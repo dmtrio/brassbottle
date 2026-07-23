@@ -191,9 +191,15 @@ def _tool_installed(tools, name):
 
 def _parse_secret(val, plugin, slot):
     """A plugin secret slot value: either a bare scope string ('env'/'agent')
-    or a map {scope: ..., hint: ...}. Returns (scope, hint). The hint is shown
-    verbatim in up.sh's 'not in secrets.env' warning, so it must be a single
-    line with no tab (PLUGIN_ENV_SECRETS is tab/newline-delimited)."""
+    or a map {scope: ..., hint: ..., global: ...}. Returns (scope, hint,
+    is_global). The hint is shown verbatim in up.sh's 'not in secrets.env'
+    warning, so it must be a single line with no tab (PLUGIN_ENV_SECRETS is
+    tab/newline-delimited). global: true (agent scope only) means the slot also
+    accepts a global env var named after the slot as a per-agent fallback — an
+    agent with no explicit agent_secrets binding is wired from that global token
+    when it is set (the fallback synthesis in derive(), keyed on
+    agent_global_slots)."""
+    is_global = False
     if isinstance(val, str):
         scope, hint = val, ""
     elif isinstance(val, dict):
@@ -201,6 +207,10 @@ def _parse_secret(val, plugin, slot):
         hint = val.get("hint", "")
         if not isinstance(hint, str):
             raise ManifestError(f"plugin '{plugin}' secret '{slot}': hint must be a string")
+        raw_global = val.get("global", False)
+        if not isinstance(raw_global, bool):
+            raise ManifestError(f"plugin '{plugin}' secret '{slot}': global must be true or false")
+        is_global = raw_global
     else:
         raise ManifestError(
             f"plugin '{plugin}' secret '{slot}': must be a scope ('env'/'agent') or a map with a scope: key")
@@ -208,9 +218,13 @@ def _parse_secret(val, plugin, slot):
         got = "no scope:" if scope is None else f"'{scope}'"
         raise ManifestError(
             f"plugin '{plugin}' secret '{slot}': scope must be 'env' or 'agent' (got {got})")
+    if is_global and scope != "agent":
+        raise ManifestError(
+            f"plugin '{plugin}' secret '{slot}': global: true is only valid with scope: agent "
+            "(a global fallback fills in agents that have no per-agent key)")
     if "\t" in hint or "\n" in hint:
         raise ManifestError(f"plugin '{plugin}' secret '{slot}': hint must be a single line (no tab/newline)")
-    return scope, hint
+    return scope, hint, is_global
 
 
 def _canonical_token_var(owner):
@@ -553,6 +567,7 @@ def derive(manifest, plugin_files, env):
     host_ports = []
     env_slots = {}         # SLOT -> (plugin, hint)  env-scoped secrets
     agent_slots = {}       # SLOT -> plugin          agent-scoped secrets
+    agent_global_slots = {}  # SLOT -> global env var  agent slots w/ global: true
     servers_by_slot = {}   # agent SLOT -> {"name": ..., "spec": {...}}
     for p in plugins:
         doc = plugin_files[p]
@@ -580,12 +595,16 @@ def derive(manifest, plugin_files, env):
                     f"plugin '{p}' secret slot '{slot}': illegal characters (must be a shell env var name)")
             if slot in env_slots or slot in agent_slots:
                 raise ManifestError(f"secret slot '{slot}' is declared by more than one enabled plugin")
-            scope, hint = _parse_secret(val, p, slot)
+            scope, hint, is_global = _parse_secret(val, p, slot)
             if scope == "env":
                 env_slots[slot] = (p, hint)
             else:
                 agent_slots[slot] = p
                 this_agent_slots.append(slot)
+                if is_global:
+                    # Global fallback var is the slot itself (the ${SLOT} header
+                    # ref) — one token users set in secrets.env for every agent.
+                    agent_global_slots[slot] = slot
 
         mcp = doc.get("mcp")
         mcp = {} if _falsy(mcp) else mcp
@@ -659,11 +678,12 @@ def derive(manifest, plugin_files, env):
                 raise ManifestError(
                     f"plugin '{p}': an agent-scoped plugin may define at most one mcp server (got {len(mcp)})")
             slot = this_agent_slots[0]
+            # The server may be remote (url:, per-agent literal header) OR local
+            # (command:, per-agent stdio bridge — e.g. axiom's mcp-remote). Both
+            # route here so the per-agent binding gates which agents get it; the
+            # shape was already validated in the mcp loop above.
             for n, spec in mcp.items():
-                if "url" not in (spec if isinstance(spec, dict) else {}):
-                    raise ManifestError(
-                        f"plugin '{p}' mcp server '{n}': an agent-scoped server must be remote (url:)")
-                servers_by_slot[slot] = {"name": n, "spec": spec}
+                servers_by_slot[slot] = {"name": n, "spec": spec if isinstance(spec, dict) else {}}
         else:
             # One line of compact JSON per plugin — the --build-payload contract.
             plugin_mcp_entries.append(json.dumps(mcp, separators=(",", ":"), ensure_ascii=False))
@@ -705,16 +725,36 @@ def derive(manifest, plugin_files, env):
             raise ManifestError(
                 f"agent_secrets: slot '{slot}' is not an agent-scoped secret of any enabled plugin")
         if source not in secret_vars:
-            # secret_vars is the set of OBSIDIAN_(WATCH_)?KEY_* vars up.sh
-            # scanned from secrets.env — name that scope so a set-but-unscanned
+            # secret_vars is the set of per-agent key vars up.sh scanned from
+            # secrets.env (OBSIDIAN_(WATCH_)?KEY_*, AXIOM_KEY_*, and a global
+            # token like AXIOM_TOKEN) — name that scope so a set-but-unscanned
             # source var reads as a scope limit, not "you forgot to set it".
             raise ManifestError(
                 f"agent_secrets: secret '{source}' (for {agent}/{slot}) not found in {secrets_file} "
-                "(agent_secrets sources must be OBSIDIAN_KEY_* / OBSIDIAN_WATCH_KEY_* vars in this release)")
+                "(agent_secrets sources must be scanned key vars: OBSIDIAN_KEY_* / "
+                "OBSIDIAN_WATCH_KEY_* / AXIOM_KEY_*, or a plugin's global token var)")
         if (agent, slot) in seen_binds:
             raise ManifestError(f"agent_secrets: {agent} is bound to slot '{slot}' more than once")
         seen_binds.add((agent, slot))
         agent_secret_records.append((agent, slot, source))
+
+    # Global fallback (scope: agent, global: true): fill in every ENABLED agent
+    # that has no explicit binding on the slot, sourced from the global token —
+    # but only when that token is actually set (present in the scanned
+    # secret_vars). This is what makes "set AXIOM_TOKEN → every agent gets axiom"
+    # work; explicit per-agent agent_secrets above take precedence (seen_binds).
+    enabled_agents = [a for a, t in (
+        ("claude", "claude"), ("codex", "codex"), ("pi", "pi"),
+        ("gemini", "gemini"), ("cursor-agent", "cursor"),
+    ) if _tool_installed(tools, t)]
+    for slot, gvar in agent_global_slots.items():
+        if gvar not in secret_vars:
+            continue
+        for agent in enabled_agents:
+            if (agent, slot) in seen_binds:
+                continue
+            seen_binds.add((agent, slot))
+            agent_secret_records.append((agent, slot, gvar))
     out["AGENT_SECRETS"] = "".join(f"{a}\t{s}\t{src}\n" for a, s, src in agent_secret_records)
 
     # An enabled agent-scoped plugin with no binding is inert (wired for no

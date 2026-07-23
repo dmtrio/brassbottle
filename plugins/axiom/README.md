@@ -1,59 +1,83 @@
 # axiom
 
-[Axiom](https://axiom.co)'s **official remote MCP server** (`mcp.axiom.co`).
-A **remote** HTTP server on a real internet host (reached via the egress
-allowlist, so no `host_port` and no host service). It gives agents tools to
-query your observability data with APL — run queries, list datasets, inspect
-schemas, list saved queries, and read monitors.
+[Axiom](https://axiom.co)'s **official MCP server** (`mcp.axiom.co`), bridged to
+**local stdio** with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) so
+**every agent** (claude, cursor, gemini, codex, pi) reaches it — not just Claude.
+It gives agents tools to query your observability data with APL: run queries,
+list datasets, inspect schemas, list saved queries, and read monitors.
 
-## Secret model — env-scoped (shared token)
+## Why the mcp-remote bridge
 
-Unlike `obsidian-annotated` (agent-scoped, per-agent keys), Axiom uses **one
-env-scoped token shared by all agents**, like `gateway`/`proxyman`. This is
-deliberate: `src/manifest.py` currently only accepts `OBSIDIAN_KEY_*` /
-`OBSIDIAN_WATCH_KEY_*` variables as `agent_secrets` sources, so an Axiom token
-can't be bound per-agent today. Per the env-scoped wiring, the server is wired
-into **Claude's `.mcp.json`** (with the `${AXIOM_TOKEN}` ref the shim expands);
-cursor/gemini don't get remote-header plugins.
+Axiom is a **remote** HTTP MCP on a real internet host. A raw remote server
+(`url:` + `headers:`) only wires cleanly into Claude — cursor/gemini can't expand
+`${VAR}` in remote headers. So instead this plugin runs Axiom's documented
+bridge, `npx -y mcp-remote https://mcp.axiom.co/mcp` (a stdio↔HTTP proxy), as a
+**local command server**. Local servers wire into every agent identically, so all
+agents get Axiom through the ordinary local-plugin path. `mcp-remote` is baked
+into the image at build time (the `install:` block), so nothing is fetched from
+npm behind the runtime egress firewall.
+
+## Secret model — per-agent key with a global fallback
+
+The Axiom token is `scope: agent, global: true`, and it **gates which agents get
+Axiom**:
+
+- **One global token** — put `AXIOM_TOKEN` in `secrets.env` and every agent
+  shares it. This is the common case.
+- **Per-agent tokens** — set `AXIOM_KEY_<agent>` and bind it under
+  `agent_secrets`; only the agents that hold a key get Axiom (an agent with no
+  token never sees the server). A per-agent key overrides the global one.
+
+The token rides in each agent's shim env and is expanded by the `bash -c`
+wrapper at spawn time (`$AXIOM_TOKEN`, like serena's `"$PWD"`) — it is **never
+written into any MCP config file**, on any agent.
 
 ## Enable it
 
+Global token for every agent — just set it in `secrets.env`:
+
 ```yaml
 plugins: [axiom]
-common_secrets: [AXIOM_TOKEN]        # env-scoped: pass AXIOM_TOKEN through from secrets.env
-                                     # or rename: {AXIOM_TOKEN: MY_AXIOM_VAR}
 ```
 
-Then put the token in `secrets.env`:
-
 ```
+# secrets.env
 AXIOM_TOKEN=xaat-xxxxxxxx…
 ```
 
-Remote plugin ⇒ no image rebuild; just rerun `./up.sh <container>`.
+Per-agent (only the listed agents get Axiom, each with its own token):
+
+```yaml
+plugins: [axiom]
+agent_secrets:
+  - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}
+  - {agent: claude,       slot: AXIOM_TOKEN, secret: AXIOM_KEY_claude}
+```
+
+```
+# secrets.env
+AXIOM_KEY_cursor=xaat-aaaa…
+AXIOM_KEY_claude=xaat-bbbb…
+```
+
+You can combine them: a global `AXIOM_TOKEN` for everyone plus an
+`agent_secrets` override for one agent. Because `mcp-remote` is baked in, adding
+or changing tokens is a config-only `./up.sh <container>` — no image rebuild.
 
 ## Token
 
 Create one in the Axiom console under **Settings → API tokens**.
 
 - A **scoped API token** (`xaat-…`) is org-bound and needs no org id — simplest
-  for header auth, which is what this plugin uses
-  (`Authorization: Bearer ${AXIOM_TOKEN}`).
+  for the `Authorization: Bearer …` header this bridge sends.
 - A **personal token** (`xapt-…`) also works but is tied to a user and may need
-  an org id; prefer a scoped token for an agent.
+  an org id (`mcp-remote … --header "x-axiom-org-id: <id>"`); prefer a scoped
+  token for an agent.
 - `mcp.axiom.co` also supports interactive **OAuth**, but that needs a browser
   callback — impractical for a headless container, which is why this plugin
-  uses a static Bearer token (the same reason `obsidian-annotated`/`gateway`
-  do).
+  sends a static Bearer token via `--header`.
 
 ## Tools
 
 `queryApl`, `listDatasets`, `getDatasetSchema`, `getSavedQueries`,
 `getMonitors`, `getMonitorsHistory`.
-
-## Note
-
-The older self-hosted Go server (`axiomhq/mcp-server-axiom`, local stdio,
-`AXIOM_TOKEN` env) is **deprecated** in favor of this hosted server. If you ever
-need the local stdio flavor instead, that'd be a `command:`-based plugin with an
-`install:` block — not this one.

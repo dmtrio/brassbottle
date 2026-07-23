@@ -25,7 +25,8 @@ Payload:
          "spec": {"url": ..., "headers": {...${SLOT}...}},
          "claude": bool,                                   # → .mcp.json ref
          "literal": [{"agent": "cursor-agent", "key_env": "IDENTITY_KEY_0"}],
-         "warn":    ["codex"]}
+         "warn":    ["codex"],                             # REMOTE spec only
+         "local":   ["cursor-agent", "codex", ...]}        # LOCAL spec only
       ]
     }
 
@@ -34,11 +35,16 @@ Payload:
   ({command, args} — stdio, wired into every agent) or env-scoped REMOTE
   ({url, headers} — http, wired into Claude's .mcp.json only). Cross-plugin
   duplicate server names hard-fail here as well as host-side (last-wins merge).
-- agent_servers carries the AGENT-SCOPED remote plugins (obsidian etc.): each
-  bound agent presents its own key. claude gets the ${SLOT} ref in .mcp.json
-  (shim expands it); cursor/gemini/pi get the literal key baked in; codex gets a
-  warning. Env-only agent-scoped slots (watch keys — no server) never reach the
-  payload; up.sh delivers them straight into the agent's env file.
+- agent_servers carries the AGENT-SCOPED plugins, wired only for the agents
+  bound to the slot (its key gates who sees the server). A REMOTE spec (obsidian)
+  presents each bound agent's own key: claude gets the ${SLOT} ref in .mcp.json
+  (shim expands it), cursor/gemini/pi get the literal key baked in (`literal`),
+  codex gets a warning (`warn`). A LOCAL spec (axiom's mcp-remote stdio bridge)
+  wires the same command into every bound agent's config (`local`, codex
+  included — its toml supports command servers); the token rides in the agent's
+  env, so nothing is baked into the config. Env-only agent-scoped slots (watch
+  keys — no server) never reach the payload; up.sh delivers them straight into
+  the agent's env file.
 - Keys never ride in the payload: each literal[] element names an environment
   variable (set on the docker exec) that holds the key, so the payload is
   secret-free. Only cursor-agent/gemini/pi literal keys are shipped at all —
@@ -471,19 +477,30 @@ def run(payload, home, workspace, env):
 
     # Runs for every installed agent even with no plugins enabled, so entries
     # from a plugin removed from the manifest are cleaned up, not orphaned
-    # (Claude gets this for free from wholesale .mcp.json regeneration). Only
-    # LOCAL plugins go here: env-scoped remote plugins live in Claude's .mcp.json
-    # alone (cursor/gemini can't expand ${VAR} in remote headers).
+    # (Claude gets this for free from wholesale .mcp.json regeneration). Uniform
+    # LOCAL plugins go to every agent; an agent-scoped LOCAL server (axiom's
+    # mcp-remote) is added only for the agents bound to it (its token gates who
+    # sees it) — the token is delivered separately into each bound agent's env.
+    # Env-scoped remote plugins still live in Claude's .mcp.json alone
+    # (cursor/gemini can't expand ${VAR} in remote headers).
     local = _local_plugins(plugins)
+
+    def local_for(agent_name):
+        d = dict(local)
+        for s in agent_servers:
+            if agent_name in (s.get("local") or []):
+                d[s["name"]] = s["spec"]
+        return d
+
     if wire.get("cursor"):
-        wire_plugin_servers_json(home / ".cursor" / "mcp.json", local)
+        wire_plugin_servers_json(home / ".cursor" / "mcp.json", local_for("cursor-agent"))
     if wire.get("gemini"):
-        wire_plugin_servers_json(home / ".gemini" / "settings.json", local)
+        wire_plugin_servers_json(home / ".gemini" / "settings.json", local_for("gemini"))
     if wire.get("pi"):
-        wire_plugin_servers_json(home / ".pi" / "agent" / "mcp.json", local)
+        wire_plugin_servers_json(home / ".pi" / "agent" / "mcp.json", local_for("pi"))
         print("    (pi: inert until the pi-mcp-adapter extension is installed)")
     if wire.get("codex"):
-        wire_codex_toml(home / ".codex" / "config.toml", local)
+        wire_codex_toml(home / ".codex" / "config.toml", local_for("codex"))
 
 
 def build_payload(env):
@@ -538,9 +555,18 @@ def build_payload(env):
         if e is None:
             e = agent_servers[slot] = {"name": sd["name"], "slot": slot,
                                        "spec": sd["spec"], "claude": False,
-                                       "literal": [], "warn": []}
+                                       "literal": [], "warn": [], "local": []}
+        is_local = isinstance(sd["spec"], dict) and "command" in sd["spec"]
         if agent == "claude":
+            # claude gets the server in its .mcp.json (command verbatim, or a
+            # ${SLOT} ref for a remote header) regardless of local/remote.
             e["claude"] = True
+        elif is_local:
+            # A LOCAL stdio server (axiom's mcp-remote) wires into every bound
+            # agent's config the same way — including codex, whose toml supports
+            # command servers. The token rides in the agent's env, not the
+            # config, so there is no per-agent key to substitute.
+            e["local"].append(agent)
         elif agent == "codex":
             e["warn"].append(agent)
         else:

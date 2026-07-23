@@ -49,9 +49,19 @@ OBSIDIAN = {"secrets": {"OBSIDIAN_ANNOTATED_KEY": "agent"},
                 "url": "https://mcp-obsidian.dmetr.io/mcp",
                 "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}}}
 WATCH = {"secrets": {"ANNOTATED_WATCH_KEY": "agent"}}
+# AXIOM is agent-scoped WITH a global fallback (scope: agent, global: true) and a
+# LOCAL stdio server (mcp-remote bridge): a global AXIOM_TOKEN wires every enabled
+# agent, AXIOM_KEY_<agent> gates/overrides one. Local ⇒ needs an install: block.
+AXIOM = {"secrets": {"AXIOM_TOKEN": {"scope": "agent", "global": True,
+                                     "hint": "axiom token"}},
+         "install": "npm install -g mcp-remote",
+         "egress": ["mcp.axiom.co"],
+         "mcp": {"axiom": {"command": "bash",
+                           "args": ["-c", 'exec npx -y mcp-remote https://mcp.axiom.co/mcp --header "Authorization: Bearer $AXIOM_TOKEN"']}}}
 PLUGIN_FILES = {"serena": SERENA, "other": OTHER,
                 "gateway": GATEWAY, "proxyman": PROXYMAN, "browser": BROWSER,
-                "obsidian-annotated": OBSIDIAN, "annotated-watch": WATCH}
+                "obsidian-annotated": OBSIDIAN, "annotated-watch": WATCH,
+                "axiom": AXIOM}
 ENV = {"SECRET_KEY_VARS": "OBSIDIAN_KEY_me_claude OBSIDIAN_WATCH_KEY_w_pi",
        "SECRETS_FILE": "/sec/secrets.env"}
 
@@ -838,12 +848,26 @@ class TestPluginsV2Phase2(unittest.TestCase):
             m.derive({"plugins": ["bad"]}, files, self.ENV)
         self.assertIn("at most one mcp server", str(cm.exception))
 
-    def test_agent_scoped_local_server_rejected(self):
+    def test_agent_scoped_local_server_allowed(self):
+        # An agent-scoped LOCAL (command:) server is valid now (axiom's
+        # mcp-remote bridge) — it routes per-agent like a remote one, and still
+        # requires an install: block (baked into the image).
         files = dict(PLUGIN_FILES, bad={"install": "x", "secrets": {"A": "agent"},
+                                        "mcp": {"s": {"command": "bash"}}})
+        d = m.derive({"plugins": ["bad"],
+                      "agent_secrets": [{"agent": "claude", "slot": "A",
+                                         "secret": "OBSIDIAN_KEY_me_claude"}]},
+                     files, self.ENV)
+        servers = json.loads(d["AGENT_SERVERS_JSON"])
+        self.assertEqual(servers["A"]["spec"], {"command": "bash"})
+        self.assertEqual(d["AGENT_SECRETS"], "claude\tA\tOBSIDIAN_KEY_me_claude\n")
+
+    def test_agent_scoped_local_server_still_needs_install(self):
+        files = dict(PLUGIN_FILES, bad={"secrets": {"A": "agent"},
                                         "mcp": {"s": {"command": "bash"}}})
         with self.assertRaises(m.ManifestError) as cm:
             m.derive({"plugins": ["bad"]}, files, self.ENV)
-        self.assertIn("must be remote (url:)", str(cm.exception))
+        self.assertIn("needs an install: block", str(cm.exception))
 
     def test_watch_is_env_only_no_server(self):
         d = self._d({"plugins": ["annotated-watch"],
@@ -852,6 +876,115 @@ class TestPluginsV2Phase2(unittest.TestCase):
         self.assertEqual(d["AGENT_SERVERS_JSON"], "{}")
         self.assertEqual(d["AGENT_SECRETS"],
                          "pi\tANNOTATED_WATCH_KEY\tOBSIDIAN_WATCH_KEY_me_claude\n")
+
+
+class TestAgentScopedGlobalFallback(unittest.TestCase):
+    """scope: agent, global: true (axiom): a global token wires every enabled
+    agent through the agent-scoped path; per-agent AXIOM_KEY_<agent> overrides.
+    The five enabled MCP agents (DEFAULT_TOOLS minus aider) resolve in a fixed
+    order: claude, codex, pi, gemini, cursor-agent."""
+
+    SECRETS_FILE = "/sec/secrets.env"
+
+    def _d(self, man, key_vars):
+        return m.derive(man, PLUGIN_FILES,
+                        {"SECRET_KEY_VARS": key_vars, "SECRETS_FILE": self.SECRETS_FILE})
+
+    def test_global_token_wires_every_enabled_agent(self):
+        # Just AXIOM_TOKEN set (no per-agent keys, no agent_secrets): all five
+        # MCP agents are bound from the global token, in enabled order.
+        d = self._d({"plugins": ["axiom"]}, "AXIOM_TOKEN")
+        self.assertEqual(
+            d["AGENT_SECRETS"],
+            "claude\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "codex\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "pi\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "gemini\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "cursor-agent\tAXIOM_TOKEN\tAXIOM_TOKEN\n")
+        # It is an agent-scoped server, not a uniform plugin entry.
+        self.assertEqual(d["AGENT_SERVER_SLOTS"], "AXIOM_TOKEN")
+        servers = json.loads(d["AGENT_SERVERS_JSON"])
+        self.assertEqual(servers["AXIOM_TOKEN"]["name"], "axiom")
+        self.assertEqual(servers["AXIOM_TOKEN"]["spec"], AXIOM["mcp"]["axiom"])
+        self.assertEqual(d["PLUGIN_MCP_ENTRIES"], "")
+        self.assertEqual(d["EGRESS"], "mcp.axiom.co")
+
+    def test_per_agent_key_overrides_global(self):
+        # cursor-agent gets its own key; the rest fall back to the global token.
+        # The explicit binding wins and appears once (no duplicate synthetic).
+        d = self._d({"plugins": ["axiom"],
+                     "agent_secrets": [{"agent": "cursor-agent", "slot": "AXIOM_TOKEN",
+                                        "secret": "AXIOM_KEY_cursor"}]},
+                    "AXIOM_TOKEN AXIOM_KEY_cursor")
+        self.assertEqual(
+            d["AGENT_SECRETS"],
+            "cursor-agent\tAXIOM_TOKEN\tAXIOM_KEY_cursor\n"
+            "claude\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "codex\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "pi\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "gemini\tAXIOM_TOKEN\tAXIOM_TOKEN\n")
+
+    def test_no_global_only_explicit_binding_wired(self):
+        # Global token NOT set: no synthetic fallback, only the explicit
+        # per-agent binding survives (AXIOM_KEY_* is now a valid source).
+        d = self._d({"plugins": ["axiom"],
+                     "agent_secrets": [{"agent": "cursor-agent", "slot": "AXIOM_TOKEN",
+                                        "secret": "AXIOM_KEY_cursor"}]},
+                    "AXIOM_KEY_cursor")
+        self.assertEqual(d["AGENT_SECRETS"],
+                         "cursor-agent\tAXIOM_TOKEN\tAXIOM_KEY_cursor\n")
+
+    def test_restricted_tools_narrows_fallback(self):
+        # Only the enabled tools get a synthetic global binding.
+        d = m.derive({"plugins": ["axiom"], "tools": ["claude", "cursor"]},
+                     PLUGIN_FILES,
+                     {"SECRET_KEY_VARS": "AXIOM_TOKEN", "SECRETS_FILE": self.SECRETS_FILE})
+        self.assertEqual(
+            d["AGENT_SECRETS"],
+            "claude\tAXIOM_TOKEN\tAXIOM_TOKEN\n"
+            "cursor-agent\tAXIOM_TOKEN\tAXIOM_TOKEN\n")
+
+    def test_nothing_set_is_inert_and_warns(self):
+        import contextlib
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = self._d({"plugins": ["axiom"]}, "")   # neither global nor per-agent
+        self.assertEqual(d["AGENT_SECRETS"], "")
+        self.assertIn("inert (wired for no agent)", err.getvalue())
+        self.assertIn("AXIOM_TOKEN", err.getvalue())
+
+    def test_common_secrets_passthrough_still_valid(self):
+        # Legacy `common_secrets: [AXIOM_TOKEN]` keeps working (list passthrough
+        # delivers the shared env var); the global fallback also wires all agents.
+        d = self._d({"plugins": ["axiom"], "common_secrets": ["AXIOM_TOKEN"]},
+                    "AXIOM_TOKEN")
+        self.assertEqual(d["PLUGIN_ENV_SECRETS"], "AXIOM_TOKEN\tAXIOM_TOKEN\t\n")
+        self.assertEqual(d["AGENT_SECRETS"].count("\n"), 5)
+
+    def test_global_flag_rejected_on_env_scope(self):
+        files = dict(PLUGIN_FILES,
+                     bad={"secrets": {"X": {"scope": "env", "global": True}},
+                          "mcp": {"s": {"url": "http://h/mcp", "headers": {}}}})
+        with self.assertRaises(m.ManifestError) as cm:
+            m.derive({"plugins": ["bad"]}, files,
+                     {"SECRET_KEY_VARS": "", "SECRETS_FILE": self.SECRETS_FILE})
+        self.assertIn("global: true is only valid with scope: agent", str(cm.exception))
+
+    def test_global_flag_must_be_bool(self):
+        files = dict(PLUGIN_FILES,
+                     bad={"secrets": {"X": {"scope": "agent", "global": "yes"}},
+                          "mcp": {"s": {"url": "http://h/mcp", "headers": {}}}})
+        with self.assertRaises(m.ManifestError) as cm:
+            m.derive({"plugins": ["bad"]}, files,
+                     {"SECRET_KEY_VARS": "", "SECRETS_FILE": self.SECRETS_FILE})
+        self.assertIn("global must be true or false", str(cm.exception))
+
+    def test_source_error_message_names_axiom_vars(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"plugins": ["axiom"],
+                     "agent_secrets": [{"agent": "claude", "slot": "AXIOM_TOKEN",
+                                        "secret": "AXIOM_KEY_gone"}]}, "AXIOM_TOKEN")
+        self.assertIn("AXIOM_KEY_*", str(cm.exception))
 
 
 if __name__ == "__main__":

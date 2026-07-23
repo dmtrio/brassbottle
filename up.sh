@@ -60,8 +60,11 @@ SECRETS_FILE="$BASE_PATH/secrets.env"
 # instead of cryptic yq failures). Secret VALUES stay out of the call: it
 # receives only the NAMES of the identity key vars that are set, plus
 # NTFY_URL/NTFY_TOPIC which the manifest may route into the container.
+# Per-agent key vars (OBSIDIAN_(WATCH_)?KEY_*, AXIOM_KEY_*) plus a plugin's
+# global token var (AXIOM_TOKEN) — the sources an agent_secrets binding may
+# name, and the presence signal for a scope: agent, global: true fallback.
 SECRET_KEY_VARS=""
-for v in $(compgen -v | grep -E '^OBSIDIAN_(WATCH_)?KEY_' || true); do
+for v in $(compgen -v | grep -E '^(OBSIDIAN_(WATCH_)?KEY_|AXIOM_KEY_|AXIOM_TOKEN$)' || true); do
     if [ -n "${!v}" ]; then SECRET_KEY_VARS="${SECRET_KEY_VARS:+$SECRET_KEY_VARS }$v"; fi
 done
 # The set of GH_TOKEN* var names present in secrets.env (NAMES only — values

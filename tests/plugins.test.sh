@@ -198,7 +198,7 @@ src/manifest.py" --derive
 --build-payload
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
 python3 /usr/local/lib/dev-agent/wire_plugins.py
-^OBSIDIAN_(WATCH_)?KEY_
+OBSIDIAN_(WATCH_)?KEY_|AXIOM_KEY_|AXIOM_TOKEN$
 DRIFT
 # The identity-key prefixes and hostname rule each live in two places by
 # design (bash glue ↔ module, manifest.py ↔ allow-egress.sh) — cross-pin

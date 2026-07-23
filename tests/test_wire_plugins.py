@@ -865,6 +865,46 @@ class TestRunIntegration(QuietTestCase):
             self.assertFalse((home / ".pi").exists())
             self.assertFalse((home / ".codex").exists())
 
+    def test_local_agent_scoped_server_wires_only_bound_agents(self):
+        """A LOCAL agent-scoped server (axiom mcp-remote) lands in the config of
+        each agent in `local` (codex included) and in claude's .mcp.json, but NOT
+        in an unbound agent's config. The token is never written into any file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            workspace = Path(tmp) / "workspace"
+            (workspace / "repos").mkdir(parents=True)
+
+            spec = {"command": "bash",
+                    "args": ["-c", 'exec npx -y mcp-remote https://mcp.axiom.co/mcp '
+                                    '--header "Authorization: Bearer $AXIOM_TOKEN"']}
+            payload = {
+                "wire": {"cursor": True, "gemini": True, "pi": True, "codex": True},
+                "plugin_mcp_entries": [],
+                "agent_servers": [
+                    {"name": "axiom", "slot": "AXIOM_TOKEN", "spec": spec,
+                     "claude": True, "literal": [], "warn": [],
+                     "local": ["cursor-agent", "codex"]},  # gemini/pi NOT bound
+                ],
+            }
+            wire_plugins.run(payload, home, workspace, {})
+
+            # claude .mcp.json: axiom present as a command server (verbatim)
+            claude = json.loads((workspace / "repos" / ".mcp.json").read_text())["mcpServers"]
+            self.assertEqual(claude["axiom"], spec)
+            # cursor + codex: wired
+            cursor = json.loads((home / ".cursor" / "mcp.json").read_text())["mcpServers"]
+            self.assertEqual(cursor["axiom"], spec)
+            self.assertIn("[mcp_servers.axiom]", (home / ".codex" / "config.toml").read_text())
+            # gemini + pi: NOT wired (no token → no server)
+            gemini = json.loads((home / ".gemini" / "settings.json").read_text())["mcpServers"]
+            self.assertNotIn("axiom", gemini)
+            pi = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())["mcpServers"]
+            self.assertNotIn("axiom", pi)
+            # the token itself is never written anywhere — only the $VAR ref is
+            for f in (workspace / "repos" / ".mcp.json", home / ".cursor" / "mcp.json",
+                      home / ".codex" / "config.toml"):
+                self.assertIn("$AXIOM_TOKEN", f.read_text())
+
     def test_payload_not_dict_raises_wireerror(self):
         """Payload not a dict raises WireError."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1051,6 +1091,21 @@ class TestBuildPayload(unittest.TestCase):
         with self.assertRaises(wire_plugins.WireError) as cm:
             wire_plugins.build_payload({"IDENTITY_AGENTS": "claude::NOPE"})
         self.assertIn("no server definition", str(cm.exception))
+
+    def test_local_agent_scoped_spec_classifies_into_local_list(self):
+        # A LOCAL (command) agent-scoped server puts every non-claude bound agent
+        # — codex included — into `local`, not `warn`/`literal`. claude via flag.
+        servers = {"AXIOM_TOKEN": {"name": "axiom",
+                                   "spec": {"command": "bash", "args": ["-c", "exec x"]}}}
+        env = {"AGENT_SERVERS_JSON": json.dumps(servers),
+               "IDENTITY_AGENTS": "claude::AXIOM_TOKEN "
+                                  "cursor-agent:IDENTITY_KEY_0:AXIOM_TOKEN "
+                                  "codex::AXIOM_TOKEN"}
+        e = wire_plugins.build_payload(env)["agent_servers"][0]
+        self.assertTrue(e["claude"])
+        self.assertEqual(e["local"], ["cursor-agent", "codex"])
+        self.assertEqual(e["literal"], [])
+        self.assertEqual(e["warn"], [])
 
     def test_missing_env_means_everything_off_and_empty(self):
         payload = wire_plugins.build_payload({})
