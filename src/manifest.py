@@ -604,6 +604,11 @@ def derive(manifest, plugin_files, env):
                 if is_global:
                     # Global fallback var is the slot itself (the ${SLOT} header
                     # ref) — one token users set in secrets.env for every agent.
+                    # NOTE: up.sh's SECRET_KEY_VARS scan must include this var
+                    # name, else it never reaches secret_vars and the fallback
+                    # silently no-ops. Today only AXIOM_TOKEN is a global slot and
+                    # up.sh scans it explicitly; a new global slot needs the scan
+                    # widened in lockstep (pinned by tests/plugins.test.sh).
                     agent_global_slots[slot] = slot
 
         mcp = doc.get("mcp")
