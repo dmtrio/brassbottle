@@ -24,7 +24,12 @@
 install: |
   # Bake the stdio↔remote bridge at build time (full network) so it runs offline
   # behind the runtime egress firewall. node/npm come from the fnm env eval.
-  npm install -g mcp-remote
+  # Floor the version: mcp-remote substitutes ${VAR} in --header from its own
+  # process.env (verified in 0.1.38, dist/chunk — the header regex tolerates the
+  # space in "Bearer ${AXIOM_TOKEN}"). Pinning >=0.1.38 keeps that behavior from
+  # regressing out on a future install; without it the literal ${AXIOM_TOKEN}
+  # could ship and every agent would 401.
+  npm install -g 'mcp-remote@^0.1.38'
 
 secrets:
   AXIOM_TOKEN: {hint: "axiom (an Axiom API token — Settings → API tokens; a scoped token 'xaat-…' is simplest)"}

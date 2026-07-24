@@ -1094,21 +1094,6 @@ class TestBuildPayload(unittest.TestCase):
             wire_plugins.build_payload({"IDENTITY_AGENTS": "claude::NOPE"})
         self.assertIn("no server definition", str(cm.exception))
 
-    def test_local_agent_scoped_spec_classifies_into_local_list(self):
-        # A LOCAL (command) agent-scoped server puts every non-claude bound agent
-        # — codex included — into `local`, not `warn`/`literal`. claude via flag.
-        servers = {"AXIOM_TOKEN": {"name": "axiom",
-                                   "spec": {"command": "bash", "args": ["-c", "exec x"]}}}
-        env = {"AGENT_SERVERS_JSON": json.dumps(servers),
-               "IDENTITY_AGENTS": "claude::AXIOM_TOKEN "
-                                  "cursor-agent:IDENTITY_KEY_0:AXIOM_TOKEN "
-                                  "codex::AXIOM_TOKEN"}
-        e = wire_plugins.build_payload(env)["agent_servers"][0]
-        self.assertTrue(e["claude"])
-        self.assertEqual(e["local"], ["cursor-agent", "codex"])
-        self.assertEqual(e["literal"], [])
-        self.assertEqual(e["warn"], [])
-
     def test_missing_env_means_everything_off_and_empty(self):
         payload = wire_plugins.build_payload({})
         self.assertEqual(payload["wire"],
@@ -1197,6 +1182,27 @@ class TestHybridBuildPayload(unittest.TestCase):
             servers["remote"]["literal"],
             [{"agent": "cursor-agent",
               "key_envs": {"TOKEN": "IDENTITY_KEY_0", "SECOND": "IDENTITY_KEY_1"}}])
+
+    def test_local_server_routes_codex_into_local_not_warn(self):
+        # A LOCAL (command) agent-scoped server — axiom's mcp-remote bridge —
+        # puts every non-claude bound agent, codex INCLUDED, into `local`
+        # (codex's TOML supports command servers), never `warn`/`literal`.
+        env = {
+            "AGENT_SERVERS_JSON": json.dumps({
+                "axiom": {"spec": {"command": "mcp-remote",
+                                   "args": ["https://mcp.axiom.co/mcp"]},
+                          "requires": ["AXIOM_TOKEN"]},
+            }),
+            "AGENT_SECRETS": (
+                "claude\tAXIOM_TOKEN\tCOMMON\n"
+                "cursor-agent\tAXIOM_TOKEN\tCOMMON\n"
+                "codex\tAXIOM_TOKEN\tCOMMON\n"),
+        }
+        e = wire_plugins.build_payload(env)["agent_servers"][0]
+        self.assertTrue(e["claude"])
+        self.assertEqual(sorted(e["local"]), ["codex", "cursor-agent"])
+        self.assertEqual(e["literal"], [])
+        self.assertEqual(e["warn"], [])
 
     def test_literal_agent_substitutes_all_required_keys(self):
         with tempfile.TemporaryDirectory() as tmp:

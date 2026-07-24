@@ -5,7 +5,7 @@ A headless Playwright MCP gateway (Docker MCP gateway, `coding` profile).
 
 ```yaml
 plugins: [gateway]
-common_secrets: [MCP_GATEWAY_TOKEN]   # optional; the slot defaults to this same var
+common_secrets: [MCP_GATEWAY_TOKEN]   # required — declares the slot; agents wire from this source
 ```
 
 ## Start the host service

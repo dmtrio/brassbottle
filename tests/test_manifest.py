@@ -1013,6 +1013,24 @@ class TestUniversalHybridSecrets(unittest.TestCase):
         self.assertEqual(servers["one"]["requires"], ["TOKEN"])
         self.assertEqual(servers["two"]["requires"], ["TOKEN", "SECOND"])
 
+    def test_remote_slots_excludes_local_command_servers(self):
+        # AGENT_SERVER_SLOTS lists every required slot; AGENT_SERVER_REMOTE_SLOTS
+        # is the subset feeding a REMOTE (no-command) server — the only slots
+        # up.sh may hand to the wiring exec. A LOCAL command server (like axiom's
+        # mcp-remote bridge) reads its ${SLOT} from the agent's own env, so its
+        # slot must NOT appear in REMOTE_SLOTS (else the value leaks onto argv).
+        files = {"mix": {"install": "x",
+                         "secrets": {"LOCAL_TOK": {}, "REMOTE_TOK": {}},
+                         "mcp": {
+                             "bridge": {"command": "mcp-remote", "requires": ["LOCAL_TOK"]},
+                             "http": {"url": "https://x.test/mcp", "requires": ["REMOTE_TOK"]},
+                         }}}
+        d = m.derive({"plugins": ["mix"], "common_secrets": ["LOCAL_TOK", "REMOTE_TOK"]},
+                     files, {"PRESENT_SECRET_VARS": "LOCAL_TOK REMOTE_TOK",
+                             "SECRETS_FILE": "/sec/secrets.env"})
+        self.assertEqual(set(d["AGENT_SERVER_SLOTS"].split()), {"LOCAL_TOK", "REMOTE_TOK"})
+        self.assertEqual(d["AGENT_SERVER_REMOTE_SLOTS"], "REMOTE_TOK")
+
     def test_override_and_disabled_take_precedence_over_default(self):
         d = self.derive(
             {"plugins": ["p"], "common_secrets": ["TOKEN"],

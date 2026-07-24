@@ -63,8 +63,13 @@ SECRETS_FILE="$BASE_PATH/secrets.env"
 # The manifest only receives NAMES of set values. Hybrid secret resolution
 # needs to tell an explicit common default from an unset source, while secret
 # values remain in this shell and reach the container through keyfiles.sh.
+# The universe of legitimate secret sources is secrets.env itself, so scan the
+# file's assigned names — NOT the whole shell environment (`compgen -v` would
+# fold in PATH/HOME/USER/…, letting a typo'd source resolve to a non-secret
+# value instead of hard-failing) — and keep the ones that are non-empty.
 PRESENT_SECRET_VARS=""
-for v in $(compgen -v); do
+for v in $(grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$SECRETS_FILE" \
+           | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' | LC_ALL=C sort -u); do
     if [ -n "${!v}" ]; then
         PRESENT_SECRET_VARS="${PRESENT_SECRET_VARS:+$PRESENT_SECRET_VARS }$v"
     fi
@@ -389,15 +394,17 @@ echo "  ✓ skills linked (read-only; rules changes go via PR to the rules repo)
 # shim env; codex is a pending warning and ships no key at all).
 #
 # Build literal remote-agent inputs from resolved AGENT_SECRETS. Only slots
-# required by an MCP server travel through docker exec; env-only slots are
-# already in the per-agent key file. Claude keeps ${SLOT} references and Codex
+# required by a REMOTE MCP server travel through docker exec; env-only slots and
+# LOCAL-server slots are already in the per-agent key file (a local server reads
+# ${SLOT} from its own process env, so putting the value on the `docker exec`
+# argv would only leak it into `ps`). Claude keeps ${SLOT} references and Codex
 # still warns for remote MCPs, so neither receives a literal key here.
 IDENTITY_ENV=()
 IDENTITY_SECRETS=""
 i=0
 while IFS=$'\t' read -r agent slot source; do
     [ -n "$agent" ] || continue
-    case " $AGENT_SERVER_SLOTS " in *" $slot "*) ;; *) continue ;; esac
+    case " $AGENT_SERVER_REMOTE_SLOTS " in *" $slot "*) ;; *) continue ;; esac
     case "$agent" in
         claude|codex) ;;
         *)

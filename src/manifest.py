@@ -552,6 +552,7 @@ def derive(manifest, plugin_files, env):
     secret_slots = {}      # SLOT -> (plugin, hint)
     servers_by_name = {}   # name -> {"spec": {...}, "requires": [SLOT, ...]}
     server_slots = []      # required slot names, first-seen order
+    remote_server_slots = []  # subset required by a REMOTE (no-command) server
     for p in plugins:
         doc = plugin_files[p]
         if doc is None:
@@ -662,9 +663,12 @@ def derive(manifest, plugin_files, env):
             requires = spec.get("requires") or []
             if requires:
                 servers_by_name[n] = {"spec": config_spec, "requires": requires}
+                is_remote = "command" not in config_spec
                 for slot in requires:
                     if slot not in server_slots:
                         server_slots.append(slot)
+                    if is_remote and slot not in remote_server_slots:
+                        remote_server_slots.append(slot)
             else:
                 uniform[n] = config_spec
         # One line of compact JSON per uniform plugin — the --build-payload
@@ -677,9 +681,12 @@ def derive(manifest, plugin_files, env):
     out["HOST_MCP_PORTS"] = ",".join(str(p) for p in sorted(set(host_ports)))
     # Required server definitions and the slots whose values must be handed to
     # the wiring exec for literal remote-agent configs. Env-only slots are not
-    # included in AGENT_SERVER_SLOTS.
+    # included in AGENT_SERVER_SLOTS. AGENT_SERVER_REMOTE_SLOTS is the subset
+    # feeding a REMOTE server — the only slots up.sh puts on the `docker exec`
+    # argv, since a LOCAL server reads its ${SLOT} from the agent's own env.
     out["AGENT_SERVERS_JSON"] = json.dumps(servers_by_name, separators=(",", ":"), ensure_ascii=False)
     out["AGENT_SERVER_SLOTS"] = " ".join(server_slots)
+    out["AGENT_SERVER_REMOTE_SLOTS"] = " ".join(remote_server_slots)
 
     # ── Hybrid secret resolution ─────────────────────────────────────────────
     # common_secrets declares the optional default source for a slot. An
