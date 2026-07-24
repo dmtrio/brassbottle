@@ -874,9 +874,9 @@ class TestRunIntegration(QuietTestCase):
             workspace = Path(tmp) / "workspace"
             (workspace / "repos").mkdir(parents=True)
 
-            spec = {"command": "bash",
-                    "args": ["-c", 'exec npx -y mcp-remote https://mcp.axiom.co/mcp '
-                                    '--header "Authorization: Bearer $AXIOM_TOKEN"']}
+            spec = {"command": "mcp-remote",
+                    "args": ["https://mcp.axiom.co/mcp", "--header",
+                             "Authorization: Bearer ${AXIOM_TOKEN}"]}
             payload = {
                 "wire": {"cursor": True, "gemini": True, "pi": True, "codex": True},
                 "plugin_mcp_entries": [],
@@ -900,10 +900,11 @@ class TestRunIntegration(QuietTestCase):
             self.assertNotIn("axiom", gemini)
             pi = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())["mcpServers"]
             self.assertNotIn("axiom", pi)
-            # the token itself is never written anywhere — only the $VAR ref is
+            # the token itself is never written anywhere — only the ${VAR} ref
+            # that mcp-remote substitutes at connect time (never in argv either)
             for f in (workspace / "repos" / ".mcp.json", home / ".cursor" / "mcp.json",
                       home / ".codex" / "config.toml"):
-                self.assertIn("$AXIOM_TOKEN", f.read_text())
+                self.assertIn("${AXIOM_TOKEN}", f.read_text())
 
     def test_payload_not_dict_raises_wireerror(self):
         """Payload not a dict raises WireError."""

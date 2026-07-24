@@ -1,21 +1,26 @@
 # axiom — Axiom's official MCP, bridged to LOCAL stdio via `mcp-remote` so EVERY
-# agent (claude, cursor, gemini, codex, pi) reaches it uniformly, not just Claude.
-# mcp-remote (baked into the image by the install: block) is a stdio↔HTTP proxy
-# to mcp.axiom.co; being a local command server it wires into every agent through
-# the ordinary local-plugin path — no per-agent remote-header injection. Axiom
-# documents exactly this bridge (npx -y mcp-remote <url>). See ./README.md.
+# agent (claude, cursor, gemini, codex; pi once its adapter is installed) reaches
+# it uniformly, not just Claude. mcp-remote (baked into the image by the install:
+# block) is a stdio↔HTTP proxy to mcp.axiom.co; being a local command server it
+# wires into every agent through the ordinary local-plugin path — no per-agent
+# remote-header injection. Axiom documents exactly this bridge (mcp-remote <url>).
+# See ./README.md.
 #
 # Agent-scoped secret WITH a global fallback (scope: agent, global: true) — the
 # token gates WHICH agents get axiom:
 #   • one global AXIOM_TOKEN in secrets.env → shared by every agent
 #   • per-agent AXIOM_KEY_<agent> → only the agents that hold a key get axiom
 #     (an agent with no token never sees the server)
-# The token rides in each agent's shim env — never written into any MCP config
-# file; the bash -c wrapper expands $AXIOM_TOKEN at spawn time, like serena's
-# "$PWD". Bind it in a manifest:
+# The token is delivered into each bound agent's shim env (keyfiles.sh) and
+# mcp-remote itself substitutes ${AXIOM_TOKEN} into the header at connect time.
+# So the secret is in NO MCP config file AND never on the process command line
+# (argv holds the literal "${AXIOM_TOKEN}", not the value). Bind it in a manifest:
 #   # global: put AXIOM_TOKEN in secrets.env → every agent
 #   agent_secrets:                              # per-agent override / gating
 #     - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}
+#
+# The server execs the baked `mcp-remote` binary directly (not `npx`), so process
+# startup never reaches for the npm registry — it runs fully offline.
 
 install: |
   # Bake the stdio↔remote bridge at build time (full network) so it runs offline
@@ -30,5 +35,5 @@ egress:
 
 mcp:
   axiom:
-    command: bash
-    args: [-c, 'exec npx -y mcp-remote https://mcp.axiom.co/mcp --header "Authorization: Bearer $AXIOM_TOKEN"']
+    command: mcp-remote
+    args: ["https://mcp.axiom.co/mcp", "--header", "Authorization: Bearer ${AXIOM_TOKEN}"]

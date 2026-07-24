@@ -56,8 +56,9 @@ AXIOM = {"secrets": {"AXIOM_TOKEN": {"scope": "agent", "global": True,
                                      "hint": "axiom token"}},
          "install": "npm install -g mcp-remote",
          "egress": ["mcp.axiom.co"],
-         "mcp": {"axiom": {"command": "bash",
-                           "args": ["-c", 'exec npx -y mcp-remote https://mcp.axiom.co/mcp --header "Authorization: Bearer $AXIOM_TOKEN"']}}}
+         "mcp": {"axiom": {"command": "mcp-remote",
+                           "args": ["https://mcp.axiom.co/mcp", "--header",
+                                    "Authorization: Bearer ${AXIOM_TOKEN}"]}}}
 PLUGIN_FILES = {"serena": SERENA, "other": OTHER,
                 "gateway": GATEWAY, "proxyman": PROXYMAN, "browser": BROWSER,
                 "obsidian-annotated": OBSIDIAN, "annotated-watch": WATCH,

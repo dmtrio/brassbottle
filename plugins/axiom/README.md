@@ -13,11 +13,12 @@ saved queries, and read monitors.
 Axiom is a **remote** HTTP MCP on a real internet host. A raw remote server
 (`url:` + `headers:`) only wires cleanly into Claude — cursor/gemini can't expand
 `${VAR}` in remote headers. So instead this plugin runs Axiom's documented
-bridge, `npx -y mcp-remote https://mcp.axiom.co/mcp` (a stdio↔HTTP proxy), as a
-**local command server**. Local servers wire into every agent identically, so all
-agents get Axiom through the ordinary local-plugin path. `mcp-remote` is baked
-into the image at build time (the `install:` block), so nothing is fetched from
-npm behind the runtime egress firewall.
+bridge, `mcp-remote https://mcp.axiom.co/mcp` (a stdio↔HTTP proxy), as a **local
+command server**. Local servers wire into every agent identically, so all agents
+get Axiom through the ordinary local-plugin path. `mcp-remote` is baked into the
+image at build time (the `install:` block) and the server execs that baked
+binary directly (not `npx`), so startup never reaches for the npm registry — it
+runs fully offline behind the egress firewall.
 
 ## Secret model — per-agent key with a global fallback
 
@@ -30,9 +31,11 @@ Axiom**:
   `agent_secrets`; only the agents that hold a key get Axiom (an agent with no
   token never sees the server). A per-agent key overrides the global one.
 
-The token rides in each agent's shim env and is expanded by the `bash -c`
-wrapper at spawn time (`$AXIOM_TOKEN`, like serena's `"$PWD"`) — it is **never
-written into any MCP config file**, on any agent.
+The token is delivered into each bound agent's shim env, and **`mcp-remote`
+itself substitutes `${AXIOM_TOKEN}`** into the `Authorization` header at connect
+time. So the secret is in **no MCP config file** and **never on the process
+command line** (argv carries the literal `${AXIOM_TOKEN}`, not the value) — only
+in the process environment, like every other agent credential here.
 
 ## Enable it
 
