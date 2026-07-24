@@ -1,7 +1,7 @@
 # annotated-watch
 
-An **env-only** plugin: one agent-scoped secret slot and **no MCP server**. It
-exists solely to deliver a per-agent key into an agent's shim environment.
+An **env-only** plugin: one hybrid secret slot and **no MCP server**. It exists
+solely to deliver each agent's resolved key into its shim environment.
 
 `ANNOTATED_WATCH_KEY` is the poll-scope key the `watch-vault` skill's background
 monitor reads from the environment — there's nothing to wire.
@@ -13,4 +13,4 @@ agent_secrets:
 ```
 
 This is proof that the general secret-slot mechanism is what "identities" always
-were — a watch key is just an agent-scoped secret with no server.
+were — a watch key is just a secret slot with no server.

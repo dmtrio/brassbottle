@@ -1,9 +1,9 @@
 # obsidian-annotated — remote MCP at mcp-obsidian.dmetr.io (a real internet host,
-# reached via egress, so no host_port). Agent-scoped secret: each agent presents
-# its own key and the server is wired only for bound agents. See ./README.md.
+# reached via egress, so no host_port). Its required secret resolves per agent,
+# so the server is wired only where an effective key exists. See ./README.md.
 
 secrets:
-  OBSIDIAN_ANNOTATED_KEY: agent          # per-agent: each agent wears its own key
+  OBSIDIAN_ANNOTATED_KEY: {}
 
 egress:
   - mcp-obsidian.dmetr.io
@@ -12,3 +12,4 @@ mcp:
   obsidian-annotated:
     url: https://mcp-obsidian.dmetr.io/mcp
     headers: {Authorization: "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}
+    requires: [OBSIDIAN_ANNOTATED_KEY]

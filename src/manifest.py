@@ -10,11 +10,10 @@ assignments it prints:
                     "<name>\t!" when yq could not parse that file (an error
                     only if the manifest actually lists the plugin; an
                     unlisted broken file must not block unrelated containers)
-    input (env):    SECRET_KEY_VARS  — space-separated names of the non-empty
-                                       OBSIDIAN_KEY_* / OBSIDIAN_WATCH_KEY_*
-                                       vars currently defined (names only —
-                                       secret VALUES never reach this process
-                                       beyond NTFY_URL/NTFY_TOPIC below)
+    input (env):    PRESENT_SECRET_VARS — space-separated names of non-empty
+                                          secret sources (names only — secret
+                                          VALUES never reach this process beyond
+                                          NTFY_URL/NTFY_TOPIC below)
                     GIT_NAME_DEFAULT / GIT_EMAIL_DEFAULT — host git config
                                        fallbacks for manifests without git:
                     NTFY_URL / NTFY_TOPIC — from secrets.env, only consumed
@@ -190,41 +189,27 @@ def _tool_installed(tools, name):
 
 
 def _parse_secret(val, plugin, slot):
-    """A plugin secret slot value: either a bare scope string ('env'/'agent')
-    or a map {scope: ..., hint: ..., global: ...}. Returns (scope, hint,
-    is_global). The hint is shown verbatim in up.sh's 'not in secrets.env'
-    warning, so it must be a single line with no tab (PLUGIN_ENV_SECRETS is
-    tab/newline-delimited). global: true (agent scope only) means the slot also
-    accepts a global env var named after the slot as a per-agent fallback — an
-    agent with no explicit agent_secrets binding is wired from that global token
-    when it is set (the fallback synthesis in derive(), keyed on
-    agent_global_slots)."""
-    is_global = False
-    if isinstance(val, str):
-        scope, hint = val, ""
+    """Parse one hybrid secret-slot declaration and return its optional hint.
+
+    Every slot uses the same resolution model: common_secrets supplies an
+    optional default, agent_secrets can override it or disable it for one
+    agent. Scope is intentionally not part of the plugin schema any more."""
+    if _falsy(val):
+        hint = ""
     elif isinstance(val, dict):
-        scope = val.get("scope")
+        extra = ",".join(k for k in val if k != "hint")
+        if extra:
+            raise ManifestError(
+                f"plugin '{plugin}' secret '{slot}': unsupported field(s): {extra} (only hint)")
         hint = val.get("hint", "")
         if not isinstance(hint, str):
             raise ManifestError(f"plugin '{plugin}' secret '{slot}': hint must be a string")
-        raw_global = val.get("global", False)
-        if not isinstance(raw_global, bool):
-            raise ManifestError(f"plugin '{plugin}' secret '{slot}': global must be true or false")
-        is_global = raw_global
     else:
         raise ManifestError(
-            f"plugin '{plugin}' secret '{slot}': must be a scope ('env'/'agent') or a map with a scope: key")
-    if scope not in ("env", "agent"):
-        got = "no scope:" if scope is None else f"'{scope}'"
-        raise ManifestError(
-            f"plugin '{plugin}' secret '{slot}': scope must be 'env' or 'agent' (got {got})")
-    if is_global and scope != "agent":
-        raise ManifestError(
-            f"plugin '{plugin}' secret '{slot}': global: true is only valid with scope: agent "
-            "(a global fallback fills in agents that have no per-agent key)")
+            f"plugin '{plugin}' secret '{slot}': must be empty or a map with an optional hint: key")
     if "\t" in hint or "\n" in hint:
         raise ManifestError(f"plugin '{plugin}' secret '{slot}': hint must be a single line (no tab/newline)")
-    return scope, hint, is_global
+    return hint
 
 
 def _canonical_token_var(owner):
@@ -522,7 +507,7 @@ def derive(manifest, plugin_files, env):
     # (agent, slot, source) records. The slot's plugin (obsidian-annotated /
     # annotated-watch) was auto-enabled above, so slot existence is guaranteed;
     # only the ref charset / suffix / source existence are checked here.
-    secret_vars = set((env.get("SECRET_KEY_VARS") or "").split())
+    present_vars = set((env.get("PRESENT_SECRET_VARS") or env.get("SECRET_KEY_VARS") or "").split())
     identity_errors = []
     sugar_bindings = []  # (agent, slot, source) from identities:
 
@@ -537,7 +522,7 @@ def derive(manifest, plugin_files, env):
                 f"  {kind} ref '{ref}': suffix is not a known agent (_claude/_codex/_pi/_gemini/_cursor_agent)")
             return
         var = f"{prefix}_{ref}"
-        if var not in secret_vars:
+        if var not in present_vars:
             identity_errors.append(f"  {kind} ref '{ref}': {var} not found in {secrets_file}")
             return
         sugar_bindings.append((agent, slot, var))
@@ -557,18 +542,16 @@ def derive(manifest, plugin_files, env):
 
     # ── Per-plugin egress + mcp entry validation (fail-fast, old order) ─
     # Each mcp server is local (command:) OR remote (url:) — the shape, not a
-    # type: field, decides. host_port: is legal only with a remote server;
-    # install: is required iff a local server (the Dockerfile bakes it). A
-    # plugin that declares an AGENT-scoped secret is an "agent-server" plugin:
-    # its (single, remote) server is wired per bound agent, so it is routed to
-    # servers_by_slot instead of the uniform plugin_mcp_entries.
+    # type: field, decides. `requires:` names the plugin's secret slots needed
+    # by that server. A required server is wired only for agents whose resolved
+    # hybrid credentials include every named slot; a server with no requirements
+    # is a uniform plugin entry.
     plugin_mcp_entries = []
     seen_server_names = set()
     host_ports = []
-    env_slots = {}         # SLOT -> (plugin, hint)  env-scoped secrets
-    agent_slots = {}       # SLOT -> plugin          agent-scoped secrets
-    agent_global_slots = {}  # SLOT -> global env var  agent slots w/ global: true
-    servers_by_slot = {}   # agent SLOT -> {"name": ..., "spec": {...}}
+    secret_slots = {}      # SLOT -> (plugin, hint)
+    servers_by_name = {}   # name -> {"spec": {...}, "requires": [SLOT, ...]}
+    server_slots = []      # required slot names, first-seen order
     for p in plugins:
         doc = plugin_files[p]
         if doc is None:
@@ -582,34 +565,21 @@ def derive(manifest, plugin_files, env):
                     f"plugin '{p}' egress entry '{d}' is not a bare hostname (no scheme, path, port, or wildcard — a domain already covers its subdomains)")
             add_egress_domain(d)
 
-        # Secrets first: knowing which of this plugin's slots are agent-scoped
-        # decides how its mcp servers are routed below.
+        # Secret slots no longer choose a delivery scope. They are all resolved
+        # through common defaults, per-agent overrides, and explicit disables.
         secrets = doc.get("secrets")
         secrets = {} if _falsy(secrets) else secrets
         if not isinstance(secrets, dict):
-            raise ManifestError(f"plugin '{p}' secrets must be a map of SLOT: scope")
-        this_agent_slots = []
+            raise ManifestError(f"plugin '{p}' secrets must be a map of SLOT: {{hint: ...}}")
+        plugin_slots = set()
         for slot, val in secrets.items():
             if not REF_RE.match(slot):
                 raise ManifestError(
                     f"plugin '{p}' secret slot '{slot}': illegal characters (must be a shell env var name)")
-            if slot in env_slots or slot in agent_slots:
+            if slot in secret_slots:
                 raise ManifestError(f"secret slot '{slot}' is declared by more than one enabled plugin")
-            scope, hint, is_global = _parse_secret(val, p, slot)
-            if scope == "env":
-                env_slots[slot] = (p, hint)
-            else:
-                agent_slots[slot] = p
-                this_agent_slots.append(slot)
-                if is_global:
-                    # Global fallback var is the slot itself (the ${SLOT} header
-                    # ref) — one token users set in secrets.env for every agent.
-                    # NOTE: up.sh's SECRET_KEY_VARS scan must include this var
-                    # name, else it never reaches secret_vars and the fallback
-                    # silently no-ops. Today only AXIOM_TOKEN is a global slot and
-                    # up.sh scans it explicitly; a new global slot needs the scan
-                    # widened in lockstep (pinned by tests/plugins.test.sh).
-                    agent_global_slots[slot] = slot
+            secret_slots[slot] = (p, _parse_secret(val, p, slot))
+            plugin_slots.add(slot)
 
         mcp = doc.get("mcp")
         mcp = {} if _falsy(mcp) else mcp
@@ -630,15 +600,28 @@ def derive(manifest, plugin_files, env):
             if not is_local and not is_remote:
                 raise ManifestError(
                     f"plugin '{p}' mcp server '{n}': needs command: (local stdio) or url: (remote http)")
+            requires = spec.get("requires", [])
+            if _falsy(requires):
+                requires = []
+            if not isinstance(requires, list) or not all(isinstance(s, str) for s in requires):
+                raise ManifestError(
+                    f"plugin '{p}' mcp server '{n}': requires must be a list of this plugin's secret slots")
+            if len(set(requires)) != len(requires):
+                raise ManifestError(
+                    f"plugin '{p}' mcp server '{n}': requires must not repeat a secret slot")
+            unknown = [slot for slot in requires if slot not in plugin_slots]
+            if unknown:
+                raise ManifestError(
+                    f"plugin '{p}' mcp server '{n}': requires unknown secret slot(s): {', '.join(unknown)}")
             if is_local:
                 has_local = True
                 if not isinstance(spec.get("command"), str):
                     raise ManifestError(
                         f"plugin '{p}' mcp server '{n}': command must be a string (local stdio server)")
-                extra = ",".join(k for k in spec if k not in ("command", "args"))
+                extra = ",".join(k for k in spec if k not in ("command", "args", "requires"))
                 if extra:
                     raise ManifestError(
-                        f"plugin '{p}' mcp server '{n}': unsupported field(s) for a local server: {extra} (only command and args)")
+                        f"plugin '{p}' mcp server '{n}': unsupported field(s) for a local server: {extra} (only command, args, and requires)")
             else:
                 has_remote = True
                 if not isinstance(spec.get("url"), str):
@@ -648,10 +631,10 @@ def derive(manifest, plugin_files, env):
                 if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
                     raise ManifestError(
                         f"plugin '{p}' mcp server '{n}': headers must be a map of string values")
-                extra = ",".join(k for k in spec if k not in ("url", "headers"))
+                extra = ",".join(k for k in spec if k not in ("url", "headers", "requires"))
                 if extra:
                     raise ManifestError(
-                        f"plugin '{p}' mcp server '{n}': unsupported field(s) for a remote server: {extra} (only url and headers)")
+                        f"plugin '{p}' mcp server '{n}': unsupported field(s) for a remote server: {extra} (only url, headers, and requires)")
             if n in seen_server_names:
                 raise ManifestError(
                     f"multiple enabled plugins define the same MCP server name: {n}")
@@ -673,141 +656,142 @@ def derive(manifest, plugin_files, env):
                 raise ManifestError(f"plugin '{p}': host_port {hp} out of range (1-65535)")
             host_ports.append(hp)
 
-        # Route the plugin's mcp servers. Agent-scoped → per-agent wiring
-        # (servers_by_slot); everything else → uniform plugin_mcp_entries.
-        if this_agent_slots:
-            if len(this_agent_slots) > 1:
-                raise ManifestError(
-                    f"plugin '{p}': an agent-scoped plugin may declare only one agent secret slot (got {', '.join(this_agent_slots)})")
-            if len(mcp) > 1:
-                raise ManifestError(
-                    f"plugin '{p}': an agent-scoped plugin may define at most one mcp server (got {len(mcp)})")
-            slot = this_agent_slots[0]
-            # The server may be remote (url:, per-agent literal header) OR local
-            # (command:, per-agent stdio bridge — e.g. axiom's mcp-remote). Both
-            # route here so the per-agent binding gates which agents get it; the
-            # shape was already validated in the mcp loop above.
-            for n, spec in mcp.items():
-                servers_by_slot[slot] = {"name": n, "spec": spec if isinstance(spec, dict) else {}}
-        else:
-            # One line of compact JSON per plugin — the --build-payload contract.
-            plugin_mcp_entries.append(json.dumps(mcp, separators=(",", ":"), ensure_ascii=False))
+        uniform = {}
+        for n, spec in mcp.items():
+            config_spec = {k: v for k, v in spec.items() if k != "requires"}
+            requires = spec.get("requires") or []
+            if requires:
+                servers_by_name[n] = {"spec": config_spec, "requires": requires}
+                for slot in requires:
+                    if slot not in server_slots:
+                        server_slots.append(slot)
+            else:
+                uniform[n] = config_spec
+        # One line of compact JSON per uniform plugin — the --build-payload
+        # contract does not need empty objects for fully required plugins.
+        if uniform:
+            plugin_mcp_entries.append(json.dumps(uniform, separators=(",", ":"), ensure_ascii=False))
     out["PLUGIN_MCP_ENTRIES"] = "".join(e + "\n" for e in plugin_mcp_entries)
     # Sorted + deduped so the firewall grant string is order-independent of the
     # plugin list and two plugins sharing a port don't double up the grant.
     out["HOST_MCP_PORTS"] = ",".join(str(p) for p in sorted(set(host_ports)))
-    # Agent-scoped server defs (slot → {name, spec}) for the wiring payload, and
-    # the slots that actually have a server (env-only watch slots have none).
-    out["AGENT_SERVERS_JSON"] = json.dumps(servers_by_slot, separators=(",", ":"), ensure_ascii=False)
-    out["AGENT_SERVER_SLOTS"] = " ".join(servers_by_slot.keys())
+    # Required server definitions and the slots whose values must be handed to
+    # the wiring exec for literal remote-agent configs. Env-only slots are not
+    # included in AGENT_SERVER_SLOTS.
+    out["AGENT_SERVERS_JSON"] = json.dumps(servers_by_name, separators=(",", ":"), ensure_ascii=False)
+    out["AGENT_SERVER_SLOTS"] = " ".join(server_slots)
 
-    # ── agent_secrets: per-agent bindings for agent-scoped slots ────────────
-    # Merge the identities: sugar bindings (validated above) with explicit
-    # agent_secrets records; validate agent/slot/source and emit one
-    # agent<tab>slot<tab>source record per line for up.sh to compose + wire.
+    # ── Hybrid secret resolution ─────────────────────────────────────────────
+    # common_secrets declares the optional default source for a slot. An
+    # agent_secrets record either replaces that source for one agent or
+    # explicitly disables the slot for that agent.
+    common = manifest.get("common_secrets")
+    defaults = {}
+    if not _falsy(common):
+        if isinstance(common, list):
+            for slot in _word_list(common, "common_secrets"):
+                if slot not in secret_slots:
+                    raise ManifestError(
+                        f"common_secrets slot '{slot}': no enabled plugin declares that secret slot")
+                defaults[slot] = slot
+        elif isinstance(common, dict):
+            for slot, source in common.items():
+                source = _scalar(source, f"common_secrets.{slot}")
+                if slot not in secret_slots:
+                    raise ManifestError(
+                        f"common_secrets slot '{slot}': no enabled plugin declares that secret slot")
+                if not REF_RE.match(source):
+                    raise ManifestError(
+                        f"common_secrets slot '{slot}': source '{source}' is not a valid env var name")
+                defaults[slot] = source
+        else:
+            raise ManifestError("manifest common_secrets: must be a list of slots or a map of SLOT: source")
+    for slot, source in list(defaults.items()):
+        if source not in present_vars:
+            plugin, hint = secret_slots[slot]
+            detail = hint or f"plugin '{plugin}'"
+            print(f"  ⚠ common secret '{source}' not in {secrets_file} — {detail} will not authenticate",
+                  file=sys.stderr)
+            del defaults[slot]
+
     explicit = manifest.get("agent_secrets")
     explicit_bindings = []
     if not _falsy(explicit):
         if not isinstance(explicit, list):
-            raise ManifestError("manifest agent_secrets: must be a list of {agent, slot, secret} records")
+            raise ManifestError(
+                "manifest agent_secrets: must be a list of {agent, slot, secret} overrides or {agent, slot, disabled: true}")
         for rec in explicit:
             if not isinstance(rec, dict):
-                raise ManifestError("agent_secrets: each entry must be a map with agent, slot, secret")
+                raise ManifestError(
+                    "agent_secrets: each entry must be a map with agent, slot, and exactly one of secret or disabled: true")
             agent = _scalar(rec.get("agent"), "agent_secrets.agent")
             slot = _scalar(rec.get("slot"), "agent_secrets.slot")
-            source = _scalar(rec.get("secret"), "agent_secrets.secret")
-            if not agent or not slot or not source:
-                raise ManifestError("agent_secrets: each entry needs agent, slot, and secret")
-            explicit_bindings.append((agent, slot, source))
+            has_secret = "secret" in rec
+            disabled = rec.get("disabled", False)
+            if not isinstance(disabled, bool):
+                raise ManifestError("agent_secrets.disabled must be true or false")
+            if not agent or not slot or has_secret == disabled:
+                raise ManifestError(
+                    "agent_secrets: each entry needs agent, slot, and exactly one of secret or disabled: true")
+            source = _scalar(rec.get("secret"), "agent_secrets.secret") if has_secret else ""
+            if has_secret and not source:
+                raise ManifestError("agent_secrets.secret must be a non-empty env var name")
+            extra = ",".join(k for k in rec if k not in ("agent", "slot", "secret", "disabled"))
+            if extra:
+                raise ManifestError(
+                    f"agent_secrets: unsupported field(s): {extra} (only agent, slot, secret, disabled)")
+            explicit_bindings.append((agent, slot, None if disabled else source))
 
     seen_binds = set()
-    agent_secret_records = []
+    overrides = {}
     for agent, slot, source in sugar_bindings + explicit_bindings:
         if agent not in AGENT_NAMES:
             raise ManifestError(
                 f"agent_secrets: unknown agent '{agent}' (one of {', '.join(sorted(AGENT_NAMES))})")
-        if slot not in agent_slots:
+        if slot not in secret_slots:
             raise ManifestError(
-                f"agent_secrets: slot '{slot}' is not an agent-scoped secret of any enabled plugin")
-        if source not in secret_vars:
-            # secret_vars is the set of per-agent key vars up.sh scanned from
-            # secrets.env (OBSIDIAN_(WATCH_)?KEY_*, AXIOM_KEY_*, and a global
-            # token like AXIOM_TOKEN) — name that scope so a set-but-unscanned
-            # source var reads as a scope limit, not "you forgot to set it".
+                f"agent_secrets: slot '{slot}' is not a secret of any enabled plugin")
+        if source is not None and source not in present_vars:
             raise ManifestError(
                 f"agent_secrets: secret '{source}' (for {agent}/{slot}) not found in {secrets_file} "
-                "(agent_secrets sources must be scanned key vars: OBSIDIAN_KEY_* / "
-                "OBSIDIAN_WATCH_KEY_* / AXIOM_KEY_*, or a plugin's global token var)")
+                "(agent_secrets sources must be non-empty variables)")
         if (agent, slot) in seen_binds:
             raise ManifestError(f"agent_secrets: {agent} is bound to slot '{slot}' more than once")
         seen_binds.add((agent, slot))
-        agent_secret_records.append((agent, slot, source))
+        overrides[(agent, slot)] = source
 
-    # Global fallback (scope: agent, global: true): fill in every ENABLED agent
-    # that has no explicit binding on the slot, sourced from the global token —
-    # but only when that token is actually set (present in the scanned
-    # secret_vars). This is what makes "set AXIOM_TOKEN → every agent gets axiom"
-    # work; explicit per-agent agent_secrets above take precedence (seen_binds).
     enabled_agents = [a for a, t in (
         ("claude", "claude"), ("codex", "codex"), ("pi", "pi"),
         ("gemini", "gemini"), ("cursor-agent", "cursor"),
     ) if _tool_installed(tools, t)]
-    for slot, gvar in agent_global_slots.items():
-        if gvar not in secret_vars:
-            continue
+
+    # Explicit overrides retain manifest order. Defaults fill every enabled
+    # agent not overridden or disabled, so a disabled entry intentionally
+    # leaves no key or server configuration behind.
+    agent_secret_records = []
+    for agent, slot, source in sugar_bindings + explicit_bindings:
+        if source is not None:
+            agent_secret_records.append((agent, slot, source))
+    for slot, source in defaults.items():
         for agent in enabled_agents:
-            if (agent, slot) in seen_binds:
+            if (agent, slot) in overrides:
                 continue
-            seen_binds.add((agent, slot))
-            agent_secret_records.append((agent, slot, gvar))
+            agent_secret_records.append((agent, slot, source))
     out["AGENT_SECRETS"] = "".join(f"{a}\t{s}\t{src}\n" for a, s, src in agent_secret_records)
 
-    # An enabled agent-scoped plugin with no binding is inert (wired for no
-    # agent) — and, if it has a server, opens egress nothing will reach. Warn
-    # rather than fail: listing the plugin without a binding may be deliberate.
+    # An enabled plugin slot with no effective credential is inert. Warn rather
+    # than fail: listing a plugin before adding a default/override is deliberate
+    # for some manifests.
     bound_slots = {slot for _, slot, _ in agent_secret_records}
-    for slot, plugin in agent_slots.items():
+    for slot, (plugin, _) in secret_slots.items():
         if slot not in bound_slots:
-            print(f"  ⚠ plugin '{plugin}' declares agent-scoped slot {slot} but no "
-                  "agent_secrets binding enables it — it is inert (wired for no agent)",
+            print(f"  ⚠ plugin '{plugin}' declares slot {slot} but no common default or "
+                  "agent override enables it — it is inert (wired for no agent)",
                   file=sys.stderr)
 
-    # ── Env-scoped secret bindings (common_secrets) → required-secret plan ──
-    # up.sh composes VALUES (it has secrets.env; this module never sees them):
-    # each record is SLOT<tab>SOURCE<tab>HINT. A plugin env slot defaults to a
-    # same-named source var; common_secrets (map) re-points it, or (list)
-    # passes an extra var through by name.
-    common = manifest.get("common_secrets")
-    remap = {}
-    passthrough = []
-    if not _falsy(common):
-        if isinstance(common, list):
-            passthrough = _word_list(common, "common_secrets")
-        elif isinstance(common, dict):
-            for slot, source in common.items():
-                remap[slot] = _scalar(source, f"common_secrets.{slot}")
-        else:
-            raise ManifestError("manifest common_secrets: must be a list of names or a map of SLOT: source")
-    for slot, source in remap.items():
-        if slot in agent_slots:
-            raise ManifestError(
-                f"common_secrets slot '{slot}' is agent-scoped — bind it under agent_secrets, not common_secrets")
-        if slot not in env_slots:
-            raise ManifestError(
-                f"common_secrets slot '{slot}': no enabled plugin declares an env-scoped secret named '{slot}'")
-        if not REF_RE.match(source):
-            raise ManifestError(
-                f"common_secrets slot '{slot}': source '{source}' is not a valid env var name")
-    records = []
-    for slot, (plugin, hint) in env_slots.items():
-        records.append((slot, remap.get(slot, slot), hint))
-    for name in passthrough:
-        if name in env_slots:
-            continue  # already covered as a plugin slot
-        if not REF_RE.match(name):
-            raise ManifestError(f"common_secrets passthrough '{name}' is not a valid env var name")
-        records.append((name, name, ""))
-    out["PLUGIN_ENV_SECRETS"] = "".join(f"{s}\t{src}\t{h}\n" for s, src, h in records)
+    # All plugin credentials are now composed as effective per-agent records.
+    # Keep the output variable empty for the stable up.sh/keyfiles interface.
+    out["PLUGIN_ENV_SECRETS"] = ""
 
     # ── remote.notify: ntfy egress + env passthrough ────────────────────
     ntfy_url = ""

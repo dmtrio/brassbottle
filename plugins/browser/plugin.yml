@@ -4,9 +4,10 @@
 host_port: 8814                        # firewall grant → HOST_MCP_PORTS
 
 secrets:
-  RESEARCH_BROWSER_KEY: {scope: env, hint: "browser (run ./service.sh browser once)"}
+  RESEARCH_BROWSER_KEY: {hint: "browser (run ./service.sh browser once)"}
 
 mcp:
   browser:
     url: http://host.docker.internal:8814/mcp
     headers: {X-API-Key: "${RESEARCH_BROWSER_KEY}"}
+    requires: [RESEARCH_BROWSER_KEY]

@@ -60,12 +60,14 @@ SECRETS_FILE="$BASE_PATH/secrets.env"
 # instead of cryptic yq failures). Secret VALUES stay out of the call: it
 # receives only the NAMES of the identity key vars that are set, plus
 # NTFY_URL/NTFY_TOPIC which the manifest may route into the container.
-# Per-agent key vars (OBSIDIAN_(WATCH_)?KEY_*, AXIOM_KEY_*) plus a plugin's
-# global token var (AXIOM_TOKEN) — the sources an agent_secrets binding may
-# name, and the presence signal for a scope: agent, global: true fallback.
-SECRET_KEY_VARS=""
-for v in $(compgen -v | grep -E '^(OBSIDIAN_(WATCH_)?KEY_|AXIOM_KEY_|AXIOM_TOKEN$)' || true); do
-    if [ -n "${!v}" ]; then SECRET_KEY_VARS="${SECRET_KEY_VARS:+$SECRET_KEY_VARS }$v"; fi
+# The manifest only receives NAMES of set values. Hybrid secret resolution
+# needs to tell an explicit common default from an unset source, while secret
+# values remain in this shell and reach the container through keyfiles.sh.
+PRESENT_SECRET_VARS=""
+for v in $(compgen -v); do
+    if [ -n "${!v}" ]; then
+        PRESENT_SECRET_VARS="${PRESENT_SECRET_VARS:+$PRESENT_SECRET_VARS }$v"
+    fi
 done
 # The set of GH_TOKEN* var names present in secrets.env (NAMES only — values
 # stay on the host). manifest.py validates every git.token / git.orgs.*.token
@@ -89,7 +91,7 @@ DERIVED=$(
                 && [ "$(printf '%s\n' "$DOC" | wc -l)" -eq 1 ] || DOC='!'
             printf '%s\t%s\n' "$(basename "$(dirname "$f")")" "$DOC"
         done
-    } | SECRET_KEY_VARS="$SECRET_KEY_VARS" GH_TOKEN_VARS="$GH_TOKEN_VARS" \
+    } | PRESENT_SECRET_VARS="$PRESENT_SECRET_VARS" GH_TOKEN_VARS="$GH_TOKEN_VARS" \
         SECRETS_FILE="$SECRETS_FILE" \
         GIT_NAME_DEFAULT="$(git config --global user.name 2>/dev/null || true)" \
         GIT_EMAIL_DEFAULT="$(git config --global user.email 2>/dev/null || true)" \
@@ -386,23 +388,21 @@ echo "  ✓ skills linked (read-only; rules changes go via PR to the rules repo)
 # and only for cursor-agent/gemini/pi (claude expands the ${VAR} ref from its
 # shim env; codex is a pending warning and ships no key at all).
 #
-# Build the per-agent inputs for agent-scoped SERVERS from AGENT_SECRETS. Only
-# slots with an actual server (AGENT_SERVER_SLOTS) need wiring — an env-only
-# slot (a watch key) was already delivered into <agent>.env above and has
-# nothing to render. Triples are "agent:key_env:slot"; claude/codex carry an
-# empty key_env (claude uses the ref, codex is warned).
+# Build literal remote-agent inputs from resolved AGENT_SECRETS. Only slots
+# required by an MCP server travel through docker exec; env-only slots are
+# already in the per-agent key file. Claude keeps ${SLOT} references and Codex
+# still warns for remote MCPs, so neither receives a literal key here.
 IDENTITY_ENV=()
-IDENTITY_AGENTS=""
+IDENTITY_SECRETS=""
 i=0
 while IFS=$'\t' read -r agent slot source; do
     [ -n "$agent" ] || continue
     case " $AGENT_SERVER_SLOTS " in *" $slot "*) ;; *) continue ;; esac
     case "$agent" in
-        claude|codex)
-            IDENTITY_AGENTS="${IDENTITY_AGENTS:+$IDENTITY_AGENTS }$agent::$slot" ;;
+        claude|codex) ;;
         *)
             IDENTITY_ENV+=(-e "IDENTITY_KEY_${i}=${!source}")
-            IDENTITY_AGENTS="${IDENTITY_AGENTS:+$IDENTITY_AGENTS }$agent:IDENTITY_KEY_$i:$slot"
+            IDENTITY_SECRETS="${IDENTITY_SECRETS:+$IDENTITY_SECRETS }$agent:IDENTITY_KEY_$i:$slot"
             i=$((i + 1)) ;;
     esac
 done <<EOF
@@ -412,7 +412,8 @@ EOF
 PAYLOAD=$(WIRE_CURSOR="$INSTALL_CURSOR" WIRE_GEMINI="$INSTALL_GEMINI" \
     WIRE_PI="$INSTALL_PI" WIRE_CODEX="$INSTALL_CODEX" \
     PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
-    AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" IDENTITY_AGENTS="$IDENTITY_AGENTS" \
+    AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
+    IDENTITY_SECRETS="$IDENTITY_SECRETS" \
     "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py" --build-payload)
 
 printf '%s' "$PAYLOAD" | docker exec -i -u coder "${IDENTITY_ENV[@]}" "dev-agent-$NAME" \

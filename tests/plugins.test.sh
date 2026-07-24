@@ -114,67 +114,69 @@ EXPECTED="AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_SLOTS CONTAINER_NTFY_TOP
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
 
 echo "── derive → build-payload chain (both host halves, real serena + gateway files)"
-# A local plugin (serena) + a remote plugin (gateway): manifest.py derives its
-# host_port into HOST_MCP_PORTS, its secret slot into PLUGIN_ENV_SECRETS, and
-# its mcp entry into PLUGIN_MCP_ENTRIES alongside serena's.
+# A local plugin (serena) + a required remote plugin (gateway): manifest.py
+# derives its host_port, resolves the explicit common default for every agent,
+# and routes gateway through the per-agent server path.
 DERIVED=$(
     {
-        printf '{"plugins": ["serena", "gateway"]}\n'
+        printf '{"plugins": ["serena", "gateway"], "common_secrets": ["MCP_GATEWAY_TOKEN"]}\n'
         printf 'serena\t'; yq -o=json -I=0 plugins/serena/plugin.yml
         printf 'gateway\t'; yq -o=json -I=0 plugins/gateway/plugin.yml
-    } | python3 src/manifest.py --derive
+    } | PRESENT_SECRET_VARS="MCP_GATEWAY_TOKEN" python3 src/manifest.py --derive
 ) || fail "--derive exited non-zero on a serena+gateway manifest"
 eval "$DERIVED"
 [ "$HOST_MCP_PORTS" = "8811" ] \
     && pass "gateway host_port folds into HOST_MCP_PORTS" \
     || fail "HOST_MCP_PORTS wrong: '$HOST_MCP_PORTS'"
-printf '%s' "$PLUGIN_ENV_SECRETS" \
-    | grep -qF "$(printf 'MCP_GATEWAY_TOKEN\tMCP_GATEWAY_TOKEN\tgateway')" \
-    && pass "gateway env-scoped secret slot derived into PLUGIN_ENV_SECRETS" \
-    || fail "PLUGIN_ENV_SECRETS missing gateway slot: '$PLUGIN_ENV_SECRETS'"
+printf '%s' "$AGENT_SECRETS" \
+    | grep -qF "$(printf 'cursor-agent\tMCP_GATEWAY_TOKEN\tMCP_GATEWAY_TOKEN')" \
+    && pass "gateway common default resolves into agent credentials" \
+    || fail "AGENT_SECRETS missing gateway default: '$AGENT_SECRETS'"
 PAYLOAD=$(WIRE_CURSOR=true WIRE_GEMINI=yes WIRE_PI=false WIRE_CODEX=true \
     PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
-    AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" IDENTITY_AGENTS="$IDENTITY_AGENTS" \
+    AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
+    IDENTITY_SECRETS="cursor-agent:IDENTITY_KEY_0:MCP_GATEWAY_TOKEN gemini:IDENTITY_KEY_1:MCP_GATEWAY_TOKEN pi:IDENTITY_KEY_2:MCP_GATEWAY_TOKEN" \
     python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero"
 printf '%s' "$PAYLOAD" | jq -e '
     .wire == {cursor: true, gemini: false, pi: false, codex: true}
-    and ([.plugin_mcp_entries[] | keys[0]] == ["serena", "coding"])
-    and (.agent_servers == [])' >/dev/null \
+    and ([.plugin_mcp_entries[] | keys[0]] == ["serena"])
+    and ([.agent_servers[] | .name] == ["coding"])' >/dev/null \
     && pass "derive → build-payload yields the wiring payload (strict booleans: yes/1 stay off)" \
     || fail "payload chain output wrong: $PAYLOAD"
 
-echo "── agent_secrets chain: obsidian bound to claude + cursor-agent (Phase 2)"
+echo "── hybrid override chain: obsidian bound to claude + cursor-agent"
 A_DERIVED=$(
     {
         printf '{"plugins": ["obsidian-annotated"], "agent_secrets": [{"agent":"claude","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_a_claude"},{"agent":"cursor-agent","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_b_cursor_agent"}]}\n'
         printf 'obsidian-annotated\t'; yq -o=json -I=0 plugins/obsidian-annotated/plugin.yml
-    } | SECRET_KEY_VARS="OBSIDIAN_KEY_a_claude OBSIDIAN_KEY_b_cursor_agent" SECRETS_FILE=/sec/secrets.env python3 src/manifest.py --derive
+    } | PRESENT_SECRET_VARS="OBSIDIAN_KEY_a_claude OBSIDIAN_KEY_b_cursor_agent" SECRETS_FILE=/sec/secrets.env python3 src/manifest.py --derive
 ) || fail "--derive exited non-zero on an agent_secrets manifest"
 eval "$A_DERIVED"
 [ "$AGENT_SERVER_SLOTS" = "OBSIDIAN_ANNOTATED_KEY" ] \
-    && pass "obsidian-annotated derives an agent-scoped server slot" \
+    && pass "obsidian-annotated derives a required server slot" \
     || fail "AGENT_SERVER_SLOTS wrong: '$AGENT_SERVER_SLOTS'"
-# up.sh's wiring loop: claude → ref (empty key_env); cursor-agent → literal key.
+# up.sh's wiring loop: cursor-agent gets a literal-key env mapping; Claude
+# retains the ${SLOT} reference from its shim env.
 A_IDA=""; A_IDENV=(); i=0
 while IFS=$'\t' read -r agent slot source; do
     [ -n "$agent" ] || continue
     case " $AGENT_SERVER_SLOTS " in *" $slot "*) ;; *) continue ;; esac
     case "$agent" in
-        claude|codex) A_IDA="${A_IDA:+$A_IDA }$agent::$slot" ;;
+        claude|codex) ;;
         *) A_IDENV+=(-e "IDENTITY_KEY_${i}=v$i"); A_IDA="${A_IDA:+$A_IDA }$agent:IDENTITY_KEY_$i:$slot"; i=$((i+1)) ;;
     esac
 done <<AEOF
 $AGENT_SECRETS
 AEOF
-A_PAYLOAD=$(AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" IDENTITY_AGENTS="$A_IDA" python3 src/wire_plugins.py --build-payload) \
+A_PAYLOAD=$(AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" IDENTITY_SECRETS="$A_IDA" python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero on agent_servers"
 printf '%s' "$A_PAYLOAD" | jq -e '
     (.agent_servers | length) == 1
     and .agent_servers[0].name == "obsidian-annotated"
     and .agent_servers[0].claude == true
-    and (.agent_servers[0].literal == [{agent: "cursor-agent", key_env: "IDENTITY_KEY_0"}])' >/dev/null \
-    && pass "agent_secrets → build-payload yields per-agent obsidian wiring" \
+    and (.agent_servers[0].literal == [{agent: "cursor-agent", key_envs: {OBSIDIAN_ANNOTATED_KEY: "IDENTITY_KEY_0"}}])' >/dev/null \
+    && pass "hybrid overrides → build-payload yields per-agent obsidian wiring" \
     || fail "agent_servers payload wrong: $A_PAYLOAD"
 
 echo "── python unit tests (src/manifest.py + src/wire_plugins.py)"
@@ -198,7 +200,7 @@ src/manifest.py" --derive
 --build-payload
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
 python3 /usr/local/lib/dev-agent/wire_plugins.py
-OBSIDIAN_(WATCH_)?KEY_|AXIOM_KEY_|AXIOM_TOKEN$
+PRESENT_SECRET_VARS
 DRIFT
 # The identity-key prefixes and hostname rule each live in two places by
 # design (bash glue ↔ module, manifest.py ↔ allow-egress.sh) — cross-pin

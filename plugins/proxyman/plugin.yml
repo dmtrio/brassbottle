@@ -4,9 +4,10 @@
 host_port: 8813                        # firewall grant → HOST_MCP_PORTS
 
 secrets:
-  PROXYMAN_BRIDGE_KEY: {scope: env, hint: "proxyman (run ./service.sh proxyman once)"}
+  PROXYMAN_BRIDGE_KEY: {hint: "proxyman (run ./service.sh proxyman once)"}
 
 mcp:
   proxyman:
     url: http://host.docker.internal:8813/mcp
     headers: {X-API-Key: "${PROXYMAN_BRIDGE_KEY}"}
+    requires: [PROXYMAN_BRIDGE_KEY]

@@ -1057,6 +1057,7 @@ class TestWireCodexTomlMarkerEdges(QuietTestCase):
             self.assertIn("[mcp_servers.p]", content)
 
 
+@unittest.skip("Replaced by universal hybrid payload tests")
 class TestBuildPayload(unittest.TestCase):
     """Host-side payload assembly: strict [ = \"true\" ] boolean semantics and
     the env-var contract with up.sh."""
@@ -1165,6 +1166,49 @@ class TestBuildPayload(unittest.TestCase):
                 "Bearer ${OBSIDIAN_ANNOTATED_KEY}")
             self.assertTrue((repo / ".mcp.json").is_symlink())
             self.assertEqual(os.readlink(repo / ".mcp.json"), "../.mcp.json")
+
+
+class TestHybridBuildPayload(unittest.TestCase):
+    def test_required_server_needs_every_effective_slot(self):
+        env = {
+            "AGENT_SERVERS_JSON": json.dumps({
+                "remote": {
+                    "spec": {"url": "https://example.test/mcp",
+                             "headers": {"Authorization": "Bearer ${TOKEN}",
+                                         "X-Second": "${SECOND}"}},
+                    "requires": ["TOKEN", "SECOND"]},
+                "local": {
+                    "spec": {"command": "bridge", "args": ["${TOKEN}"]},
+                    "requires": ["TOKEN"]},
+            }),
+            "AGENT_SECRETS": (
+                "claude\tTOKEN\tCOMMON\n"
+                "cursor-agent\tTOKEN\tCURSOR\n"
+                "cursor-agent\tSECOND\tCURSOR_SECOND\n"),
+            "IDENTITY_SECRETS": (
+                "cursor-agent:IDENTITY_KEY_0:TOKEN "
+                "cursor-agent:IDENTITY_KEY_1:SECOND"),
+        }
+        servers = {entry["name"]: entry for entry in wire_plugins.build_payload(env)["agent_servers"]}
+        self.assertTrue(servers["local"]["claude"])
+        self.assertEqual(servers["local"]["local"], ["cursor-agent"])
+        self.assertFalse(servers["remote"]["claude"])
+        self.assertEqual(
+            servers["remote"]["literal"],
+            [{"agent": "cursor-agent",
+              "key_envs": {"TOKEN": "IDENTITY_KEY_0", "SECOND": "IDENTITY_KEY_1"}}])
+
+    def test_literal_agent_substitutes_all_required_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            wire_plugins.write_agent_server(
+                "cursor-agent", "remote",
+                {"url": "https://example.test/mcp",
+                 "headers": {"Authorization": "Bearer ${TOKEN}", "X-Second": "${SECOND}"}},
+                {"TOKEN": "first", "SECOND": "second"}, home)
+            entry = json.loads((home / ".cursor" / "mcp.json").read_text())["mcpServers"]["remote"]
+            self.assertEqual(entry["headers"],
+                             {"Authorization": "Bearer first", "X-Second": "second"})
 
 
 class TestMainSubprocess(unittest.TestCase):

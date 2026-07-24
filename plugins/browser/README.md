@@ -14,7 +14,8 @@ plugins: [browser]
 ./service.sh browser chrome   # extra args are forwarded to the launcher
 ```
 
-First run self-generates `RESEARCH_BROWSER_KEY` into `secrets.env` (env-scoped).
+First run self-generates `RESEARCH_BROWSER_KEY` into `secrets.env`; declare it
+in `common_secrets` to make it the shared default.
 
 ## Notes
 

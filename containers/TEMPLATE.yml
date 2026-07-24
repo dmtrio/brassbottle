@@ -87,17 +87,15 @@ capabilities:
 #   plugins: [serena, gateway, obsidian-annotated]   # serena: local; others remote
 plugins: []
 
-# Env-scoped plugin secrets. An ENV-SCOPED slot (its secrets: scope is `env`) is
-# one value shared by every agent (a remote service token). Enabling the plugin
-# is enough to wire it: each slot
-# defaults to a same-named var in secrets.env. Name it here to make the binding
-# explicit AND to re-point THIS container's slot at a different secret.
+# Common plugin-secret defaults. Declaring a plugin slot here supplies one source
+# value to every enabled agent; a required MCP is wired only where that slot
+# resolves. Use the map form to re-point THIS container's slot at a different
+# secrets.env variable.
 #   common_secrets:
 #     SLOT: SOURCE_VAR        # map form: source SLOT from SOURCE_VAR (re-point)
-#     - EXTRA_VAR             # list form: pass an extra secrets.env var through
-# up.sh warns (does not fail) if a source var is missing from secrets.env — the
-# service just won't authenticate until it's set. An agent-scoped slot does NOT
-# go here (it errors) — bind it under agent_secrets below.
+#     - SLOT                  # list form: source SLOT from same-named variable
+# up.sh warns (does not fail) if a common source is missing; it produces no
+# binding or MCP config for that slot until the source is set.
 #
 # Example (two containers, one gateway plugin, different tokens):
 #   plugins: [gateway]
@@ -106,19 +104,21 @@ plugins: []
 #   common_secrets: {MCP_GATEWAY_TOKEN: MCP_GATEWAY_TOKEN_prod} # points elsewhere
 common_secrets: {}
 
-# Per-agent secret bindings. An AGENT-SCOPED plugin (its secrets: slot is
-# `agent`) is wired only for the agents you bind here, each presenting its OWN
-# key. A binding is a flat record: which agent, which slot the plugin declares,
-# and which secrets.env var supplies that agent's value.
-# up.sh HARD-FAILS at apply time if a source var is missing from secrets.env or
-# the agent/slot is unknown. See each plugins/<name>/README.md for its slot name.
+# Per-agent secret overrides or removals. A record replaces the common default
+# for one agent, or `disabled: true` removes the slot for that agent. up.sh
+# HARD-FAILS when an override source is absent or the agent/slot is unknown.
+# See each plugins/<name>/README.md for slot names.
 #
-# Example:
-#   plugins: [obsidian-annotated, annotated-watch]
+# Example: override one agent's shared gateway token and remove gateway for pi:
+#   plugins: [gateway, obsidian-annotated, annotated-watch]
+#   common_secrets: [MCP_GATEWAY_TOKEN]
 #   agent_secrets:
+#     - {agent: cursor-agent, slot: MCP_GATEWAY_TOKEN, secret: CURSOR_GATEWAY_TOKEN}
+#     - {agent: pi,           slot: MCP_GATEWAY_TOKEN, disabled: true}
 #     - {agent: claude, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_site_claude}
 #     - {agent: gemini, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_site_gemini}
 #     - {agent: claude, slot: ANNOTATED_WATCH_KEY,    secret: OBSIDIAN_WATCH_KEY_site_claude}
+# `disabled: true` omits both the secret and every MCP server that requires it.
 # (the secret: values are var names in secrets.env; see secrets.env.example)
 #
 # (The old `identities: {obsidian: [...], watch: [...]}` ref-suffix form still

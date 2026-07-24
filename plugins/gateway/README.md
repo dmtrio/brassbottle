@@ -14,8 +14,9 @@ common_secrets: [MCP_GATEWAY_TOKEN]   # optional; the slot defaults to this same
 ./service.sh gateway        # leave it running (tmux or launchd)
 ```
 
-First run self-generates `MCP_GATEWAY_TOKEN` into `secrets.env`. The token is
-**env-scoped** — every agent presents the same value.
+First run self-generates `MCP_GATEWAY_TOKEN` into `secrets.env`. Declare it in
+`common_secrets` to use it as every agent's default; individual agents can
+override or disable that slot.
 
 ## Security posture
 

@@ -57,7 +57,8 @@ one** of `command:` (local) or `url:` (remote).
 | `mcp: {<server>: {url, headers}}` | **Remote** HTTP server, reached on the host or internet. |
 | `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists. |
 | `host_port: <int>` | Remote-only; opens the container firewall to `host.docker.internal:<port>`. |
-| `secrets: {<SLOT>: <scope>}` | Secret slots the headers reference. `scope` is `env` (one value shared by all agents) or `agent` (per-agent, bound in the manifest). Long form `{scope: env, hint: "…"}` adds the message shown when the source var is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
+| `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
+| `requires: [<SLOT>, …]` | Optional MCP-server field. The server is configured only for agents with every required slot; uncredentialed servers omit it. |
 | `egress: [host, …]` | Bare hostnames added to this container's firewall allowlist. |
 
 **Local example** (`serena`):
@@ -75,27 +76,34 @@ egress: [blob.core.windows.net]
 ```yaml
 host_port: 8811
 secrets:
-  MCP_GATEWAY_TOKEN: {scope: env, hint: "gateway (run ./service.sh gateway once)"}
+  MCP_GATEWAY_TOKEN: {hint: "gateway (run ./service.sh gateway once)"}
 mcp:
   coding:
     url: http://host.docker.internal:8811/mcp
     headers: {Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"}
+    requires: [MCP_GATEWAY_TOKEN]
 ```
 
 ## Binding secrets in a manifest
 
-Slots declare *what* a plugin needs; the manifest binds *the value*:
+Slots declare *what* a plugin needs; `common_secrets` supplies an explicit
+default and `agent_secrets` overrides or removes it for one agent:
 
 ```yaml
 plugins: [gateway, obsidian-annotated]
-common_secrets: [MCP_GATEWAY_TOKEN]            # env-scoped: list passes through, {SLOT: SRC} renames
-agent_secrets:                                  # agent-scoped: one record per (agent, slot)
+common_secrets: [MCP_GATEWAY_TOKEN]            # default source has the same name
+# Or remap: {MCP_GATEWAY_TOKEN: GATEWAY_PROD_TOKEN}
+agent_secrets:
   - {agent: claude, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_me_claude}
+  - {agent: cursor-agent, slot: MCP_GATEWAY_TOKEN, secret: CURSOR_GATEWAY_TOKEN}
+  - {agent: pi, slot: MCP_GATEWAY_TOKEN, disabled: true}
 ```
 
-Source vars resolve (by name only — never value) against `secrets.env`. A
-dangling source, or an `agent` slot bound in `common_secrets` (or vice-versa),
-is a hard error at `up` time.
+Resolution is `disabled` → no value, then agent `secret` override, then the
+common default. A server with `requires:` is omitted for an agent missing any
+required value. Sources resolve by name only — never value — against
+`secrets.env`; an unset override is a hard error, while an unset common default
+warns and yields no binding.
 
 ## How it loads
 

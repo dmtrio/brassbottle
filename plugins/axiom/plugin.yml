@@ -6,17 +6,16 @@
 # remote-header injection. Axiom documents exactly this bridge (mcp-remote <url>).
 # See ./README.md.
 #
-# Agent-scoped secret WITH a global fallback (scope: agent, global: true) — the
-# token gates WHICH agents get axiom:
-#   • one global AXIOM_TOKEN in secrets.env → shared by every agent
-#   • per-agent AXIOM_KEY_<agent> → only the agents that hold a key get axiom
-#     (an agent with no token never sees the server)
-# The token is delivered into each bound agent's shim env (keyfiles.sh) and
+# Hybrid secret resolution gates WHICH agents get axiom:
+#   • common_secrets: [AXIOM_TOKEN] → shared default for every enabled agent
+#   • agent_secrets override or disable individual agents
+# The resolved token is delivered into each bound agent's shim env (keyfiles.sh)
+# and
 # mcp-remote itself substitutes ${AXIOM_TOKEN} into the header at connect time.
 # So the secret is in NO MCP config file AND never on the process command line
 # (argv holds the literal "${AXIOM_TOKEN}", not the value). Bind it in a manifest:
-#   # global: put AXIOM_TOKEN in secrets.env → every agent
-#   agent_secrets:                              # per-agent override / gating
+#   common_secrets: [AXIOM_TOKEN]               # shared default
+#   agent_secrets:                              # per-agent override / disable
 #     - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}
 #
 # The server execs the baked `mcp-remote` binary directly (not `npx`), so process
@@ -28,7 +27,7 @@ install: |
   npm install -g mcp-remote
 
 secrets:
-  AXIOM_TOKEN: {scope: agent, global: true, hint: "axiom (an Axiom API token — Settings → API tokens; a scoped token 'xaat-…' is simplest). Global for every agent; gate/override one agent with AXIOM_KEY_<agent>."}
+  AXIOM_TOKEN: {hint: "axiom (an Axiom API token — Settings → API tokens; a scoped token 'xaat-…' is simplest)"}
 
 egress:
   - mcp.axiom.co
@@ -37,3 +36,4 @@ mcp:
   axiom:
     command: mcp-remote
     args: ["https://mcp.axiom.co/mcp", "--header", "Authorization: Bearer ${AXIOM_TOKEN}"]
+    requires: [AXIOM_TOKEN]

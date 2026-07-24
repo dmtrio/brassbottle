@@ -3,11 +3,12 @@
 
 host_port: 8811                        # firewall grant → HOST_MCP_PORTS
 
-# env scope = one value shared by all agents; hint shows in up.sh's missing-var warning.
+# A common default can be overridden or disabled for individual agents.
 secrets:
-  MCP_GATEWAY_TOKEN: {scope: env, hint: "gateway (run ./service.sh gateway once)"}
+  MCP_GATEWAY_TOKEN: {hint: "gateway (run ./service.sh gateway once)"}
 
 mcp:
   coding:
     url: http://host.docker.internal:8811/mcp
     headers: {Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"}
+    requires: [MCP_GATEWAY_TOKEN]

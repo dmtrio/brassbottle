@@ -1,5 +1,5 @@
-# annotated-watch — env-only plugin: an agent-scoped secret slot, no MCP server.
-# Delivers ANNOTATED_WATCH_KEY (the watch-vault poll key) per agent. See ./README.md.
+# annotated-watch — env-only plugin. Delivers the resolved
+# ANNOTATED_WATCH_KEY (the watch-vault poll key) per agent. See ./README.md.
 
 secrets:
-  ANNOTATED_WATCH_KEY: agent
+  ANNOTATED_WATCH_KEY: {}

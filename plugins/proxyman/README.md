@@ -14,6 +14,6 @@ plugins: [proxyman]
 ./service.sh proxyman      # Proxyman.app must be running; leave it up (tmux/launchd)
 ```
 
-First run self-generates `PROXYMAN_BRIDGE_KEY` into `secrets.env` (env-scoped —
-shared by all agents). The bridge binds localhost only and requires the key on
-inbound requests.
+First run self-generates `PROXYMAN_BRIDGE_KEY` into `secrets.env`; declare it in
+`common_secrets` to make it the shared default. The bridge binds localhost only
+and requires the key on inbound requests.

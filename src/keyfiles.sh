@@ -4,11 +4,10 @@
 # unlike wire_plugins.py). Extracted from up.sh so the real composition logic is
 # executable in tests, not just mirrored.
 #
-# Writes ONE COMPLETE env file per shim agent (Plugins v2 Phase 3 — common.env
-# retired): the env-scoped secrets shared by all agents, then each bound agent's
-# own agent-scoped secrets appended last (so they override a shared value at
-# compose time, not via shim source order). `cat <agent>.env` is then the full
-# audit of exactly what that agent sees.
+# Writes ONE COMPLETE env file per shim agent. Plugin credentials arrive as
+# already-resolved per-agent records (common defaults, overrides, and disables
+# were handled by manifest.py), so `cat <agent>.env` is the full audit of what
+# that agent sees.
 #
 # The VALUES come from the current environment via indirect expansion
 # (${!source}); the caller sources secrets.env. This file, like the Python
@@ -19,15 +18,15 @@ warn_missing() { echo "  ⚠ $1 not in secrets.env — $2 will not authenticate 
 # write_keyfiles <keys_dir> <shim_agents> <plugin_env_secrets> <agent_secrets> [<git_org_tokens>]
 #   keys_dir            already exists, mode 700, wiped of *.env by the caller
 #   shim_agents         space-separated agent names (match the Dockerfile shims)
-#   plugin_env_secrets  SLOT<TAB>SOURCE<TAB>HINT per line (env-scoped, from manifest.py)
-#   agent_secrets       AGENT<TAB>SLOT<TAB>SOURCE per line (agent-scoped, from manifest.py)
+#   plugin_env_secrets  legacy shared passthrough records (currently empty)
+#   agent_secrets       AGENT<TAB>SLOT<TAB>SOURCE resolved records (manifest.py)
 #   git_org_tokens      OWNER<TAB>CANONICAL<TAB>SOURCE per line (per-org, from manifest.py)
 # Reads GH_TOKEN and every SOURCE var from the environment (indirect expansion).
 write_keyfiles() {
     local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" git_org_tokens="${5:-}"
     local shared="" slot src hint agent a f owner canonical
 
-    # Shared block: env-scoped plugin secrets + GH_TOKEN, built once. The
+    # Shared block: legacy passthroughs + GH_TOKEN, built once. The
     # heredoc keeps the loop in this shell so the warns aren't lost to a pipe
     # subshell.
     while IFS=$'\t' read -r slot src hint; do
@@ -60,10 +59,9 @@ EOF
         printf '%s' "$shared" > "$keys_dir/$a.env"; chmod 600 "$keys_dir/$a.env"
     done
 
-    # Append each bound agent's own agent-scoped secrets (after the shared
-    # block, so they win on a name collision). No warn_missing here — unlike
-    # the shared slots above, an agent_secrets source var that isn't in
-    # secrets.env is a hard error in manifest.py, so it can't reach this loop.
+    # Append each agent's resolved plugin secrets. No warn_missing here: an
+    # override source is validated by manifest.py, while an unset common source
+    # is omitted before it becomes a resolved record.
     while IFS=$'\t' read -r agent slot src; do
         [ -n "$agent" ] || continue
         echo "$slot=${!src}" >> "$keys_dir/$agent.env"

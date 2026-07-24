@@ -198,19 +198,21 @@ plugin.
 
 Secret **values** live in one file — `secrets.env` (mode 600, gitignored, never
 mounted). Manifests and the Python modules handle only secret **names**; values
-are resolved host-side at `up` time. Plugins declare **secret slots**, each
-scoped:
+are resolved host-side at `up` time. Plugins declare **secret slots**. Every
+slot uses one hybrid resolution order:
 
-- **env-scoped** — one value shared by every agent (service tokens). Bound with
-  `common_secrets:`; a slot defaults to a same-named `secrets.env` var.
-- **agent-scoped** — each agent gets its own value (e.g. a per-agent Obsidian
-  key). Bound with `agent_secrets:`, one record per (agent, slot, source var);
-  a dangling source hard-fails at `up`.
+1. `common_secrets:` provides an explicit default source for every enabled
+   agent.
+2. `agent_secrets:` may replace that source for one agent.
+3. `disabled: true` removes the slot for one agent.
+
+An unset common source warns and provides no value; an unset per-agent override
+hard-fails at `up`.
 
 **Per-agent shims deliver them.** Each agent CLI is fronted by a shim that, at
-process start, loads only that agent's `~/.agent-keys/<agent>.env` — the
-env-scoped secrets plus that agent's own agent-scoped keys — and overrides
-inherited env before exec'ing the real binary. Two consequences:
+process start, loads only that agent's `~/.agent-keys/<agent>.env` — its fully
+resolved secret set — and overrides inherited env before exec'ing the real
+binary. Two consequences:
 
 - `cat <agent>.env` is the full audit of exactly what that agent sees.
 - Delegation is safe: when claude spawns `cursor-agent -p`, the child's shim

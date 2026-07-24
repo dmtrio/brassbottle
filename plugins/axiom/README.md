@@ -20,16 +20,18 @@ image at build time (the `install:` block) and the server execs that baked
 binary directly (not `npx`), so startup never reaches for the npm registry — it
 runs fully offline behind the egress firewall.
 
-## Secret model — per-agent key with a global fallback
+## Secret model — common default with per-agent overrides
 
-The Axiom token is `scope: agent, global: true`, and it **gates which agents get
-Axiom**:
+The Axiom token follows the common hybrid-secret model and **gates which agents
+get Axiom**:
 
-- **One global token** — put `AXIOM_TOKEN` in `secrets.env` and every agent
-  shares it. This is the common case.
+- **One common token** — declare `common_secrets: [AXIOM_TOKEN]` and put
+  `AXIOM_TOKEN` in `secrets.env`; every enabled agent shares it.
 - **Per-agent tokens** — set `AXIOM_KEY_<agent>` and bind it under
   `agent_secrets`; only the agents that hold a key get Axiom (an agent with no
-  token never sees the server). A per-agent key overrides the global one.
+  token never sees the server). A per-agent key overrides the common default.
+- **Removal** — `{agent: pi, slot: AXIOM_TOKEN, disabled: true}` removes both
+  pi's token and its Axiom server configuration.
 
 The token is delivered into each bound agent's shim env, and **`mcp-remote`
 itself substitutes `${AXIOM_TOKEN}`** into the `Authorization` header at connect
@@ -39,10 +41,11 @@ in the process environment, like every other agent credential here.
 
 ## Enable it
 
-Global token for every agent — just set it in `secrets.env`:
+Common token for every agent:
 
 ```yaml
 plugins: [axiom]
+common_secrets: [AXIOM_TOKEN]
 ```
 
 ```
@@ -65,7 +68,7 @@ AXIOM_KEY_cursor=xaat-aaaa…
 AXIOM_KEY_claude=xaat-bbbb…
 ```
 
-You can combine them: a global `AXIOM_TOKEN` for everyone plus an
+You can combine them: a common `AXIOM_TOKEN` default for everyone plus an
 `agent_secrets` override for one agent. Because `mcp-remote` is baked in, adding
 or changing tokens is a config-only `./up.sh <container>` — no image rebuild.
 
