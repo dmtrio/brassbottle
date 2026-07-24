@@ -45,6 +45,7 @@ opinion.
 | [`obsidian-annotated`](obsidian-annotated/) | remote HTTP (real host) | — | [README](obsidian-annotated/README.md) |
 | [`axiom`](axiom/) | local (stdio bridge → mcp.axiom.co, baked) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
+| [`ngrok`](ngrok/) | CLI binary + secret (no server) | — | [README](ngrok/README.md) |
 
 ## `plugin.yml` schema
 

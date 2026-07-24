@@ -1,0 +1,31 @@
+# ngrok — CLI tunnel agent, baked into the image. NOT an MCP server.
+#
+# ngrok is a plain command-line app plus a secret: it exposes a local port to
+# the public internet over an outbound tunnel. This plugin is the server-less
+# shape (see plugins/annotated-watch): an `install:` block that bakes the binary
+# at image build, a secret slot that delivers the authtoken, and one egress
+# grant for the agent's runtime tunnel connection. No `mcp:`, no run.sh, no
+# host_port — nothing to wire beyond the binary and the token.
+
+# Baked at build (full network). The stable v3 static binary is a single `ngrok`
+# executable; land it on PATH. Verify the URL against ngrok.com/download when
+# revising — bin.equinox.io is ngrok's canonical stable download host.
+install: |
+  curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz \
+    | sudo tar xz -C /usr/local/bin ngrok
+  sudo chmod +x /usr/local/bin/ngrok
+
+# ngrok reads NGROK_AUTHTOKEN from the environment natively — no `ngrok config
+# add-authtoken` step. The resolved token lands in each bound agent's shim env,
+# so any agent that runs `ngrok http <port>` authenticates automatically.
+# Resolution is the ordinary hybrid model: common_secrets supplies one shared
+# default source (ngrok's free tier is one token per account), and agent_secrets
+# overrides or disables individual agents — e.g. per-agent tokens for attribution
+# on a paid plan.
+secrets:
+  NGROK_AUTHTOKEN: {hint: "ngrok authtoken (dashboard.ngrok.com → Your Authtoken)"}
+
+# The v3 agent's outbound tunnel connection. Install happens at build (full
+# network, pre-firewall), so only the RUNTIME endpoint needs an allowlist grant.
+egress:
+  - connect.ngrok-agent.com
