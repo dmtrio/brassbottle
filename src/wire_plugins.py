@@ -373,6 +373,55 @@ def warn_agent_server(agent, name, slots):
               f"{', '.join(slots)} are available to codex processes via its shim.")
 
 
+# The config file each literal-key agent keeps its MCP servers in (home-relative).
+_AGENT_SERVER_CONFIG = {
+    "cursor-agent": Path(".cursor") / "mcp.json",
+    "gemini": Path(".gemini") / "settings.json",
+    "pi": Path(".pi") / "agent" / "mcp.json",
+}
+
+
+def _delete_named_servers(path, names):
+    """Remove mcpServers[name] for each name from an existing config, leaving
+    every other (hand-added, plugin, still-required) entry untouched."""
+    data, servers = _load_servers(path)
+    if data is None:
+        return
+    removed = [n for n in names if servers.pop(n, None) is not None]
+    if removed:
+        _write_atomic(path, _dump_json(data), mode=0o600)
+
+
+def reconcile_agent_servers(agent, required, home):
+    """Wire this agent's required remote servers AND delete any a prior run wired
+    that this run no longer requires — e.g. the agent's slot was set
+    `disabled: true`, or its plugin was removed. A remote literal entry carries
+    the credential inline, so a bare upsert would leave a disabled agent's token
+    live and its server reachable; the exact set this module manages is tracked
+    in a <config>.dev-agent-servers sidecar so hand-added and local-plugin
+    entries are never touched. `required` maps server name -> (spec, keys)."""
+    rel = _AGENT_SERVER_CONFIG.get(agent)
+    if rel is None:
+        return
+    path = home / rel
+    sidecar = path.parent / (path.name + ".dev-agent-servers")
+    old = []
+    if sidecar.is_file() and sidecar.stat().st_size > 0:
+        old = _load_json_file(sidecar)
+        if not isinstance(old, list):
+            raise WireError(f"{sidecar}: expected a JSON array of names")
+    stale = [n for n in old if n not in required]
+    if not required and not stale:
+        return  # nothing managed now or before — don't create empty files
+    if stale:
+        _delete_named_servers(path, stale)
+        print(f"  ✓ {agent}: removed {len(stale)} stale MCP server(s) no longer required "
+              f"({', '.join(sorted(stale))})")
+    for name, (spec, keys) in required.items():
+        write_agent_server(agent, name, spec, keys, home)
+    _write_atomic(sidecar, json.dumps(sorted(required), separators=(",", ":")) + "\n", mode=0o600)
+
+
 def wire_plugin_servers_json(path, plugins):
     """Sync the plugin stdio servers into a JSON agent config (cursor, gemini,
     pi). The set of plugin-managed names is tracked in a sidecar
@@ -482,7 +531,11 @@ def run(payload, home, workspace, env):
 
     # Per-agent wiring of required servers (literal keys for cursor/gemini/pi,
     # a warning for codex). Runs BEFORE the plugin merge so
-    # wire_plugin_servers_json preserves these non-sidecar entries.
+    # wire_plugin_servers_json preserves these entries. Collect each literal
+    # agent's required servers first, then reconcile per agent so an entry a
+    # prior run wired but this run dropped (disabled slot / removed plugin) is
+    # deleted, not left behind with its literal credential still live.
+    required_by_agent = {}  # agent -> {name: (spec, keys)}
     for s in agent_servers:
         for lit in s.get("literal") or []:
             if "key_envs" in lit:
@@ -492,9 +545,15 @@ def run(payload, home, workspace, env):
                 # Compatibility with payloads emitted before multi-slot
                 # requirements existed.
                 keys = {s.get("slot", ""): env.get(lit.get("key_env") or "", "")}
-            write_agent_server(lit.get("agent") or "", s["name"], s["spec"], keys, home)
+            required_by_agent.setdefault(lit.get("agent") or "", {})[s["name"]] = (s["spec"], keys)
         for agent in s.get("warn") or []:
             warn_agent_server(agent, s["name"], s.get("requires") or [])
+
+    # Reconcile every wired literal-key agent — including ones with zero required
+    # servers this run, so a fully-disabled agent's stale entries are pruned.
+    for agent, flag in (("cursor-agent", "cursor"), ("gemini", "gemini"), ("pi", "pi")):
+        if wire.get(flag):
+            reconcile_agent_servers(agent, required_by_agent.get(agent, {}), home)
 
     # Runs for every installed agent even with no plugins enabled, so entries
     # from a plugin removed from the manifest are cleaned up, not orphaned
