@@ -906,6 +906,54 @@ class TestRunIntegration(QuietTestCase):
                       home / ".codex" / "config.toml"):
                 self.assertIn("${AXIOM_TOKEN}", f.read_text())
 
+    def test_disabled_remote_server_is_removed_from_literal_agent(self):
+        """A remote literal-key server (obsidian) wired for cursor on one run must
+        be REMOVED — entry and inline credential — when a later run drops it
+        (disabled: true / plugin removal), while hand-added and local-plugin
+        entries survive. Guards the upsert-only stale-config hole."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            workspace = Path(tmp) / "workspace"
+            (workspace / "repos").mkdir(parents=True)
+            # Pre-seed cursor's config with a hand-added server that must survive.
+            (home / ".cursor").mkdir()
+            (home / ".cursor" / "mcp.json").write_text(
+                json.dumps({"mcpServers": {"hand-added": {"command": "keep-me"}}}))
+
+            spec = {"url": "https://mcp-obsidian.dmetr.io/mcp",
+                    "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}
+            wire = {"cursor": True, "gemini": False, "pi": False, "codex": False}
+            enabled = {
+                "wire": wire,
+                "plugin_mcp_entries": [{"serena": {"command": "bash", "args": ["-lc", "s"]}}],
+                "agent_servers": [
+                    {"name": "obsidian-annotated", "spec": spec,
+                     "requires": ["OBSIDIAN_ANNOTATED_KEY"], "claude": False,
+                     "warn": [], "local": [],
+                     "literal": [{"agent": "cursor-agent",
+                                  "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}]},
+                ],
+            }
+            wire_plugins.run(enabled, home, workspace, {"IDENTITY_KEY_0": "sekret-token"})
+
+            cfg = home / ".cursor" / "mcp.json"
+            cursor = json.loads(cfg.read_text())["mcpServers"]
+            self.assertEqual(cursor["obsidian-annotated"]["headers"]["Authorization"],
+                             "Bearer sekret-token")   # literal key substituted in
+            self.assertIn("serena", cursor)            # local plugin wired
+            self.assertIn("hand-added", cursor)        # hand-added preserved
+
+            # Rerun with the server disabled for cursor (no longer in agent_servers).
+            disabled = {"wire": wire, "plugin_mcp_entries": [
+                {"serena": {"command": "bash", "args": ["-lc", "s"]}}], "agent_servers": []}
+            wire_plugins.run(disabled, home, workspace, {"IDENTITY_KEY_0": "sekret-token"})
+
+            cursor = json.loads(cfg.read_text())["mcpServers"]
+            self.assertNotIn("obsidian-annotated", cursor)   # stale server pruned
+            self.assertNotIn("sekret-token", cfg.read_text())  # inline credential gone
+            self.assertIn("serena", cursor)            # local plugin still wired
+            self.assertIn("hand-added", cursor)        # hand-added still preserved
+
     def test_payload_not_dict_raises_wireerror(self):
         """Payload not a dict raises WireError."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1057,15 +1105,9 @@ class TestWireCodexTomlMarkerEdges(QuietTestCase):
             self.assertIn("[mcp_servers.p]", content)
 
 
-@unittest.skip("Replaced by universal hybrid payload tests")
 class TestBuildPayload(unittest.TestCase):
-    """Host-side payload assembly: strict [ = \"true\" ] boolean semantics and
-    the env-var contract with up.sh."""
-
-    OBS_SERVERS = {"OBSIDIAN_ANNOTATED_KEY": {
-        "name": "obsidian-annotated",
-        "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
-                 "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}}}
+    """Host-side payload assembly: strict [ = \"true\" ] boolean semantics, the
+    PLUGIN_MCP_ENTRIES parsing contract, and the round-trip into run()."""
 
     def test_only_literal_true_enables_flags(self):
         env = {"WIRE_CURSOR": "true", "WIRE_GEMINI": "yes", "WIRE_PI": "1",
@@ -1075,24 +1117,6 @@ class TestBuildPayload(unittest.TestCase):
                          {"cursor": True, "gemini": False, "pi": False, "codex": False})
         # capabilities is gone entirely — obsidian is an agent_server now.
         self.assertNotIn("capabilities", payload)
-
-    def test_agent_servers_assembled_from_json_and_triples(self):
-        env = {"AGENT_SERVERS_JSON": json.dumps(self.OBS_SERVERS),
-               "IDENTITY_AGENTS": "claude::OBSIDIAN_ANNOTATED_KEY "
-                                  "cursor-agent:IDENTITY_KEY_0:OBSIDIAN_ANNOTATED_KEY "
-                                  "codex::OBSIDIAN_ANNOTATED_KEY"}
-        payload = wire_plugins.build_payload(env)
-        self.assertEqual(len(payload["agent_servers"]), 1)
-        e = payload["agent_servers"][0]
-        self.assertEqual((e["name"], e["slot"], e["claude"]),
-                         ("obsidian-annotated", "OBSIDIAN_ANNOTATED_KEY", True))
-        self.assertEqual(e["literal"], [{"agent": "cursor-agent", "key_env": "IDENTITY_KEY_0"}])
-        self.assertEqual(e["warn"], ["codex"])
-
-    def test_triple_referencing_unknown_slot_raises(self):
-        with self.assertRaises(wire_plugins.WireError) as cm:
-            wire_plugins.build_payload({"IDENTITY_AGENTS": "claude::NOPE"})
-        self.assertIn("no server definition", str(cm.exception))
 
     def test_missing_env_means_everything_off_and_empty(self):
         payload = wire_plugins.build_payload({})
@@ -1117,8 +1141,8 @@ class TestBuildPayload(unittest.TestCase):
             wire_plugins.build_payload({"PLUGIN_MCP_ENTRIES": "[1, 2]\n"})
 
     def test_round_trips_through_run(self):
-        """The payload build_payload emits is exactly what run() consumes: an
-        agent-scoped server reaches claude (ref) and cursor (literal); a local
+        """The payload build_payload emits is exactly what run() consumes: a
+        required remote server reaches claude (ref) and cursor (literal); a local
         plugin reaches cursor too."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -1129,9 +1153,13 @@ class TestBuildPayload(unittest.TestCase):
             (repo / ".git").mkdir(parents=True)
             env = {"WIRE_CURSOR": "true",
                    "PLUGIN_MCP_ENTRIES": '{"serena": {"command": "bash"}}\n',
-                   "AGENT_SERVERS_JSON": json.dumps(self.OBS_SERVERS),
-                   "IDENTITY_AGENTS": "claude::OBSIDIAN_ANNOTATED_KEY "
-                                      "cursor-agent:K0:OBSIDIAN_ANNOTATED_KEY",
+                   "AGENT_SERVERS_JSON": json.dumps({"obsidian-annotated": {
+                       "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
+                                "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},
+                       "requires": ["OBSIDIAN_ANNOTATED_KEY"]}}),
+                   "AGENT_SECRETS": "claude\tOBSIDIAN_ANNOTATED_KEY\tSRC\n"
+                                    "cursor-agent\tOBSIDIAN_ANNOTATED_KEY\tSRC\n",
+                   "IDENTITY_SECRETS": "cursor-agent:K0:OBSIDIAN_ANNOTATED_KEY",
                    "K0": "SECRET"}
             payload = json.loads(json.dumps(wire_plugins.build_payload(env)))
             with contextlib.redirect_stdout(io.StringIO()):
