@@ -26,8 +26,13 @@ CDP_PORT_BASE = 9222
 # The secret slot plugins/browser/plugin.yml declares.
 SLOT = "RESEARCH_BROWSER_KEY"
 
-BRAVE = Path("/Applications/Brave Browser.app")
-CHROME = Path("/Applications/Google Chrome.app")
+# Default install locations. Override per setup with BRAVE_APP / CHROME_APP in
+# ./.env (the repo's existing host-side override channel, alongside
+# DEV_AGENT_HOME / RULES_PATH / CONTAINERS_PATH) — for a browser in
+# ~/Applications, a renamed app bundle, or a Chromium variant. A one-off can
+# also pass an absolute path in place of brave|chrome.
+BRAVE_APP_DEFAULT = "/Applications/Brave Browser.app"
+CHROME_APP_DEFAULT = "/Applications/Google Chrome.app"
 
 
 def run_tool(cmd, **kw):
@@ -179,17 +184,30 @@ def ensure_api_key(secrets_file: Path, var_name: str) -> str:
     return key
 
 
-def pick_browser(choice: str) -> Path:
-    if choice == "brave":
-        app = BRAVE
-    elif choice == "chrome":
-        app = CHROME
+def browser_apps(env: dict | None = None) -> dict[str, Path]:
+    """Where each browser lives, BRAVE_APP / CHROME_APP overriding the default."""
+    e = os.environ if env is None else env
+    return {
+        "brave": Path(e.get("BRAVE_APP") or BRAVE_APP_DEFAULT),
+        "chrome": Path(e.get("CHROME_APP") or CHROME_APP_DEFAULT),
+    }
+
+
+def pick_browser(choice: str, env: dict | None = None) -> Path:
+    apps = browser_apps(env)
+    if choice in apps:
+        app = apps[choice]
     elif choice == "auto":
-        app = BRAVE if BRAVE.is_dir() else CHROME
+        app = apps["brave"] if apps["brave"].is_dir() else apps["chrome"]
+    elif choice.startswith("/"):
+        app = Path(choice)          # one-off: an explicit app bundle path
     else:
-        raise SystemExit("Usage: launch.py <container> [brave|chrome]")
+        raise SystemExit(
+            "Usage: launch.py <container> [brave|chrome|/path/to/Browser.app]")
     if not app.is_dir():
-        raise SystemExit(f"ERROR: browser not found at {app}")
+        raise SystemExit(
+            f"ERROR: browser not found at {app} "
+            "(set BRAVE_APP / CHROME_APP in ./.env to point elsewhere)")
     return app
 
 

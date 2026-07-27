@@ -350,7 +350,7 @@ SVC="$WORK/svc"; mkdir -p "$SVC/src" "$SVC/plugins/withsvc" "$SVC/plugins/nosvc"
 cp "$REPO/service.sh" "$SVC/service.sh"; cp "$REPO/src/common.sh" "$SVC/src/"
 cat > "$SVC/plugins/withsvc/run.sh" <<'MOCK'
 #!/bin/bash
-echo "ran withsvc args=[$*] base=${BASE_PATH:+set}"
+echo "ran withsvc args=[$*] base=${BASE_PATH:+set} containers=${CONTAINERS_PATH:+set}"
 MOCK
 chmod +x "$SVC/plugins/withsvc/run.sh"
 : > "$SVC/plugins/nosvc/plugin.yml"
@@ -377,6 +377,9 @@ out=$(svc withsvc chrome --flag 2>&1); rc=$?
 assert_rc "valid service execs run.sh (rc 0)" 0 "$rc"
 assert_contains "dispatcher forwards extra args verbatim" "$out" "ran withsvc args=[chrome --flag]"
 assert_contains "dispatcher exports BASE_PATH to the launcher" "$out" "base=set"
+# A launcher that reads a container manifest (browser) must see the SAME
+# CONTAINERS_PATH up.sh does; unexported it would silently ignore ./.env.
+assert_contains "dispatcher exports CONTAINERS_PATH to the launcher" "$out" "containers=set"
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then echo "FAILED: $FAILURES bash test(s)"; exit 1; fi

@@ -52,6 +52,8 @@ bundled `rules/`. To point at your own locations instead, drop a gitignored
 DEV_AGENT_HOME="$HOME/dev-agent"           # move the runtime home (secrets/keys/artifacts)
 RULES_PATH="$HOME/git/agent-conf/rules"    # use your own rules repo instead of bundled rules/
 CONTAINERS_PATH="$HOME/dev-agent/containers"  # read manifests from your own (private) dir
+BRAVE_APP="$HOME/Applications/Brave Browser.app"   # browser plugin: app locations
+CHROME_APP="/Applications/Chromium.app"            # (defaults are /Applications/…)
 ```
 
 (When `DEV_AGENT_HOME` is set and `$DEV_AGENT_HOME/rules` exists, it's used as

@@ -43,6 +43,25 @@ run.
 Screenshots and uploads must use host paths under the TMPDIR above; see
 `AGENTS.md` for agent-facing guidance.
 
+## Browser location
+
+Defaults are `/Applications/Brave Browser.app` and
+`/Applications/Google Chrome.app`. Point them elsewhere — a browser in
+`~/Applications`, a renamed bundle, a Chromium variant — with `BRAVE_APP` /
+`CHROME_APP` in the repo's gitignored `./.env`, the same channel as
+`DEV_AGENT_HOME` / `CONTAINERS_PATH`:
+
+```bash
+BRAVE_APP="$HOME/Applications/Brave Browser.app"
+CHROME_APP="/Applications/Chromium.app"
+```
+
+For a one-off, pass an absolute path in place of `brave|chrome`:
+
+```bash
+./service.sh browser job-hunt /Applications/Arc.app
+```
+
 ## Notes
 
 - Dedicated instance with its **own** profile dir — none of your cookies,
