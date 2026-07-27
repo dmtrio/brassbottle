@@ -64,6 +64,105 @@ class TestDerivedPaths(unittest.TestCase):
         self.assertEqual(bl.api_key_var("personal-site"), "RESEARCH_BROWSER_KEY_personal_site")
 
 
+class TestBridgeCommand(unittest.TestCase):
+    """The exec'd command — the part that carries the whole feature."""
+
+    def _build(self):
+        return bl.build_bridge_command(
+            8815, 9223, "deadbeef", Path("/base/browser-tmp/job-hunt"),
+            base_env={"PATH": "/usr/bin", "TMPDIR": "/leftover"})
+
+    def test_tmpdir_points_at_the_containers_exchange_dir(self):
+        # This is the entire scoping mechanism; it must override any inherited
+        # TMPDIR, not merely be set when absent.
+        _, env = self._build()
+        self.assertEqual(env["TMPDIR"], "/base/browser-tmp/job-hunt")
+
+    def test_inherited_env_is_preserved(self):
+        _, env = self._build()
+        self.assertEqual(env["PATH"], "/usr/bin")
+
+    def test_ports_and_key_land_in_argv(self):
+        argv, _ = self._build()
+        self.assertEqual(argv[argv.index("--port") + 1], "8815")
+        self.assertEqual(argv[argv.index("--apiKey") + 1], "deadbeef")
+        self.assertIn("http://127.0.0.1:9223", argv)
+
+    def test_separator_splits_proxy_args_from_server_args(self):
+        # Everything after "--" is the wrapped server's own command line;
+        # mis-placing it would hand mcp-proxy flags to chrome-devtools-mcp.
+        argv, _ = self._build()
+        sep = argv.index("--")
+        self.assertIn("mcp-proxy", argv[:sep])
+        self.assertIn("chrome-devtools-mcp", argv[sep:])
+        self.assertNotIn("--allowUnrestrictedPaths", argv)
+
+
+class TestApiKeyVar(unittest.TestCase):
+    def test_manifest_binding_wins(self):
+        man = {"common_secrets": {"RESEARCH_BROWSER_KEY": "RESEARCH_BROWSER_KEY_job_hunt"}}
+        self.assertEqual(bl.api_key_var("job-hunt", man), "RESEARCH_BROWSER_KEY_job_hunt")
+
+    def test_list_form_binding(self):
+        man = {"common_secrets": ["RESEARCH_BROWSER_KEY"]}
+        self.assertEqual(bl.api_key_var("job-hunt", man), "RESEARCH_BROWSER_KEY")
+
+    def test_derived_fallback_without_binding(self):
+        self.assertEqual(bl.api_key_var("job-hunt", {}), "RESEARCH_BROWSER_KEY_job_hunt")
+        self.assertEqual(bl.api_key_var("job-hunt"), "RESEARCH_BROWSER_KEY_job_hunt")
+
+
+class TestBridgePortValidation(unittest.TestCase):
+    def test_default_and_low_ports_accepted(self):
+        for ok in (8814, 8815, 9221, 1):
+            with self.subTest(ok=ok):
+                self.assertEqual(bl.validate_bridge_port(ok), ok)
+
+    def test_ports_in_the_cdp_band_rejected(self):
+        # bridge 9222 would derive CDP 9630 while colliding with the default
+        # container's CDP port — it would attach to the wrong browser.
+        for bad in (9222, 9223, 12000):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    bl.validate_bridge_port(bad)
+
+    def test_out_of_range_rejected(self):
+        for bad in (0, -1, 70000):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    bl.validate_bridge_port(bad)
+
+
+class TestReadSecret(unittest.TestCase):
+    """secrets.env is SOURCED, matching up.sh — not parsed as text."""
+
+    def _read(self, body, var="KEY"):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "secrets.env"
+            f.write_text(body)
+            return bl.read_secret(f, var)
+
+    def test_plain_assignment(self):
+        self.assertEqual(self._read("KEY=abc123\n"), "abc123")
+
+    def test_double_quoted_value_is_unquoted(self):
+        # Text parsing would return '"abc123"' and the bridge would then reject
+        # every request the container made with the unquoted key.
+        self.assertEqual(self._read('KEY="abc123"\n'), "abc123")
+
+    def test_single_quoted_value_is_unquoted(self):
+        self.assertEqual(self._read("KEY='abc123'\n"), "abc123")
+
+    def test_export_prefix(self):
+        self.assertEqual(self._read("export KEY=abc123\n"), "abc123")
+
+    def test_absent_var_is_empty(self):
+        self.assertEqual(self._read("OTHER=x\n"), "")
+
+    def test_missing_file_is_empty(self):
+        self.assertEqual(bl.read_secret(Path("/nonexistent/secrets.env"), "KEY"), "")
+
+
 class TestContainerNameValidation(unittest.TestCase):
     def test_path_escaping_names_rejected(self):
         # The name is interpolated into the manifest/profile/TMPDIR paths.

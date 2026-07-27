@@ -61,6 +61,11 @@ services:
       # Mac-browsable. For agent OUTPUTS that aren't code: screenshots,
       # reports, exports, progress notes. Code still exits via git only.
       - ${ARTIFACTS_PATH}:/artifacts
+      # Browser file-exchange dir, nested inside the outbox on purpose: it is
+      # the host TMPDIR the browser plugin's MCP is launched with, which is the
+      # only directory that MCP is allowed to write to. Docker mounts by
+      # destination depth, so /artifacts lands first and this over it (leaving
+      # an empty browser/ in the outbox on the host).
       - ${BROWSER_TMP_PATH}:/artifacts/browser
 
       # ── Per-agent MCP credentials (edit host-side, live in container) ─────

@@ -10,5 +10,7 @@
 set -e
 
 : "${BASE_PATH:?run this launcher via ./service.sh browser (it resolves BASE_PATH)}"
+command -v python3 >/dev/null 2>&1 \
+    || { echo "ERROR: python3 not found on PATH (the launcher is Python)"; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 exec python3 "$SCRIPT_DIR/launch.py" "$@"
