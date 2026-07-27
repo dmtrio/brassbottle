@@ -87,6 +87,17 @@ capabilities:
 #   plugins: [serena, gateway, obsidian-annotated]   # serena: local; others remote
 plugins: []
 
+# Per-container host port for a host-service plugin (optional). Host ports are
+# exclusive, so two containers running the same plugin need different values —
+# same reason each container has its own ssh.port / remote.mosh_ports. Overrides
+# the plugin's default host_port in plugin.yml and re-points any ${HOST_PORT} in
+# the plugin's remote url; the resolved port also feeds the firewall grant.
+# Keep a browser bridge port BELOW 9222: the launcher derives that container's
+# Chrome debug port as bridge+408, so a bridge at or above 9222 could collide
+# with another container's debug port.
+#   plugin_ports:
+#     browser: 8815              # default in plugins/browser/plugin.yml is 8814
+
 # Common plugin-secret defaults. Declaring a plugin slot here supplies one source
 # value to every enabled agent; a required MCP is wired only where that slot
 # resolves. Use the map form to re-point THIS container's slot at a different

@@ -61,6 +61,7 @@ services:
       # Mac-browsable. For agent OUTPUTS that aren't code: screenshots,
       # reports, exports, progress notes. Code still exits via git only.
       - ${ARTIFACTS_PATH}:/artifacts
+      - ${BROWSER_TMP_PATH}:/artifacts/browser
 
       # ── Per-agent MCP credentials (edit host-side, live in container) ─────
       # <keys>/<agent>.env = one complete env file per agent: the shared

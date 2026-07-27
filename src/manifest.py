@@ -68,6 +68,11 @@ import sys
 # trailing newlines — word splitting ate them).
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 REF_RE = re.compile(r"^[A-Za-z0-9_]+\Z")
+# Placeholder a plugin's remote url uses for its own host port, so the port
+# lives once in plugin.yml (host_port:) and a manifest plugin_ports: override
+# re-points the url and the firewall grant together. Expanded host-side at
+# derive time — cursor/gemini can't expand ${VAR} refs in remote specs.
+HOST_PORT_REF = "${HOST_PORT}"
 # Directory name under /workspace/repos/<name> — no slash, no leading dot/dash.
 REPO_DIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
 # Forge org/user name (git.orgs key). GitHub's own rule: alphanumerics and
@@ -466,6 +471,28 @@ def derive(manifest, plugin_files, env):
             "manifest plugins failed validation:\n" + "\n".join(plugin_errors))
     out["PLUGINS"] = " ".join(plugins)
 
+    # ── plugin_ports: per-container host port for a host-service plugin ──
+    # Host ports are exclusive, so two containers running the same host-service
+    # plugin (two browsers, say) need different ports — the same reason ssh.port
+    # and remote.mosh_ports are per-container. An override re-points BOTH the
+    # firewall grant (HOST_MCP_PORTS) and the ${HOST_PORT} placeholder in the
+    # plugin's url, so the port stays a single value with one source of truth.
+    plugin_ports_val = manifest.get("plugin_ports")
+    plugin_ports = {}
+    if not _falsy(plugin_ports_val):
+        if not isinstance(plugin_ports_val, dict):
+            raise ManifestError(
+                "manifest plugin_ports: must be a map of plugin: port, e.g. plugin_ports: {browser: 8815}")
+        for name, val in plugin_ports_val.items():
+            if name not in plugins:
+                raise ManifestError(
+                    f"plugin_ports '{name}': not an enabled plugin (add it to plugins: first)")
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise ManifestError(f"plugin_ports '{name}': must be an integer port number")
+            if not 1 <= val <= 65535:
+                raise ManifestError(f"plugin_ports '{name}': port {val} out of range (1-65535)")
+            plugin_ports[name] = val
+
     # ── ssh / remote (RFC 04) ───────────────────────────────────────────
     ssh = _section(manifest, "ssh")
     ssh_port = _scalar(ssh.get("port"), "ssh.port")
@@ -655,7 +682,37 @@ def derive(manifest, plugin_files, env):
                 raise ManifestError(f"plugin '{p}': host_port must be an integer port number")
             if not 1 <= hp <= 65535:
                 raise ManifestError(f"plugin '{p}': host_port {hp} out of range (1-65535)")
-            host_ports.append(hp)
+        elif p in plugin_ports:
+            # Overriding a port the plugin never declares would open a firewall
+            # grant to a port nothing serves — almost certainly a typo'd name.
+            raise ManifestError(
+                f"plugin_ports '{p}': plugin declares no host_port (it has no host-side service to re-point)")
+        # The manifest override wins over the plugin's default; either way the
+        # SAME value feeds the firewall grant and the url placeholder below.
+        resolved_port = plugin_ports.get(p, hp if not _falsy(hp) else None)
+        if resolved_port is not None:
+            host_ports.append(resolved_port)
+
+        # ${HOST_PORT} in a remote url → the resolved port. Substituted here,
+        # host-side at derive time, NOT left as a ${VAR} ref for the agent:
+        # only Claude expands those reliably (cursor/gemini can't), and this
+        # has to work for every agent.
+        # Rebuilt into a NEW dict rather than assigned into the spec:
+        # plugin_files belongs to the caller (and the test suite reuses one
+        # module-level fixture across cases), so mutating it in place would
+        # leak the resolved port into every later read of the same plugin.
+        substituted = {}
+        for n, spec in mcp.items():
+            url = spec.get("url") if isinstance(spec, dict) else None
+            if not isinstance(url, str) or HOST_PORT_REF not in url:
+                continue
+            if resolved_port is None:
+                raise ManifestError(
+                    f"plugin '{p}' mcp server '{n}': url uses {HOST_PORT_REF} but the plugin "
+                    f"declares no host_port to substitute")
+            substituted[n] = {**spec, "url": url.replace(HOST_PORT_REF, str(resolved_port))}
+        if substituted:
+            mcp = {**mcp, **substituted}
 
         uniform = {}
         for n, spec in mcp.items():
