@@ -177,6 +177,52 @@ class TestContainerNameValidation(unittest.TestCase):
                 self.assertTrue(bl.CONTAINER_NAME_RE.match(good))
 
 
+class TestBrowserAppOverrides(unittest.TestCase):
+    """App locations are settable outside the script (./.env → env)."""
+
+    def test_defaults_when_unset(self):
+        apps = bl.browser_apps({})
+        self.assertEqual(apps["brave"], Path("/Applications/Brave Browser.app"))
+        self.assertEqual(apps["chrome"], Path("/Applications/Google Chrome.app"))
+
+    def test_env_overrides(self):
+        apps = bl.browser_apps({"BRAVE_APP": "/Users/me/Applications/Brave.app",
+                                "CHROME_APP": "/opt/Chromium.app"})
+        self.assertEqual(apps["brave"], Path("/Users/me/Applications/Brave.app"))
+        self.assertEqual(apps["chrome"], Path("/opt/Chromium.app"))
+
+    def test_empty_env_value_falls_back_to_default(self):
+        self.assertEqual(bl.browser_apps({"BRAVE_APP": ""})["brave"],
+                         Path("/Applications/Brave Browser.app"))
+
+    def test_pick_browser_uses_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td) / "Custom.app"
+            app.mkdir()
+            self.assertEqual(bl.pick_browser("brave", {"BRAVE_APP": str(app)}), app)
+
+    def test_pick_browser_accepts_absolute_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td) / "OneOff.app"
+            app.mkdir()
+            self.assertEqual(bl.pick_browser(str(app), {}), app)
+
+    def test_auto_prefers_brave_then_falls_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            chrome = Path(td) / "Chrome.app"
+            chrome.mkdir()
+            env = {"BRAVE_APP": str(Path(td) / "absent.app"), "CHROME_APP": str(chrome)}
+            self.assertEqual(bl.pick_browser("auto", env), chrome)
+
+    def test_unknown_choice_rejected(self):
+        with self.assertRaises(SystemExit):
+            bl.pick_browser("firefox", {})
+
+    def test_missing_app_rejected(self):
+        with self.assertRaises(SystemExit):
+            bl.pick_browser("brave", {"BRAVE_APP": "/nope/Brave.app"})
+
+
 class TestContainersDir(unittest.TestCase):
     def test_env_override_wins(self):
         self.assertEqual(
