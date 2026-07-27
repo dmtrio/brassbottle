@@ -135,6 +135,8 @@ write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS
 # ── Host paths + platform ─────────────────────────────────────────────────────
 ARTIFACTS_PATH="$BASE_PATH/artifacts/$NAME"
 mkdir -p "$ARTIFACTS_PATH"
+BROWSER_TMP_PATH="$BASE_PATH/browser-tmp/$NAME"
+mkdir -p "$BROWSER_TMP_PATH"
 # Rules: RULES_PATH override (set in ./.env) → your existing $BASE_PATH/rules
 # → the bundled repo rules. The bundled default makes a fresh clone runnable;
 # point RULES_PATH at your own rules repo to override (the agent-conf usecase).
@@ -213,7 +215,7 @@ INSTALL_PI="$INSTALL_PI" INSTALL_GEMINI="$INSTALL_GEMINI" \
 INSTALL_CURSOR="$INSTALL_CURSOR" INSTALL_AIDER="$INSTALL_AIDER" \
 HOST_MCP_PORTS="$HOST_MCP_PORTS" EXTRA_ALLOWED_DOMAINS="$EGRESS" \
 ALLOWED_CIDRS="$EGRESS_CIDRS" \
-KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" MEM_LIMIT="$MEM_LIMIT" \
+KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWSER_TMP_PATH" MEM_LIMIT="$MEM_LIMIT" \
 SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
 REMOTE_TMUX="$REMOTE_TMUX" \
 MOSH_PORTS="$MOSH_PORTS" MOSH_PORTS_DASH="$MOSH_PORTS_DASH" \

@@ -41,7 +41,7 @@ opinion.
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
 | [`gateway`](gateway/) | remote HTTP | `./service.sh gateway` | [README](gateway/README.md) |
 | [`proxyman`](proxyman/) | remote HTTP | `./service.sh proxyman` | [README](proxyman/README.md) |
-| [`browser`](browser/) | remote HTTP | `./service.sh browser` | [README](browser/README.md) |
+| [`browser`](browser/) | remote HTTP | `./service.sh browser <container>` | [README](browser/README.md) |
 | [`obsidian-annotated`](obsidian-annotated/) | remote HTTP (real host) | — | [README](obsidian-annotated/README.md) |
 | [`axiom`](axiom/) | local (stdio bridge → mcp.axiom.co, baked) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
@@ -57,7 +57,7 @@ one** of `command:` (local) or `url:` (remote).
 | `mcp: {<server>: {command, args}}` | **Local** stdio server, runs in the container. Requires `install:`. |
 | `mcp: {<server>: {url, headers}}` | **Remote** HTTP server, reached on the host or internet. |
 | `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists. |
-| `host_port: <int>` | Remote-only; opens the container firewall to `host.docker.internal:<port>`. |
+| `host_port: <int>` | Remote-only; opens the container firewall to `host.docker.internal:<port>`. A manifest `plugin_ports:` override replaces this default (see below). |
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
 | `requires: [<SLOT>, …]` | Optional MCP-server field. The server is configured only for agents with every required slot; uncredentialed servers omit it. |
 | `egress: [host, …]` | Bare hostnames added to this container's firewall allowlist. |
@@ -84,6 +84,25 @@ mcp:
     headers: {Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"}
     requires: [MCP_GATEWAY_TOKEN]
 ```
+
+## `plugin_ports` — per-container host port
+
+Host-service plugins (`host_port:` in `plugin.yml`) listen on a Mac port. Host
+ports are exclusive, so two containers running the same plugin need different
+values — the same reason `ssh.port` and `remote.mosh_ports` are per-container.
+
+Set `plugin_ports:` in the **manifest** (not in `plugin.yml`):
+
+```yaml
+plugins: [browser]
+plugin_ports:
+  browser: 8815    # overrides plugins/browser/plugin.yml host_port: 8814
+```
+
+The override re-points **both** the firewall grant (`HOST_MCP_PORTS`) and any
+`${HOST_PORT}` placeholder in the plugin's remote `url`, so the port stays a
+single source of truth. A plugin url may use `${HOST_PORT}` instead of a
+literal port to stay in sync with `host_port` / `plugin_ports`.
 
 ## Binding secrets in a manifest
 

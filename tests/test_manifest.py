@@ -40,7 +40,7 @@ PROXYMAN = {"host_port": 8813,
 BROWSER = {"host_port": 8814,
            "secrets": {"RESEARCH_BROWSER_KEY": {
                        "hint": "browser (run ./service.sh browser once)"}},
-           "mcp": {"browser": {"url": "http://host.docker.internal:8814/mcp",
+           "mcp": {"browser": {"url": "http://host.docker.internal:${HOST_PORT}/mcp",
                                "headers": {"X-API-Key": "${RESEARCH_BROWSER_KEY}"},
                                "requires": ["RESEARCH_BROWSER_KEY"]}}}
 OBSIDIAN = {"secrets": {"OBSIDIAN_ANNOTATED_KEY": {}},
@@ -878,6 +878,79 @@ class TestUniversalHybridSecrets(unittest.TestCase):
                     {"agent": "claude", "slot": "TOKEN", "secret": "X", "disabled": True}]},
                 "X")
         self.assertIn("exactly one of secret or disabled", str(cm.exception))
+
+
+class TestPluginPorts(unittest.TestCase):
+    """plugin_ports: per-container override of a plugin's host_port. The
+    resolved value drives BOTH the firewall grant and the ${HOST_PORT} url."""
+
+    def test_override_applied(self):
+        d = derive({"plugins": ["browser"], "plugin_ports": {"browser": 8815}})
+        self.assertEqual(d["HOST_MCP_PORTS"], "8815")
+
+    def test_default_preserved(self):
+        d = derive({"plugins": ["browser"]})
+        self.assertEqual(d["HOST_MCP_PORTS"], "8814")
+
+    # The browser server declares requires:, so it is only configured when its
+    # slot resolves — bind it and mark the source present to see the url.
+    WIRED_ENV = {"PRESENT_SECRET_VARS": "RESEARCH_BROWSER_KEY",
+                 "SECRETS_FILE": "/sec/secrets.env"}
+    BOUND = {"RESEARCH_BROWSER_KEY": "RESEARCH_BROWSER_KEY"}
+
+    def _wired(self, man):
+        return derive({**man, "common_secrets": self.BOUND}, env=self.WIRED_ENV)
+
+    def test_host_port_substituted_in_server_url(self):
+        d = self._wired({"plugins": ["browser"], "plugin_ports": {"browser": 8815}})
+        self.assertIn("host.docker.internal:8815/mcp", d["AGENT_SERVERS_JSON"])
+        self.assertNotIn("${HOST_PORT}", d["AGENT_SERVERS_JSON"])
+
+    def test_default_substitutes_plugin_host_port(self):
+        d = self._wired({"plugins": ["browser"]})
+        self.assertIn("host.docker.internal:8814/mcp", d["AGENT_SERVERS_JSON"])
+        self.assertNotIn("${HOST_PORT}", d["AGENT_SERVERS_JSON"])
+
+    def test_substitution_does_not_mutate_plugin_files(self):
+        # PLUGIN_FILES is a module-level fixture shared by every test in this
+        # file (and in production a plugin doc the caller still owns).
+        derive({"plugins": ["browser"], "plugin_ports": {"browser": 8815}})
+        self.assertEqual(BROWSER["mcp"]["browser"]["url"],
+                         "http://host.docker.internal:${HOST_PORT}/mcp")
+
+    ERROR_CASES = [
+        ("not a map", {"plugins": ["browser"], "plugin_ports": [8815]},
+         "manifest plugin_ports: must be a map of plugin: port, e.g. plugin_ports: {browser: 8815}"),
+        ("plugin not enabled", {"plugins": ["browser"], "plugin_ports": {"ghost": 8815}},
+         "plugin_ports 'ghost': not an enabled plugin (add it to plugins: first)"),
+        ("non-int value", {"plugins": ["browser"], "plugin_ports": {"browser": "8815"}},
+         "plugin_ports 'browser': must be an integer port number"),
+        ("bool value", {"plugins": ["browser"], "plugin_ports": {"browser": True}},
+         "plugin_ports 'browser': must be an integer port number"),
+        ("out of range low", {"plugins": ["browser"], "plugin_ports": {"browser": 0}},
+         "plugin_ports 'browser': port 0 out of range (1-65535)"),
+        ("out of range high", {"plugins": ["browser"], "plugin_ports": {"browser": 70000}},
+         "plugin_ports 'browser': port 70000 out of range (1-65535)"),
+        ("no host_port on plugin", {"plugins": ["serena"], "plugin_ports": {"serena": 8815}},
+         "plugin_ports 'serena': plugin declares no host_port (it has no host-side service to re-point)"),
+    ]
+
+    def test_error_cases(self):
+        for name, man, message in self.ERROR_CASES:
+            with self.subTest(name):
+                with self.assertRaises(m.ManifestError) as cm:
+                    derive(man)
+                self.assertEqual(str(cm.exception), message)
+
+    def test_host_port_ref_without_resolved_port(self):
+        files = {"p": {"mcp": {"browser": {
+            "url": "http://host.docker.internal:${HOST_PORT}/mcp"}}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertEqual(
+            str(cm.exception),
+            "plugin 'p' mcp server 'browser': url uses ${HOST_PORT} but the plugin "
+            "declares no host_port to substitute")
 
 
 if __name__ == "__main__":

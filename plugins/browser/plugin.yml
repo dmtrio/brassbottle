@@ -8,6 +8,6 @@ secrets:
 
 mcp:
   browser:
-    url: http://host.docker.internal:8814/mcp
+    url: http://host.docker.internal:${HOST_PORT}/mcp
     headers: {X-API-Key: "${RESEARCH_BROWSER_KEY}"}
     requires: [RESEARCH_BROWSER_KEY]
