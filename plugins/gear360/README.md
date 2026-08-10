@@ -138,8 +138,9 @@ gear360-doctor
 # video — any even 2:1 dual-fisheye MP4 (3840x1920 and 2560x1280 both work).
 # Needs ORIGINAL SM-C200 filenames; renamed files need --force. Multiple
 # inputs concatenate into one output.
-#   -l  light compensation      -a  refine alignment (3840x1920 only)
-stitch-gear360.sh -l /artifacts/in/CLIP.MP4 /artifacts/out/CLIP_360.mp4
+#   -a  refine alignment (use it — biggest seam-quality lever)
+#   -l  light compensation
+stitch-gear360.sh -a -l /artifacts/in/CLIP.MP4 /artifacts/out/CLIP_360.mp4
 
 # photos
 gear360pano.sh /artifacts/in/PHOTO.JPG
@@ -152,8 +153,8 @@ gear360pano.sh /artifacts/in/PHOTO.JPG
 else ignored. Test on a couple of files first, then leave it running:
 
 ```bash
-gear360-watch --once -l       # drain the current backlog and exit
-gear360-watch -l              # then watch forever (Ctrl-C, or TERM, to stop)
+gear360-watch --once -a -l    # drain the current backlog and exit
+gear360-watch -a -l           # then watch forever (Ctrl-C, or TERM, to stop)
 gear360-watch -h              # all flags
 ```
 
@@ -268,8 +269,29 @@ Verified in a clean `ubuntu:24.04` at both resolutions: 2560x1280 produces
 2362x1178 @ 60000/1001 with 180 frames, video + audio streams, and
 `Spherical = true / ProjectionType = equirectangular`; 3840x1920 is unchanged.
 
-**`-a` cannot work at 2560x1280** and is ignored there. The MLS grid is a
-per-pixel map for 3840x1920; there is no scaled equivalent.
+### Seam quality
+
+Measured on real SM-C200 footage, best last:
+
+| | seam |
+|---|---|
+| native 2560x1280, `-l` | obvious hazy band; clouds break across it |
+| native 2560x1280, `-a -l` | band largely gone, faint line remains |
+| upscaled to 3840x1920, `-a -l` | essentially seamless |
+
+**Use `-a`.** It works at any resolution now that the grid is rescaled and the
+alignment constants scale with the frame, and it is the single biggest quality
+lever. It is not gated on resolution.
+
+Upscaling to 3840x1920 first still wins, because the alignment constants are
+empirical for that size and only approximate when scaled. It costs 2.25x the
+pixels through the stitcher, so it is a quality/time trade rather than a
+default:
+
+```bash
+ffmpeg -i in.MP4 -vf scale=3840:1920:flags=lanczos -c:v libx264 -crf 16 -c:a copy up.MP4
+stitch-gear360.sh -a -l up.MP4 out_stitched.mp4
+```
 
 ## Notes
 
