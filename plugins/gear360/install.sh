@@ -58,18 +58,25 @@ spatialmedia_install() {
 spatialmedia_install || warn "spatialmedia unavailable (metadata injection will fail)"
 
 # ── 3. Sources ───────────────────────────────────────────────────────────────
+# NOTE on the guard pattern used by these three steps: `set -e` inside a
+# function invoked as `f || warn` is IGNORED for the entire body (POSIX: errexit
+# is off for any command of an AND-OR list but the last) and then leaks to the
+# top level. A subshell body inherits the same suppression, so it does not help
+# either. Every fallible command therefore propagates explicitly with
+# `|| return 1`.
 clone_sources() {
-    set -e
     local repo name
     for repo in drNoob13/fisheyeStitcher bilde2910/stitch-gear360 ultramango/gear360pano; do
         name="${repo##*/}"
-        [ -d "$GEAR/$name" ] || git clone --depth 1 "https://github.com/$repo.git" "$GEAR/$name"
+        [ -d "$GEAR/$name" ] && continue
+        git clone --depth 1 "https://github.com/$repo.git" "$GEAR/$name" || return 1
     done
 }
 clone_sources || warn "could not clone the stitching repos"
 
 # ── 3b. Patch upstream ───────────────────────────────────────────────────────
-# Four fixes: non-3840x1920 support (2), NTSC frame-rate truncation, and audio
+# Eight fixes: non-3840x1920 support, the empty-AVI writer bug, NTSC frame-rate
+# truncation, the wrapper's resolution gate and dead -a/-l flags, and audio
 # passthrough. Non-fatal — an unpatched build still stitches native 3840x1920
 # video, so a patch that no longer applies must narrow what works rather than
 # cost us the toolchain. See patch_upstream.py for what each one does.
@@ -82,22 +89,24 @@ python3 "$HERE/patch_upstream.py" "$GEAR/fisheyeStitcher" "$GEAR/stitch-gear360"
 # stitch-gear360 hardcodes /usr/share/fisheye-stitcher/grid_*.yml.gz — ship
 # whatever grid the repo carries rather than assuming the filename.
 install_assets() {
-    set -e
-    sudo mkdir -p /usr/share/fisheye-stitcher
+    sudo mkdir -p /usr/share/fisheye-stitcher || return 1
     find "$GEAR/fisheyeStitcher" \( -name 'grid_*.yml.gz' -o -name 'grid_*.yml' \) \
-        -exec sudo cp -n {} /usr/share/fisheye-stitcher/ \;
+        -exec sudo cp -n {} /usr/share/fisheye-stitcher/ \; || return 1
+    ls /usr/share/fisheye-stitcher/grid_* >/dev/null 2>&1 || {
+        echo "no calibration grid found in the fisheyeStitcher checkout" >&2
+        return 1
+    }
     local s
     for s in "$GEAR/stitch-gear360"/*.sh "$GEAR/gear360pano"/*.sh; do
         [ -f "$s" ] || continue
-        chmod +x "$s"
-        sudo ln -sf "$s" "/usr/local/bin/$(basename "$s")"
+        chmod +x "$s" || return 1
+        sudo ln -sf "$s" "/usr/local/bin/$(basename "$s")" || return 1
     done
 }
 install_assets || warn "could not install the calibration grid / wrapper scripts"
 
 # ── 5. Build fisheyeStitcher ─────────────────────────────────────────────────
 build_stitcher() {
-    set -e
     # Upstream targets OpenCV 3 and still uses C-API constants that OpenCV 4's
     # C++ headers dropped: CV_INTER_LINEAR / CV_TM_CCORR_NORMED (imgproc) and
     # CV_CAP_PROP_* (videoio). Ubuntu 24.04 ships OpenCV 4.6, so it will not
@@ -113,8 +122,8 @@ build_stitcher() {
         -DCMAKE_CXX_STANDARD=17 \
         -DCMAKE_CXX_FLAGS="-I/usr/include/opencv4 \
 -include opencv2/imgproc/types_c.h \
--include opencv2/videoio/legacy/constants_c.h"
-    cmake --build "$GEAR/fisheyeStitcher/build" -j"$(nproc)"
+-include opencv2/videoio/legacy/constants_c.h" || return 1
+    cmake --build "$GEAR/fisheyeStitcher/build" -j"$(nproc)" || return 1
 
     # Resolve by TARGET NAME, never "first executable in build/". A CMake build
     # tree is full of probe binaries (CompilerIdC/a.out,
@@ -130,7 +139,7 @@ build_stitcher() {
     [ -n "$bin" ] || bin="$(find "$GEAR/fisheyeStitcher/build" -type f -name fisheyeStitcher \
                               -perm -u+x -not -path '*/CMakeFiles/*' -print -quit)"
     [ -n "$bin" ] || { echo "no fisheyeStitcher binary in the build tree" >&2; return 1; }
-    sudo ln -sf "$bin" /usr/local/bin/fisheyeStitcher
+    sudo ln -sf "$bin" /usr/local/bin/fisheyeStitcher || return 1
 }
 build_stitcher || warn "fisheyeStitcher failed to build"
 

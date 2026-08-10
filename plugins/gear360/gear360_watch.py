@@ -67,6 +67,42 @@ class Watcher:
                   self.complete_dir, self.done, self.failed, self.logs):
             d.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def unique(path: Path) -> Path:
+        """A free name at `path`, suffixing rather than overwriting.
+
+        SM-C200 filenames wrap and repeat across cards, so two different clips
+        are routinely called 360_0300.MP4. Sources were already protected this
+        way; results need it just as much — silently replacing a finished stitch
+        costs minutes of compute and the file itself.
+        """
+        if not path.exists():
+            return path
+        n = 1
+        while True:
+            candidate = path.with_name(f"{path.stem}_{n}{path.suffix}")
+            if not candidate.exists():
+                return candidate
+            n += 1
+
+    def publish(self, produced: Path, dest: Path) -> None:
+        """Move a result into place atomically.
+
+        scratch is a named volume and out is a bind mount, i.e. different
+        filesystems, so shutil.move degrades to copy-then-unlink writing
+        DIRECTLY to the final path. A SIGKILL (docker stop's 10s grace expires
+        long before a stitch finishes), a full disk, or a bind-mount error
+        would leave a truncated file sitting at the real output name. Land it
+        on a hidden name on the destination filesystem first, then rename.
+        """
+        staging = dest.with_name(f".tmp-{dest.name}")
+        try:
+            shutil.move(str(produced), str(staging))
+            os.replace(staging, dest)
+        finally:
+            if staging.exists():
+                staging.unlink(missing_ok=True)
+
     def already_handled(self, src: Path, fp: str) -> bool:
         """True if this exact file (same fingerprint) already succeeded or
         failed. A replaced file has a new fingerprint and gets picked up."""
@@ -159,7 +195,13 @@ class Watcher:
         with logfile.open("w") as fh:
             fh.write(f"$ {' '.join(cmd)}\n\n")
             fh.flush()
-            rc = subprocess.call(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT)
+            # stitch-gear360 puts its full-length intermediate AVIs under
+            # $XDG_CACHE_HOME, not the working directory — point that at the
+            # work dir so --scratch actually governs the largest files, and so
+            # they are cleaned up with it.
+            env = {**os.environ, "XDG_CACHE_HOME": str(work / "cache")}
+            rc = subprocess.call(cmd, cwd=work, env=env,
+                                 stdout=fh, stderr=subprocess.STDOUT)
 
         produced = [p for p in sorted(work.rglob("*"))
                     if p.is_file() and p.suffix.lower() in RESULT_EXT
@@ -170,19 +212,23 @@ class Watcher:
                 fh.write("\nno output produced\n")
 
         if rc == 0:
-            # Built in scratch and moved only on success, so a half-written
-            # result never appears in the output folder. Names are normalised
-            # here rather than trusted from the tool: gear360pano picks its own.
+            # Built in scratch and published only on success. Names are
+            # normalised here rather than trusted from the tool: gear360pano
+            # picks its own.
+            fp = fingerprint(src) or ""
             for n, p in enumerate(produced):
                 stem = f"{src.stem}{STITCHED_SUFFIX}"
                 if len(produced) > 1:
                     stem = f"{stem}_{n + 1}"
-                shutil.move(str(p), str(self.out_dir / f"{stem}{p.suffix.lower()}"))
-            (self.done / src.name).write_text(fingerprint(src) or "")
+                self.publish(p, self.unique(self.out_dir / f"{stem}{p.suffix.lower()}"))
+            log(f"  ✓ {src.name} → {self.out_dir} ({len(produced)} file(s))")
+            # Retire BEFORE marking done: if the move fails, the source stays
+            # visibly unprocessed in the drop folder rather than being skipped
+            # forever by a done marker it no longer matches.
+            self.retire(src)
+            (self.done / src.name).write_text(fp)
             (self.failed / src.name).unlink(missing_ok=True)
             (self.failed_dir / f"{src.name}.log").unlink(missing_ok=True)
-            log(f"  ✓ {src.name} → {self.out_dir} ({len(produced)} file(s))")
-            self.retire(src)
         else:
             (self.failed / src.name).write_text(fingerprint(src) or "")
             shutil.copyfile(logfile, self.failed_dir / f"{src.name}.log")
@@ -198,11 +244,7 @@ class Watcher:
         card. A name collision is resolved by suffixing rather than clobbering,
         since SM-C200 filenames wrap around and repeat between cards.
         """
-        dest = self.complete_dir / src.name
-        n = 1
-        while dest.exists():
-            dest = self.complete_dir / f"{src.stem}_{n}{src.suffix}"
-            n += 1
+        dest = self.unique(self.complete_dir / src.name)
         try:
             shutil.move(str(src), str(dest))
             log(f"    moved source → {dest}")
@@ -219,6 +261,10 @@ class Watcher:
             # stray file in the drop folder costs `settle` seconds every cycle.
             if src.suffix.lower() not in VIDEO_EXT | PHOTO_EXT:
                 continue
+            # Our own output dropped back into the drop folder would otherwise
+            # be re-stitched into <name>_stitched_stitched.mp4.
+            if src.stem.endswith(STITCHED_SUFFIX):
+                continue
 
             fp = fingerprint(src)
             if fp is None or self.already_handled(src, fp):
@@ -230,7 +276,16 @@ class Watcher:
                 log(f"still copying, will retry: {src.name}")
                 continue
 
-            self.process(src)
+            try:
+                self.process(src)
+            except Exception as exc:            # noqa: BLE001 — daemon must survive
+                # One unlucky file (disk full mid-move, bind-mount hiccup) must
+                # not take down an unattended watcher and strand the backlog.
+                log(f"  ✗ {src.name}: unexpected error: {exc!r}")
+                try:
+                    (self.failed / src.name).write_text(fingerprint(src) or "")
+                except OSError:
+                    pass
 
     def run(self) -> int:
         lock = (self.state / "lock").open("w")
@@ -244,8 +299,12 @@ class Watcher:
         mode = ", --once" if self.args.once else ""
         log(f"watching {self.in_dir} → {self.out_dir} "
             f"(poll {self.args.interval}s{mode})")
-        if subprocess.call(["gear360-doctor"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL) != 0:
+        try:
+            healthy = subprocess.call(["gear360-doctor"], stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL) == 0
+        except OSError:
+            healthy = False       # not installed at all
+        if not healthy:
             print("gear360-watch: WARNING — toolchain incomplete, "
                   "run gear360-doctor", file=sys.stderr)
 

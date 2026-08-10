@@ -12,10 +12,24 @@ Covers the two things that have actually broken in practice:
 
 Nothing here builds the toolchain or runs ffmpeg; the stitcher itself is stubbed
 so these stay fast and offline.
+
+LIMITATION worth knowing: the fixtures below are copies of what the patcher
+EXPECTS, not of upstream, and the two get edited together — so they cannot
+detect upstream drift. Only a real clone can. That check is one command:
+
+    docker run --rm -v "$PWD:/s:ro" ubuntu:24.04 bash -c '
+      apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        ca-certificates git python3 >/dev/null
+      git clone --depth 1 -q https://github.com/drNoob13/fisheyeStitcher.git /tmp/fs
+      git clone --depth 1 -q https://github.com/bilde2910/stitch-gear360.git /tmp/sg
+      python3 /s/patch_upstream.py /tmp/fs /tmp/sg'
+
+Run it if a build starts warning that patches did not apply.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -243,7 +257,10 @@ class WatcherTests(unittest.TestCase):
             failed=str(self.root / "failed"), scratch=str(self.root / "scratch"),
             complete=None, state=str(self.root / "state"),
             interval=1, settle=0, once=True, force=False, passthrough=[],
-            upscale=True,
+            # Off in the fixture so process() tests don't shell out to ffprobe;
+            # the real CLI default (on) is asserted by
+            # test_upscale_is_on_by_default.
+            upscale=False,
         )
         self.w = gear360_watch.Watcher(self.args)
 
@@ -296,7 +313,6 @@ class WatcherTests(unittest.TestCase):
         self.assertNotIn("--upscale ", help_text)
 
     def test_no_upscale_uses_the_source_untouched(self):
-        self.args.upscale = False
         src = self._src()
         self.assertEqual(self.w.prepare_source(src, self.root / "work"), src)
 
@@ -304,18 +320,73 @@ class WatcherTests(unittest.TestCase):
         src = self._src("360_0301.JPG")
         self.assertEqual(self.w.prepare_source(src, self.root / "work"), src)
 
+    def _run_process(self, src, stub):
+        """Drive the real process() with a stubbed stitcher on PATH."""
+        binpath = self.root / "bin"
+        binpath.mkdir(exist_ok=True)
+        script = binpath / "stitch-gear360.sh"
+        script.write_text(stub)
+        script.chmod(0o755)
+        (binpath / "gear360pano.sh").write_bytes(script.read_bytes())
+        (binpath / "gear360pano.sh").chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{binpath}:{old}"
+        try:
+            return self.w.process(src)
+        finally:
+            os.environ["PATH"] = old
+
     def test_staged_upscale_is_not_shipped_as_a_result(self):
-        # The staged copy is an .mp4 under the work dir; harvesting it would
-        # put a 3840x1920 un-stitched intermediate in out/.
-        work = self.root / "work"
-        staged = work / gear360_watch.STAGING_DIR
-        staged.mkdir(parents=True)
-        (staged / "360_0300.MP4").write_bytes(b"upscaled")
-        (work / "360_0300_stitched.mp4").write_bytes(b"real result")
-        produced = [p for p in sorted(work.rglob("*"))
-                    if p.is_file() and p.suffix.lower() in gear360_watch.RESULT_EXT
-                    and gear360_watch.STAGING_DIR not in p.relative_to(work).parts]
-        self.assertEqual([p.name for p in produced], ["360_0300_stitched.mp4"])
+        # Exercises the real harvest in process(), not a copy of its filter: a
+        # 3840x1920 un-stitched intermediate must never reach out/.
+        src = self._src()
+        stub = ('#!/bin/sh\n'
+                'out=$(eval echo \\${$#})\n'
+                'mkdir -p "$(dirname "$out")/upscaled"\n'
+                'echo staged > "$(dirname "$out")/upscaled/360_0300.MP4"\n'
+                'echo real > "$out"\n')
+        self.assertTrue(self._run_process(src, stub))
+        self.assertEqual([p.name for p in sorted(self.w.out_dir.iterdir())],
+                         ["360_0300_stitched.mp4"])
+
+    def test_success_publishes_retires_and_marks_done(self):
+        src = self._src()
+        stub = '#!/bin/sh\nout=$(eval echo \\${$#})\necho result > "$out"\n'
+        self.assertTrue(self._run_process(src, stub))
+        self.assertTrue((self.w.out_dir / "360_0300_stitched.mp4").exists())
+        self.assertFalse(src.exists(), "source should have been retired")
+        self.assertTrue((self.w.complete_dir / "360_0300.MP4").exists())
+        self.assertTrue((self.w.done / "360_0300.MP4").exists())
+        self.assertFalse(any(self.w.out_dir.glob(".tmp-*")), "staging left behind")
+
+    def test_failure_quarantines_and_leaves_the_source_alone(self):
+        src = self._src()
+        self.assertFalse(self._run_process(src, '#!/bin/sh\nexit 3\n'))
+        self.assertTrue(src.exists(), "source must not be retired on failure")
+        self.assertTrue((self.w.failed / "360_0300.MP4").exists())
+        self.assertTrue((self.w.failed_dir / "360_0300.MP4.log").exists())
+        self.assertEqual(list(self.w.out_dir.iterdir()), [])
+
+    def test_tool_exiting_zero_with_no_output_is_a_failure(self):
+        # The empty-AVI lesson: a clean exit code is not evidence of success.
+        src = self._src()
+        self.assertFalse(self._run_process(src, '#!/bin/sh\nexit 0\n'))
+        self.assertTrue((self.w.failed / "360_0300.MP4").exists())
+
+    def test_results_never_overwrite_an_earlier_stitch(self):
+        # SM-C200 names repeat across cards; a second 360_0300 must not silently
+        # replace the first one's output.
+        (self.w.out_dir / "360_0300_stitched.mp4").write_bytes(b"first card")
+        stub = '#!/bin/sh\nout=$(eval echo \\${$#})\necho second > "$out"\n'
+        self._run_process(self._src(), stub)
+        self.assertEqual((self.w.out_dir / "360_0300_stitched.mp4").read_bytes(),
+                         b"first card")
+        self.assertTrue((self.w.out_dir / "360_0300_stitched_1.mp4").exists())
+
+    def test_our_own_output_is_not_restitched(self):
+        (self.w.in_dir / "360_0300_stitched.mp4").write_bytes(b"result")
+        self.w.scan()
+        self.assertEqual(list(self.w.out_dir.iterdir()), [])
 
     def test_retire_moves_source_into_complete(self):
         src = self._src()
