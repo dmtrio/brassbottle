@@ -241,6 +241,7 @@ class WatcherTests(unittest.TestCase):
             failed=str(self.root / "failed"), scratch=str(self.root / "scratch"),
             complete=None, state=str(self.root / "state"),
             interval=1, settle=0, once=True, force=False, passthrough=[],
+            upscale=False,
         )
         self.w = gear360_watch.Watcher(self.args)
 
@@ -275,6 +276,23 @@ class WatcherTests(unittest.TestCase):
     def test_non_media_is_not_dispatched(self):
         self.assertIsNone(
             self.w.build_command(self._src("notes.txt"), self.root / "w"))
+
+    def test_upscale_off_uses_the_source_untouched(self):
+        src = self._src()
+        self.assertEqual(self.w.prepare_source(src, self.root / "work"), src)
+
+    def test_staged_upscale_is_not_shipped_as_a_result(self):
+        # The staged copy is an .mp4 under the work dir; harvesting it would
+        # put a 3840x1920 un-stitched intermediate in out/.
+        work = self.root / "work"
+        staged = work / gear360_watch.STAGING_DIR
+        staged.mkdir(parents=True)
+        (staged / "360_0300.MP4").write_bytes(b"upscaled")
+        (work / "360_0300_stitched.mp4").write_bytes(b"real result")
+        produced = [p for p in sorted(work.rglob("*"))
+                    if p.is_file() and p.suffix.lower() in gear360_watch.RESULT_EXT
+                    and gear360_watch.STAGING_DIR not in p.relative_to(work).parts]
+        self.assertEqual([p.name for p in produced], ["360_0300_stitched.mp4"])
 
     def test_retire_moves_source_into_complete(self):
         src = self._src()
