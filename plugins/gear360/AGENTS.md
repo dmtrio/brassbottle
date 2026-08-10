@@ -51,7 +51,7 @@ never /artifacts.
 stitch-gear360.sh -a -l /artifacts/in/CLIP.MP4 /artifacts/out/CLIP_stitched.mp4
 
 # photos (Hugin-based)
-gear360pano.sh /artifacts/in/PHOTO.JPG
+gear360pano.sh -o /artifacts/out /artifacts/in/PHOTO.JPG   # -o is required
 
 # drop-folder ingest: stitch everything in /artifacts/in
 gear360-watch --once -a -l   # drain the backlog and exit
@@ -61,9 +61,9 @@ gear360-watch -a -l          # keep watching (polls every 10s)
 ### Resolution
 
 Both SM-C200 video modes work through `stitch-gear360.sh`: 3840x1920 and
-2560x1280. Do **not** upscale 2560x1280 to get past a resolution check — there
-is no longer one to get past, and upscaling costs two resampling passes and
-2.25x the pixels for nothing.
+2560x1280. Upscaling 2560x1280 to 3840x1920 first is **not** needed to pass a
+resolution check — there is no longer one to pass — but it is the single
+biggest seam-quality win, which is why the watcher does it by default.
 
 This relies on build-time patches to upstream (`patch_upstream.py`). Stock
 upstream fails on 2560x1280 two ways: an out-of-bounds `cv::Rect` abort, and —
@@ -129,11 +129,10 @@ structurally valid but empty file. Confirm the output has a video stream.
   equirectangular output looks distorted even when correct. Report seam or
   exposure concerns and let the user view it in a real 360 player rather than
   concluding the stitch failed.
-- Visible seams are **not** fixable with `-a` at 2560x1280 (it is ignored
-  there). The static MLS lens calibration is applied at every resolution via a
-  build-time grid rescale; if seams look badly misaligned, check the build log
-  for `gear360: MLS grid rescaled to ...` — its absence at a non-3840x1920
-  resolution means the calibration is not being applied.
+- For visible seams the order is: confirm `-a -l` were passed, then upscale
+  (the watcher does by default). If they persist, check the build log for
+  `gear360: MLS grid rescaled to ...` — its absence at a non-3840x1920
+  resolution means the static lens calibration is not being applied at all.
 - `ffmpeg`'s `v360=dfisheye:equirect` filter is a quick structural check only.
   It has no per-lens calibration, so it is not a substitute for the stitcher
   and its output should not be delivered as a result.

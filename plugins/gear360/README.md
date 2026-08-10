@@ -46,6 +46,7 @@ bash embedded in a YAML string.
 | `gear360_watch.py` | runtime (`gear360-watch`) | drop-folder ingest |
 | `test_gear360.py` | host | 29 unit tests; also loaded by `tests/` |
 | `LOG.md` | — | change history: what broke, what was patched, why |
+| `patch_upstream.py` note | — | a file is patched **all-or-nothing**; a partial match leaves it untouched |
 
 The two runtime tools are **symlinked** from `/opt/plugins/gear360/`, not
 copied, so there is one copy in the image and one place to edit. Tests live
@@ -57,9 +58,11 @@ beside the code and run either from this directory
 
 This plugin adds OpenCV, Hugin and ffmpeg to every container's image.
 
-- **Disk** is mostly fine — layers are content-addressed and shared across the
-  `dev-agent:<name>` tags, so it is roughly one copy on the host, not one per
-  container.
+- **Disk** is worse than it looks. The bake `RUN` sits *after* the per-agent
+  install layers, whose build args differ per container, so the parent layer
+  differs and each distinct agent-toolset combination gets its own copy of
+  OpenCV + Hugin + ffmpeg rather than sharing one. Moving the apt step above
+  the agent installs would fix that.
 - **Rebuild time** is the real tax. `COPY plugins /opt/plugins` invalidates
   whenever *any* `plugin.yml` changes, which re-runs the whole bake loop — so
   every future plugin edit costs an extra couple of minutes on every
@@ -214,8 +217,9 @@ ffmpeg -i /artifacts/in/CLIP.MP4 \
 1. Stitch one short clip before committing to a batch.
 2. Confirm the metadata took: `python3 -m spatialmedia <file>` should report
    spherical XML. Without it, players show a flat warped rectangle.
-3. Check the seams at the lens boundaries (the vertical centre lines). Retrying
-   with `-a` / `-l` will **not** help — see below.
+3. Check the seams at the lens boundaries (the vertical centre lines). If they
+   show, confirm `-a -l` were passed and that the input was upscaled — see
+   "Seam quality".
 4. QuickLook will **not** reframe 360 video. Use VLC, or a private YouTube
    upload, to judge the result.
 
@@ -271,9 +275,8 @@ reported and skipped, never half-applied.
    `--enb_ra`, but the stitcher's options are `--enb_light_compen` /
    `--enb_refine_align`, and it parses values with `atoi()` while the wrapper
    passed the strings `"true"`/`"false"` (`atoi("true") == 0`). **Both features
-   had never run, whatever `-a`/`-l` were set to.** Now passed correctly, with
-   `-a` force-disabled (and warned about) at anything but 3840x1920, since
-   refine alignment needs that MLS grid.
+   had never run, whatever `-a`/`-l` were set to.** Both are now passed
+   correctly at every resolution.
 7. **Source files queued for audio.** fisheyeStitcher reads video through
    OpenCV, which has no audio support, so its AVI is video-only.
 8. **Source audio mapped into the join.** The join took only the AVI queue and
@@ -301,8 +304,8 @@ lever. It is not gated on resolution.
 
 Upscaling to 3840x1920 first still wins, because the alignment constants are
 empirical for that size and only approximate when scaled. It costs 2.25x the
-pixels through the stitcher, so it is a quality/time trade rather than a
-default:
+pixels through the stitcher — the watcher does it by default; `--no-upscale`
+trades the quality back:
 
 ```bash
 # by hand — keep the ORIGINAL filename, the wrapper checks it

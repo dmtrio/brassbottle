@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """Patch the vendored upstream sources at image build.
 
-Four fixes across two projects, applied to the clones under /opt/gear360 before
-fisheyeStitcher is compiled. Each is an exact-match text replacement that fails
-loudly rather than applying partially, so an upstream change is reported instead
-of silently producing a subtly wrong build.
+Eight fixes across two projects, applied to the clones under /opt/gear360 before
+fisheyeStitcher is compiled. Each is an exact-match text replacement, and a file
+is only written when EVERY patch for it matched — a partial apply is reported
+and the file left untouched, so an upstream change narrows what works instead of
+silently producing a subtly wrong build.
 
-fisheyeStitcher (src/fisheye_stitcher.cpp, app/stitch.cpp)
-  1. conditional MLS deform      — non-3840x1920 support
-  2. scaled alignment constants  — non-3840x1920 support
-  3. frame-rate truncation       — output ran 1.59% slow on NTSC sources
-
+fisheyeStitcher (src/fisheye_stitcher.cpp)
+  1. rescale the MLS grid        — static lens calibration, else seams misalign
+  2. scale alignment constants   — else out-of-bounds cv::Rect below 3840x1920
+fisheyeStitcher (app/stitch.cpp)
+  3. frame-rate truncation       — output ran ~1.59% slow on NTSC sources
+  4. reopen the writer           — else every frame silently discarded (empty avi)
 stitch-gear360 (stitch-gear360.sh)
-  4. audio passthrough           — output was silent by construction
+  5. accept any 2:1 resolution   — the gate was wrapper-level, not a real limit
+  6. real flag names + numerics  — -a/-l had never taken effect
+  7. queue the source files      — for audio, below
+  8. map source audio into join  — output was silent by construction
 
 Usage: patch_upstream.py <fisheyeStitcher-dir> <stitch-gear360-dir>
 Exit code is the number of patches that could not be applied (0 = all good).
@@ -142,7 +147,10 @@ PATCHES: dict[str, dict[str, list[tuple[str, str, str]]]] = {
     # the frame size at runtime. Accept any even 2:1 dual-fisheye frame.
     res_w="${{resolution%x*}}"
     res_h="${{resolution#*x}}"
-    if [ -z "$res_w" ] || [ -z "$res_h" ] \\
+    case "$res_w:$res_h" in
+        ''|*[!0-9:]*|:*|*:) res_w=0; res_h=0 ;;   # non-numeric ffprobe output
+    esac
+    if [ "$res_w" -eq 0 ] || [ "$res_h" -eq 0 ] \\
        || [ $((res_w % 2)) -ne 0 ] || [ $((res_h % 2)) -ne 0 ] \\
        || [ "$res_w" -ne $((res_h * 2)) ]; then
         echo_fail
@@ -230,8 +238,9 @@ def patch_file(path: Path, patches: list[tuple[str, str, str]]) -> int:
         return 0
 
     failures = 0
+    patched = text
     for description, find, replace in patches:
-        count = text.count(find)
+        count = patched.count(find)
         if count != 1:
             print(
                 f"gear360 patch: FAILED — '{description}' matched {count} times "
@@ -241,15 +250,22 @@ def patch_file(path: Path, patches: list[tuple[str, str, str]]) -> int:
             )
             failures += 1
             continue
-        text = text.replace(find, replace)
+        patched = patched.replace(find, replace)
 
-    if failures == len(patches):
+    # ALL-OR-NOTHING per file. Writing a partially patched file would stamp it
+    # with MARKER, so any later run short-circuits on "already applied" and the
+    # missing patches never get another chance — and a half-patched stitcher
+    # fails in the silent ways this plugin exists to avoid (e.g. the frame-rate
+    # fix without the writer reopen: correct timing on an empty file).
+    if failures:
+        print(f"gear360 patch: {path.name}: {failures}/{len(patches)} did not "
+              f"apply — leaving the file UNPATCHED rather than half-patched",
+              file=sys.stderr)
         return failures
 
-    path.write_text(text)
-    applied = len(patches) - failures
-    print(f"gear360 patch: {path.name}: applied {applied}/{len(patches)}")
-    return failures
+    path.write_text(patched)
+    print(f"gear360 patch: {path.name}: applied {len(patches)}/{len(patches)}")
+    return 0
 
 
 def main() -> int:
