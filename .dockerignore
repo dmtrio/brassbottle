@@ -6,3 +6,6 @@
 plugins/*/run.sh
 plugins/README.md
 plugins/*/README.md
+# Plugin unit tests live beside the code they cover but are host-only; the
+# image does not need them (the repo suite loads them via tests/).
+plugins/*/test_*.py
