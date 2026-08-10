@@ -273,6 +273,15 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.w.build_command(src, self.root / "w")[0],
                          "gear360pano.sh")
 
+    def test_photos_get_an_explicit_output_dir(self):
+        # gear360pano writes to html/data relative to the script, not to cwd.
+        # Without -o the stitch succeeds and the harvest finds nothing, which
+        # the watcher then reports as "no output produced".
+        work = self.root / "w"
+        cmd = self.w.build_command(self._src("360_0301.JPG"), work)
+        self.assertIn("-o", cmd)
+        self.assertEqual(cmd[cmd.index("-o") + 1], str(work))
+
     def test_non_media_is_not_dispatched(self):
         self.assertIsNone(
             self.w.build_command(self._src("notes.txt"), self.root / "w"))
