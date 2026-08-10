@@ -94,8 +94,9 @@ class Watcher:
 
         fisheyeStitcher's adaptive-alignment constants are empirical for
         3840x1920 and only approximate when scaled to a smaller frame, so
-        upscaling first measurably tightens the seam on 2560x1280 footage. It
-        costs ~2.25x the pixels through the stitcher, hence opt-in.
+        upscaling first is the difference between a clearly visible seam and
+        essentially none on 2560x1280 footage. On by default for that reason;
+        --no-upscale trades it for ~2.25x fewer pixels through the stitcher.
 
         The copy keeps the ORIGINAL filename: stitch-gear360.sh validates that
         it looks like an untouched SM-C200 name.
@@ -286,9 +287,14 @@ def main() -> int:
     p.add_argument("--settle", type=int, default=3,
                    help="seconds a file must stop changing before it is "
                         "considered fully copied (default: 3)")
-    p.add_argument("--upscale", action="store_true",
-                   help="upscale non-3840x1920 video to 3840x1920 before "
-                        "stitching — tighter seams, ~2.25x the stitch time")
+    # On by default: on real SM-C200 2560x1280 footage the seam goes from
+    # clearly visible to essentially invisible. Anything already 3840x1920 is
+    # passed through untouched, so this costs nothing for native 4K input.
+    p.add_argument("--no-upscale", dest="upscale", action="store_false",
+                   help="stitch at the source resolution instead of upscaling "
+                        "to 3840x1920 first. Faster (~2.25x fewer pixels) but "
+                        "visibly worse seams below 3840x1920.")
+    p.set_defaults(upscale=True)
     p.add_argument("--once", action="store_true",
                    help="drain the current backlog, then exit")
     p.add_argument("-f", "--force", action="store_true",
