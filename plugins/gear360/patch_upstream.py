@@ -165,19 +165,11 @@ PATCHES: dict[str, dict[str, list[tuple[str, str, str]]]] = {
     # are --enb_light_compen / --enb_refine_align and it parses their values with
     # atoi() — so the strings "true"/"false" both evaluated to 0 and neither
     # feature ever ran, whatever -a / -l were set to. Pass the real names with
-    # numeric values. Refine alignment additionally needs the 3840x1920 MLS grid,
-    # so it stays off at any other size regardless of -a.
-    cur_res=$(ffprobe -v error -select_streams v:0 \\
-        -show_entries stream=width,height -of csv=s=x:p=0 "$current")
+    # numeric values. Refine alignment works at any resolution now that the MLS
+    # grid is rescaled and the alignment constants scale with the frame — it
+    # measurably tightens the seam, so it is NOT gated on resolution.
     LC_NUM=0; [ "$USE_LC" = "true" ] && LC_NUM=1
-    RA_NUM=0
-    if [ "$USE_RA" = "true" ]; then
-        if [ "$cur_res" = "3840x1920" ]; then
-            RA_NUM=1
-        else
-            echo_err "Warning: -a needs 3840x1920 (this is $cur_res); ignoring it."
-        fi
-    fi
+    RA_NUM=0; [ "$USE_RA" = "true" ] && RA_NUM=1
     fisheyeStitcher \\
         --out_dir "${{CACHE_DIR}}" \\
         --img_nm "${{i}}" \\

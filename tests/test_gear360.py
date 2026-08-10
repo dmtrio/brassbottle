@@ -194,6 +194,14 @@ class PatchUpstreamTests(unittest.TestCase):
         self.assertIn("--enb_refine_align", body)
         self.assertNotIn('--enb_lc "${USE_LC}"', body)
 
+    def test_refine_alignment_not_resolution_gated(self):
+        # -a measurably tightens the seam at 2560x1280 once the grid is
+        # rescaled and the constants scale, so it must not be forced off.
+        run_patcher(self.fs, self.sg)
+        body = (self.sg / "stitch-gear360.sh").read_text()
+        self.assertIn('RA_NUM=0; [ "$USE_RA" = "true" ] && RA_NUM=1', body)
+        self.assertNotIn("ignoring it", body)
+
     def test_wrapper_join_maps_source_audio(self):
         run_patcher(self.fs, self.sg)
         body = (self.sg / "stitch-gear360.sh").read_text()

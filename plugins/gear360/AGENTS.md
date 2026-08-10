@@ -30,20 +30,25 @@ file to `/artifacts/out`.
 this camera's 2560x1280 — the plugin patches upstream at image build. Use it as
 the single entry point; it does frames, stitch, join, audio and 360 metadata.
 
-`-l` (light compensation) works. `-a` (refine alignment) is **ignored at
-anything other than 3840x1920** and warns — the MLS grid is a per-pixel map for
-that size only. Do not suggest `-a` to fix seams on 2560x1280 footage.
+Always pass **`-a -l`**. Both work at every resolution, and `-a` (refine
+alignment) is the single biggest seam-quality lever — measured on real footage
+it removes most of the visible boundary band. Neither is gated on resolution.
+
+If seams still show after `-a -l`, the next lever is upscaling to 3840x1920
+before stitching: the alignment constants are empirical for that size and only
+approximate when scaled down. That costs 2.25x the pixels, so offer it rather
+than doing it automatically.
 
 ```bash
 # video — 2560x1280 and 3840x1920 both work
-stitch-gear360.sh -l /artifacts/in/CLIP.MP4 /artifacts/out/CLIP_360.mp4
+stitch-gear360.sh -a -l /artifacts/in/CLIP.MP4 /artifacts/out/CLIP_360.mp4
 
 # photos (Hugin-based)
 gear360pano.sh /artifacts/in/PHOTO.JPG
 
 # drop-folder ingest: stitch everything in /artifacts/in
-gear360-watch --once -l   # drain the backlog and exit
-gear360-watch -l          # keep watching (polls every 10s)
+gear360-watch --once -a -l   # drain the backlog and exit
+gear360-watch -a -l          # keep watching (polls every 10s)
 ```
 
 ### Resolution
@@ -81,7 +86,7 @@ at once, and half-written output appearing in `/artifacts/out`.
 
 - Use `--once` when the user wants a batch drained now; use the bare form only
   when they have asked for continuous watching, since it does not return.
-- Start it in the background (`gear360-watch -l &`) if you need to keep
+- Start it in the background (`gear360-watch -a -l &`) if you need to keep
   working, and tell the user it is running. Do not leave a foreground watcher
   blocking the session.
 - Only one can run at a time — a second exits immediately by design. If you get
