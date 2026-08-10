@@ -34,10 +34,17 @@ Always pass **`-a -l`**. Both work at every resolution, and `-a` (refine
 alignment) is the single biggest seam-quality lever — measured on real footage
 it removes most of the visible boundary band. Neither is gated on resolution.
 
-If seams still show after `-a -l`, the next lever is upscaling to 3840x1920
-before stitching: the alignment constants are empirical for that size and only
-approximate when scaled down. That costs 2.25x the pixels, so offer it rather
-than doing it automatically.
+`gear360-watch` **upscales to 3840x1920 by default** before stitching anything
+smaller, and that is the single biggest quality difference on this camera —
+measured on real 2560x1280 footage the seam goes from clearly visible to
+essentially invisible. The alignment constants are empirical for 3840x1920 and
+only approximate when scaled down, which is why. Input already at 3840x1920 is
+passed through untouched, so it costs nothing there.
+
+Do not pass `--no-upscale` unless the user asks for speed over quality, and say
+what they are trading. When stitching by hand rather than through the watcher,
+upscale first — keep the original filename, and stage it in /workspace/scratch,
+never /artifacts.
 
 ```bash
 # video — 2560x1280 and 3840x1920 both work

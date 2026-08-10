@@ -153,7 +153,7 @@ gear360pano.sh /artifacts/in/PHOTO.JPG
 else ignored. Test on a couple of files first, then leave it running:
 
 ```bash
-gear360-watch --once -a -l    # drain the current backlog and exit
+gear360-watch --once -a -l    # drain (upscales by default) the current backlog and exit
 gear360-watch -a -l           # then watch forever (Ctrl-C, or TERM, to stop)
 gear360-watch -h              # all flags
 ```
@@ -294,11 +294,12 @@ ffmpeg -i /artifacts/in/CLIP.MP4 -vf scale=3840:1920:flags=lanczos \
        -c:v libx264 -crf 16 -preset medium -c:a copy /workspace/scratch/CLIP.MP4
 stitch-gear360.sh -a -l /workspace/scratch/CLIP.MP4 /artifacts/out/CLIP_stitched.mp4
 
-# or let the watcher do it
-gear360-watch --once -a -l --upscale
+# or let the watcher do it — upscaling is the DEFAULT
+gear360-watch --once -a -l
+gear360-watch --once -a -l --no-upscale   # faster, visibly worse seams
 ```
 
-`--upscale` stages the enlarged copy inside the scratch work dir under the
+Upscaling stages the enlarged copy inside the scratch work dir under the
 original filename, stitches from it, and names the result after the *original*
 source. Anything already 3840x1920, or not 2:1, is passed through untouched; a
 failed upscale falls back to stitching natively rather than failing the file.

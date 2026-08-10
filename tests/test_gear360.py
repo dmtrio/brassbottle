@@ -241,7 +241,7 @@ class WatcherTests(unittest.TestCase):
             failed=str(self.root / "failed"), scratch=str(self.root / "scratch"),
             complete=None, state=str(self.root / "state"),
             interval=1, settle=0, once=True, force=False, passthrough=[],
-            upscale=False,
+            upscale=True,
         )
         self.w = gear360_watch.Watcher(self.args)
 
@@ -277,8 +277,20 @@ class WatcherTests(unittest.TestCase):
         self.assertIsNone(
             self.w.build_command(self._src("notes.txt"), self.root / "w"))
 
-    def test_upscale_off_uses_the_source_untouched(self):
+    def test_upscale_is_on_by_default(self):
+        # Asserted against the real CLI, not a hand-built Namespace.
+        help_text = subprocess.check_output(
+            [sys.executable, str(PLUGIN / "gear360_watch.py"), "--help"], text=True)
+        self.assertIn("--no-upscale", help_text)
+        self.assertNotIn("--upscale ", help_text)
+
+    def test_no_upscale_uses_the_source_untouched(self):
+        self.args.upscale = False
         src = self._src()
+        self.assertEqual(self.w.prepare_source(src, self.root / "work"), src)
+
+    def test_photos_are_never_upscaled(self):
+        src = self._src("360_0301.JPG")
         self.assertEqual(self.w.prepare_source(src, self.root / "work"), src)
 
     def test_staged_upscale_is_not_shipped_as_a_result(self):
