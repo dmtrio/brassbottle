@@ -1,0 +1,26 @@
+# gear360 — Samsung Gear 360 (SM-C200) dual-fisheye → equirectangular toolchain.
+# NOT an MCP server: this is the binary-only plugin shape (see plugins/ngrok),
+# minus the secret. No `mcp:`, no `secrets:`, no `run.sh`, no `host_port:`.
+#
+# Because there is no server and no secret, listing `gear360` in a manifest's
+# `plugins:` has exactly one effect: AGENTS.md is merged into that container's
+# agent rules. The install below bakes into EVERY dev-agent image regardless
+# (the Dockerfile bake loop globs all of plugins/*/plugin.yml) — that is the
+# standing cost of this plugin, documented in README.md.
+#
+# No runtime `egress:` grant: stitching is pure local compute. Everything is
+# fetched at build time, where the network is unrestricted.
+#
+# The real work lives in sibling files rather than a wall of bash in this
+# string. `COPY plugins /opt/plugins` in the Dockerfile puts them in the image,
+# so the install can just call them, and gear360_watch.py / gear360_doctor.py
+# stay ordinary scripts you can read, lint and run directly.
+#
+#   install.sh          apt, sources, build, PATH wiring  (baked at build)
+#   gear360_doctor.py   reports what actually made it in
+#   gear360_watch.py    drop-folder ingest
+#
+# (plugins/*/README.md is in .dockerignore, so editing docs does not rebuild.)
+
+install: |
+  bash /opt/plugins/gear360/install.sh
