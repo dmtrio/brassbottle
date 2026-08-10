@@ -45,6 +45,7 @@ bash embedded in a YAML string.
 | `gear360_doctor.py` | runtime (`gear360-doctor`) | reports what actually made it in |
 | `gear360_watch.py` | runtime (`gear360-watch`) | drop-folder ingest |
 | `test_gear360.py` | host | 29 unit tests; also loaded by `tests/` |
+| `LOG.md` | — | change history: what broke, what was patched, why |
 
 The two runtime tools are **symlinked** from `/opt/plugins/gear360/`, not
 copied, so there is one copy in the image and one place to edit. Tests live
@@ -219,6 +220,9 @@ ffmpeg -i /artifacts/in/CLIP.MP4 \
    upload, to judge the result.
 
 ## Upstream patches
+
+For the story behind each of these — how they were found and what the symptoms
+looked like — see [`LOG.md`](LOG.md).
 
 `install.sh` applies `patch_upstream.py` to the vendored clones before building.
 Eight fixes across three files; each needs a unique exact match or it is
