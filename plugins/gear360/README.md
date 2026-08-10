@@ -40,12 +40,17 @@ bash embedded in a YAML string.
 
 | File | Runs | Does |
 |---|---|---|
-| `install.sh` | image build | apt, sources, compile, `PATH` wiring |
+| `install.sh` | image build | apt, sources, patches, compile, `PATH` wiring |
+| `patch_upstream.py` | image build | 8 exact-match patches to the vendored clones |
 | `gear360_doctor.py` | runtime (`gear360-doctor`) | reports what actually made it in |
 | `gear360_watch.py` | runtime (`gear360-watch`) | drop-folder ingest |
+| `test_gear360.py` | host | 29 unit tests; also loaded by `tests/` |
 
-The two Python tools are **symlinked** from `/opt/plugins/gear360/`, not copied,
-so there is one copy in the image and one place to edit.
+The two runtime tools are **symlinked** from `/opt/plugins/gear360/`, not
+copied, so there is one copy in the image and one place to edit. Tests live
+beside the code and run either from this directory
+(`python3 -m unittest test_gear360`) or as part of the repo suite, which
+`tests/test_gear360.py` bridges into. They are excluded from the image.
 
 ## Cost
 
@@ -140,7 +145,7 @@ gear360-doctor
 # inputs concatenate into one output.
 #   -a  refine alignment (use it — biggest seam-quality lever)
 #   -l  light compensation
-stitch-gear360.sh -a -l /artifacts/in/CLIP.MP4 /artifacts/out/CLIP_360.mp4
+stitch-gear360.sh -a -l /artifacts/in/CLIP.MP4 /artifacts/out/CLIP_stitched.mp4
 
 # photos
 gear360pano.sh /artifacts/in/PHOTO.JPG
@@ -153,7 +158,7 @@ gear360pano.sh /artifacts/in/PHOTO.JPG
 else ignored. Test on a couple of files first, then leave it running:
 
 ```bash
-gear360-watch --once -a -l    # drain (upscales by default) the current backlog and exit
+gear360-watch --once -a -l    # drain the current backlog and exit
 gear360-watch -a -l           # then watch forever (Ctrl-C, or TERM, to stop)
 gear360-watch -h              # all flags
 ```
@@ -172,8 +177,14 @@ Behaviour worth knowing:
   the SD card would get stitched half-written.
 - **Output is atomic.** Results are built in scratch and moved into the output
   folder only on success, so a partial result never appears there.
-- **Sources are never modified, moved, or deleted.** The input folder may be
-  the only copy off the SD card.
+- **Upscaling to 3840x1920 is the default** for anything smaller and 2:1 — it
+  is the biggest seam-quality lever on this camera (see "Seam quality").
+  `--no-upscale` opts out. Input already at 3840x1920 passes through untouched.
+- **Finished sources are moved to `<input>/complete`**, so the input folder
+  shows only what is left to do. Moved, never deleted or rewritten — that
+  folder may be the only copy off the SD card. Name collisions are suffixed.
+- **Results are named `<source>_stitched.<ext>`**, including photos, whose
+  own output name from `gear360pano` is not trusted.
 - **Failures are not retried.** A `.log` lands in `/artifacts/failed/` and the
   file is skipped until you clear its marker.
 
@@ -184,6 +195,7 @@ State lives in `/artifacts/.gear360/`:
 | `done/<file>` | fingerprint of a completed file — delete to re-stitch |
 | `failed/<file>` | a failure — delete to retry after fixing the cause |
 | `logs/<file>.log` | full output of the last attempt, success or not |
+| `lock` | `flock` target; one watcher per state dir |
 
 Replacing a file with a different one of the same name changes its fingerprint,
 so it gets picked up again automatically.
