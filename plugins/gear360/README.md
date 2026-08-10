@@ -289,9 +289,19 @@ pixels through the stitcher, so it is a quality/time trade rather than a
 default:
 
 ```bash
-ffmpeg -i in.MP4 -vf scale=3840:1920:flags=lanczos -c:v libx264 -crf 16 -c:a copy up.MP4
-stitch-gear360.sh -a -l up.MP4 out_stitched.mp4
+# by hand — keep the ORIGINAL filename, the wrapper checks it
+ffmpeg -i /artifacts/in/CLIP.MP4 -vf scale=3840:1920:flags=lanczos \
+       -c:v libx264 -crf 16 -preset medium -c:a copy /workspace/scratch/CLIP.MP4
+stitch-gear360.sh -a -l /workspace/scratch/CLIP.MP4 /artifacts/out/CLIP_stitched.mp4
+
+# or let the watcher do it
+gear360-watch --once -a -l --upscale
 ```
+
+`--upscale` stages the enlarged copy inside the scratch work dir under the
+original filename, stitches from it, and names the result after the *original*
+source. Anything already 3840x1920, or not 2:1, is passed through untouched; a
+failed upscale falls back to stitching natively rather than failing the file.
 
 ## Notes
 

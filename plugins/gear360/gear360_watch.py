@@ -29,6 +29,9 @@ PHOTO_EXT = {".jpg", ".jpeg"}
 RESULT_EXT = {".mp4", ".jpg", ".jpeg", ".tif", ".avi"}
 # Appended to every result, so a stitched file is never mistaken for a source.
 STITCHED_SUFFIX = "_stitched"
+# Upscaled input is staged here. Excluded from result harvesting — it is an
+# .mp4 sitting under the work dir, so it would otherwise ship as a "result".
+STAGING_DIR = "upscaled"
 
 running = True
 
@@ -75,13 +78,61 @@ class Watcher:
                 continue
         return False
 
-    def build_command(self, src: Path, work: Path) -> list[str] | None:
+    def probe_size(self, src: Path) -> tuple[int, int] | None:
+        try:
+            out = subprocess.check_output(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0",
+                 str(src)], text=True).strip()
+            w, h = out.split("x")[:2]
+            return int(w), int(h)
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            return None
+
+    def prepare_source(self, src: Path, work: Path) -> Path:
+        """Optionally upscale to 3840x1920 before stitching.
+
+        fisheyeStitcher's adaptive-alignment constants are empirical for
+        3840x1920 and only approximate when scaled to a smaller frame, so
+        upscaling first measurably tightens the seam on 2560x1280 footage. It
+        costs ~2.25x the pixels through the stitcher, hence opt-in.
+
+        The copy keeps the ORIGINAL filename: stitch-gear360.sh validates that
+        it looks like an untouched SM-C200 name.
+        """
+        if not self.args.upscale or src.suffix.lower() not in VIDEO_EXT:
+            return src
+        size = self.probe_size(src)
+        if size is None or size == (3840, 1920):
+            return src
+        w, h = size
+        if w != h * 2:            # not dual-fisheye; let the wrapper reject it
+            return src
+
+        staged = work / STAGING_DIR
+        staged.mkdir(parents=True, exist_ok=True)
+        dest = staged / src.name
+        log(f"  upscaling {w}x{h} → 3840x1920")
+        rc = subprocess.call(
+            ["ffmpeg", "-v", "error", "-y", "-i", str(src),
+             "-vf", "scale=3840:1920:flags=lanczos",
+             "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+             "-c:a", "copy", str(dest)])
+        if rc != 0 or not dest.exists():
+            log("  upscale failed — stitching at native resolution instead")
+            return src
+        return dest
+
+    def build_command(self, src: Path, work: Path,
+                      input_path: Path | None = None) -> list[str] | None:
         ext = src.suffix.lower()
+        source = input_path or src
         if ext in VIDEO_EXT:
             cmd = ["stitch-gear360.sh", *self.args.passthrough]
             if self.args.force:
                 cmd.append("--force")
-            return [*cmd, str(src), str(work / f"{src.stem}{STITCHED_SUFFIX}.mp4")]
+            # Output is named from the ORIGINAL source, not the staged copy.
+            return [*cmd, str(source), str(work / f"{src.stem}{STITCHED_SUFFIX}.mp4")]
         if ext in PHOTO_EXT:
             # gear360pano's output naming/location is not something to assume:
             # run it inside an empty scratch dir and harvest what it produced.
@@ -94,7 +145,7 @@ class Watcher:
         work.mkdir(parents=True)
         logfile = self.logs / f"{src.name}.log"
 
-        cmd = self.build_command(src, work)
+        cmd = self.build_command(src, work, self.prepare_source(src, work))
         if cmd is None:
             shutil.rmtree(work, ignore_errors=True)
             return True
@@ -108,7 +159,8 @@ class Watcher:
             rc = subprocess.call(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT)
 
         produced = [p for p in sorted(work.rglob("*"))
-                    if p.is_file() and p.suffix.lower() in RESULT_EXT]
+                    if p.is_file() and p.suffix.lower() in RESULT_EXT
+                    and STAGING_DIR not in p.relative_to(work).parts]
         if rc == 0 and not produced:
             rc = 1
             with logfile.open("a") as fh:
@@ -234,6 +286,9 @@ def main() -> int:
     p.add_argument("--settle", type=int, default=3,
                    help="seconds a file must stop changing before it is "
                         "considered fully copied (default: 3)")
+    p.add_argument("--upscale", action="store_true",
+                   help="upscale non-3840x1920 video to 3840x1920 before "
+                        "stitching — tighter seams, ~2.25x the stitch time")
     p.add_argument("--once", action="store_true",
                    help="drain the current backlog, then exit")
     p.add_argument("-f", "--force", action="store_true",
