@@ -135,9 +135,11 @@ class Watcher:
             # Output is named from the ORIGINAL source, not the staged copy.
             return [*cmd, str(source), str(work / f"{src.stem}{STITCHED_SUFFIX}.mp4")]
         if ext in PHOTO_EXT:
-            # gear360pano's output naming/location is not something to assume:
-            # run it inside an empty scratch dir and harvest what it produced.
-            return ["gear360pano.sh", str(src)]
+            # gear360pano writes to $DIR/html/data relative to the SCRIPT, not
+            # to the working directory — running it in an empty scratch dir is
+            # not enough, the result lands in /opt/gear360/gear360pano/html/data
+            # and the harvest finds nothing. -o puts it where we can collect it.
+            return ["gear360pano.sh", "-o", str(work), str(src)]
         return None
 
     def process(self, src: Path) -> bool:
