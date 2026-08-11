@@ -103,11 +103,20 @@ volumes:
 Compose prefixes the name with the project, so `cbm-cache` is really
 `dev-agent-<container>_cbm-cache` — **per container**, exactly like the auth
 volumes, and removed by `./down.sh <container> --purge` (never by a plain
-`down`). Two containers running the same plugin get separate volumes; two
-*plugins* may not share a volume name or a mountpoint, and neither may collide
-with a compose-owned one (`workspace`, the auth volumes, `/artifacts`, …) —
-compose merges by key, so a collision would silently remount a real directory
-rather than fail.
+`down`). Two containers running the same plugin get separate volumes.
+
+The rules, all enforced by `src/manifest.py` at derive time:
+
+| Rule | Why |
+|---|---|
+| Name: ≥2 chars, opens on a letter or digit, `[A-Za-z0-9_-]` | Compose reads a 1-character source as a Windows drive letter — the mount silently loses its `source`, `compose config` still exits 0, and only `docker up` fails, naming a path nobody wrote. |
+| Path: under `/home/coder/`, and not `/home/coder` itself | Everything runs as coder, so that is where plugin state belongs. It also makes `/usr/local/bin`, `/etc`, and the workspace tree unreachable — a volume there freezes or hides real image content. |
+| Path charset: letters, digits, `. _ - + @` | Compose interpolates `$VAR` in **every** `-f` file, so a `$` lets the real mount target differ from the declared one; the entrypoint's word-split loop also globs, so a `*` would chown a different directory than the one mounted. |
+| No overlap with a compose mount (`workspace`, the auth volumes, `/artifacts`, …) — as the same path, a **parent**, or a **child** | Compose merges by key. A volume at a parent freezes that whole tree (a rebuilt image never reaches the container again); at a child it hides live content. Both are silent, surfacing only as lost auth or missing repos. |
+| No overlap with another enabled plugin's mount, same three ways | Same failure, between plugins. |
+
+Overlap is compared component-wise, so `/home/coder/.curse` is not treated as
+containing `/home/coder/.cursor`.
 
 Nothing outside `plugins/<name>/` names the plugin. At `up`, `src/manifest.py`
 renders the volumes of the **enabled** plugins into a generated compose overlay
@@ -120,7 +129,9 @@ volume from the image directory it covers, *including ownership*, so a
 mountpoint the image doesn't contain would arrive root-owned and the coder-run
 agent could not write to it. The overlay passes the paths to the entrypoint as
 `PLUGIN_VOLUME_PATHS` and it chowns them to coder as root, before any agent
-starts. A plugin declares the volume; it does not have to `mkdir` anything.
+starts — walking up to fix the missing **parents** docker created root-owned
+too, stopping at the first directory that is already coder's. So a plugin
+declares the volume and does not have to `mkdir` anything, at any depth.
 
 ## `plugin_ports` — per-container host port
 

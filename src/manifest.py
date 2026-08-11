@@ -91,9 +91,31 @@ COMPOSE_MOUNT_PATHS = {
     "/home/coder/.gemini", "/home/coder/.cursor", "/home/coder/.config/cursor",
     "/home/coder/.config/gh",
 }
-# A container mountpoint. Absolute, no whitespace (the entrypoint word-splits
-# PLUGIN_VOLUME_PATHS), no ':' (compose's own mount-spec separator), no '..'.
-VOLUME_PATH_RE = re.compile(r"^(/[^\s:/]+)+\Z")
+# A container mountpoint, restricted to a deliberately boring charset. Not
+# paranoia about a hostile plugin.yml (install: already runs arbitrary code at
+# build) — the point is that this value survives three hops that each read it
+# differently, and a permissive charset makes the validator advertise
+# guarantees the pipeline does not keep:
+#   • compose interpolates $VAR/${VAR} in EVERY -f file before parsing, so a
+#     '$' lets the final mount target differ from the declared one (and can
+#     pull in a value from the secrets.env up.sh has sourced);
+#   • the entrypoint's word-split loop also glob-expands, so '*' '?' '['
+#     chown a different path than the one that was mounted;
+#   • ':' is compose's own mount-spec separator and whitespace breaks the
+#     word split.
+# Alphanumerics plus . _ - + @ covers every real cache/state directory.
+VOLUME_PATH_SEGMENT = r"[A-Za-z0-9._@+-]+"
+VOLUME_PATH_RE = re.compile(r"^(/%s)+\Z" % VOLUME_PATH_SEGMENT)
+# Volume mountpoints live under the coder home. Everything in the container
+# runs as coder, so that is where plugin state belongs — and confining it there
+# rules out mounting over /usr/local/bin, /etc, or the workspace tree, none of
+# which a volume can shadow without freezing or hiding real content.
+VOLUME_ROOT = "/home/coder"
+# Compose reads a 1-character source as a Windows drive letter, silently
+# yielding a mount with a target of "v:/path" and NO source — `docker compose
+# config` accepts it and only `up` fails, with a daemon error naming a path
+# nobody wrote. Require two characters, opening on an alphanumeric.
+VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]+\Z")
 # Directory name under /workspace/repos/<name> — no slash, no leading dot/dash.
 REPO_DIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
 # Forge org/user name (git.orgs key). GitHub's own rule: alphanumerics and
@@ -207,6 +229,17 @@ def agent_for_ref(ref):
         if ref.endswith(suffix):
             return agent
     return ""
+
+
+def _path_overlaps(a, b):
+    """True when two absolute paths are the same or one contains the other.
+
+    Component-wise, never str.startswith: '/home/coder/.cursor' is not inside
+    '/home/coder/.curse', but a prefix test would say it is — and the reverse
+    mistake (missing a real nesting) is what lets a volume shadow a live tree.
+    """
+    pa, pb = a.split("/"), b.split("/")
+    return pa[:len(pb)] == pb or pb[:len(pa)] == pa
 
 
 def plugin_compose_overlay(volumes):
@@ -742,9 +775,9 @@ def derive(manifest, plugin_files, env):
             raise ManifestError(
                 f"plugin '{p}' volumes must be a map of NAME: /container/path")
         for vname, vpath in vols.items():
-            if not NAME_RE.match(vname):
+            if not VOLUME_NAME_RE.match(vname):
                 raise ManifestError(
-                    f"plugin '{p}' volume '{vname}': illegal characters in name (allowed: letters, digits, underscore, dash — it becomes a compose volume key)")
+                    f"plugin '{p}' volume '{vname}': name must be at least two characters, start with a letter or digit, and use only letters, digits, underscore, dash (it becomes a compose volume key)")
             if vname in COMPOSE_VOLUME_NAMES:
                 raise ManifestError(
                     f"plugin '{p}' volume '{vname}': that name is already a compose volume (compose would merge into it and remount a real directory)")
@@ -754,13 +787,22 @@ def derive(manifest, plugin_files, env):
             vpath = _scalar(vpath, f"plugin '{p}' volumes.{vname}")
             if not VOLUME_PATH_RE.match(vpath) or ".." in vpath.split("/"):
                 raise ManifestError(
-                    f"plugin '{p}' volume '{vname}': path '{vpath}' is not an absolute container path (no spaces, no ':', no '..', no trailing slash)")
-            if vpath in COMPOSE_MOUNT_PATHS:
+                    f"plugin '{p}' volume '{vname}': path '{vpath}' is not an absolute container path (letters, digits, and . _ - + @ only — no spaces, ':', '$', globs, '..', or trailing slash)")
+            if not _path_overlaps(vpath, VOLUME_ROOT) or vpath == VOLUME_ROOT:
                 raise ManifestError(
-                    f"plugin '{p}' volume '{vname}': path '{vpath}' is already mounted by compose")
-            if vpath in path_owner:
+                    f"plugin '{p}' volume '{vname}': path '{vpath}' must be under {VOLUME_ROOT}/ (a volume elsewhere would shadow image content or the workspace)")
+            # Not just an exact hit: a volume at a PARENT of a compose mount
+            # freezes that whole tree in a volume (a rebuilt image never reaches
+            # the container again), and one at a CHILD hides live content —
+            # both silent, both only visible as lost auth or missing repos.
+            clash = next((m for m in sorted(COMPOSE_MOUNT_PATHS) if _path_overlaps(vpath, m)), None)
+            if clash:
                 raise ManifestError(
-                    f"plugin '{p}' volume '{vname}': path '{vpath}' is already mounted by plugin '{path_owner[vpath]}'")
+                    f"plugin '{p}' volume '{vname}': path '{vpath}' collides with the compose mount '{clash}'")
+            clash = next((q for q in sorted(path_owner) if _path_overlaps(vpath, q)), None)
+            if clash:
+                raise ManifestError(
+                    f"plugin '{p}' volume '{vname}': path '{vpath}' collides with '{clash}', mounted by plugin '{path_owner[clash]}'")
             plugin_volumes[vname] = vpath
             volume_owner[vname] = p
             path_owner[vpath] = p

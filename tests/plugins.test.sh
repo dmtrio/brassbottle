@@ -123,8 +123,9 @@ MANIFEST_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manife
 [ "$COMPOSE_VOLS" = "$MANIFEST_VOLS" ] \
     && pass "manifest.py COMPOSE_VOLUME_NAMES matches the compose file" \
     || fail "compose volumes '$COMPOSE_VOLS' != manifest.py reserved '$MANIFEST_VOLS'"
-# Mount targets: everything the service mounts, named volume or bind, minus the
-# :ro ones (a plugin remounting a read-only path is the same silent breakage).
+# Mount targets: everything the service mounts, named volume or bind, INCLUDING
+# the :ro ones — a plugin remounting a read-only path (/agent-rules, the keys
+# dir) is the same silent breakage as remounting a writable one.
 COMPOSE_TARGETS=$(yq -r '.services.dev-agent.volumes[]' compose/docker-compose.local.yml \
     | awk -F: '{print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
 MANIFEST_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_MOUNT_PATHS)) + " ")')
@@ -142,7 +143,10 @@ VOL_DERIVED=$(
 eval "$VOL_DERIVED"
 OVERLAY=$(mktemp -t plugins-overlay.XXXXXX)
 printf '%s\n' "$PLUGIN_COMPOSE_YAML" > "$OVERLAY"
-yq -e '.volumes["cbm-cache"] | has("x") | not' "$OVERLAY" >/dev/null 2>&1 \
+# has() on the PARENT map, not `.volumes["x"] | has(...)`: a missing key and a
+# key with an empty value are both null, so testing the child's contents passes
+# on any file at all — including one with no volumes: section.
+yq -e '.volumes | has("cbm-cache")' "$OVERLAY" >/dev/null 2>&1 \
     && pass "overlay declares the plugin's named volume" \
     || fail "overlay missing the cbm-cache volume: $(cat "$OVERLAY")"
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -151,13 +155,27 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     MERGED=$(CONTAINER_NAME=t USER_UID=1000 USER_GID=1000 RULES_PATH=/tmp KEYS_PATH=/tmp \
         ARTIFACTS_PATH=/tmp BROWSER_TMP_PATH=/tmp IMAGE_TAG=t MEM_LIMIT=2g \
         docker compose -p plugins-test --project-directory "$SCRIPT_DIR" \
-            -f compose/docker-compose.local.yml -f "$OVERLAY" config 2>&1) \
-        && printf '%s' "$MERGED" | grep -q 'cbm-cache' \
+            -f compose/docker-compose.local.yml -f "$OVERLAY" config --format json 2>&1) \
         && pass "compose accepts the generated overlay (merged with the real file)" \
         || fail "compose rejected the generated overlay: $(printf '%s' "$MERGED" | head -3)"
-    printf '%s' "$MERGED" | grep -q 'PLUGIN_VOLUME_PATHS' \
+    # Assert the RESOLVED mount, not just that the string appears: compose
+    # parses a 1-character source as a Windows drive letter, producing a mount
+    # with the whole spec as `target` and NO `source`. That config exits 0 and
+    # still contains the name — only `docker up` fails, on someone else's
+    # machine. Pin source AND target so that shape can never pass again.
+    printf '%s' "$MERGED" | jq -e '
+        .services["dev-agent"].volumes
+        | map(select(.source == "cbm-cache"))
+        | length == 1
+        and .[0].target == "/home/coder/.cache/codebase-memory-mcp"
+        and .[0].type == "volume"' >/dev/null 2>&1 \
+        && pass "merged mount resolves to source=cbm-cache with the declared target" \
+        || fail "mount did not resolve: $(printf '%s' "$MERGED" | jq -c '.services["dev-agent"].volumes' 2>/dev/null)"
+    printf '%s' "$MERGED" | jq -e '
+        .services["dev-agent"].environment.PLUGIN_VOLUME_PATHS
+        == "/home/coder/.cache/codebase-memory-mcp"' >/dev/null 2>&1 \
         && pass "merged config keeps PLUGIN_VOLUME_PATHS for the entrypoint" \
-        || fail "PLUGIN_VOLUME_PATHS lost when compose merged the overlay"
+        || fail "PLUGIN_VOLUME_PATHS lost/mangled when compose merged the overlay"
 else
     echo "  ~ SKIP: docker compose unavailable (overlay merge unverified)"
 fi
@@ -167,6 +185,54 @@ rm -f "$OVERLAY"
 grep -q 'PLUGIN_VOLUME_PATHS' src/entrypoint.sh \
     && pass "entrypoint consumes PLUGIN_VOLUME_PATHS" \
     || fail "src/entrypoint.sh no longer reads PLUGIN_VOLUME_PATHS (volumes mount root-owned)"
+# ...and run the REAL block (extracted from entrypoint.sh, not a copy of it) as
+# root in a container. A grep alone cannot see word splitting, globbing, or the
+# parent walk — the three things that decide whether the mountpoint the agent
+# actually writes to ends up coder-owned.
+if command -v docker >/dev/null 2>&1; then
+    ENTRY_BLOCK=$(mktemp -t entry-block.XXXXXX)
+    awk '/^# ── Plugin-declared volume mountpoints/,/^set \+f$/' src/entrypoint.sh > "$ENTRY_BLOCK"
+    [ -s "$ENTRY_BLOCK" ] && grep -q 'set +f' "$ENTRY_BLOCK" \
+        || fail "could not extract the volume block from src/entrypoint.sh (markers moved)"
+    VOL_OUT=$(docker run --rm -v "$ENTRY_BLOCK:/block.sh:ro" ubuntu:24.04 bash -c '
+        set -e
+        # ubuntu:24.04 ships its own uid-1000 user; the image builds coder there.
+        userdel -f ubuntu 2>/dev/null || true
+        useradd -m -u 1000 coder
+        # A real glob target the loop must NOT touch, and a deep path whose
+        # parents docker would have created root-owned.
+        mkdir -p /home/coder/decoy && chown root:root /home/coder/decoy
+        mkdir -p /home/coder/.local && chown coder:coder /home/coder/.local
+        mkdir -p "/home/coder/.local/state/deep/db" /home/coder/plain
+        chown -R root:root /home/coder/.local/state /home/coder/plain
+        export PLUGIN_VOLUME_PATHS="/home/coder/plain /home/coder/.local/state/deep/db /home/coder/*"
+        . /block.sh
+        echo "mountpoint=$(stat -c %U /home/coder/plain)"
+        echo "deep=$(stat -c %U /home/coder/.local/state/deep/db)"
+        echo "deep_parent=$(stat -c %U /home/coder/.local/state/deep)"
+        echo "walk_stopped=$(stat -c %U /home/coder/.local)"
+        echo "glob_literal=$([ -d "/home/coder/*" ] && echo yes || echo no)"
+        echo "decoy=$(stat -c %U /home/coder/decoy)"
+    ' 2>&1) || fail "entrypoint volume block failed to run: $(printf '%s' "$VOL_OUT" | tail -3)"
+    printf '%s' "$VOL_OUT" | grep -q 'mountpoint=coder' \
+        && pass "entrypoint chowns each declared mountpoint to coder" \
+        || fail "mountpoint not chowned: $VOL_OUT"
+    printf '%s' "$VOL_OUT" | grep -q 'deep=coder' && printf '%s' "$VOL_OUT" | grep -q 'deep_parent=coder' \
+        && pass "entrypoint chowns the root-owned parents docker created" \
+        || fail "parent dirs left root-owned: $VOL_OUT"
+    printf '%s' "$VOL_OUT" | grep -q 'walk_stopped=coder' \
+        && pass "parent walk stops at the first coder-owned ancestor" \
+        || fail "parent walk climbed too far: $VOL_OUT"
+    # The loop must word-split but NOT glob: with globbing on, '/home/coder/*'
+    # expands and chowns unrelated directories while the mounted path is missed.
+    printf '%s' "$VOL_OUT" | grep -q 'glob_literal=yes' \
+        && printf '%s' "$VOL_OUT" | grep -q 'decoy=root' \
+        && pass "entrypoint does not glob-expand a path (set -f holds)" \
+        || fail "glob expanded — unrelated dirs chowned, real mountpoint missed: $VOL_OUT"
+    rm -f "$ENTRY_BLOCK"
+else
+    echo "  ~ SKIP: docker unavailable (entrypoint chown loop unverified)"
+fi
 grep -q 'PLUGIN_COMPOSE_YAML' up.sh \
     && pass "up.sh places the generated overlay" \
     || fail "up.sh no longer consumes PLUGIN_COMPOSE_YAML (declared volumes never mount)"
