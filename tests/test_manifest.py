@@ -997,33 +997,83 @@ class TestPluginVolumes(unittest.TestCase):
         d = derive({"plugins": ["p"]}, plugin_files=files)
         self.assertIn("  state:", d["PLUGIN_COMPOSE_YAML"])
 
+    BAD_PATH = ("plugin 'p' volume 'vol': path '%s' is not an absolute container path "
+                "(letters, digits, and . _ - + @ only — no spaces, ':', '$', globs, "
+                "'..', or trailing slash)")
+
     ERROR_CASES = [
         ("not a map", {"volumes": ["cbm-cache"]},
          "plugin 'p' volumes must be a map of NAME: /container/path"),
         ("name charset", {"volumes": {"bad name": "/home/coder/x"}},
-         "plugin 'p' volume 'bad name': illegal characters in name (allowed: letters, "
-         "digits, underscore, dash — it becomes a compose volume key)"),
+         "plugin 'p' volume 'bad name': name must be at least two characters, start "
+         "with a letter or digit, and use only letters, digits, underscore, dash "
+         "(it becomes a compose volume key)"),
+        # Compose reads a 1-char source as a Windows drive letter: the mount
+        # loses its source, `compose config` still exits 0, and only `up` fails.
+        ("single-character name", {"volumes": {"v": "/home/coder/x"}},
+         "plugin 'p' volume 'v': name must be at least two characters, start "
+         "with a letter or digit, and use only letters, digits, underscore, dash "
+         "(it becomes a compose volume key)"),
+        ("name starting with a dash", {"volumes": {"-v": "/home/coder/x"}},
+         "plugin 'p' volume '-v': name must be at least two characters, start "
+         "with a letter or digit, and use only letters, digits, underscore, dash "
+         "(it becomes a compose volume key)"),
         ("compose volume name", {"volumes": {"workspace": "/home/coder/x"}},
          "plugin 'p' volume 'workspace': that name is already a compose volume "
          "(compose would merge into it and remount a real directory)"),
-        ("relative path", {"volumes": {"v": "home/coder/x"}},
-         "plugin 'p' volume 'v': path 'home/coder/x' is not an absolute container "
-         "path (no spaces, no ':', no '..', no trailing slash)"),
-        ("path with colon", {"volumes": {"v": "/home/coder/x:ro"}},
-         "plugin 'p' volume 'v': path '/home/coder/x:ro' is not an absolute container "
-         "path (no spaces, no ':', no '..', no trailing slash)"),
-        ("path with space", {"volumes": {"v": "/home/coder/my cache"}},
-         "plugin 'p' volume 'v': path '/home/coder/my cache' is not an absolute container "
-         "path (no spaces, no ':', no '..', no trailing slash)"),
-        ("path traversal", {"volumes": {"v": "/home/coder/../etc"}},
-         "plugin 'p' volume 'v': path '/home/coder/../etc' is not an absolute container "
-         "path (no spaces, no ':', no '..', no trailing slash)"),
-        ("trailing slash", {"volumes": {"v": "/home/coder/x/"}},
-         "plugin 'p' volume 'v': path '/home/coder/x/' is not an absolute container "
-         "path (no spaces, no ':', no '..', no trailing slash)"),
-        ("compose mount path", {"volumes": {"v": "/home/coder/.claude"}},
-         "plugin 'p' volume 'v': path '/home/coder/.claude' is already mounted by compose"),
+        ("relative path", {"volumes": {"vol": "home/coder/x"}}, BAD_PATH % "home/coder/x"),
+        ("path with colon", {"volumes": {"vol": "/home/coder/x:ro"}},
+         BAD_PATH % "/home/coder/x:ro"),
+        ("path with space", {"volumes": {"vol": "/home/coder/my cache"}},
+         BAD_PATH % "/home/coder/my cache"),
+        ("path traversal", {"volumes": {"vol": "/home/coder/../etc"}},
+         BAD_PATH % "/home/coder/../etc"),
+        ("trailing slash", {"volumes": {"vol": "/home/coder/x/"}}, BAD_PATH % "/home/coder/x/"),
+        # compose interpolates $VAR in every -f file, so a '$' lets the real
+        # mount target differ from the declared one (and can pull in a value
+        # from the secrets.env up.sh sourced).
+        ("path with a variable reference", {"volumes": {"vol": "/home/coder/${HOME}"}},
+         BAD_PATH % "/home/coder/${HOME}"),
+        ("path with a bare dollar", {"volumes": {"vol": "/home/coder/$HOME"}},
+         BAD_PATH % "/home/coder/$HOME"),
+        # The entrypoint's loop must word-split, which also globs: a '*' would
+        # chown whatever matches instead of the path that was mounted.
+        ("path with a glob star", {"volumes": {"vol": "/home/coder/*"}},
+         BAD_PATH % "/home/coder/*"),
+        ("path with a glob class", {"volumes": {"vol": "/home/coder/ca[ch]e"}},
+         BAD_PATH % "/home/coder/ca[ch]e"),
+        ("compose mount path", {"volumes": {"vol": "/home/coder/.claude"}},
+         "plugin 'p' volume 'vol': path '/home/coder/.claude' collides with the "
+         "compose mount '/home/coder/.claude'"),
+        # A volume at a PARENT of a compose mount freezes that tree in a volume;
+        # a rebuilt image never reaches the container again.
+        ("parent of a compose mount", {"volumes": {"vol": "/home/coder/.config"}},
+         "plugin 'p' volume 'vol': path '/home/coder/.config' collides with the "
+         "compose mount '/home/coder/.config/cursor'"),
+        # ...and one at a CHILD hides live content inside it.
+        ("child of a compose mount", {"volumes": {"vol": "/home/coder/.claude/projects"}},
+         "plugin 'p' volume 'vol': path '/home/coder/.claude/projects' collides with "
+         "the compose mount '/home/coder/.claude'"),
+        ("child of the workspace volume", {"volumes": {"vol": "/workspace/repos"}},
+         "plugin 'p' volume 'vol': path '/workspace/repos' must be under /home/coder/ "
+         "(a volume elsewhere would shadow image content or the workspace)"),
+        ("the coder home itself", {"volumes": {"vol": "/home/coder"}},
+         "plugin 'p' volume 'vol': path '/home/coder' must be under /home/coder/ "
+         "(a volume elsewhere would shadow image content or the workspace)"),
+        ("a system binary dir", {"volumes": {"vol": "/usr/local/bin"}},
+         "plugin 'p' volume 'vol': path '/usr/local/bin' must be under /home/coder/ "
+         "(a volume elsewhere would shadow image content or the workspace)"),
+        ("etc", {"volumes": {"vol": "/etc"}},
+         "plugin 'p' volume 'vol': path '/etc' must be under /home/coder/ "
+         "(a volume elsewhere would shadow image content or the workspace)"),
     ]
+
+    def test_sibling_of_a_compose_mount_is_allowed(self):
+        # The overlap test is component-wise: '/home/coder/.curse' must not be
+        # read as containing '/home/coder/.cursor' the way a prefix test would.
+        d = derive({"plugins": ["p"]},
+                   plugin_files={"p": {"volumes": {"curse": "/home/coder/.curse"}}})
+        self.assertIn("  curse:", d["PLUGIN_COMPOSE_YAML"])
 
     def test_error_cases(self):
         for name, doc, message in self.ERROR_CASES:
@@ -1049,8 +1099,18 @@ class TestPluginVolumes(unittest.TestCase):
             derive({"plugins": ["a", "b"]}, plugin_files=files)
         self.assertEqual(
             str(cm.exception),
-            "plugin 'b' volume 'b-cache': path '/home/coder/cache' is already "
-            "mounted by plugin 'a'")
+            "plugin 'b' volume 'b-cache': path '/home/coder/cache' collides with "
+            "'/home/coder/cache', mounted by plugin 'a'")
+
+    def test_one_plugin_cannot_nest_inside_another(self):
+        files = {"a": {"volumes": {"a-cache": "/home/coder/cache"}},
+                 "b": {"volumes": {"b-cache": "/home/coder/cache/inner"}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["a", "b"]}, plugin_files=files)
+        self.assertEqual(
+            str(cm.exception),
+            "plugin 'b' volume 'b-cache': path '/home/coder/cache/inner' collides "
+            "with '/home/coder/cache', mounted by plugin 'a'")
 
     def test_disabled_plugin_does_not_collide(self):
         # Only ENABLED plugins contend for names — two containers can each run

@@ -21,15 +21,37 @@ su coder -c 'if [ ! -L /home/coder/.claude.json ]; then [ -f /home/coder/.claude
 # not contain arrives root-owned and the coder-run agent silently cannot write
 # to it (exactly how cursor-agent's auth failed to persist). We run as root
 # here, before any agent, so fix it centrally rather than trusting every plugin
-# to mkdir its own path at build. Non-recursive on purpose: only a freshly
-# created volume can be wrong, and it is empty by definition — a recursive chown
-# would walk a cache that can reach hundreds of MB on every boot.
+# to mkdir its own path at build.
+#
+# The loop is unquoted to word-split the space-separated list, which also turns
+# on globbing: `set -f` off/on around it so a path containing '*' can never
+# chown a DIFFERENT directory than the one that was mounted (manifest.py also
+# rejects glob characters — this is the second lock on the same door).
+#
+# Docker creates every missing PARENT of the mountpoint root-owned too, so walk
+# up from the mountpoint chowning root-owned ancestors and stop at the first one
+# that is already coder's. Without it a path one level below an existing image
+# directory leaves its parent unwritable — the plugin can write its own file but
+# not a sibling next to it. Bounded twice: manifest.py confines these paths to
+# /home/coder/, and the walk halts as soon as ownership is already right, so it
+# can never climb past the coder-owned home. Each chown is non-recursive: only
+# freshly created directories can be wrong, and they are empty by definition —
+# a recursive chown would walk a cache of hundreds of MB on every boot.
+set -f
 for _vol_path in ${PLUGIN_VOLUME_PATHS:-}; do
-    mkdir -p "$_vol_path" && chown coder:coder "$_vol_path" \
-        && echo "✓ Plugin volume: $_vol_path" \
-        || echo "⚠ Plugin volume $_vol_path: could not fix ownership"
+    if mkdir -p "$_vol_path"; then
+        _p="$_vol_path"
+        while [ "$_p" != "/" ] && [ "$(stat -c %u "$_p" 2>/dev/null || echo 1)" = 0 ]; do
+            chown coder:coder "$_p" || break
+            _p="$(dirname "$_p")"
+        done
+        echo "✓ Plugin volume: $_vol_path"
+    else
+        echo "⚠ Plugin volume $_vol_path: could not create mountpoint"
+    fi
 done
-unset _vol_path
+set +f
+unset _vol_path _p
 
 # ── Egress firewall (default ON — fail loud, never run open) ─────────────────
 if [ "${ENABLE_FIREWALL:-true}" = "true" ]; then
