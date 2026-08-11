@@ -953,5 +953,113 @@ class TestPluginPorts(unittest.TestCase):
             "declares no host_port to substitute")
 
 
+class TestPluginVolumes(unittest.TestCase):
+    """volumes: — per-container named volumes declared BY a plugin, rendered
+    into a generated compose overlay so compose/ never names a plugin."""
+
+    CACHE = {"install": "x", "mcp": {"cbm": {"command": "cbm"}},
+             "volumes": {"cbm-cache": "/home/coder/.cache/cbm"}}
+    FILES = {**PLUGIN_FILES, "cache": CACHE}
+
+    def _derive(self, man):
+        return derive(man, plugin_files=self.FILES)
+
+    def test_no_volumes_emits_empty_overlay(self):
+        # Empty (not a stub document) is the contract up.sh branches on: no
+        # declared volume must mean no -f at all, not an inert extra file.
+        self.assertEqual(derive({"plugins": ["serena"]})["PLUGIN_COMPOSE_YAML"], "")
+
+    def test_overlay_mounts_and_declares_the_volume(self):
+        yaml = self._derive({"plugins": ["cache"]})["PLUGIN_COMPOSE_YAML"]
+        self.assertIn("      - cbm-cache:/home/coder/.cache/cbm", yaml)
+        self.assertIn("volumes:\n  cbm-cache:", yaml)
+
+    def test_overlay_passes_paths_to_the_entrypoint(self):
+        # The entrypoint chowns these; without the env line a fresh volume
+        # mounts root-owned and the agent silently cannot write to it.
+        yaml = self._derive({"plugins": ["cache"]})["PLUGIN_COMPOSE_YAML"]
+        self.assertIn("      - PLUGIN_VOLUME_PATHS=/home/coder/.cache/cbm", yaml)
+
+    def test_volumes_of_unenabled_plugins_are_absent(self):
+        self.assertEqual(self._derive({"plugins": ["serena"]})["PLUGIN_COMPOSE_YAML"], "")
+
+    def test_overlay_is_independent_of_plugin_order(self):
+        two = {**self.FILES, "other-cache": {
+            "volumes": {"a-cache": "/home/coder/.cache/a"}}}
+        forward = derive({"plugins": ["cache", "other-cache"]}, plugin_files=two)
+        reverse = derive({"plugins": ["other-cache", "cache"]}, plugin_files=two)
+        self.assertEqual(forward["PLUGIN_COMPOSE_YAML"], reverse["PLUGIN_COMPOSE_YAML"])
+        self.assertIn("PLUGIN_VOLUME_PATHS=/home/coder/.cache/a /home/coder/.cache/cbm",
+                      forward["PLUGIN_COMPOSE_YAML"])
+
+    def test_a_plugin_may_declare_volumes_without_a_server(self):
+        files = {"p": {"volumes": {"state": "/home/coder/.local/state/p"}}}
+        d = derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertIn("  state:", d["PLUGIN_COMPOSE_YAML"])
+
+    ERROR_CASES = [
+        ("not a map", {"volumes": ["cbm-cache"]},
+         "plugin 'p' volumes must be a map of NAME: /container/path"),
+        ("name charset", {"volumes": {"bad name": "/home/coder/x"}},
+         "plugin 'p' volume 'bad name': illegal characters in name (allowed: letters, "
+         "digits, underscore, dash — it becomes a compose volume key)"),
+        ("compose volume name", {"volumes": {"workspace": "/home/coder/x"}},
+         "plugin 'p' volume 'workspace': that name is already a compose volume "
+         "(compose would merge into it and remount a real directory)"),
+        ("relative path", {"volumes": {"v": "home/coder/x"}},
+         "plugin 'p' volume 'v': path 'home/coder/x' is not an absolute container "
+         "path (no spaces, no ':', no '..', no trailing slash)"),
+        ("path with colon", {"volumes": {"v": "/home/coder/x:ro"}},
+         "plugin 'p' volume 'v': path '/home/coder/x:ro' is not an absolute container "
+         "path (no spaces, no ':', no '..', no trailing slash)"),
+        ("path with space", {"volumes": {"v": "/home/coder/my cache"}},
+         "plugin 'p' volume 'v': path '/home/coder/my cache' is not an absolute container "
+         "path (no spaces, no ':', no '..', no trailing slash)"),
+        ("path traversal", {"volumes": {"v": "/home/coder/../etc"}},
+         "plugin 'p' volume 'v': path '/home/coder/../etc' is not an absolute container "
+         "path (no spaces, no ':', no '..', no trailing slash)"),
+        ("trailing slash", {"volumes": {"v": "/home/coder/x/"}},
+         "plugin 'p' volume 'v': path '/home/coder/x/' is not an absolute container "
+         "path (no spaces, no ':', no '..', no trailing slash)"),
+        ("compose mount path", {"volumes": {"v": "/home/coder/.claude"}},
+         "plugin 'p' volume 'v': path '/home/coder/.claude' is already mounted by compose"),
+    ]
+
+    def test_error_cases(self):
+        for name, doc, message in self.ERROR_CASES:
+            with self.subTest(name):
+                with self.assertRaises(m.ManifestError) as cm:
+                    derive({"plugins": ["p"]}, plugin_files={"p": doc})
+                self.assertEqual(str(cm.exception), message)
+
+    def test_two_plugins_cannot_share_a_volume_name(self):
+        files = {"a": {"volumes": {"shared": "/home/coder/a"}},
+                 "b": {"volumes": {"shared": "/home/coder/b"}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["a", "b"]}, plugin_files=files)
+        self.assertEqual(
+            str(cm.exception),
+            "plugin 'b' volume 'shared': already declared by plugin 'a' "
+            "(two plugins cannot share one volume)")
+
+    def test_two_plugins_cannot_share_a_mount_path(self):
+        files = {"a": {"volumes": {"a-cache": "/home/coder/cache"}},
+                 "b": {"volumes": {"b-cache": "/home/coder/cache"}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["a", "b"]}, plugin_files=files)
+        self.assertEqual(
+            str(cm.exception),
+            "plugin 'b' volume 'b-cache': path '/home/coder/cache' is already "
+            "mounted by plugin 'a'")
+
+    def test_disabled_plugin_does_not_collide(self):
+        # Only ENABLED plugins contend for names — two containers can each run
+        # a different plugin that happens to want the same volume name.
+        files = {"a": {"volumes": {"shared": "/home/coder/a"}},
+                 "b": {"volumes": {"shared": "/home/coder/b"}}}
+        d = derive({"plugins": ["a"]}, plugin_files=files)
+        self.assertIn("  shared:", d["PLUGIN_COMPOSE_YAML"])
+
+
 if __name__ == "__main__":
     unittest.main()

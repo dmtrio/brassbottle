@@ -40,6 +40,7 @@ opinion.
 |---|---|---|---|
 | [`serena`](serena/) | local (stdio, baked) | — | [README](serena/README.md) |
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
+| [`codebase-memory`](codebase-memory/) | local (stdio, baked) | — | [README](codebase-memory/README.md) |
 | [`gateway`](gateway/) | remote HTTP | `./service.sh gateway` | [README](gateway/README.md) |
 | [`proxyman`](proxyman/) | remote HTTP | `./service.sh proxyman` | [README](proxyman/README.md) |
 | [`browser`](browser/) | remote HTTP | `./service.sh browser <container>` | [README](browser/README.md) |
@@ -60,6 +61,7 @@ one** of `command:` (local) or `url:` (remote).
 | `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists. |
 | `host_port: <int>` | Remote-only; opens the container firewall to `host.docker.internal:<port>`. A manifest `plugin_ports:` override replaces this default (see below). |
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
+| `volumes: {<name>: /container/path}` | Per-container named volume(s) for state that must outlive a container recreate — see below. Mounted only in containers that enable the plugin. |
 | `requires: [<SLOT>, …]` | Optional MCP-server field. The server is configured only for agents with every required slot; uncredentialed servers omit it. |
 | `egress: [host, …]` | Bare hostnames added to this container's firewall allowlist. |
 
@@ -85,6 +87,40 @@ mcp:
     headers: {Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"}
     requires: [MCP_GATEWAY_TOKEN]
 ```
+
+## `volumes` — state that survives a recreate
+
+Anything a plugin writes into the container's filesystem is image layer: it
+dies with the container, so every `./up.sh` costs a rebuild of that state (a
+code index, a downloaded model, a language-server cache). Declare a volume and
+it survives instead:
+
+```yaml
+volumes:
+  cbm-cache: /home/coder/.cache/codebase-memory-mcp
+```
+
+Compose prefixes the name with the project, so `cbm-cache` is really
+`dev-agent-<container>_cbm-cache` — **per container**, exactly like the auth
+volumes, and removed by `./down.sh <container> --purge` (never by a plain
+`down`). Two containers running the same plugin get separate volumes; two
+*plugins* may not share a volume name or a mountpoint, and neither may collide
+with a compose-owned one (`workspace`, the auth volumes, `/artifacts`, …) —
+compose merges by key, so a collision would silently remount a real directory
+rather than fail.
+
+Nothing outside `plugins/<name>/` names the plugin. At `up`, `src/manifest.py`
+renders the volumes of the **enabled** plugins into a generated compose overlay
+under `$BASE_PATH/compose/<container>.plugins.yml` and `up.sh` adds it as one
+more `-f`, the same way the ssh/mosh overlays work. De-list the plugin and the
+next `up` drops the mount (the volume itself waits for a `--purge`).
+
+Ownership is handled centrally, not by each plugin: docker seeds a fresh named
+volume from the image directory it covers, *including ownership*, so a
+mountpoint the image doesn't contain would arrive root-owned and the coder-run
+agent could not write to it. The overlay passes the paths to the entrypoint as
+`PLUGIN_VOLUME_PATHS` and it chowns them to coder as root, before any agent
+starts. A plugin declares the volume; it does not have to `mkdir` anything.
 
 ## `plugin_ports` — per-container host port
 
@@ -132,6 +168,9 @@ warns and yields no binding.
   and derives the wiring → `src/wire_plugins.py` (baked in the image) writes each
   agent's MCP config.
 - **`Dockerfile`** bakes every local plugin's `install:` block at build.
+- **Compose** gets a generated overlay when an enabled plugin declares
+  `volumes:` (`$BASE_PATH/compose/<container>.plugins.yml`, one more `-f`); the
+  entrypoint chowns its mountpoints to coder.
 - **`service.sh <name>`** runs `plugins/<name>/run.sh` on the host (resolves
   `BASE_PATH` and hands it down); it never touches docker.
 
@@ -164,9 +203,11 @@ otherwise leave the suite reporting OK while covering nothing.
    declares `secrets:`).
 4. **Local** plugin → rebuild the image so `install:` bakes. **Remote** → just
    rerun `./up.sh <container>`.
-5. Tests, if the plugin has logic worth pinning: `plugins/<name>/test_*.py`,
+5. Writes state worth keeping across a recreate (an index, a cache, a
+   downloaded model)? Declare `volumes:` (see above) — no compose edit.
+6. Tests, if the plugin has logic worth pinning: `plugins/<name>/test_*.py`,
    discovered automatically (see above).
-6. Add `plugins/<name>/README.md` (human docs) and, if the agent needs guidance
+7. Add `plugins/<name>/README.md` (human docs) and, if the agent needs guidance
    on *using* the tools, `plugins/<name>/AGENTS.md` (merged into enabled
    containers' rules — see above). The fragment is baked with the image, so a
    change to it needs a rebuild, like `install:`.

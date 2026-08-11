@@ -1,0 +1,59 @@
+# codebase-memory — local stdio MCP tool, baked into the image. See ./README.md.
+#
+# Codebase knowledge graph (tree-sitter over 158 languages) from
+# DeusData/codebase-memory-mcp: one statically-linked native binary, no language
+# runtime, no API key, no host service, no secret. It makes no network request
+# of its own accord once installed, so this plugin declares NO egress: — the
+# runtime firewall never has to open for it.
+#
+# We unpack the release archive ourselves instead of running upstream's
+# install.sh or `codebase-memory-mcp install`. That command's whole job is to
+# write MCP entries, skills and lifecycle hooks into every agent config it
+# detects — exactly the files src/wire_plugins.py owns here, and which at build
+# time are empty dirs that become volume mounts at runtime. Fetching the same
+# checksum-verified archive pins the version and touches nothing else.
+
+install: |
+  # Pinned release. To update: bump this, rebuild the image. (The binary's own
+  # `update` subcommand only prints an install.sh invocation, and that path
+  # rewrites agent config — see README.)
+  CBM_VERSION=v0.10.1
+  base="https://github.com/DeusData/codebase-memory-mcp/releases/download/${CBM_VERSION}"
+  # -portable is the fully static linux build; the plain one dynamically links
+  # glibc 2.38+. Same choice upstream's installer makes for linux.
+  archive="codebase-memory-mcp-linux-$(dpkg --print-architecture)-portable.tar.gz"
+  tmp="$(mktemp -d)"
+  curl -fsSL --proto '=https' -o "$tmp/$archive" "$base/$archive"
+  curl -fsSL --proto '=https' -o "$tmp/checksums.txt" "$base/checksums.txt"
+  # Verify BEFORE unpacking — the archive is the entire plugin (~290 MB
+  # unpacked). checksums.txt covers every release asset; match ours by name.
+  ( cd "$tmp" && grep " [ *]\?$archive\$" checksums.txt | sha256sum -c - )
+  # Only the binary; the archive also carries LICENSE, notices, and upstream's
+  # install.sh, none of which belong in the image.
+  tar -xzf "$tmp/$archive" -C "$tmp" codebase-memory-mcp
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$tmp/codebase-memory-mcp" "$HOME/.local/bin/codebase-memory-mcp"
+  rm -rf "$tmp"
+  # Fail the build loudly if the binary can't run at all.
+  codebase-memory-mcp --version
+
+# The graph index (plus _config.db and the daemon logs) lives here. A named
+# volume at the tool's DEFAULT cache path, not a CBM_CACHE_DIR override: the
+# tool allows exactly one canonical cache root per account, so a shell-side
+# `codebase-memory-mcp` — which would not carry the override — must land on the
+# same root the MCP sessions use, or it is rejected at the admission barrier.
+# Without this the index is image layer, and a container recreate costs a
+# re-index of every repo (measured 7-11 s each; see README).
+volumes:
+  cbm-cache: /home/coder/.cache/codebase-memory-mcp
+
+# LOCAL server: command + args ONLY (up.sh hard-fails on other fields, so every
+# agent wires identically). No $PWD rooting needed, unlike serena/archex — this
+# server is project-agnostic and every tool takes an explicit repo_path/project,
+# so one session can hold several repos and worktrees at once. With no
+# subcommand the binary speaks MCP on stdio (stdout stays clean JSON-RPC; logs
+# go to stderr and to ~/.cache/codebase-memory-mcp/logs).
+mcp:
+  codebase-memory:
+    command: codebase-memory-mcp
+    args: []

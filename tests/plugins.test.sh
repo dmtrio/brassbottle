@@ -108,10 +108,68 @@ echo ",$EGRESS_ALL," | grep -qF ",blob.core.windows.net," \
 # full emitted variable set. grep first: quoted multi-line values (e.g.
 # PLUGIN_MCP_ENTRIES) have continuation lines that are not assignments.
 EMITTED=$(printf '%s\n' "$ALL_DERIVED" | grep -oE '^[A-Z_]+=' | tr -d = | LC_ALL=C sort | tr '\n' ' ')
-EXPECTED="AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS INSTALL_AIDER INSTALL_CLAUDE INSTALL_CODEX INSTALL_CURSOR INSTALL_GEMINI INSTALL_PI MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SSH_BIND SSH_PORT "
+EXPECTED="AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS INSTALL_AIDER INSTALL_CLAUDE INSTALL_CODEX INSTALL_CURSOR INSTALL_GEMINI INSTALL_PI MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SSH_BIND SSH_PORT "
 [ "$EMITTED" = "$EXPECTED" ] \
     && pass "--derive emits exactly the variable set up.sh consumes" \
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
+
+echo "── plugin-declared volumes (plugins/<name>/volumes: → generated overlay)"
+# The reserved sets in manifest.py exist to stop a plugin from colliding with a
+# STATIC compose volume/mount — compose merges by key, so a collision silently
+# remounts a real directory instead of erroring. Pin them against the compose
+# file: adding a volume there without updating manifest.py re-opens the hole.
+COMPOSE_VOLS=$(yq -r '.volumes | keys | .[]' compose/docker-compose.local.yml | LC_ALL=C sort | tr '\n' ' ')
+MANIFEST_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_VOLUME_NAMES)) + " ")')
+[ "$COMPOSE_VOLS" = "$MANIFEST_VOLS" ] \
+    && pass "manifest.py COMPOSE_VOLUME_NAMES matches the compose file" \
+    || fail "compose volumes '$COMPOSE_VOLS' != manifest.py reserved '$MANIFEST_VOLS'"
+# Mount targets: everything the service mounts, named volume or bind, minus the
+# :ro ones (a plugin remounting a read-only path is the same silent breakage).
+COMPOSE_TARGETS=$(yq -r '.services.dev-agent.volumes[]' compose/docker-compose.local.yml \
+    | awk -F: '{print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
+MANIFEST_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_MOUNT_PATHS)) + " ")')
+[ "$COMPOSE_TARGETS" = "$MANIFEST_TARGETS" ] \
+    && pass "manifest.py COMPOSE_MOUNT_PATHS matches the compose file" \
+    || fail "compose targets '$COMPOSE_TARGETS' != manifest.py reserved '$MANIFEST_TARGETS'"
+# The generated overlay must be real compose input, not just well-formed YAML:
+# render a shipped plugin's declaration and let compose itself validate it.
+VOL_DERIVED=$(
+    {
+        printf '{"plugins": ["codebase-memory"]}\n'
+        printf 'codebase-memory\t'; yq -o=json -I=0 plugins/codebase-memory/plugin.yml
+    } | python3 src/manifest.py --derive
+) || fail "--derive exited non-zero on a volume-declaring plugin"
+eval "$VOL_DERIVED"
+OVERLAY=$(mktemp -t plugins-overlay.XXXXXX)
+printf '%s\n' "$PLUGIN_COMPOSE_YAML" > "$OVERLAY"
+yq -e '.volumes["cbm-cache"] | has("x") | not' "$OVERLAY" >/dev/null 2>&1 \
+    && pass "overlay declares the plugin's named volume" \
+    || fail "overlay missing the cbm-cache volume: $(cat "$OVERLAY")"
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    # config merges the overlay onto the real compose file exactly as up.sh
+    # does, so a shape compose rejects fails HERE, not on someone's next up.
+    MERGED=$(CONTAINER_NAME=t USER_UID=1000 USER_GID=1000 RULES_PATH=/tmp KEYS_PATH=/tmp \
+        ARTIFACTS_PATH=/tmp BROWSER_TMP_PATH=/tmp IMAGE_TAG=t MEM_LIMIT=2g \
+        docker compose -p plugins-test --project-directory "$SCRIPT_DIR" \
+            -f compose/docker-compose.local.yml -f "$OVERLAY" config 2>&1) \
+        && printf '%s' "$MERGED" | grep -q 'cbm-cache' \
+        && pass "compose accepts the generated overlay (merged with the real file)" \
+        || fail "compose rejected the generated overlay: $(printf '%s' "$MERGED" | head -3)"
+    printf '%s' "$MERGED" | grep -q 'PLUGIN_VOLUME_PATHS' \
+        && pass "merged config keeps PLUGIN_VOLUME_PATHS for the entrypoint" \
+        || fail "PLUGIN_VOLUME_PATHS lost when compose merged the overlay"
+else
+    echo "  ~ SKIP: docker compose unavailable (overlay merge unverified)"
+fi
+rm -f "$OVERLAY"
+# The chown loop is the other half of the contract: without it a fresh volume
+# mounts root-owned and the coder-run agent silently cannot write to it.
+grep -q 'PLUGIN_VOLUME_PATHS' src/entrypoint.sh \
+    && pass "entrypoint consumes PLUGIN_VOLUME_PATHS" \
+    || fail "src/entrypoint.sh no longer reads PLUGIN_VOLUME_PATHS (volumes mount root-owned)"
+grep -q 'PLUGIN_COMPOSE_YAML' up.sh \
+    && pass "up.sh places the generated overlay" \
+    || fail "up.sh no longer consumes PLUGIN_COMPOSE_YAML (declared volumes never mount)"
 
 echo "── derive → build-payload chain (both host halves, real serena + gateway files)"
 # A local plugin (serena) + a required remote plugin (gateway): manifest.py
