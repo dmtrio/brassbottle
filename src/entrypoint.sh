@@ -14,6 +14,23 @@ echo "╚═══════════════════════�
 # only means claude.json isn't persisted this boot.
 su coder -c 'if [ ! -L /home/coder/.claude.json ]; then [ -f /home/coder/.claude.json ] && mv /home/coder/.claude.json /home/coder/.claude/claude.json; ln -sf /home/coder/.claude/claude.json /home/coder/.claude.json; fi' || true
 
+# ── Plugin-declared volume mountpoints ───────────────────────────────────────
+# PLUGIN_VOLUME_PATHS arrives from the generated compose overlay (one entry per
+# volume: in an enabled plugin.yml). Docker seeds a fresh named volume from the
+# image directory it covers, ownership included — so a mountpoint the image does
+# not contain arrives root-owned and the coder-run agent silently cannot write
+# to it (exactly how cursor-agent's auth failed to persist). We run as root
+# here, before any agent, so fix it centrally rather than trusting every plugin
+# to mkdir its own path at build. Non-recursive on purpose: only a freshly
+# created volume can be wrong, and it is empty by definition — a recursive chown
+# would walk a cache that can reach hundreds of MB on every boot.
+for _vol_path in ${PLUGIN_VOLUME_PATHS:-}; do
+    mkdir -p "$_vol_path" && chown coder:coder "$_vol_path" \
+        && echo "✓ Plugin volume: $_vol_path" \
+        || echo "⚠ Plugin volume $_vol_path: could not fix ownership"
+done
+unset _vol_path
+
 # ── Egress firewall (default ON — fail loud, never run open) ─────────────────
 if [ "${ENABLE_FIREWALL:-true}" = "true" ]; then
     if /usr/local/bin/init-firewall.sh; then

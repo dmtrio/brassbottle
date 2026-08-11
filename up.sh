@@ -116,6 +116,22 @@ COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
 [ -n "$SSH_PORT" ] && COMPOSE_FILES="$COMPOSE_FILES -f $SCRIPT_DIR/compose/docker-compose.ssh.yml"
 [ "$REMOTE_MOSH" = "true" ] && COMPOSE_FILES="$COMPOSE_FILES -f $SCRIPT_DIR/compose/docker-compose.mosh.yml"
 
+# Plugin-declared volumes (plugins/<name>/volumes:) ride in as one more overlay,
+# the same mechanism as ssh/mosh — except this one is DERIVED per container from
+# its manifest, which is what keeps compose/ free of any plugin's name.
+# manifest.py renders the YAML (unit-tested); up.sh only places the file and
+# adds the -f. Written under BASE_PATH, not the repo: it is per-container
+# derived state, like keys/<name>/. Removed when no enabled plugin declares a
+# volume, so de-listing the plugin really drops the mount on the next up.
+PLUGIN_COMPOSE_FILE="$BASE_PATH/compose/$NAME.plugins.yml"
+if [ -n "$PLUGIN_COMPOSE_YAML" ]; then
+    mkdir -p "$BASE_PATH/compose"
+    printf '%s\n' "$PLUGIN_COMPOSE_YAML" > "$PLUGIN_COMPOSE_FILE"
+    COMPOSE_FILES="$COMPOSE_FILES -f $PLUGIN_COMPOSE_FILE"
+else
+    rm -f "$PLUGIN_COMPOSE_FILE"
+fi
+
 # ── Compose derived credentials (keys/<name>/ is rebuilt from scratch) ───────
 KEYS_PATH="$BASE_PATH/keys/$NAME"
 mkdir -p "$KEYS_PATH"; chmod 700 "$KEYS_PATH"
