@@ -44,15 +44,15 @@ bash embedded in a YAML string.
 | `patch_upstream.py` | image build | 8 exact-match patches to the vendored clones |
 | `gear360_doctor.py` | runtime (`gear360-doctor`) | reports what actually made it in |
 | `gear360_watch.py` | runtime (`gear360-watch`) | drop-folder ingest |
-| `test_gear360.py` | host | 29 unit tests; also loaded by `tests/` |
+| `test_gear360.py` | host | 34 unit tests; auto-discovered by the repo suite |
 | `LOG.md` | — | change history: what broke, what was patched, why |
 | `patch_upstream.py` note | — | a file is patched **all-or-nothing**; a partial match leaves it untouched |
 
 The two runtime tools are **symlinked** from `/opt/plugins/gear360/`, not
 copied, so there is one copy in the image and one place to edit. Tests live
 beside the code and run either from this directory
-(`python3 -m unittest test_gear360`) or as part of the repo suite, which
-`tests/test_gear360.py` bridges into. They are excluded from the image.
+(`python3 -m unittest discover`) or as part of the repo suite, which picks up
+any `plugins/*/test_*.py` automatically. They are excluded from the image.
 
 ## Cost
 
