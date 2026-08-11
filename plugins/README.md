@@ -15,6 +15,7 @@ plugins/<name>/
   plugin.yml     required — what the server is and what it needs
   run.sh         optional — a host-side service, started with ./service.sh <name>
   README.md      optional — human docs for this plugin
+  test_*.py      optional — unit tests, discovered automatically (below)
   AGENTS.md      optional — agent-facing usage guidance (when/how to use the
                  tools). Merged into each agent's global rules, but ONLY in
                  containers whose manifest enables this plugin.
@@ -134,6 +135,26 @@ warns and yields no binding.
 - **`service.sh <name>`** runs `plugins/<name>/run.sh` on the host (resolves
   `BASE_PATH` and hands it down); it never touches docker.
 
+### `test_*.py` — unit tests
+
+Put tests beside the code they cover. Any `plugins/<name>/test_*.py` is picked
+up automatically by `tests/test_plugin_suites.py` — there is nothing to
+register:
+
+```bash
+cd plugins/<name> && python3 -m unittest discover   # while hacking on it
+python3 -m unittest discover -s tests               # everything
+```
+
+Each plugin directory is put on `sys.path` before its tests run, so a test can
+`import <module_under_test>` directly, and modules are namespaced per plugin so
+two plugins can both ship a `test_watch.py`. Test files are kept out of the
+image by `plugins/*/test_*.py` in `.dockerignore`.
+
+The loader also asserts that discovery found files and that every test file
+yields at least one test case — a glob or import that quietly breaks would
+otherwise leave the suite reporting OK while covering nothing.
+
 ## Adding a plugin
 
 1. `mkdir plugins/<name>` and write `plugin.yml` (see schema above).
@@ -143,7 +164,9 @@ warns and yields no binding.
    declares `secrets:`).
 4. **Local** plugin → rebuild the image so `install:` bakes. **Remote** → just
    rerun `./up.sh <container>`.
-5. Add `plugins/<name>/README.md` (human docs) and, if the agent needs guidance
+5. Tests, if the plugin has logic worth pinning: `plugins/<name>/test_*.py`,
+   discovered automatically (see above).
+6. Add `plugins/<name>/README.md` (human docs) and, if the agent needs guidance
    on *using* the tools, `plugins/<name>/AGENTS.md` (merged into enabled
    containers' rules — see above). The fragment is baked with the image, so a
    change to it needs a rebuild, like `install:`.
