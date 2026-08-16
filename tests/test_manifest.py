@@ -708,12 +708,18 @@ class TestHybridSchemaRules(unittest.TestCase):
             self._d({"plugins": ["bad"]}, files=dict(PLUGIN_FILES, bad=bad))
         self.assertIn("needs an install: block", str(cm.exception))
 
-    def test_host_port_only_with_remote_and_integer(self):
+    def test_host_port_needs_a_server_and_integer(self):
+        # a LOCAL bridge that dials the host may declare host_port (rhinomcp);
+        # the grant lands in HOST_MCP_PORTS exactly like a remote plugin's
+        d = self._d({"plugins": ["p"]},
+                    files={"p": {"install": "x", "host_port": 1999,
+                                 "mcp": {"s": {"command": "x"}}}})
+        self.assertEqual(d["HOST_MCP_PORTS"], "1999")
+        # ...but with no mcp server at all there is nothing to use the grant
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"plugins": ["p"]},
-                    files={"p": {"install": "x", "host_port": 8811,
-                                 "mcp": {"s": {"command": "x"}}}})
-        self.assertIn("host_port is only valid with a remote", str(cm.exception))
+                    files={"p": {"host_port": 8811, "egress": ["a.com"]}})
+        self.assertIn("host_port needs an mcp server", str(cm.exception))
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"plugins": ["p"]},
                     files={"p": {"host_port": "8811", "mcp": {"s": {"url": "http://h/mcp"}}}})
@@ -723,6 +729,32 @@ class TestHybridSchemaRules(unittest.TestCase):
             self._d({"plugins": ["p"]},
                     files={"p": {"host_port": 88111, "mcp": {"s": {"url": "http://h/mcp"}}}})
         self.assertIn("out of range (1-65535)", str(cm.exception))
+
+    def test_host_port_substituted_into_local_args(self):
+        # the local-bridge-dials-host case: ${HOST_PORT} in args resolves like
+        # a remote url's, and a plugin_ports: override re-points args and the
+        # firewall grant together (single source of truth)
+        files = {"p": {"install": "x", "host_port": 1999,
+                       "mcp": {"s": {"command": "bash",
+                                     "args": ["-c", "PORT=${HOST_PORT} exec bridge"]}}}}
+        d = self._d({"plugins": ["p"]}, files=files)
+        entry = json.loads(d["PLUGIN_MCP_ENTRIES"].strip())
+        self.assertEqual(entry["s"]["args"], ["-c", "PORT=1999 exec bridge"])
+        d = self._d({"plugins": ["p"], "plugin_ports": {"p": 2999}}, files=files)
+        entry = json.loads(d["PLUGIN_MCP_ENTRIES"].strip())
+        self.assertEqual(entry["s"]["args"], ["-c", "PORT=2999 exec bridge"])
+        self.assertEqual(d["HOST_MCP_PORTS"], "2999")
+        # the shared fixture must not have absorbed a substitution (manifest
+        # rebuilds specs rather than mutating plugin_files in place)
+        self.assertIn("${HOST_PORT}", files["p"]["mcp"]["s"]["args"][1])
+
+    def test_host_port_ref_in_args_without_host_port_errors(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"plugins": ["p"]},
+                    files={"p": {"install": "x",
+                                 "mcp": {"s": {"command": "bash",
+                                               "args": ["${HOST_PORT}"]}}}})
+        self.assertIn("args uses ${HOST_PORT}", str(cm.exception))
 
     def test_duplicate_secret_slot_across_plugins(self):
         files = {"a": {"secrets": {"TOK": {}}}, "b": {"secrets": {"TOK": {}}}}

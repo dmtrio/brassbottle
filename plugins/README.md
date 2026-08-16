@@ -48,6 +48,9 @@ opinion.
 | [`axiom`](axiom/) | local (stdio bridge → mcp.axiom.co, baked) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
 | [`ngrok`](ngrok/) | CLI binary + secret (no server) | — | [README](ngrok/README.md) |
+| [`rhino-mcp`](rhino-mcp/) | remote HTTP (in-Rhino server, official) | Rhino: `MCPStart` | [README](rhino-mcp/README.md) |
+| [`rhinomcp`](rhinomcp/) | local (stdio bridge → host TCP 1999, baked) | Rhino: `mcpstart` | [README](rhinomcp/README.md) |
+| [`cordyceps`](cordyceps/) | remote HTTP (in-Grasshopper server) | GH: Cordyceps component | [README](cordyceps/README.md) |
 
 ## `plugin.yml` schema
 
@@ -59,7 +62,7 @@ one** of `command:` (local) or `url:` (remote).
 | `mcp: {<server>: {command, args}}` | **Local** stdio server, runs in the container. Requires `install:`. |
 | `mcp: {<server>: {url, headers}}` | **Remote** HTTP server, reached on the host or internet. |
 | `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists. |
-| `host_port: <int>` | Remote-only; opens the container firewall to `host.docker.internal:<port>`. A manifest `plugin_ports:` override replaces this default (see below). |
+| `host_port: <int>` | Opens the container firewall to `host.docker.internal:<port>`. Valid with a remote (`url:`) server **or** a local bridge that dials the host (`rhinomcp`); rejected on a plugin with no MCP server. `${HOST_PORT}` in a remote `url` or a local server's `args` resolves to it. A manifest `plugin_ports:` override replaces this default (see below). |
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
 | `volumes: {<name>: /container/path}` | Per-container named volume(s) for state that must outlive a container recreate — see below. Mounted only in containers that enable the plugin. |
 | `requires: [<SLOT>, …]` | Optional MCP-server field. The server is configured only for agents with every required slot; uncredentialed servers omit it. |
@@ -148,9 +151,10 @@ plugin_ports:
 ```
 
 The override re-points **both** the firewall grant (`HOST_MCP_PORTS`) and any
-`${HOST_PORT}` placeholder in the plugin's remote `url`, so the port stays a
-single source of truth. A plugin url may use `${HOST_PORT}` instead of a
-literal port to stay in sync with `host_port` / `plugin_ports`.
+`${HOST_PORT}` placeholder in the plugin's remote `url` — or in a local
+bridge's `args` (`rhinomcp`) — so the port stays a single source of truth. A
+plugin may use `${HOST_PORT}` there instead of a literal port to stay in sync
+with `host_port` / `plugin_ports`.
 
 ## Binding secrets in a manifest
 
