@@ -182,7 +182,8 @@ plugins: [serena, gateway, obsidian-annotated]
 Two shapes, decided by the entry (no `type:` field):
 
 - **Local** — a stdio server baked into the image (`command:` + `install:`),
-  wired into every installed agent.
+  wired into every installed agent. A local bridge may also dial a Mac-host
+  service (`host_port:` + `${HOST_PORT}` in its args, like `rhinomcp`).
 - **Remote** — an HTTP server (`url:`), on the Mac host (`host_port:`, started
   with `./service.sh <name>`) or a real internet host.
 

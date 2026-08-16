@@ -69,11 +69,22 @@ import sys
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 REF_RE = re.compile(r"^[A-Za-z0-9_]+\Z")
 # Placeholder a plugin uses for its own host port — in a remote url, or in a
-# local bridge's args when the bridge dials the host (rhinomcp) — so the port
-# lives once in plugin.yml (host_port:) and a manifest plugin_ports: override
-# re-points the dial target and the firewall grant together. Expanded host-side
-# at derive time — cursor/gemini can't expand ${VAR} refs in remote specs.
+# local bridge's command/args when the bridge dials the host (rhinomcp) — so
+# the port lives once in plugin.yml (host_port:) and a manifest plugin_ports:
+# override re-points the dial target and the firewall grant together. Expanded
+# host-side at derive time — cursor/gemini can't expand ${VAR} refs in remote
+# specs.
 HOST_PORT_REF = "${HOST_PORT}"
+
+
+def _host_port_ref_fields(spec):
+    """The string fields of an mcp server spec that may carry ${HOST_PORT}:
+    a remote url, or a local bridge's command/args."""
+    if not isinstance(spec, dict):
+        return []
+    args = spec.get("args") if isinstance(spec.get("args"), list) else []
+    return [v for v in (spec.get("url"), spec.get("command"), *args)
+            if isinstance(v, str)]
 # ── Plugin-declared volumes (plugins/<name>/volumes:) ────────────────────────
 # The static compose file's own named volumes and mount targets. A plugin
 # reusing either name would be MERGED into the static definition by compose
@@ -814,10 +825,20 @@ def derive(manifest, plugin_files, env):
             # remote (url:) server, or a local bridge whose command dials the
             # host over TCP (rhinomcp). Anything else would open a firewall
             # hole nothing uses.
-            if not (has_remote or has_local):
+            if not mcp:
                 raise ManifestError(
                     f"plugin '{p}': host_port needs an mcp server to use it — a remote "
                     "(url:) server, or a local bridge that dials the host")
+            if not has_remote and not any(
+                    HOST_PORT_REF in v
+                    for spec in mcp.values() for v in _host_port_ref_fields(spec)):
+                # Only local servers justify the grant, so one of them must
+                # demonstrably take the port — otherwise the firewall opens for
+                # a port nothing dials, and a plugin_ports: override would move
+                # the grant while the bridge kept dialing the old port.
+                raise ManifestError(
+                    f"plugin '{p}': host_port with only local servers needs a "
+                    f"{HOST_PORT_REF} reference in the bridge's command/args")
             if isinstance(hp, bool) or not isinstance(hp, int):
                 raise ManifestError(f"plugin '{p}': host_port must be an integer port number")
             if not 1 <= hp <= 65535:
@@ -833,38 +854,35 @@ def derive(manifest, plugin_files, env):
         if resolved_port is not None:
             host_ports.append(resolved_port)
 
-        # ${HOST_PORT} in a remote url OR a local server's args → the resolved
-        # port. Substituted here, host-side at derive time, NOT left as a
-        # ${VAR} ref for the agent: only Claude expands those reliably
-        # (cursor/gemini can't), and this has to work for every agent. Args
-        # cover the local-bridge-dials-host case (rhinomcp), so a plugin_ports:
-        # override re-points the dial target and the firewall grant together
-        # for locals exactly as it re-points a remote url.
+        # ${HOST_PORT} in a remote url OR a local server's command/args → the
+        # resolved port. Substituted here, host-side at derive time, NOT left
+        # as a ${VAR} ref for the agent: only Claude expands those reliably
+        # (cursor/gemini can't), and this has to work for every agent. The
+        # command/args fields cover the local-bridge-dials-host case
+        # (rhinomcp), so a plugin_ports: override re-points the dial target
+        # and the firewall grant together for locals exactly as it re-points
+        # a remote url.
         # Rebuilt into NEW dicts/lists rather than assigned into the spec:
         # plugin_files belongs to the caller (and the test suite reuses one
         # module-level fixture across cases), so mutating it in place would
         # leak the resolved port into every later read of the same plugin.
         substituted = {}
         for n, spec in mcp.items():
-            if not isinstance(spec, dict):
-                continue
-            url = spec.get("url")
-            args = spec.get("args")
-            url_ref = isinstance(url, str) and HOST_PORT_REF in url
-            args_ref = isinstance(args, list) and any(
-                isinstance(a, str) and HOST_PORT_REF in a for a in args)
-            if not url_ref and not args_ref:
+            if not any(HOST_PORT_REF in v for v in _host_port_ref_fields(spec)):
                 continue
             if resolved_port is None:
                 raise ManifestError(
-                    f"plugin '{p}' mcp server '{n}': {'url' if url_ref else 'args'} uses "
-                    f"{HOST_PORT_REF} but the plugin declares no host_port to substitute")
+                    f"plugin '{p}' mcp server '{n}': {'url' if 'url' in spec else 'command/args'} "
+                    f"uses {HOST_PORT_REF} but the plugin declares no host_port to substitute")
+            port = str(resolved_port)
             new_spec = dict(spec)
-            if url_ref:
-                new_spec["url"] = url.replace(HOST_PORT_REF, str(resolved_port))
-            if args_ref:
-                new_spec["args"] = [a.replace(HOST_PORT_REF, str(resolved_port))
-                                    if isinstance(a, str) else a for a in args]
+            for key in ("url", "command"):
+                v = new_spec.get(key)
+                if isinstance(v, str) and HOST_PORT_REF in v:
+                    new_spec[key] = v.replace(HOST_PORT_REF, port)
+            if isinstance(new_spec.get("args"), list):
+                new_spec["args"] = [a.replace(HOST_PORT_REF, port) if isinstance(a, str) else a
+                                    for a in new_spec["args"]]
             substituted[n] = new_spec
         if substituted:
             mcp = {**mcp, **substituted}
