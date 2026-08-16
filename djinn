@@ -1,0 +1,34 @@
+#!/bin/bash
+# djinn — the word that calls them. brassbottle's CLI dispatcher.
+#
+# Pure glue: each subcommand execs the real implementation with the rest of
+# the args forwarded verbatim. up.sh/down.sh/service.sh stay the actual
+# implementations and remain runnable directly — this is just one shorter,
+# memorable front door onto all of them.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+usage() {
+    cat <<'EOF'
+Usage: ./djinn <subcommand> [args...]
+  up       <name>              create/update a container from its manifest
+  down     <name> [--purge]    stop (or purge) a container
+  service  <name> [args...]    start a plugin's host-side service on this Mac
+  allow    <container> <domain...>  add domains to a running container's egress allowlist
+  keys     <container> ...     edit one container's agent MCP credentials
+  migrate  <name> [--dry-run]  copy a container's volumes to the djinn- prefix
+  help                         show this message
+EOF
+}
+
+case "${1:-}" in
+    up)      shift; exec "$SCRIPT_DIR/up.sh" "$@" ;;
+    down)    shift; exec "$SCRIPT_DIR/down.sh" "$@" ;;
+    service) shift; exec "$SCRIPT_DIR/service.sh" "$@" ;;
+    allow)   shift; exec "$SCRIPT_DIR/bin/allow-egress.sh" "$@" ;;
+    keys)    shift; exec "$SCRIPT_DIR/bin/update-agent-keys.sh" "$@" ;;
+    migrate) shift; exec python3 "$SCRIPT_DIR/src/migrate.py" "$@" ;;
+    help|-h|--help) usage; exit 0 ;;
+    "")      usage >&2; exit 1 ;;
+    *)       echo "Error: unknown subcommand '$1'" >&2; usage >&2; exit 1 ;;
+esac

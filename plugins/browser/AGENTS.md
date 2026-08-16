@@ -20,6 +20,6 @@ after `/run/host_mark` to the path in field 4:
 
 ```bash
 grep -E " /artifacts/browser " /proc/self/mountinfo
-# 266 256 0:46 /deme/dev-agent/browser-tmp/<container> /artifacts/browser … /run/host_mark/Users …
-#              ^ host path is /Users + this  →  /Users/deme/dev-agent/browser-tmp/<container>
+# 266 256 0:46 /deme/djinn/browser-tmp/<container> /artifacts/browser … /run/host_mark/Users …
+#              ^ host path is /Users + this  →  /Users/deme/djinn/browser-tmp/<container>
 ```

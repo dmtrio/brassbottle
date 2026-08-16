@@ -4,7 +4,7 @@
 # Launched via ./up.sh <name> — don't run directly.
 
 services:
-  dev-agent:
+  djinn:
     build:
       context: .
       dockerfile: Dockerfile
@@ -19,9 +19,9 @@ services:
         INSTALL_AIDER: "${INSTALL_AIDER:-true}"
         INSTALL_CODEX: "${INSTALL_CODEX:-true}"
     # Per-container tag: each container builds/uses its own image tag
-    image: dev-agent:${IMAGE_TAG:-local}
+    image: djinn:${IMAGE_TAG:-local}
 
-    container_name: dev-agent-${CONTAINER_NAME}
+    container_name: djinn-${CONTAINER_NAME}
     hostname: ${CONTAINER_NAME}
 
     restart: unless-stopped
@@ -106,7 +106,7 @@ volumes:
   cursor-auth:
   gh-auth:
 
-# Shared bridge (RFC 04): every dev-agent container joins ONE user-defined
+# Shared bridge (RFC 04): every djinn container joins ONE user-defined
 # network with a stable subnet instead of a per-project default network, so
 # a WireGuard/VPN layer on the host can target the whole fleet as a single
 # CIDR and reach any container. up.sh creates it if missing (external: true
@@ -115,5 +115,5 @@ volumes:
 # container's egress firewall still governs its own traffic.
 networks:
   default:
-    name: dev-agent-net
+    name: djinn-net
     external: true

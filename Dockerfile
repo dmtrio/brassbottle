@@ -237,19 +237,19 @@ RUN apt-get update && apt-get install -y openssh-server \
 # here a change re-runs only this layer, not the apt installs above. chmod:
 # COPY keeps the build-context mode, and a umask-077 clone would otherwise
 # bake a root-only 600 file the coder-user exec can't read.
-COPY src/wire_plugins.py /usr/local/lib/dev-agent/wire_plugins.py
-RUN chmod 644 /usr/local/lib/dev-agent/wire_plugins.py
+COPY src/wire_plugins.py /usr/local/lib/djinn/wire_plugins.py
+RUN chmod 644 /usr/local/lib/djinn/wire_plugins.py
 
 # Composes each agent's global rules file = base rules (read-only /agent-rules
 # mount) + the AGENTS.md fragments of the plugins a container enables. up.sh
 # runs it at `up`; the rules-compose.bashrc hook (below) re-runs it per shell.
-COPY src/compose_rules.py /usr/local/lib/dev-agent/compose_rules.py
-RUN chmod 644 /usr/local/lib/dev-agent/compose_rules.py
+COPY src/compose_rules.py /usr/local/lib/djinn/compose_rules.py
+RUN chmod 644 /usr/local/lib/djinn/compose_rules.py
 
 # Merges the manifest's repo list into /workspace/dev.code-workspace on every
 # `up` (idempotent — preserves agent-managed worktree entries; layout v2).
-COPY src/code_workspace.py /usr/local/lib/dev-agent/code_workspace.py
-RUN chmod 644 /usr/local/lib/dev-agent/code_workspace.py
+COPY src/code_workspace.py /usr/local/lib/djinn/code_workspace.py
+RUN chmod 644 /usr/local/lib/djinn/code_workspace.py
 
 ENV SSH_ENABLED=false
 
@@ -297,8 +297,8 @@ RUN echo '' >> /home/$USERNAME/.bashrc \
 # after boot; freshness.py (stdlib-only, unit-tested) formats the relative age.
 # Sourced BEFORE tmux-landing so that hook stays the last line of .bashrc, and
 # so it prints once — in the tmux pane, not the outer shell tmux replaces.
-COPY src/freshness.py /usr/local/lib/dev-agent/freshness.py
-RUN chmod 644 /usr/local/lib/dev-agent/freshness.py
+COPY src/freshness.py /usr/local/lib/djinn/freshness.py
+RUN chmod 644 /usr/local/lib/djinn/freshness.py
 COPY --chown=$USERNAME:$USERNAME src/freshness-landing.bashrc /usr/local/share/freshness-landing.bashrc
 RUN echo '' >> /home/$USERNAME/.bashrc \
     && echo '# PLN Container Freshness: one-line dim config-age readout (interactive)' >> /home/$USERNAME/.bashrc \

@@ -4,7 +4,7 @@
 #
 # Because there is no server and no secret, listing `gear360` in a manifest's
 # `plugins:` has exactly one effect: AGENTS.md is merged into that container's
-# agent rules. The install below bakes into EVERY dev-agent image regardless
+# agent rules. The install below bakes into EVERY djinn image regardless
 # (the Dockerfile bake loop globs all of plugins/*/plugin.yml) — that is the
 # standing cost of this plugin, documented in README.md.
 #

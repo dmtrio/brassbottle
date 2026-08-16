@@ -51,9 +51,11 @@ case "${SAVE:-}" in yml|firewall|none|"") ;; *) echo "Error: --save must be yml,
 
 # ── Verify the container ──────────────────────────────────────────────────────
 # Accept the short manifest name (coding-personal-site) or the full container
-# name (dev-agent-coding-personal-site); normalise to both.
-SHORT="${RAW#dev-agent-}"
-CONTAINER="dev-agent-$SHORT"
+# name (djinn-coding-personal-site); normalise to both. The pre-rebrand
+# dev-agent- prefix is also accepted so an existing container's full name
+# still resolves.
+SHORT="${RAW#djinn-}"; SHORT="${SHORT#dev-agent-}"
+CONTAINER="djinn-$SHORT"
 # Sourced here (not at the top) so --help / usage / bad-flag paths don't depend
 # on ./.env; only the manifest path below needs CONTAINERS_PATH.
 . "$SCRIPT_DIR/../src/common.sh"   # sets CDD_ROOT (repo root) + CONTAINERS_PATH
@@ -63,8 +65,8 @@ command -v docker >/dev/null || { echo "Error: docker not found"; exit 1; }
 
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
     echo "Error: no container named '$CONTAINER'."
-    echo "Existing dev-agent containers:"
-    docker ps -a --filter "name=dev-agent-" --format '  {{.Names}} ({{.State}})' 2>/dev/null || true
+    echo "Existing djinn containers:"
+    docker ps -a --filter "name=djinn-" --format '  {{.Names}} ({{.State}})' 2>/dev/null || true
     exit 1
 fi
 RUNNING="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo false)"

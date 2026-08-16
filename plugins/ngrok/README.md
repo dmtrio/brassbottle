@@ -11,7 +11,7 @@ secret, so this plugin uses the server-less shape (like
   tunnel connection at runtime.
 
 Because it carries an `install:` block, ngrok is **baked into the shared image**:
-enabling it in a new manifest needs an **image rebuild**, not just `./up.sh`.
+enabling it in a new manifest needs an **image rebuild**, not just `./djinn up`.
 
 ## Enable it
 
@@ -26,7 +26,7 @@ Add the token to `secrets.env`:
 NGROK_AUTHTOKEN=2abc...your_token
 ```
 
-Then rebuild the image and `./up.sh <container>`. Verify inside the container:
+Then rebuild the image and `./djinn up <container>`. Verify inside the container:
 
 ```bash
 ngrok version          # binary is on PATH

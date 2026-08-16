@@ -27,7 +27,7 @@ network either: stitching is pure local compute, so there is no `egress:` grant.
 
 **Consequence worth knowing:** listing `gear360` in a manifest's `plugins:` has
 exactly one effect — `AGENTS.md` is merged into that container's agent rules.
-The install bakes into **every** dev-agent image regardless, because the
+The install bakes into **every** djinn image regardless, because the
 Dockerfile's bake loop globs all of `plugins/*/plugin.yml` and does not consult
 any manifest. See "Cost" below.
 
@@ -66,7 +66,7 @@ This plugin adds OpenCV, Hugin and ffmpeg to every container's image.
 - **Rebuild time** is the real tax. `COPY plugins /opt/plugins` invalidates
   whenever *any* `plugin.yml` changes, which re-runs the whole bake loop — so
   every future plugin edit costs an extra couple of minutes on every
-  container's next `up.sh`.
+  container's next `djinn up`.
 
 If that becomes annoying, the escape hatch is to move this directory out of
 `plugins/` and back to a hand-run script; nothing else depends on it.

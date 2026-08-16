@@ -11,7 +11,7 @@ plugins: [proxyman]
 ## Start the host service
 
 ```bash
-./service.sh proxyman      # Proxyman.app must be running; leave it up (tmux/launchd)
+./djinn service proxyman      # Proxyman.app must be running; leave it up (tmux/launchd)
 ```
 
 First run self-generates `PROXYMAN_BRIDGE_KEY` into `secrets.env`; declare it in

@@ -503,7 +503,7 @@ class TestWirePluginServersJson(QuietTestCase):
             self.assertTrue(config_path.exists())
             self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o600)
 
-            sidecar = config_path.parent / (config_path.name + ".dev-agent-plugins")
+            sidecar = config_path.parent / (config_path.name + ".djinn-plugins")
             self.assertTrue(sidecar.exists())
             self.assertEqual(os.stat(sidecar).st_mode & 0o777, 0o600)
 
@@ -522,7 +522,7 @@ class TestWirePluginServersJson(QuietTestCase):
                 }
             }))
 
-            sidecar = config_path.parent / (config_path.name + ".dev-agent-plugins")
+            sidecar = config_path.parent / (config_path.name + ".djinn-plugins")
             sidecar.write_text('["oldplug"]\n')
 
             # Wire with new plugins (no oldplug)
@@ -542,7 +542,7 @@ class TestWirePluginServersJson(QuietTestCase):
 
             wire_plugins.wire_plugin_servers_json(config_path, plugins)
             content1 = config_path.read_text()
-            sidecar = config_path.parent / (config_path.name + ".dev-agent-plugins")
+            sidecar = config_path.parent / (config_path.name + ".djinn-plugins")
             sidecar_content1 = sidecar.read_text()
 
             wire_plugins.wire_plugin_servers_json(config_path, plugins)
@@ -563,7 +563,7 @@ class TestWirePluginServersJson(QuietTestCase):
                 }
             }))
 
-            sidecar = config_path.parent / (config_path.name + ".dev-agent-plugins")
+            sidecar = config_path.parent / (config_path.name + ".djinn-plugins")
             sidecar.write_text('["serena"]\n')
 
             # Call with empty plugins
@@ -600,7 +600,7 @@ class TestWirePluginServersJson(QuietTestCase):
             config_path = Path(tmp) / "mcp.json"
             config_path.write_text(json.dumps({"mcpServers": {"old": {}}}))
 
-            sidecar = config_path.parent / (config_path.name + ".dev-agent-plugins")
+            sidecar = config_path.parent / (config_path.name + ".djinn-plugins")
             sidecar.write_text("")
 
             # Should not raise
@@ -625,11 +625,11 @@ class TestWireCodexToml(QuietTestCase):
             self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o600)
 
             content = config_path.read_text()
-            self.assertIn("# >>> dev-agent plugin MCP", content)
+            self.assertIn("# >>> djinn plugin MCP", content)
             self.assertIn("[mcp_servers.serena]", content)
             self.assertIn('command = "bash"', content)
             self.assertIn('args = ["-lc","x"]', content)  # compact JSON
-            self.assertIn("# <<< dev-agent plugin MCP", content)
+            self.assertIn("# <<< djinn plugin MCP", content)
             self.assertTrue(content.endswith("\n"))
 
     def test_existing_hand_config_survives_above_block(self):
@@ -687,8 +687,8 @@ class TestWireCodexToml(QuietTestCase):
 
             content = config_path.read_text()
             # Extract the managed block
-            start = content.find("# >>> dev-agent plugin MCP")
-            end = content.find("# <<< dev-agent plugin MCP") + len("# <<< dev-agent plugin MCP <<<")
+            start = content.find("# >>> djinn plugin MCP")
+            end = content.find("# <<< djinn plugin MCP") + len("# <<< djinn plugin MCP <<<")
             block = content[start:end]
 
             # Check two tables with exactly one blank line between them
@@ -702,9 +702,9 @@ class TestWireCodexToml(QuietTestCase):
             config_path = Path(tmp) / "config.toml"
             config_path.write_text(
                 "keep = 1\n"
-                "# >>> dev-agent plugin MCP <<<\n"
+                "# >>> djinn plugin MCP <<<\n"
                 "[mcp_servers.old]\n"
-                "# <<< dev-agent plugin MCP <<<\n"
+                "# <<< djinn plugin MCP <<<\n"
                 "keep_me = 2\n"
             )
 
@@ -714,13 +714,13 @@ class TestWireCodexToml(QuietTestCase):
             self.assertIn("keep = 1", content)
             self.assertIn("keep_me = 2", content)
             self.assertNotIn("[mcp_servers.old]", content)
-            self.assertNotIn("# >>> dev-agent plugin MCP", content)
+            self.assertNotIn("# >>> djinn plugin MCP", content)
 
     def test_opening_marker_without_closing_raises_wireerror(self):
         """Opening marker present but no closing marker → WireError, file untouched."""
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
-            original = "# >>> dev-agent plugin MCP <<<\nstuff\n"
+            original = "# >>> djinn plugin MCP <<<\nstuff\n"
             config_path.write_text(original)
 
             with self.assertRaises(wire_plugins.WireError) as cm:
@@ -732,12 +732,12 @@ class TestWireCodexToml(QuietTestCase):
         """Lone closing marker with no opener is left in place."""
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
-            config_path.write_text("keep = 1\n# <<< dev-agent plugin MCP <<<\n")
+            config_path.write_text("keep = 1\n# <<< djinn plugin MCP <<<\n")
 
             wire_plugins.wire_codex_toml(config_path, {"p": {"command": "x"}})
 
             content = config_path.read_text()
-            self.assertIn("# <<< dev-agent plugin MCP <<<", content)
+            self.assertIn("# <<< djinn plugin MCP <<<", content)
             self.assertIn("[mcp_servers.p]", content)
 
     def test_content_between_markers_fully_removed(self):
@@ -745,10 +745,10 @@ class TestWireCodexToml(QuietTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             config_path.write_text(
-                "# >>> dev-agent plugin MCP <<<\n"
+                "# >>> djinn plugin MCP <<<\n"
                 "[mcp_servers.stale]\n"
                 "command = 'old'\n"
-                "# <<< dev-agent plugin MCP <<<\n"
+                "# <<< djinn plugin MCP <<<\n"
             )
 
             wire_plugins.wire_codex_toml(config_path, {"new": {"command": "bash"}})
@@ -1070,10 +1070,10 @@ class TestWireCodexTomlMarkerEdges(QuietTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             original = (
-                "# >>> dev-agent plugin MCP >>>\n"
+                "# >>> djinn plugin MCP >>>\n"
                 "[mcp_servers.old]\n"
-                "# <<< dev-agent plugin MCP <<<\n"
-                "# >>> dev-agent plugin MCP >>>\n"
+                "# <<< djinn plugin MCP <<<\n"
+                "# >>> djinn plugin MCP >>>\n"
                 "user_config = 1\n"
             )
             config_path.write_text(original)
@@ -1086,8 +1086,8 @@ class TestWireCodexTomlMarkerEdges(QuietTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             original = (
-                "# <<< dev-agent plugin MCP <<<\n"
-                "# >>> dev-agent plugin MCP >>>\n"
+                "# <<< djinn plugin MCP <<<\n"
+                "# >>> djinn plugin MCP >>>\n"
                 "user_config = 1\n"
             )
             config_path.write_text(original)

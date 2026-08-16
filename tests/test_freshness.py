@@ -113,14 +113,14 @@ class ReadEnvFileTests(unittest.TestCase):
                 'PATH="/usr/bin:/bin"\n'
                 "# a comment\n"
                 "\n"
-                "DEV_AGENT_UP_AT=2026-07-21T00:00:00Z\n"
-                "DEV_AGENT_IMAGE_BUILT=2026-07-08T00:00:00Z\n",
+                "DJINN_UP_AT=2026-07-21T00:00:00Z\n"
+                "DJINN_IMAGE_BUILT=2026-07-08T00:00:00Z\n",
                 encoding="utf-8",
             )
             values = freshness.read_env_file(str(p))
         self.assertEqual(values["PATH"], "/usr/bin:/bin")  # quotes stripped
-        self.assertEqual(values["DEV_AGENT_UP_AT"], "2026-07-21T00:00:00Z")
-        self.assertEqual(values["DEV_AGENT_IMAGE_BUILT"], "2026-07-08T00:00:00Z")
+        self.assertEqual(values["DJINN_UP_AT"], "2026-07-21T00:00:00Z")
+        self.assertEqual(values["DJINN_IMAGE_BUILT"], "2026-07-08T00:00:00Z")
 
     def test_missing_file_is_empty_dict(self):
         self.assertEqual(freshness.read_env_file("/no/such/file/environment"), {})
@@ -166,9 +166,9 @@ class WiringTests(unittest.TestCase):
 
     def test_dockerfile_bakes_helper_at_the_path_the_hook_invokes(self):
         self.assertIn(
-            "COPY src/freshness.py /usr/local/lib/dev-agent/freshness.py", self.dockerfile
+            "COPY src/freshness.py /usr/local/lib/djinn/freshness.py", self.dockerfile
         )
-        self.assertIn("/usr/local/lib/dev-agent/freshness.py", self.hook)
+        self.assertIn("/usr/local/lib/djinn/freshness.py", self.hook)
 
     def test_dockerfile_sources_the_hook_before_tmux_landing(self):
         d = self.dockerfile

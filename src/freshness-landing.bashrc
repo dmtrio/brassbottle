@@ -11,7 +11,7 @@
 # src/freshness.py formats the relative age (host-clock, unit-tested) and prints
 # nothing when no stamp is present — a readout, never an alarm.
 if [[ $- == *i* ]]; then
-    __freshness_line="$(python3 /usr/local/lib/dev-agent/freshness.py 2>/dev/null)"
+    __freshness_line="$(python3 /usr/local/lib/djinn/freshness.py 2>/dev/null)"
     [ -n "$__freshness_line" ] && printf '\033[2m%s\033[0m\n' "$__freshness_line"
     unset __freshness_line
 fi

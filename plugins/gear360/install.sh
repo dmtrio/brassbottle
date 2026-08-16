@@ -2,7 +2,7 @@
 # Baked at image build by plugin.yml (`bash /opt/plugins/gear360/install.sh`).
 # Network is unrestricted here — the container firewall is a runtime thing.
 #
-# Failure policy: this runs inside EVERY dev-agent image build, so only the apt
+# Failure policy: this runs inside EVERY djinn image build, so only the apt
 # step is allowed to fail the build. The three source steps are independently
 # guarded — a broken upstream must not brick the build of containers that have
 # nothing to do with 360 video, and a compile failure must not also cost us the

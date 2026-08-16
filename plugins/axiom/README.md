@@ -70,7 +70,7 @@ AXIOM_KEY_claude=xaat-bbbb…
 
 You can combine them: a common `AXIOM_TOKEN` default for everyone plus an
 `agent_secrets` override for one agent. Because `mcp-remote` is baked in, adding
-or changing tokens is a config-only `./up.sh <container>` — no image rebuild.
+or changing tokens is a config-only `./djinn up <container>` — no image rebuild.
 
 ## Token
 

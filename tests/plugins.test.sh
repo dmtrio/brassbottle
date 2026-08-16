@@ -126,7 +126,7 @@ MANIFEST_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manife
 # Mount targets: everything the service mounts, named volume or bind, INCLUDING
 # the :ro ones — a plugin remounting a read-only path (/agent-rules, the keys
 # dir) is the same silent breakage as remounting a writable one.
-COMPOSE_TARGETS=$(yq -r '.services.dev-agent.volumes[]' compose/docker-compose.local.yml \
+COMPOSE_TARGETS=$(yq -r '.services.djinn.volumes[]' compose/docker-compose.local.yml \
     | awk -F: '{print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
 MANIFEST_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_MOUNT_PATHS)) + " ")')
 [ "$COMPOSE_TARGETS" = "$MANIFEST_TARGETS" ] \
@@ -164,15 +164,15 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     # still contains the name — only `docker up` fails, on someone else's
     # machine. Pin source AND target so that shape can never pass again.
     printf '%s' "$MERGED" | jq -e '
-        .services["dev-agent"].volumes
+        .services["djinn"].volumes
         | map(select(.source == "cbm-cache"))
         | length == 1
         and .[0].target == "/home/coder/.cache/codebase-memory-mcp"
         and .[0].type == "volume"' >/dev/null 2>&1 \
         && pass "merged mount resolves to source=cbm-cache with the declared target" \
-        || fail "mount did not resolve: $(printf '%s' "$MERGED" | jq -c '.services["dev-agent"].volumes' 2>/dev/null)"
+        || fail "mount did not resolve: $(printf '%s' "$MERGED" | jq -c '.services["djinn"].volumes' 2>/dev/null)"
     printf '%s' "$MERGED" | jq -e '
-        .services["dev-agent"].environment.PLUGIN_VOLUME_PATHS
+        .services["djinn"].environment.PLUGIN_VOLUME_PATHS
         == "/home/coder/.cache/codebase-memory-mcp"' >/dev/null 2>&1 \
         && pass "merged config keeps PLUGIN_VOLUME_PATHS for the entrypoint" \
         || fail "PLUGIN_VOLUME_PATHS lost/mangled when compose merged the overlay"
@@ -323,7 +323,7 @@ yq -o=json -I=0 "$MANIFEST"
 src/manifest.py" --derive
 --build-payload
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
-python3 /usr/local/lib/dev-agent/wire_plugins.py
+python3 /usr/local/lib/djinn/wire_plugins.py
 PRESENT_SECRET_VARS
 DRIFT
 # The identity-key prefixes and hostname rule each live in two places by
@@ -409,7 +409,7 @@ grep -qF -- "COPY src/wire_plugins.py" Dockerfile \
 grep -qF -- "COPY src/code_workspace.py" Dockerfile \
     && pass "Dockerfile bakes src/code_workspace.py into the image" \
     || fail "Dockerfile no longer bakes code_workspace.py (up.sh execs it)"
-grep -qF -- "python3 /usr/local/lib/dev-agent/code_workspace.py /workspace/dev.code-workspace" up.sh \
+grep -qF -- "python3 /usr/local/lib/djinn/code_workspace.py /workspace/dev.code-workspace" up.sh \
     && pass "up.sh invokes code_workspace.py against dev.code-workspace" \
     || fail "up.sh no longer wires to code_workspace.py (update this suite!)"
 # up.sh sources the extracted key-composition helper and calls it (the logic is

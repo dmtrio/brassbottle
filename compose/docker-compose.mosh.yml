@@ -11,7 +11,7 @@
 # inbound UDP accept, so publish, server, and firewall cannot disagree.
 
 services:
-  dev-agent:
+  djinn:
     ports:
       - "${SSH_BIND:-127.0.0.1}:${MOSH_PORTS_DASH:-60000-60010}:${MOSH_PORTS_DASH:-60000-60010}/udp"
     environment:

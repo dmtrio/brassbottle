@@ -26,9 +26,9 @@ TARGET="${1:-agent}"
 TAIL=$(tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 3)
 
 curl -s --max-time 10 \
-    -H "Title: dev-agent-${CONTAINER_NAME:-container}: agent idle" \
+    -H "Title: djinn-${CONTAINER_NAME:-container}: agent idle" \
     -H "Tags: robot" \
     -d "${TAIL:-<no recent output>}" \
-    "${NTFY_URL%/}/${NTFY_TOPIC:-dev-agents}" >/dev/null || true
+    "${NTFY_URL%/}/${NTFY_TOPIC:-djinn-agents}" >/dev/null || true
 
 exit 0

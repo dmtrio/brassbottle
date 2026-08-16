@@ -5,7 +5,7 @@
 # WireGuard/VPN tunnel — not the open internet).
 
 services:
-  dev-agent:
+  djinn:
     ports:
       - "${SSH_BIND:-127.0.0.1}:${SSH_PORT}:22"
     environment:

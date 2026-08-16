@@ -80,7 +80,7 @@ remote-controls a real browser window on the user's desktop (so they can
 watch you work). Consequences:
 - Never conclude "no browser is installed" and never try to install one.
 - If a browser tool fails to connect, the desktop browser or its bridge is
-  down: STOP and tell the user to run `./service.sh browser` on the host.
+  down: STOP and tell the user to run `./djinn service browser` on the host.
 - The user can see every page you open. They may interact with the window;
   re-snapshot rather than assuming state.
 

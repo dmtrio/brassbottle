@@ -31,10 +31,10 @@ mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 WORK=$(cd "$(mktemp -d)" && pwd -P); trap 'rm -rf "$WORK"' EXIT
 
 # A sandbox copy of the scripts under test, laid out exactly like the repo
-# (bin/ + src/) but with NO ./.env. The scripts that resolve a dev-agent home
+# (bin/ + src/) but with NO ./.env. The scripts that resolve a djinn home
 # source src/common.sh, which reads the repo root's ./.env BEFORE honouring
-# $DEV_AGENT_HOME — so running them from $REPO on a machine that has the
-# documented `DEV_AGENT_HOME=...` in ./.env would ignore our sandbox and write
+# $DJINN_HOME — so running them from $REPO on a machine that has the
+# documented `DJINN_HOME=...` in ./.env would ignore our sandbox and write
 # to the user's REAL keys/secrets. Running them from here can't.
 SBOX="$WORK/repo"; mkdir -p "$SBOX/bin" "$SBOX/src" "$SBOX/plugins/gateway"
 cp "$REPO"/bin/*.sh "$SBOX/bin/"; cp "$REPO"/src/common.sh "$SBOX/src/"
@@ -220,11 +220,35 @@ echo "── common.sh ──"
 # not read) and BASH_SOURCE resolves there. It lives in src/, and CDD_ROOT is
 # that dir's PARENT — so mirror the layout: $cfg/src/common.sh → CDD_ROOT=$cfg.
 cfg="$WORK/cfg"; mkdir -p "$cfg/src"; cp "$REPO/src/common.sh" "$cfg/src/common.sh"
-bp() { env -i DEV_AGENT_HOME="${1-}" bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh"; }
-assert_eq "default BASE_PATH is ./.dev-agent" "$cfg/.dev-agent" "$(bp '')"
-assert_eq "DEV_AGENT_HOME overrides BASE_PATH" "/custom/home" "$(bp /custom/home)"
-printf 'DEV_AGENT_HOME=%s/from-dotenv\n' "$WORK" > "$cfg/.env"
-assert_eq "./.env sets DEV_AGENT_HOME" "$WORK/from-dotenv" "$(env -i bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh")"
+bp() { env -i DJINN_HOME="${1-}" bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh"; }
+assert_eq "default BASE_PATH is ./.djinn" "$cfg/.djinn" "$(bp '')"
+assert_eq "DJINN_HOME overrides BASE_PATH" "/custom/home" "$(bp /custom/home)"
+printf 'DJINN_HOME=%s/from-dotenv\n' "$WORK" > "$cfg/.env"
+assert_eq "./.env sets DJINN_HOME" "$WORK/from-dotenv" "$(env -i bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh")"
+rm -f "$cfg/.env"
+
+# Compat: DEV_AGENT_HOME still overrides BASE_PATH when DJINN_HOME is unset,
+# but DJINN_HOME wins when both are set.
+bp_dev() { env -i DEV_AGENT_HOME="${1-}" bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh"; }
+assert_eq "DEV_AGENT_HOME still overrides BASE_PATH (compat)" "/legacy/home" "$(bp_dev /legacy/home)"
+assert_eq "DJINN_HOME wins over DEV_AGENT_HOME when both set" "/new/home" \
+    "$(env -i DJINN_HOME=/new/home DEV_AGENT_HOME=/legacy/home bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh")"
+
+# Auto-detect: default chosen (no override), no ./.djinn yet, but a
+# pre-rebrand ./.dev-agent exists → keep using it (and say so on stderr)
+# rather than silently starting a second, empty home. A separate sandbox so
+# it doesn't interact with $cfg's own (djinn-only) default-path assertions.
+adcfg="$WORK/adcfg"; mkdir -p "$adcfg/src" "$adcfg/.dev-agent"
+cp "$REPO/src/common.sh" "$adcfg/src/common.sh"
+out=$(env -i bash -c '. "$1"; echo "$BASE_PATH"' _ "$adcfg/src/common.sh" 2>"$WORK/ad.err")
+assert_eq "pre-existing .dev-agent is auto-detected" "$adcfg/.dev-agent" "$out"
+assert_contains "auto-detect note suggests the move" "$(cat "$WORK/ad.err")" "mv .dev-agent .djinn"
+# ...but once ./.djinn also exists, the new default wins outright (no note).
+mkdir -p "$adcfg/.djinn"
+out=$(env -i bash -c '. "$1"; echo "$BASE_PATH"' _ "$adcfg/src/common.sh" 2>"$WORK/ad2.err")
+assert_eq "an existing .djinn wins over .dev-agent auto-detect" "$adcfg/.djinn" "$out"
+assert_eq "no auto-detect note once .djinn exists" "" "$(cat "$WORK/ad2.err")"
+
 # A failing COMMAND in ./.env (as opposed to an explicit `exit`, which would
 # terminate the shell directly) is what common.sh's set +e guard converts into
 # a loud exit 1 instead of a silent abort under the caller's set -e.
@@ -235,7 +259,7 @@ assert_contains "broken ./.env reports the failure" "$out" "./.env exited non-ze
 rm -f "$cfg/.env"
 
 # CONTAINERS_PATH resolution (mirrors RULES_PATH: override → $BASE_PATH/containers → repo)
-cpath() { env -i DEV_AGENT_HOME="${1-}" CONTAINERS_PATH="${2-}" bash -c '. "$1"; echo "$CONTAINERS_PATH"' _ "$cfg/src/common.sh"; }
+cpath() { env -i DJINN_HOME="${1-}" CONTAINERS_PATH="${2-}" bash -c '. "$1"; echo "$CONTAINERS_PATH"' _ "$cfg/src/common.sh"; }
 assert_eq "default CONTAINERS_PATH is the repo's containers/" "$cfg/containers" "$(cpath '' '')"
 dah="$WORK/dah-cp"; mkdir -p "$dah/containers"
 assert_eq "\$BASE_PATH/containers wins when it exists" "$dah/containers" "$(cpath "$dah" '')"
@@ -275,11 +299,16 @@ assert_rc "domain with scheme rejected" 1 "$rc"
 out=$(run_ae mycontainer cdn.playwright.dev --save none); rc=$?
 assert_rc "valid domain accepted rc 0" 0 "$rc"
 assert_contains "valid domain echoed" "$out" "Domains:   cdn.playwright.dev"
+assert_contains "short name resolves to the djinn- prefixed container" "$out" "Container: djinn-mycontainer"
+out=$(run_ae dev-agent-mycontainer cdn.playwright.dev --save none)
+assert_contains "pre-rebrand dev-agent- prefix still resolves (compat)" "$out" "Container: djinn-mycontainer"
+out=$(run_ae djinn-mycontainer cdn.playwright.dev --save none)
+assert_contains "full djinn- prefixed name also accepted" "$out" "Container: djinn-mycontainer"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── update-agent-keys.sh ──"
 DAH="$WORK/dah"; KP="$DAH/keys/mysite"; mkdir -p "$KP"
-uak() { ( cd "$SBOX" && env DEV_AGENT_HOME="$DAH" bash bin/update-agent-keys.sh "$@" ) ; }
+uak() { ( cd "$SBOX" && env DJINN_HOME="$DAH" bash bin/update-agent-keys.sh "$@" ) ; }
 
 uak mysite claude OBSIDIAN_ANNOTATED_KEY sekret >/dev/null
 assert_eq "set writes VAR to <agent>.env" "OBSIDIAN_ANNOTATED_KEY=sekret" "$(cat "$KP/claude.env")"
@@ -316,8 +345,8 @@ chmod +x "$WORK/rbin/openssl" "$WORK/rbin/docker"
 
 RDAH="$WORK/rdah"; mkdir -p "$RDAH"; SEC="$RDAH/secrets.env"
 # Drive the launcher through service.sh (the entry point): service.sh resolves
-# BASE_PATH from DEV_AGENT_HOME via common.sh and exports it for run.sh.
-run_svc() { ( cd "$SBOX" && env DEV_AGENT_HOME="$RDAH" DOCKER_LOG="$WORK/dockerlog" PATH="$WORK/rbin:$PATH" bash service.sh "$1" ) ; }
+# BASE_PATH from DJINN_HOME via common.sh and exports it for run.sh.
+run_svc() { ( cd "$SBOX" && env DJINN_HOME="$RDAH" DOCKER_LOG="$WORK/dockerlog" PATH="$WORK/rbin:$PATH" bash service.sh "$1" ) ; }
 
 : > "$WORK/dockerlog"
 run_svc gateway >/dev/null 2>&1 || true
@@ -345,7 +374,7 @@ echo "── service.sh (host-service dispatcher) ──"
 # A throwaway repo layout: service.sh + src/common.sh (service.sh sources it to
 # resolve BASE_PATH just before exec) + a plugin that ships a run.sh (echoes its
 # forwarded args) and one that doesn't. No ./.env, so the validation/error paths
-# never touch it and the exec path resolves BASE_PATH to $SVC/.dev-agent.
+# never touch it and the exec path resolves BASE_PATH to $SVC/.djinn.
 SVC="$WORK/svc"; mkdir -p "$SVC/src" "$SVC/plugins/withsvc" "$SVC/plugins/nosvc"
 cp "$REPO/service.sh" "$SVC/service.sh"; cp "$REPO/src/common.sh" "$SVC/src/"
 cat > "$SVC/plugins/withsvc/run.sh" <<'MOCK'
