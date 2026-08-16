@@ -29,6 +29,10 @@ if [ -z "$NAME" ]; then
     done
     exit 1
 fi
+# The container's full docker name (common.sh's DJINN_CTR_PREFIX — see
+# src/common.sh — is the single source of truth for the prefix; down.sh and
+# bin/allow-egress.sh build/resolve off the same var).
+CNAME="$DJINN_CTR_PREFIX$NAME"
 
 # CONTAINERS_PATH (resolved in common.sh) is where manifests live: the repo's
 # containers/ by default, or $BASE_PATH/containers / a CONTAINERS_PATH override
@@ -183,36 +187,18 @@ fi
 
 # ── Shared network (all containers; single CIDR for VPN/tunnel targeting) ───
 # One user-defined bridge with a stable subnet (override via DJINN_SUBNET
-# in ./.env; DEV_AGENT_SUBNET still honored for compat). Existing containers
-# adopt it on their next recreate.
+# in ./.env; DEV_AGENT_SUBNET still honored for compat — rebrand-transitional,
+# delete once every ./.env has moved to DJINN_SUBNET). Existing containers
+# adopt it on their next recreate. The create/verify logic — including
+# reclaiming the subnet from a pre-rebrand dev-agent-net bridge, so a
+# pre-existing install's first up.sh doesn't fail with "pool overlaps" — lives
+# in src/ensure_net.py (unit-tested; see tests/test_ensure_net.py), modeled on
+# src/migrate.py. up.sh only resolves the desired subnet and aborts on error.
 DESIRED_SUBNET="${DJINN_SUBNET:-${DEV_AGENT_SUBNET:-172.30.0.0/24}}"
-if docker network inspect djinn-net >/dev/null 2>&1; then
-    # The subnet is fixed at creation — warn loudly if the override drifted,
-    # or the operator points their VPN route at a CIDR no container is on.
-    ACTUAL_SUBNET=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' djinn-net 2>/dev/null || true)
-    if [ -n "$ACTUAL_SUBNET" ] && [ "$ACTUAL_SUBNET" != "$DESIRED_SUBNET" ]; then
-        echo "  ⚠ djinn-net already exists with subnet $ACTUAL_SUBNET (config wants $DESIRED_SUBNET)."
-        echo "    To change it: stop all djinn containers, 'docker network rm djinn-net', rerun up.sh."
-    fi
-else
-    # Rebrand migration: the old dev-agent-net bridge is left alone — containers
-    # still attached to it keep working until they're re-upped onto djinn-net.
-    if docker network inspect dev-agent-net >/dev/null 2>&1; then
-        echo "  ⚠ old network dev-agent-net detected; containers still on it keep working until re-upped."
-        echo "    Consider 'docker network rm dev-agent-net' once every container has migrated."
-    fi
-    echo "Creating shared network djinn-net ($DESIRED_SUBNET)"
-    # `|| inspect` tolerates losing a create race to a concurrent up.sh run.
-    if ! docker network create --subnet "$DESIRED_SUBNET" djinn-net >/dev/null 2>&1 \
-        && ! docker network inspect djinn-net >/dev/null 2>&1; then
-        echo "Error: could not create djinn-net ($DESIRED_SUBNET) — the subnet may overlap an existing docker network."
-        echo "Pick a free range via DJINN_SUBNET in ./.env (docker auto-allocates inside 172.17-172.31)."
-        exit 1
-    fi
-fi
+python3 "$SCRIPT_DIR/src/ensure_net.py" "$DESIRED_SUBNET" || exit 1
 
 # ── Apply ─────────────────────────────────────────────────────────────────────
-echo "Applying $MANIFEST → djinn-$NAME"
+echo "Applying $MANIFEST → $CNAME"
 REMOTE_SUMMARY=""
 [ "$REMOTE_TMUX" = "true" ] && REMOTE_SUMMARY="tmux"
 [ "$REMOTE_MOSH" = "true" ] && REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}mosh"
@@ -244,7 +230,7 @@ REMOTE_TMUX="$REMOTE_TMUX" \
 MOSH_PORTS="$MOSH_PORTS" MOSH_PORTS_DASH="$MOSH_PORTS_DASH" \
 NTFY_URL="$CONTAINER_NTFY_URL" NTFY_TOPIC="$CONTAINER_NTFY_TOPIC" \
 IMAGE_TAG="$NAME" \
-docker compose -p "djinn-$NAME" --project-directory "$SCRIPT_DIR" \
+docker compose -p "$CNAME" --project-directory "$SCRIPT_DIR" \
     $COMPOSE_FILES up -d --build
 
 # ── Wait for entrypoint/firewall ──────────────────────────────────────────────
@@ -253,33 +239,33 @@ docker compose -p "djinn-$NAME" --project-directory "$SCRIPT_DIR" \
 # re-up). A rise DURING the wait = a crash loop this run — which also catches
 # the SSH-missing-key case where 'firewall active' prints before the fatal
 # exit (the marker alone would falsely read as success).
-BASELINE_RESTARTS="$(docker inspect -f '{{.RestartCount}}' "djinn-$NAME" 2>/dev/null || echo 0)"
+BASELINE_RESTARTS="$(docker inspect -f '{{.RestartCount}}' "$CNAME" 2>/dev/null || echo 0)"
 i=0
 READY=false
 while [ $i -lt 24 ]; do
-    STATUS="$(docker inspect -f '{{.State.Status}}' "djinn-$NAME" 2>/dev/null || echo missing)"
+    STATUS="$(docker inspect -f '{{.State.Status}}' "$CNAME" 2>/dev/null || echo missing)"
     if [ "$STATUS" = "exited" ] || [ "$STATUS" = "missing" ] || [ "$STATUS" = "restarting" ]; then
         echo "Error: container failed to start. Logs:"
-        docker logs "djinn-$NAME" 2>&1 | tail -20
+        docker logs "$CNAME" 2>&1 | tail -20
         exit 1
     fi
-    RESTART_COUNT="$(docker inspect -f '{{.RestartCount}}' "djinn-$NAME" 2>/dev/null || echo 0)"
+    RESTART_COUNT="$(docker inspect -f '{{.RestartCount}}' "$CNAME" 2>/dev/null || echo 0)"
     if [ "$RESTART_COUNT" -gt "$BASELINE_RESTARTS" ]; then
         echo "Error: container crash-loop detected (restarts rose to $RESTART_COUNT). Logs:"
-        docker logs "djinn-$NAME" 2>&1 | tail -20
+        docker logs "$CNAME" 2>&1 | tail -20
         exit 1
     fi
-    if docker logs "djinn-$NAME" 2>&1 | grep -q "firewall active\|firewall DISABLED"; then
+    if docker logs "$CNAME" 2>&1 | grep -q "firewall active\|firewall DISABLED"; then
         # The marker persists in logs across restarts, so a crashing boot can
         # print it too. Confirm the container is actually STABLE: still running
         # and no new restart 2s later. A crash loop keeps incrementing, so this
         # catches a container that logged the marker then died.
         sleep 2
-        CONFIRM_STATUS="$(docker inspect -f '{{.State.Status}}' "djinn-$NAME" 2>/dev/null || echo missing)"
-        CONFIRM_RESTARTS="$(docker inspect -f '{{.RestartCount}}' "djinn-$NAME" 2>/dev/null || echo 0)"
+        CONFIRM_STATUS="$(docker inspect -f '{{.State.Status}}' "$CNAME" 2>/dev/null || echo missing)"
+        CONFIRM_RESTARTS="$(docker inspect -f '{{.RestartCount}}' "$CNAME" 2>/dev/null || echo 0)"
         if [ "$CONFIRM_STATUS" != "running" ] || [ "$CONFIRM_RESTARTS" -gt "$BASELINE_RESTARTS" ]; then
             echo "Error: container crash-loop detected (unstable after readiness marker). Logs:"
-            docker logs "djinn-$NAME" 2>&1 | tail -20
+            docker logs "$CNAME" 2>&1 | tail -20
             exit 1
         fi
         READY=true
@@ -291,7 +277,7 @@ done
 
 if [ "$READY" = "false" ]; then
     echo "Error: container did not reach readiness (timeout). Logs:"
-    docker logs "djinn-$NAME" 2>&1 | tail -20
+    docker logs "$CNAME" 2>&1 | tail -20
     exit 1
 fi
 
@@ -302,11 +288,11 @@ fi
 # harmless: rmdir it and proceed. The refusal recommends the selective volume
 # reset, NOT --purge: purge would also delete the auth volumes (agent logins,
 # per-project state) that the reset — and the port shim below — preserve.
-docker exec -u coder "djinn-$NAME" bash -c 'rmdir /workspace/main 2>/dev/null || true'
-if docker exec -u coder "djinn-$NAME" bash -c '[ -e /workspace/main ]'; then
+docker exec -u coder "$CNAME" bash -c 'rmdir /workspace/main 2>/dev/null || true'
+if docker exec -u coder "$CNAME" bash -c '[ -e /workspace/main ]'; then
     echo "Error: this workspace uses layout v1 (/workspace/main). Layout v2 puts every repo under /workspace/repos/<name>."
     echo "Push every branch you care about, then reset the workspace volume (agent auth/state survives) and rerun:"
-    echo "  ./djinn down $NAME && docker volume rm djinn-${NAME}_workspace && ./djinn up $NAME"
+    echo "  ./djinn down $NAME && docker volume rm ${CNAME}_workspace && ./djinn up $NAME"
     exit 1
 fi
 
@@ -329,7 +315,7 @@ $GIT_ORG_TOKENS
 EOF
     while IFS=$'\t' read -r RNAME RURL; do
         [ -n "$RNAME" ] || continue
-        docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "djinn-$NAME" bash -c \
+        docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
             '[ -d "/workspace/repos/$REPO_NAME/.git" ] || git clone "$REPO_URL" "/workspace/repos/$REPO_NAME"' \
             || echo "WARNING: clone of '$RNAME' failed — private repo needs either GH_TOKEN in secrets.env (machine user must have repo access) or a one-time 'gh auth login' in the container"
         # Per-repo identity attribution: if this repo's OWNER has a git.orgs
@@ -347,7 +333,7 @@ EOF
         IDENT=$(printf '%s' "$GIT_ORG_IDENTITIES" | awk -F'\t' -v o="$REPO_OWNER" '$1==o{print $2"\t"$3; exit}')
         ID_NAME="${IDENT%%$'\t'*}"; ID_EMAIL="${IDENT#*$'\t'}"
         if [ -n "$ID_NAME" ] || [ -n "$ID_EMAIL" ]; then
-            docker exec -e "REPO_NAME=$RNAME" -e "ID_NAME=$ID_NAME" -e "ID_EMAIL=$ID_EMAIL" -u coder "djinn-$NAME" bash -c '
+            docker exec -e "REPO_NAME=$RNAME" -e "ID_NAME=$ID_NAME" -e "ID_EMAIL=$ID_EMAIL" -u coder "$CNAME" bash -c '
                 d="/workspace/repos/$REPO_NAME"; [ -d "$d/.git" ] || exit 0
                 [ -n "$ID_NAME" ]  && git -C "$d" config user.name  "$ID_NAME"
                 [ -n "$ID_EMAIL" ] && git -C "$d" config user.email "$ID_EMAIL"
@@ -357,7 +343,7 @@ EOF
 $REPOS
 EOF
 else
-    docker exec -u coder "djinn-$NAME" bash -c \
+    docker exec -u coder "$CNAME" bash -c \
         "[ -d /workspace/repos/scratch/.git ] || git init -b main /workspace/repos/scratch"
 fi
 
@@ -367,18 +353,18 @@ fi
 # -workspace-repos. Copy once so a workspace reset keeps its memory (the auth
 # volume the state lives in survives the reset). Remove this block once every
 # container has been recreated on layout v2.
-docker exec -u coder "djinn-$NAME" bash -c \
+docker exec -u coder "$CNAME" bash -c \
     'src=/home/coder/.claude/projects/-workspace-main; dst=/home/coder/.claude/projects/-workspace-repos; if [ -d "$src" ] && [ ! -e "$dst" ]; then cp -a "$src" "$dst"; fi'
 
 # Merge the manifest's repo list into dev.code-workspace (idempotent): a
 # manifest edit on a live container adds its folder entry on the next up,
 # while agent-managed worktree entries and hand-added folders survive.
 REPO_NAMES="$(printf '%s' "$REPOS" | cut -f1 | tr '\n' ' ')"
-docker exec -u coder -e REPO_NAMES="${REPO_NAMES:-scratch}" "djinn-$NAME" \
+docker exec -u coder -e REPO_NAMES="${REPO_NAMES:-scratch}" "$CNAME" \
     python3 /usr/local/lib/djinn/code_workspace.py /workspace/dev.code-workspace
 
-docker cp "$SCRIPT_DIR/docs/workspace.CLAUDE.md" "djinn-$NAME:/workspace/CLAUDE.md"
-docker exec "djinn-$NAME" chown coder:coder /workspace/CLAUDE.md
+docker cp "$SCRIPT_DIR/docs/workspace.CLAUDE.md" "$CNAME:/workspace/CLAUDE.md"
+docker exec "$CNAME" chown coder:coder /workspace/CLAUDE.md
 
 # ── Global rules fan-out (compose base rules + enabled-plugin fragments) ─────
 # Each tool's global file is GENERATED (was a symlink to the read-only
@@ -389,7 +375,7 @@ docker exec "djinn-$NAME" chown coder:coder /workspace/CLAUDE.md
 # interactive-shell hook (src/rules-compose.bashrc) recomposes so host-side
 # edits to the base stay live. PLUGINS (space-separated enabled names) is the
 # source of truth both composes read; skills stays a symlink (a dir, not text).
-docker exec -u coder -e ENABLED_PLUGINS="$PLUGINS" "djinn-$NAME" bash -c '
+docker exec -u coder -e ENABLED_PLUGINS="$PLUGINS" "$CNAME" bash -c '
 mkdir -p /home/coder/.claude /home/coder/.codex /home/coder/.gemini /home/coder/.config/djinn
 printf "%s\n" "${ENABLED_PLUGINS:-}" > /home/coder/.config/djinn/enabled-plugins
 python3 /usr/local/lib/djinn/compose_rules.py --announce
@@ -448,7 +434,7 @@ PAYLOAD=$(WIRE_CURSOR="$INSTALL_CURSOR" WIRE_GEMINI="$INSTALL_GEMINI" \
     IDENTITY_SECRETS="$IDENTITY_SECRETS" \
     "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py" --build-payload)
 
-printf '%s' "$PAYLOAD" | docker exec -i -u coder "${IDENTITY_ENV[@]}" "djinn-$NAME" \
+printf '%s' "$PAYLOAD" | docker exec -i -u coder "${IDENTITY_ENV[@]}" "$CNAME" \
     python3 /usr/local/lib/djinn/wire_plugins.py
 
 # ── Container freshness stamps (PLN - Container Freshness Readout) ────────────
@@ -462,25 +448,25 @@ printf '%s' "$PAYLOAD" | docker exec -i -u coder "${IDENTITY_ENV[@]}" "djinn-$NA
 #                cache hit leaves it old, which is the honest signal for the
 #                baked half (bundled rules, plugin fragments, install: blocks).
 UP_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-IMAGE_ID="$(docker inspect -f '{{.Image}}' "djinn-$NAME" 2>/dev/null || true)"
+IMAGE_ID="$(docker inspect -f '{{.Image}}' "$CNAME" 2>/dev/null || true)"
 IMAGE_BUILT="$(docker inspect -f '{{.Created}}' "$IMAGE_ID" 2>/dev/null || true)"
 # Non-fatal (|| true): the readout is cosmetic — a failure to stamp must never
 # abort an otherwise-successful `up` (zero runtime failure surface, by design).
-docker exec "djinn-$NAME" bash -c '
+docker exec "$CNAME" bash -c '
     sed -i "/^DJINN_UP_AT=/d;/^DJINN_IMAGE_BUILT=/d" /etc/environment
     printf "DJINN_UP_AT=%s\nDJINN_IMAGE_BUILT=%s\n" "$1" "$2" >> /etc/environment
 ' _ "$UP_AT" "$IMAGE_BUILT" || true
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  djinn-$NAME is up (manifest: $MANIFEST)"
+echo "  $CNAME is up (manifest: $MANIFEST)"
 echo ""
 echo "  VS Code / Cursor:  Dev Containers: Attach to Running Container"
-echo "  Terminal:          docker exec -it -u coder djinn-$NAME bash"
+echo "  Terminal:          docker exec -it -u coder $CNAME bash"
 echo "  Claude:            cd /workspace/repos && claude   (one session over every repo)"
 [ -n "$SSH_PORT" ] && echo "  SSH:               ssh -p $SSH_PORT coder@$( [ "$SSH_BIND" = "127.0.0.1" ] && echo localhost || echo '<this-host>' )"
 if [ "$REMOTE_TMUX" = "true" ] || [ "$REMOTE_MOSH" = "true" ]; then
-    TUNNEL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "djinn-$NAME" 2>/dev/null || true)"
+    TUNNEL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CNAME" 2>/dev/null || true)"
     echo "  Remote (tunnel):   ${TUNNEL_IP:-<no ip>} — $( [ "$REMOTE_MOSH" = "true" ] && echo "mosh coder@ip (UDP $MOSH_PORTS_DASH)" || echo "ssh coder@ip" ) over your WireGuard/VPN"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

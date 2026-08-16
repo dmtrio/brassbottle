@@ -758,6 +758,173 @@ class TestWireCodexToml(QuietTestCase):
             self.assertIn("[mcp_servers.new]", content)
 
 
+class TestWireCodexOldMarkerCompat(QuietTestCase):
+    """rebrand-transitional: a pre-rebrand `# >>> dev-agent plugin MCP` block
+    (written by an older up.sh) is recognized and folded into the new
+    `# >>> djinn plugin MCP` block, instead of being left alongside it — the
+    original SEVERE bug produced duplicate [mcp_servers.*] tables and broke
+    codex's config."""
+
+    def test_old_marker_block_is_reconciled_into_one_new_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "keep = 1\n"
+                "# >>> dev-agent plugin MCP (managed by up.sh; edits inside are overwritten) >>>\n"
+                "[mcp_servers.serena]\n"
+                'command = "old-bash"\n'
+                "args = []\n"
+                "# <<< dev-agent plugin MCP <<<\n"
+            )
+
+            wire_plugins.wire_codex_toml(config_path, {"serena": {"command": "bash", "args": []}})
+
+            content = config_path.read_text()
+            self.assertTrue(content.startswith("keep = 1\n"))
+            # Exactly one table, exactly one marker pair — the new one.
+            self.assertEqual(content.count("[mcp_servers.serena]"), 1)
+            self.assertEqual(content.count("# >>> djinn plugin MCP"), 1)
+            self.assertNotIn("# >>> dev-agent plugin MCP", content)
+            self.assertNotIn("# <<< dev-agent plugin MCP", content)
+            self.assertNotIn("old-bash", content)
+            self.assertIn('command = "bash"', content)
+
+    def test_old_and_new_blocks_both_present_collapse_to_one(self):
+        """Pins the exact reported bug: an old block from a not-yet-updated
+        up.sh alongside a new one must reconcile to a single new-marker
+        block, not two [mcp_servers.*] tables for the same name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "# >>> dev-agent plugin MCP (managed by up.sh; edits inside are overwritten) >>>\n"
+                "[mcp_servers.serena]\n"
+                'command = "bash"\n'
+                "args = []\n"
+                "# <<< dev-agent plugin MCP <<<\n"
+                "# >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>\n"
+                "[mcp_servers.serena]\n"
+                'command = "bash"\n'
+                "args = []\n"
+                "# <<< djinn plugin MCP <<<\n"
+            )
+
+            wire_plugins.wire_codex_toml(config_path, {"serena": {"command": "bash", "args": []}})
+
+            content = config_path.read_text()
+            self.assertEqual(content.count("[mcp_servers.serena]"), 1)
+            self.assertEqual(content.count("# >>> djinn plugin MCP"), 1)
+            self.assertNotIn("dev-agent", content)
+
+
+class TestReconcileAgentServersOldSidecarCompat(QuietTestCase):
+    """rebrand-transitional: a .dev-agent-servers sidecar (from a volume
+    migrate.py copied over) is read once — when the new .djinn-servers
+    sidecar doesn't exist yet — so its stale literal-key MCP servers (which
+    may carry inlined credentials) are still pruned, then migrated forward
+    (rename-forward, one-way)."""
+
+    SPEC = {"url": "https://mcp-obsidian.dmetr.io/mcp",
+            "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}
+
+    def test_old_sidecar_only_is_read_pruned_and_migrated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cfg = home / ".cursor" / "mcp.json"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text(json.dumps({"mcpServers": {
+                "obsidian-annotated": {"headers": {"Authorization": "Bearer stale-token"}},
+                "hand-added": {"command": "keep-me"},
+            }}))
+            old_sidecar = cfg.parent / (cfg.name + ".dev-agent-servers")
+            old_sidecar.write_text('["obsidian-annotated"]\n')
+            new_sidecar = cfg.parent / (cfg.name + ".djinn-servers")
+            self.assertFalse(new_sidecar.exists())
+
+            # This run no longer requires obsidian-annotated for cursor-agent
+            # (e.g. slot disabled) — the sidecar is what makes the stale
+            # inlined-credential entry prunable at all.
+            wire_plugins.reconcile_agent_servers("cursor-agent", {}, home)
+
+            data = json.loads(cfg.read_text())
+            self.assertNotIn("obsidian-annotated", data["mcpServers"])
+            self.assertNotIn("stale-token", cfg.read_text())
+            self.assertIn("hand-added", data["mcpServers"])
+            self.assertTrue(new_sidecar.exists())
+            self.assertEqual(json.loads(new_sidecar.read_text()), [])
+            self.assertFalse(old_sidecar.exists())  # migrated away, one-way
+
+    def test_both_present_new_sidecar_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cfg = home / ".cursor" / "mcp.json"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text(json.dumps({"mcpServers": {
+                "obsidian-annotated": {"headers": {"Authorization": "Bearer keep-token"}},
+            }}))
+            new_sidecar = cfg.parent / (cfg.name + ".djinn-servers")
+            new_sidecar.write_text('["obsidian-annotated"]\n')
+            old_sidecar = cfg.parent / (cfg.name + ".dev-agent-servers")
+            old_sidecar.write_text('["someone-else"]\n')
+
+            required = {"obsidian-annotated": (self.SPEC, {"OBSIDIAN_ANNOTATED_KEY": "keep-token"})}
+            wire_plugins.reconcile_agent_servers("cursor-agent", required, home)
+
+            data = json.loads(cfg.read_text())
+            self.assertIn("obsidian-annotated", data["mcpServers"])
+            # The old sidecar is left alone — the present new one already won.
+            self.assertTrue(old_sidecar.exists())
+
+
+class TestWirePluginServersJsonOldSidecarCompat(QuietTestCase):
+    """rebrand-transitional: same compat, for the plugin-servers sidecar
+    (.dev-agent-plugins -> .djinn-plugins)."""
+
+    def test_old_sidecar_only_is_read_pruned_and_migrated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "mcp.json"
+            config_path.write_text(json.dumps({
+                "mcpServers": {
+                    "obsidian-annotated": {"url": "..."},  # identity, untouched
+                    "oldplug": {"command": "stale", "args": ["--token", "leaked"]},
+                }
+            }))
+            old_sidecar = config_path.parent / (config_path.name + ".dev-agent-plugins")
+            old_sidecar.write_text('["oldplug"]\n')
+            new_sidecar = config_path.parent / (config_path.name + ".djinn-plugins")
+            self.assertFalse(new_sidecar.exists())
+
+            wire_plugins.wire_plugin_servers_json(config_path, {"newplug": {"command": "new"}})
+
+            data = json.loads(config_path.read_text())
+            self.assertNotIn("oldplug", data["mcpServers"])
+            self.assertIn("obsidian-annotated", data["mcpServers"])
+            self.assertIn("newplug", data["mcpServers"])
+            self.assertTrue(new_sidecar.exists())
+            self.assertEqual(json.loads(new_sidecar.read_text()), ["newplug"])
+            self.assertFalse(old_sidecar.exists())  # migrated away, one-way
+
+    def test_both_present_new_sidecar_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "mcp.json"
+            config_path.write_text(json.dumps({
+                "mcpServers": {
+                    "fromnew": {"command": "keep-me"},
+                    "fromold": {"command": "stale-only-tracked-by-old-sidecar"},
+                }
+            }))
+            new_sidecar = config_path.parent / (config_path.name + ".djinn-plugins")
+            new_sidecar.write_text('["fromnew"]\n')
+            old_sidecar = config_path.parent / (config_path.name + ".dev-agent-plugins")
+            old_sidecar.write_text('["fromold"]\n')
+
+            wire_plugins.wire_plugin_servers_json(config_path, {})
+
+            data = json.loads(config_path.read_text())
+            self.assertNotIn("fromnew", data["mcpServers"])  # pruned by the (present) new sidecar
+            self.assertIn("fromold", data["mcpServers"])     # old sidecar ignored entirely
+            self.assertTrue(old_sidecar.exists())             # left alone
+
+
 class TestRunIntegration(QuietTestCase):
     """Integration tests for the run function."""
 

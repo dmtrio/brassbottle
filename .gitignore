@@ -2,6 +2,8 @@
 # repo-local config + runtime home (secrets, keys, artifacts) — never commit
 .env
 .djinn/
+# rebrand-transitional: a pre-rebrand ./.dev-agent home common.sh still
+# auto-detects — delete once every container's ./.env has moved to DJINN_HOME.
 .dev-agent/
 secrets.env
 # personal container manifests carry semi-private data (private repo URLs, LAN

@@ -3,6 +3,10 @@
 the pre-rebrand `dev-agent-<name>_*` prefix to the current `djinn-<name>_*`
 prefix (docker-dev → brassbottle; the CLI brand dev-agent → djinn).
 
+rebrand-transitional tool — delete this file (and tests/test_migrate.py, and
+the `./djinn migrate` subcommand) once every container has been migrated;
+`grep -rn rebrand-transitional` lists the rest of what goes with it.
+
 Volumes are COPIED, never moved: the old `dev-agent-<name>_*` volumes are
 left exactly as they are, so a failed or partial migration never loses data
 and the migration can simply be rerun. Only after you've confirmed the
@@ -34,12 +38,39 @@ class MigrateError(Exception):
     """Fatal migration error; main() prints it as 'Error: …' and exits 1."""
 
 
+def _format_cmd(cmd):
+    """The one place that turns an argv list into displayed text — used by
+    both _run()'s boundary log and print_dry_run(), so the printed plan can
+    never drift from what actually executes (they're the same string)."""
+    return "  $ " + " ".join(cmd)
+
+
 def _run(cmd):
     """Single choke point for every subprocess call — logs the exact command
     about to run (the outbound half of the boundary log) so both the plan
     and any failure are reconstructable from stdout alone."""
-    print(f"  $ {' '.join(cmd)}")
+    print(_format_cmd(cmd))
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def stop_cmd(name):
+    """argv for stopping the old container. A pure builder: no I/O, so both
+    the real executor and the --dry-run printer can consume the exact same
+    command instead of each hand-typing their own copy of it."""
+    return ["docker", "stop", f"{OLD_PREFIX}{name}"]
+
+
+def create_cmd(target):
+    return ["docker", "volume", "create", target]
+
+
+def copy_cmd(old, target):
+    return [
+        "docker", "run", "--rm",
+        "-v", f"{old}:/from:ro",
+        "-v", f"{target}:/to",
+        BUSYBOX_IMAGE, "sh", "-c", "cp -a /from/. /to/",
+    ]
 
 
 def list_old_volumes(name):
@@ -77,7 +108,7 @@ def stop_old_container(name):
     returns nonzero with a message, so this never raises."""
     old_container = f"{OLD_PREFIX}{name}"
     print(f"Stopping old container {old_container} (if running)...")
-    result = _run(["docker", "stop", old_container])
+    result = _run(stop_cmd(name))
     if result.returncode == 0:
         print(f"  done: {old_container} stopped")
     else:
@@ -89,19 +120,14 @@ def copy_volume(old, target):
     throwaway busybox container. Raises with the failing command's stderr on
     either step; the old volume is never touched."""
     print(f"Copying {old} -> {target} ...")
-    created = _run(["docker", "volume", "create", target])
+    created = _run(create_cmd(target))
     if created.returncode != 0:
         raise MigrateError(f"docker volume create {target} failed: {created.stderr.strip()}")
-    copy_cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{old}:/from:ro",
-        "-v", f"{target}:/to",
-        BUSYBOX_IMAGE, "sh", "-c", "cp -a /from/. /to/",
-    ]
-    copied = _run(copy_cmd)
+    cmd = copy_cmd(old, target)
+    copied = _run(cmd)
     if copied.returncode != 0:
         raise MigrateError(
-            f"copy failed ({' '.join(copy_cmd)}): {copied.stderr.strip()}"
+            f"copy failed ({' '.join(cmd)}): {copied.stderr.strip()}"
         )
     print(f"  done: {old} -> {target}")
 
@@ -113,15 +139,14 @@ def print_plan(name, mapping):
 
 
 def print_dry_run(name, mapping):
+    """Prints the exact commands migrate() WOULD run — via the same builders
+    and the same _format_cmd() the real executor's boundary log uses, so this
+    text can never drift from what --dry-run actually skips."""
     print("\n--dry-run: plan only, nothing executed.")
-    print(f"  $ docker stop {OLD_PREFIX}{name}")
+    print(_format_cmd(stop_cmd(name)))
     for old, target in mapping:
-        print(f"  $ docker volume create {target}")
-        print(
-            "  $ docker run --rm "
-            f"-v {old}:/from:ro -v {target}:/to {BUSYBOX_IMAGE} "
-            'sh -c "cp -a /from/. /to/"'
-        )
+        print(_format_cmd(create_cmd(target)))
+        print(_format_cmd(copy_cmd(old, target)))
 
 
 def migrate(name, dry_run):

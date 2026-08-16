@@ -121,10 +121,10 @@ alias cddj="cd \$DJINN_REPO"
 Tab-completion for container names (`djup`/`djdown`) and host services (`djsvc`):
 
 ```bash
-_dj_ctr_dir() {   # mirrors common.sh's CONTAINERS_PATH resolution
-  if   [ -n "$CONTAINERS_PATH" ];                              then echo "$CONTAINERS_PATH"
-  elif [ -d "${DJINN_HOME:-$DJINN_REPO/.djinn}/containers" ]; then echo "${DJINN_HOME:-$DJINN_REPO/.djinn}/containers"
-  else echo "$DJINN_REPO/containers"; fi
+_dj_ctr_dir() {   # delegates to common.sh (the single source of truth for
+                   # CONTAINERS_PATH resolution) instead of duplicating its
+                   # override/compat logic here; stderr note suppressed.
+  bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$CONTAINERS_PATH"'
 }
 _dj_names() {
   local d f names=""; d="$(_dj_ctr_dir)"
@@ -145,11 +145,11 @@ use the native zsh version below — `(N)` makes the globs no-match-safe. Needs
 `compinit` to have run (frameworks like oh-my-zsh already do it):
 
 ```zsh
-_dj_names_zsh() {   # container short-names; mirrors common.sh's CONTAINERS_PATH resolution
+_dj_names_zsh() {   # container short-names; delegates to common.sh (single
+                     # source of truth) instead of duplicating its
+                     # override/compat logic here; stderr note suppressed.
   local dir
-  if   [ -n "$CONTAINERS_PATH" ]; then dir="$CONTAINERS_PATH"
-  elif [ -d "${DJINN_HOME:-$DJINN_REPO/.djinn}/containers" ]; then dir="${DJINN_HOME:-$DJINN_REPO/.djinn}/containers"
-  else dir="$DJINN_REPO/containers"; fi
+  dir=$(bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$CONTAINERS_PATH"')
   local -a names=(${dir}/*.yml(N:t:r)); names=(${names:#TEMPLATE})
   compadd -a names
 }
@@ -384,6 +384,7 @@ listens publicly.
 
 ## Migrating from docker-dev
 
+<!-- rebrand-transitional -->
 This repo was renamed **brassbottle** on GitHub (old clone/remote URLs
 redirect, so an existing `git remote` keeps working). To bring an existing
 setup along:
@@ -394,9 +395,18 @@ setup along:
 2. Per container: `./djinn migrate <name>` copies its volumes to the
    `djinn-<name>` prefix (the `dev-agent-<name>` originals are left in
    place, not deleted), then `./djinn up <name>` brings it up under the new
-   name.
+   name. If `djinn-net` can't be created because the old `dev-agent-net`
+   bridge still holds the subnet, `./djinn up` reclaims it automatically once
+   that container has no `dev-agent-*` containers left attached.
 3. Once every container has been re-upped, remove the old `dev-agent-net`
    bridge — `djinn-net` replaces it on the same subnet.
+
+**Once every container has migrated**, every shim this rebrand left behind is
+one grep away: `grep -rn rebrand-transitional .` lists them all — the
+`DEV_AGENT_HOME`/`.dev-agent` fallbacks, the `DEV_AGENT_SUBNET` fallback, the
+old codex/sidecar marker compat, and this section itself. Deleting them (and
+`src/migrate.py`, `tests/test_migrate.py`, and the `./djinn migrate`
+subcommand) completes the rebrand.
 
 **Manifest filename = container identity.** A `containers/<name>.yml` under
 your own (untracked) manifests directory names the container it produces, so

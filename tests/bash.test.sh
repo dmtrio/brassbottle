@@ -267,16 +267,26 @@ assert_eq "CONTAINERS_PATH env override wins over everything" "/my/private/manif
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── allow-egress.sh ──"
-run_ae() { ( cd "$SBOX" && env CONTAINERS_PATH="$WORK/no-such-manifests" PATH="$WORK/aebin:$PATH" bash bin/allow-egress.sh "$@" ) 2>&1; }
-# docker mock: inspect succeeds (container "exists"), reports NOT running so the
-# live-apply path is skipped; ps -a prints nothing.
+run_ae() { ( cd "$SBOX" && env CONTAINERS_PATH="$WORK/no-such-manifests" \
+    MOCK_EXISTING_CONTAINERS="${MOCK_EXISTING_CONTAINERS-djinn-mycontainer}" \
+    PATH="$WORK/aebin:$PATH" bash bin/allow-egress.sh "$@" ) 2>&1; }
+# docker mock: `inspect [-f fmt] <name>` only "succeeds" (State.Running=false,
+# so the live-apply path is skipped) for a name in the space-separated
+# MOCK_EXISTING_CONTAINERS allowlist (env var the test sets) — everything else
+# reports not-found. Tightened from "inspect always succeeds" so the
+# djinn-/dev-agent- fallback resolution in allow-egress.sh is actually
+# exercised instead of short-circuited by an inspect that always says yes.
 mkdir -p "$WORK/aebin"
 cat > "$WORK/aebin/docker" <<'MOCK'
 #!/bin/bash
-# $1=subcommand. `inspect -f {{.State.Running}} <c>` → not running (skip live
-# apply); plain `inspect <c>` → exit 0 (container exists); ps → nothing.
 case "$1" in
-    inspect) [ "$2" = "-f" ] && echo false; exit 0 ;;
+    inspect)
+        if [ "$2" = "-f" ]; then name="$4"; else name="$2"; fi
+        for c in $MOCK_EXISTING_CONTAINERS; do
+            [ "$c" = "$name" ] && { echo false; exit 0; }
+        done
+        exit 1
+        ;;
     ps)      exit 0 ;;
     *)       exit 0 ;;
 esac
@@ -300,10 +310,30 @@ out=$(run_ae mycontainer cdn.playwright.dev --save none); rc=$?
 assert_rc "valid domain accepted rc 0" 0 "$rc"
 assert_contains "valid domain echoed" "$out" "Domains:   cdn.playwright.dev"
 assert_contains "short name resolves to the djinn- prefixed container" "$out" "Container: djinn-mycontainer"
-out=$(run_ae dev-agent-mycontainer cdn.playwright.dev --save none)
-assert_contains "pre-rebrand dev-agent- prefix still resolves (compat)" "$out" "Container: djinn-mycontainer"
 out=$(run_ae djinn-mycontainer cdn.playwright.dev --save none)
 assert_contains "full djinn- prefixed name also accepted" "$out" "Container: djinn-mycontainer"
+
+# rebrand-transitional: a REAL pre-rebrand container (the djinn- name does
+# NOT exist; the dev-agent- name does) resolves via the fallback, using its
+# actual (old) name — not a rebuilt-but-nonexistent djinn- name.
+MOCK_EXISTING_CONTAINERS="dev-agent-mycontainer"
+out=$(run_ae mycontainer cdn.playwright.dev --save none)
+assert_contains "pre-rebrand-only container resolves via fallback" "$out" "Container: dev-agent-mycontainer"
+assert_contains "fallback use is announced" "$out" "using pre-rebrand container"
+out=$(run_ae dev-agent-mycontainer cdn.playwright.dev --save none)
+assert_contains "dev-agent- prefixed input also resolves via fallback" "$out" "Container: dev-agent-mycontainer"
+unset MOCK_EXISTING_CONTAINERS
+
+# Neither the djinn- nor the dev-agent- name exists → a clear error naming
+# both attempts, plus a ps -a hint for both prefixes.
+MOCK_EXISTING_CONTAINERS=""
+out=$(run_ae ghost cdn.playwright.dev --save none 2>&1); rc=$?
+assert_rc "neither name exists → rc 1" 1 "$rc"
+assert_contains "error names the djinn- attempt" "$out" "no container named 'djinn-ghost'"
+assert_contains "error names the dev-agent- attempt" "$out" "also tried 'dev-agent-ghost'"
+assert_contains "not-found hint lists djinn- containers" "$out" "Existing djinn containers:"
+assert_contains "not-found hint lists pre-rebrand containers too" "$out" "Existing pre-rebrand containers"
+unset MOCK_EXISTING_CONTAINERS
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── update-agent-keys.sh ──"

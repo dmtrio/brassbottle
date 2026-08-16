@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Unit tests for src/migrate.py — the dev-agent- → djinn- volume migrator.
 
+rebrand-transitional tool — delete this file (alongside src/migrate.py and
+the `./djinn migrate` subcommand) once every container has been migrated.
+
 No real docker calls: every subprocess.run() is mocked via a small command
 dispatcher (fake_run) keyed on the docker subcommand, so each test controls
 exactly what "docker" would have said without a daemon anywhere nearby.
 Covers: prefix mapping/discovery, the none-found hard error, the
 target-already-exists skip (never overwrites), --dry-run executing no
-mutating command, and the exact shape of the copy command.
+mutating command, the exact shape of the copy command, and that the
+--dry-run text is derived from the same command builders the real executor
+uses (so the two can't drift apart).
 """
 
 import subprocess
@@ -260,6 +265,37 @@ class FailureSurfacesCommandTests(QuietTestCase):
         self.assertEqual(rc, 0)
         rm_calls = [c for c in fake.calls if "rm" in c]
         self.assertEqual(rm_calls, [])
+
+
+class DryRunDerivationTests(QuietTestCase):
+    """--dry-run's printed plan must come from the same command builders the
+    real executor calls — pins that against drift by patching a builder and
+    checking BOTH the dry-run text and the real executed argv change."""
+
+    def test_patching_a_builder_changes_dry_run_and_real_execution_alike(self):
+        patched_stop = ["docker", "stop", "PATCHED-CONTAINER"]
+        with unittest.mock.patch.object(migrate, "stop_cmd", return_value=patched_stop):
+            fake_dry = FakeDocker(volumes=["dev-agent-mysite_workspace"])
+            with unittest.mock.patch.object(migrate.subprocess, "run", side_effect=fake_dry):
+                rc_dry = migrate.migrate("mysite", dry_run=True)
+            self.assertEqual(rc_dry, 0)
+            self.assertIn("PATCHED-CONTAINER", self.out)
+
+            fake_real = FakeDocker(volumes=["dev-agent-mysite_workspace"])
+            with unittest.mock.patch.object(migrate.subprocess, "run", side_effect=fake_real):
+                rc_real = migrate.migrate("mysite", dry_run=False)
+            self.assertEqual(rc_real, 0)
+        stop_calls = [c for c in fake_real.calls if c[:2] == ["docker", "stop"]]
+        self.assertEqual(stop_calls, [patched_stop])
+
+    def test_dry_run_copy_line_matches_the_real_copy_argv(self):
+        """The --dry-run print for the copy step is exactly copy_cmd()'s
+        output joined with spaces — not a hand-typed second rendering of it."""
+        fake = FakeDocker(volumes=["dev-agent-mysite_workspace"])
+        with unittest.mock.patch.object(migrate.subprocess, "run", side_effect=fake):
+            migrate.migrate("mysite", dry_run=True)
+        expected = migrate.copy_cmd("dev-agent-mysite_workspace", "djinn-mysite_workspace")
+        self.assertIn(migrate._format_cmd(expected), self.out)
 
 
 class MainTests(QuietTestCase):

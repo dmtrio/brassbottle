@@ -27,11 +27,15 @@ if [ -f "$CDD_ROOT/.env" ]; then
 fi
 if [ -n "${DJINN_HOME:-}" ]; then
     BASE_PATH="$DJINN_HOME"
+# rebrand-transitional: DEV_AGENT_HOME compat — delete this branch (and the
+# ./.dev-agent auto-detect below) once every container's ./.env has moved to
+# DJINN_HOME.
 elif [ -n "${DEV_AGENT_HOME:-}" ]; then
     BASE_PATH="$DEV_AGENT_HOME"
 elif [ ! -d "$CDD_ROOT/.djinn" ] && [ -d "$CDD_ROOT/.dev-agent" ]; then
-    # Default chosen, no ./.djinn yet, but a pre-rebrand ./.dev-agent exists —
-    # keep using it rather than silently starting a second, empty home.
+    # rebrand-transitional: default chosen, no ./.djinn yet, but a
+    # pre-rebrand ./.dev-agent exists — keep using it rather than silently
+    # starting a second, empty home.
     BASE_PATH="$CDD_ROOT/.dev-agent"
     echo "common.sh: using existing $BASE_PATH (consider: mv .dev-agent .djinn)" >&2
 else
@@ -52,3 +56,14 @@ if [ -z "${CONTAINERS_PATH:-}" ]; then
         CONTAINERS_PATH="$CDD_ROOT/containers"
     fi
 fi
+
+# Container naming: the single source of truth for the current and
+# pre-rebrand prefixes, so up.sh/down.sh/bin/allow-egress.sh build and
+# resolve container names off one pair of vars instead of each hand-typing
+# "djinn-"/"dev-agent-" (partial consolidation — src/entrypoint.sh,
+# src/tmux-notify.sh, and migrate.py are baked/Python and stay as they are).
+DJINN_CTR_PREFIX="djinn-"
+# rebrand-transitional: the pre-rebrand container prefix (docker-dev /
+# dev-agent). Only bin/allow-egress.sh still needs it, to resolve a real
+# not-yet-migrated container. Delete once every container has been re-upped.
+OLD_CTR_PREFIX="dev-agent-"
