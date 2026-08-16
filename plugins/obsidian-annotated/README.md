@@ -14,7 +14,7 @@ agent_secrets:
 
 ## Per-agent wiring
 
-`up.sh` delivers each bound agent's key into its own `<agent>.env` and wires the
+`djinn up` delivers each bound agent's key into its own `<agent>.env` and wires the
 server per agent:
 
 - **claude** — `.mcp.json` keeps the `${VAR}` ref (the shim expands it).

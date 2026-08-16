@@ -10,7 +10,7 @@
 # an API key on inbound requests.
 #
 # Run in tmux or wrap in launchd. Proxyman.app must be running.
-# Key: PROXYMAN_BRIDGE_KEY in ~/dev-agent/secrets.env (self-generated on
+# Key: PROXYMAN_BRIDGE_KEY in ~/djinn/secrets.env (self-generated on
 # first run). Containers get access by listing the `proxyman` plugin in the
 # manifest — up.sh grants port 8813, composes the key, and generates the
 # .mcp.json entry.
@@ -21,7 +21,7 @@ PROXYMAN_MCP="/Applications/Setapp/Proxyman.app/Contents/MacOS/mcp-server"
 [ -x "$PROXYMAN_MCP" ] || PROXYMAN_MCP="/Applications/Proxyman.app/Contents/MacOS/mcp-server"
 [ -x "$PROXYMAN_MCP" ] || { echo "ERROR: Proxyman mcp-server binary not found"; exit 1; }
 
-# BASE_PATH (the dev-agent home) is resolved by service.sh — which sources
+# BASE_PATH (the djinn home) is resolved by service.sh — which sources
 # src/common.sh once, at the repo root — and handed to this launcher in the
 # environment. So this script needs no path arithmetic of its own; start it via:
 #   ./service.sh proxyman

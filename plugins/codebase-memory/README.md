@@ -31,7 +31,7 @@ plugins: [codebase-memory]
   It mounts at the tool's **default** cache path rather than overriding
   `CBM_CACHE_DIR`, because the tool allows exactly one canonical cache root per
   account: a shell-side `codebase-memory-mcp` wouldn't carry the override and
-  would be rejected at the admission barrier. `./down.sh <container> --purge`
+  would be rejected at the admission barrier. `./djinn down <container> --purge`
   removes it; a plain `down` keeps it. Budget for the size — 6–8 MB for a
   typical repo here, but 102 MB for a 2000-file C codebase.
 - **A persisted index can be stale where a fresh one can't.** Changes made
@@ -54,7 +54,7 @@ plugins: [codebase-memory]
   setting `CBM_WORKERS` / `CBM_MEM_BUDGET_MB`.
 - **Never run `codebase-memory-mcp install` / `update` / `uninstall` inside a
   container.** Those rewrite agent MCP config, skills and hooks — files
-  `src/wire_plugins.py` owns and re-derives on every `./up.sh`, and which are
+  `src/wire_plugins.py` owns and re-derives on every `./djinn up`, and which are
   volume mounts here. To move versions, bump `CBM_VERSION` in
   [`plugin.yml`](plugin.yml) and rebuild the image.
 - **The graph UI** (upstream's `--ui=true --port=9749`) is not wired. It would

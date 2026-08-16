@@ -123,7 +123,7 @@ if [ "$SSH_ENABLED" = "true" ]; then
     # than start sshd nobody can log into.
     if [ -z "$SSH_AUTHORIZED_KEY" ]; then
         echo "FATAL: SSH_ENABLED=true but SSH_AUTHORIZED_KEY is empty."
-        echo "Set SSH_AUTHORIZED_KEY in ~/dev-agent/secrets.env (your public key)."
+        echo "Set SSH_AUTHORIZED_KEY in ~/djinn/secrets.env (your public key)."
         exit 1
     fi
     echo "$SSH_AUTHORIZED_KEY" > /home/coder/.ssh/authorized_keys
@@ -150,7 +150,7 @@ if [ "$SSH_ENABLED" = "true" ]; then
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Container:  dev-agent-${CONTAINER_NAME}   (sshd on :22, published"
+    echo "  Container:  djinn-${CONTAINER_NAME}   (sshd on :22, published"
     echo "              on the host at the manifest's ssh.port)"
     echo "  SSH:        ssh -p <ssh.port> coder@<docker-host>"
     echo "  VS Code:    Remote-SSH to the same host/port"
@@ -163,13 +163,13 @@ if [ "$SSH_ENABLED" = "true" ]; then
 else
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Container:  dev-agent-${CONTAINER_NAME}   (attach mode, no sshd)"
+    echo "  Container:  djinn-${CONTAINER_NAME}   (attach mode, no sshd)"
     echo ""
     echo "  VS Code / Cursor:"
-    echo "    Dev Containers: Attach to Running Container → dev-agent-${CONTAINER_NAME}"
+    echo "    Dev Containers: Attach to Running Container → djinn-${CONTAINER_NAME}"
     echo "    then open /workspace (or /workspace/dev.code-workspace)"
     echo ""
-    echo "  Terminal:   docker exec -it -u coder dev-agent-${CONTAINER_NAME} bash"
+    echo "  Terminal:   docker exec -it -u coder djinn-${CONTAINER_NAME} bash"
     echo "  Workspace:  /workspace"
     echo ""
     echo "  Dev servers: use VS Code port forwarding, or publish ports at launch"

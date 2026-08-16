@@ -11,7 +11,7 @@ common_secrets: [MCP_GATEWAY_TOKEN]   # required — declares the slot; agents w
 ## Start the host service
 
 ```bash
-./service.sh gateway        # leave it running (tmux or launchd)
+./djinn service gateway        # leave it running (tmux or launchd)
 ```
 
 First run self-generates `MCP_GATEWAY_TOKEN` into `secrets.env`. Declare it in

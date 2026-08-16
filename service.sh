@@ -19,7 +19,7 @@
 # host service must never carry that risk, nor sit one typo away from it.
 # service.sh never touches docker.
 #
-# service.sh is the one place that knows the dev-agent home: it sources
+# service.sh is the one place that knows the djinn home: it sources
 # src/common.sh (once, at the repo root — no ../ path arithmetic) to resolve
 # BASE_PATH and hands it to the launcher in the environment, so each run.sh
 # needs zero path knowledge of its own. common.sh is sourced LATE (just before
@@ -73,7 +73,7 @@ if [ ! -f "$RUN" ]; then
     exit 1
 fi
 
-# Resolve the dev-agent home here and hand it down — the launcher takes it from
+# Resolve the djinn home here and hand it down — the launcher takes it from
 # the environment rather than computing a path to common.sh itself.
 # CONTAINERS_PATH rides along for the same reason: common.sh resolves it (from
 # ./.env, the env, or the per-setup default), and a launcher that reads a

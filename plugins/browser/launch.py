@@ -28,7 +28,7 @@ SLOT = "RESEARCH_BROWSER_KEY"
 
 # Default install locations. Override per setup with BRAVE_APP / CHROME_APP in
 # ./.env (the repo's existing host-side override channel, alongside
-# DEV_AGENT_HOME / RULES_PATH / CONTAINERS_PATH) — for a browser in
+# DJINN_HOME / RULES_PATH / CONTAINERS_PATH) — for a browser in
 # ~/Applications, a renamed app bundle, or a Chromium variant. A one-off can
 # also pass an absolute path in place of brave|chrome.
 BRAVE_APP_DEFAULT = "/Applications/Brave Browser.app"

@@ -6,7 +6,7 @@
 #   ./service.sh gateway
 #
 # Run it in tmux, or wrap in a launchd plist for boot persistence.
-# Token: MCP_GATEWAY_TOKEN in ~/dev-agent/secrets.env (self-generated on
+# Token: MCP_GATEWAY_TOKEN in ~/djinn/secrets.env (self-generated on
 # first run); up.sh composes it into containers whose manifest lists the
 # gateway plugin.
 #
@@ -22,7 +22,7 @@
 
 set -e
 
-# BASE_PATH (the dev-agent home) is resolved by service.sh — which sources
+# BASE_PATH (the djinn home) is resolved by service.sh — which sources
 # src/common.sh once, at the repo root — and handed to this launcher in the
 # environment. So this script needs no path arithmetic of its own; start it via:
 #   ./service.sh gateway

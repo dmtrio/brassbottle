@@ -40,5 +40,5 @@ plugins: [serena]
   `blob.core.windows.net` for the Azure-hosted ones (.NET, others). If another
   language's download is firewall-blocked, add the host from the error live:
   ```bash
-  ./bin/allow-egress.sh dev-agent-<name> <host> --save yml
+  ./djinn allow djinn-<name> <host> --save yml
   ```

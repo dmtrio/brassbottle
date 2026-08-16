@@ -49,14 +49,14 @@ class TestCdpPortOffset(unittest.TestCase):
 class TestDerivedPaths(unittest.TestCase):
     def test_profile_dir(self):
         self.assertEqual(
-            bl.profile_dir("/home/dev-agent", "job-hunt"),
-            Path("/home/dev-agent/browser-profiles/job-hunt"),
+            bl.profile_dir("/home/testuser", "job-hunt"),
+            Path("/home/testuser/browser-profiles/job-hunt"),
         )
 
     def test_browser_tmp_dir(self):
         self.assertEqual(
-            bl.browser_tmp_dir("/home/dev-agent", "job-hunt"),
-            Path("/home/dev-agent/browser-tmp/job-hunt"),
+            bl.browser_tmp_dir("/home/testuser", "job-hunt"),
+            Path("/home/testuser/browser-tmp/job-hunt"),
         )
 
     def test_api_key_var(self):

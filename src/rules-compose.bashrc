@@ -9,5 +9,5 @@
 # break or slow-noise the shell. Sourced BEFORE the tmux-landing hook (which
 # execs tmux and never returns), so it runs in the login shell too.
 if [[ $- == *i* ]]; then
-    python3 /usr/local/lib/dev-agent/compose_rules.py >/dev/null 2>&1 || true
+    python3 /usr/local/lib/djinn/compose_rules.py >/dev/null 2>&1 || true
 fi

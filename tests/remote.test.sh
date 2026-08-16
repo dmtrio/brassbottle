@@ -32,17 +32,17 @@ echo "── compose overlays"
 for f in compose/docker-compose.local.yml compose/docker-compose.ssh.yml compose/docker-compose.mosh.yml; do
     yq '.' "$f" >/dev/null 2>&1 && pass "$f parses" || fail "$f is not valid YAML"
 done
-[ "$(yq '.networks.default.name' compose/docker-compose.local.yml)" = "dev-agent-net" ] \
-    && pass "local compose joins the shared dev-agent-net bridge" \
+[ "$(yq '.networks.default.name' compose/docker-compose.local.yml)" = "djinn-net" ] \
+    && pass "local compose joins the shared djinn-net bridge" \
     || fail "local compose is missing the shared-network config"
 [ "$(yq '.networks.default.external' compose/docker-compose.local.yml)" = "true" ] \
     && pass "shared network is external (created by up.sh, not compose)" \
     || fail "shared network must be external: true"
-yq -r '.services.dev-agent.environment[]' compose/docker-compose.ssh.yml | grep -q '^REMOTE_TMUX=' \
+yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q '^REMOTE_TMUX=' \
     && pass "ssh overlay passes REMOTE_TMUX" \
     || fail "ssh overlay is missing REMOTE_TMUX"
 for var in NTFY_URL NTFY_TOPIC; do
-    yq -r '.services.dev-agent.environment[]' compose/docker-compose.ssh.yml | grep -q "^$var=" \
+    yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q "^$var=" \
         && pass "ssh overlay passes $var" \
         || fail "ssh overlay is missing $var"
 done
@@ -51,11 +51,11 @@ echo "── mosh port-range agreement (manifest.py is the source; defaults must
 # The overlay carries fallbacks (${MOSH_PORTS:-...} / ${MOSH_PORTS_DASH:-...})
 # for the values manifest.py computes from remote.mosh_ports. All defaults — env
 # (colon form), publish (dash form), wrapper, manifest.py — must be one range.
-ENV_DEFAULT=$(yq -r '.services.dev-agent.environment[]' compose/docker-compose.mosh.yml | sed -n 's/^MOSH_PORTS=${MOSH_PORTS:-\(.*\)}$/\1/p')
+ENV_DEFAULT=$(yq -r '.services.djinn.environment[]' compose/docker-compose.mosh.yml | sed -n 's/^MOSH_PORTS=${MOSH_PORTS:-\(.*\)}$/\1/p')
 [ "$ENV_DEFAULT" = "60000:60010" ] \
     && pass "mosh overlay env default is 60000:60010" \
     || fail "mosh overlay env default unexpected: '$ENV_DEFAULT'"
-DASH_DEFAULT=$(yq -r '.services.dev-agent.ports[0]' compose/docker-compose.mosh.yml | grep -o '{MOSH_PORTS_DASH:-[0-9-]*}' | head -1 | sed 's/.*:-\([0-9-]*\)}/\1/')
+DASH_DEFAULT=$(yq -r '.services.djinn.ports[0]' compose/docker-compose.mosh.yml | grep -o '{MOSH_PORTS_DASH:-[0-9-]*}' | head -1 | sed 's/.*:-\([0-9-]*\)}/\1/')
 [ "$DASH_DEFAULT" = "${ENV_DEFAULT/:/-}" ] \
     && pass "publish default ($DASH_DEFAULT) matches env default" \
     || fail "publish default '$DASH_DEFAULT' != env default '${ENV_DEFAULT/:/-}'"
@@ -161,7 +161,7 @@ src/manifest.py	remote.get("mosh")
 src/manifest.py	remote.get("notify")
 src/manifest.py	remote.get("mosh_ports")
 up.sh	compose/docker-compose.mosh.yml
-up.sh	dev-agent-net
+up.sh	djinn-net
 src/manifest.py	remote.notify requires remote.tmux
 src/manifest.py	re.sub(r"^[A-Za-z]+://", "", ntfy_url)
 src/manifest.py	[0-9]{1,5}:[0-9]{1,5}

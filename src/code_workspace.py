@@ -10,7 +10,7 @@ last. A freshly-created file also pins the integrated terminal's default cwd
 to /workspace/repos, so new containers don't open shells in /artifacts.
 
 Runs in-container as:
-  python3 /usr/local/lib/dev-agent/code_workspace.py /workspace/dev.code-workspace
+  python3 /usr/local/lib/djinn/code_workspace.py /workspace/dev.code-workspace
 with REPO_NAMES in the environment. Stdlib only; atomic writes (tmp + replace).
 Parse failures refuse to touch the file — an agent may have hand-edited it.
 """

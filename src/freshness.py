@@ -3,13 +3,13 @@
 
 `up.sh` writes two host-truth timestamps into /etc/environment after boot:
 
-  DEV_AGENT_UP_AT       ISO8601 UTC of the last `./up.sh` (governs the freshness
-                        of external rules — pulled each `up` — and MCP wiring).
-  DEV_AGENT_IMAGE_BUILT the image's real `.Created` (governs the baked half:
-                        bundled rules, plugin AGENTS.md fragments, install:
-                        blocks). `up.sh` uses `--build`, which is cache-gated,
-                        so a full cache hit leaves this old — exactly the honest
-                        signal for how stale the image is.
+  DJINN_UP_AT       ISO8601 UTC of the last `./up.sh` (governs the freshness
+                    of external rules — pulled each `up` — and MCP wiring).
+  DJINN_IMAGE_BUILT the image's real `.Created` (governs the baked half:
+                    bundled rules, plugin AGENTS.md fragments, install:
+                    blocks). `up.sh` uses `--build`, which is cache-gated,
+                    so a full cache hit leaves this old — exactly the honest
+                    signal for how stale the image is.
 
 Two stamps because layer caching makes them diverge: you can `up` daily for two
 weeks while the image build stays two weeks old, so a single "created on" would
@@ -28,8 +28,8 @@ import sys
 from datetime import datetime, timezone
 
 ENV_FILE = "/etc/environment"
-UP_AT_VAR = "DEV_AGENT_UP_AT"
-IMAGE_BUILT_VAR = "DEV_AGENT_IMAGE_BUILT"
+UP_AT_VAR = "DJINN_UP_AT"
+IMAGE_BUILT_VAR = "DJINN_IMAGE_BUILT"
 
 
 def parse_iso(value):

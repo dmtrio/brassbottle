@@ -5,7 +5,7 @@
 #   ./up.sh personal-site                                     # idempotent — rerun after edits
 #
 # Everything here is secret-free and committable. Secret VALUES live in
-# secrets.env (default ./.dev-agent/secrets.env) and are referenced by naming convention (below).
+# secrets.env (default ./.djinn/secrets.env) and are referenced by naming convention (below).
 # Derived state (keys/, the container, generated configs) is disposable:
 # up.sh rebuilds all of it from this file + secrets.env.
 

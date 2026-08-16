@@ -173,7 +173,7 @@ echo "Host network detected as: $HOST_NETWORK"
 
 # INBOUND from the GATEWAY IP stays open (published-port traffic arrives via
 # the gateway proxy, whose source is the gateway address). Deliberately NOT
-# the whole subnet: on the shared dev-agent-net bridge the /24 is the entire
+# the whole subnet: on the shared djinn-net bridge the /24 is the entire
 # fleet, and a subnet-wide ACCEPT would let any sibling container reach this
 # one's listeners — cross-container isolation must not rest on the sibling's
 # own (agent-editable) OUTPUT chain. OUTBOUND to the host network is likewise

@@ -1,23 +1,29 @@
-# Agent Dev Containers
+# brassbottle
 
 Isolated, firewalled Docker environments where AI coding agents work with
 full permissions — locally on your Mac (or any Docker host). One container
 per project, declared by a manifest. The assembly is a config.
 
+brassbottle — the vessel; `djinn` — the word that calls them.
+*(“Genie” traces back to Latin* genius loci *— a spirit bound to a place.)*
+
 ```
-containers/<name>.yml  ──./up.sh <name>──►  dev-agent-<name>
+containers/<name>.yml  ──./djinn up <name>──►  djinn-<name>
         │                                      ├── agents: claude, codex, pi,
-.dev-agent/secrets.env                         │   gemini, cursor-agent, aider
+.djinn/secrets.env                             │   gemini, cursor-agent, aider
   (all secret values, gitignored;              ├── egress firewall (zone allowlist)
-   move via DEV_AGENT_HOME)                     ├── /workspace (volume): repos/<name> + worktrees/
+   move via DJINN_HOME)                        ├── /workspace (volume): repos/<name> + worktrees/
                                                ├── /agent-rules (ro): global rules + skills
 rules/  (bundled default;                       ├── /artifacts → Mac-visible outbox
   override via RULES_PATH)                      └── per-agent identity via shims
 ```
 
+(`./up.sh <name>` still works directly — `djinn` is a dispatcher in front of
+it and the other scripts below.)
+
 The repo is self-contained: a fresh clone runs with no external setup.
 Runtime state (`secrets.env`, keys, artifacts) defaults to a gitignored
-`./.dev-agent/`, and rules come from the bundled `rules/`. A gitignored
+`./.djinn/`, and rules come from the bundled `rules/`. A gitignored
 `./.env` overrides both — see [Prerequisites](#prerequisites).
 
 ## The two files you author
@@ -26,12 +32,12 @@ Runtime state (`secrets.env`, keys, artifacts) defaults to a gitignored
    tools, capability grants, per-agent identities. Secret-free, committable.
    Copy `containers/TEMPLATE.yml` and edit.
 2. **`secrets.env`** — every secret value, one file, mode 600, never mounted
-   (default `./.dev-agent/secrets.env`, gitignored). Copy `secrets.env.example`
+   (default `./.djinn/secrets.env`, gitignored). Copy `secrets.env.example`
    and fill in what your manifests reference.
 
-Everything else is derived: `./up.sh <name>` (idempotent) composes
+Everything else is derived: `./djinn up <name>` (idempotent) composes
 credentials, applies the firewall, clones the repos, lays out worktrees, and
-generates MCP configs. `./down.sh <name>` stops (code survives);
+generates MCP configs. `./djinn down <name>` stops (code survives);
 `--purge` forgets the container entirely (artifacts still survive).
 
 ## Prerequisites
@@ -39,32 +45,33 @@ generates MCP configs. `./down.sh <name>` stops (code survives);
 - Docker Desktop (macOS) or Docker Engine (Linux)
 - `yq` (`brew install yq`)
 - `python3` (any 3.9+, stdlib only — present via Xcode CLT on macOS; on a
-  minimal Linux box, `apt install python3`). `up.sh` uses it for manifest
-  validation and the wiring payload, preferring `/usr/bin/python3` over
-  version-manager shims (`PYTHON3=/path` overrides).
+  minimal Linux box, `apt install python3`). `up.sh` (what `djinn up` calls)
+  uses it for manifest validation and the wiring payload, preferring
+  `/usr/bin/python3` over version-manager shims (`PYTHON3=/path` overrides).
 
-That's it — the repo is self-contained. `up.sh` keeps its runtime state
-(secrets, keys, artifacts) in a gitignored `./.dev-agent/` and uses the
+That's it — the repo is self-contained. `djinn` keeps its runtime state
+(secrets, keys, artifacts) in a gitignored `./.djinn/` and uses the
 bundled `rules/`. To point at your own locations instead, drop a gitignored
 `./.env` at the repo root:
 
 ```bash
-DEV_AGENT_HOME="$HOME/dev-agent"           # move the runtime home (secrets/keys/artifacts)
+DJINN_HOME="$HOME/djinn"                   # move the runtime home (secrets/keys/artifacts)
 RULES_PATH="$HOME/git/agent-conf/rules"    # use your own rules repo instead of bundled rules/
-CONTAINERS_PATH="$HOME/dev-agent/containers"  # read manifests from your own (private) dir
+CONTAINERS_PATH="$HOME/djinn/containers"   # read manifests from your own (private) dir
 BRAVE_APP="$HOME/Applications/Brave Browser.app"   # browser plugin: app locations
 CHROME_APP="/Applications/Chromium.app"            # (defaults are /Applications/…)
 ```
 
-(When `DEV_AGENT_HOME` is set and `$DEV_AGENT_HOME/rules` exists, it's used as
+(When `DJINN_HOME` is set and `$DJINN_HOME/rules` exists, it's used as
 the rules dir automatically — no need to set `RULES_PATH` too. The same applies
-to manifests: if `$DEV_AGENT_HOME/containers` exists it's used automatically, so
-you don't need to set `CONTAINERS_PATH` either.)
+to manifests: if `$DJINN_HOME/containers` exists it's used automatically, so
+you don't need to set `CONTAINERS_PATH` either. The old `DEV_AGENT_HOME` is
+still honored if set.)
 
 **Keep your manifests out of this repo.** Your real `containers/*.yml` carry
 semi-private data (private repo URLs, LAN subnets, identity naming), so this
 repo ships only `containers/TEMPLATE.yml`. Point manifests at a directory of
-your own — e.g. `~/dev-agent/containers` (auto-detected) — and make *that* its
+your own — e.g. `~/djinn/containers` (auto-detected) — and make *that* its
 own private git repo. The tool stays public; your configs stay private and
 versioned, with no second copy of the project to maintain.
 
@@ -72,7 +79,7 @@ versioned, with no second copy of the project to maintain.
 
 ```bash
 cp containers/TEMPLATE.yml containers/my-app.yml
-./up.sh my-app
+./djinn up my-app
 ```
 
 `TEMPLATE.yml` runs unedited (omit/empty `repos:` → git-inits
@@ -81,13 +88,13 @@ working smoke test. Then edit it — repos, memory, capabilities, identities —
 and rerun (idempotent). Add any secrets it references to `secrets.env`:
 
 ```bash
-mkdir -p .dev-agent && cp secrets.env.example .dev-agent/secrets.env   # up.sh also creates it empty
+mkdir -p .djinn && cp secrets.env.example .djinn/secrets.env   # djinn up also creates it empty
 ```
 
 Then attach: VS Code / Cursor → **"Dev Containers: Attach to Running
-Container"** → `dev-agent-my-app` (lands as `coder` in `/workspace` — open
+Container"** → `djinn-my-app` (lands as `coder` in `/workspace` — open
 `dev.code-workspace` for the multi-root view). Terminal:
-`docker exec -it -u coder dev-agent-my-app bash`. Recommended start:
+`docker exec -it -u coder djinn-my-app bash`. Recommended start:
 `cd /workspace/repos && claude` (sees every repo); starting inside one repo
 also works.
 
@@ -97,39 +104,40 @@ carry the GitHub machine-user token from `secrets.env`.
 
 ## Shell aliases (optional)
 
-`up.sh` / `down.sh` / `service.sh` resolve their own location, so they run from
-any directory. Drop these in `~/.bashrc` to invoke them from anywhere (each
-lists its options when run with no argument):
+`djinn` (and the `up.sh` / `down.sh` / `service.sh` it dispatches to) resolves
+its own location, so it runs from any directory. Drop these in `~/.bashrc` to
+invoke it from anywhere (each subcommand lists its options when run with no
+argument):
 
 ```bash
-export DA_REPO="$HOME/git/docker-dev"        # adjust to your clone
-alias daup="$DA_REPO/up.sh"                   # daup <name>          (no arg → lists manifests)
-alias dadown="$DA_REPO/down.sh"               # dadown <name> [--purge]
-alias dasvc="$DA_REPO/service.sh"             # dasvc <name> [args]  (no arg → lists host services)
-alias daegress="$DA_REPO/bin/allow-egress.sh" # daegress <container> <domain>…
-alias cdda="cd \$DA_REPO"
+export DJINN_REPO="$HOME/git/brassbottle"      # adjust to your clone
+alias djup="$DJINN_REPO/djinn up"              # djup <name>          (no arg → lists manifests)
+alias djdown="$DJINN_REPO/djinn down"          # djdown <name> [--purge]
+alias djsvc="$DJINN_REPO/djinn service"        # djsvc <name> [args]  (no arg → lists host services)
+alias djallow="$DJINN_REPO/djinn allow"        # djallow <container> <domain>…
+alias cddj="cd \$DJINN_REPO"
 ```
 
-Tab-completion for container names (`daup`/`dadown`) and host services (`dasvc`):
+Tab-completion for container names (`djup`/`djdown`) and host services (`djsvc`):
 
 ```bash
-_da_ctr_dir() {   # mirrors common.sh's CONTAINERS_PATH resolution
-  if   [ -n "$CONTAINERS_PATH" ];                                  then echo "$CONTAINERS_PATH"
-  elif [ -d "${DEV_AGENT_HOME:-$DA_REPO/.dev-agent}/containers" ]; then echo "${DEV_AGENT_HOME:-$DA_REPO/.dev-agent}/containers"
-  else echo "$DA_REPO/containers"; fi
+_dj_ctr_dir() {   # mirrors common.sh's CONTAINERS_PATH resolution
+  if   [ -n "$CONTAINERS_PATH" ];                              then echo "$CONTAINERS_PATH"
+  elif [ -d "${DJINN_HOME:-$DJINN_REPO/.djinn}/containers" ]; then echo "${DJINN_HOME:-$DJINN_REPO/.djinn}/containers"
+  else echo "$DJINN_REPO/containers"; fi
 }
-_da_names() {
-  local d f names=""; d="$(_da_ctr_dir)"
+_dj_names() {
+  local d f names=""; d="$(_dj_ctr_dir)"
   for f in "$d"/*.yml; do f=${f##*/}; [ "$f" = TEMPLATE.yml ] && continue; names="$names ${f%.yml}"; done
   COMPREPLY=($(compgen -W "$names" -- "${COMP_WORDS[COMP_CWORD]}"))
 }
-complete -F _da_names daup dadown
-_da_services() {
+complete -F _dj_names djup djdown
+_dj_services() {
   local p names=""
-  for p in "$DA_REPO"/plugins/*/run.sh; do [ -e "$p" ] && names="$names $(basename "$(dirname "$p")")"; done
+  for p in "$DJINN_REPO"/plugins/*/run.sh; do [ -e "$p" ] && names="$names $(basename "$(dirname "$p")")"; done
   COMPREPLY=($(compgen -W "$names" -- "${COMP_WORDS[COMP_CWORD]}"))
 }
-complete -F _da_services dasvc
+complete -F _dj_services djsvc
 ```
 
 macOS defaults to zsh. The aliases work in `~/.zshrc` unchanged. For completion,
@@ -137,21 +145,21 @@ use the native zsh version below — `(N)` makes the globs no-match-safe. Needs
 `compinit` to have run (frameworks like oh-my-zsh already do it):
 
 ```zsh
-_da_names_zsh() {   # container short-names; mirrors common.sh's CONTAINERS_PATH resolution
+_dj_names_zsh() {   # container short-names; mirrors common.sh's CONTAINERS_PATH resolution
   local dir
   if   [ -n "$CONTAINERS_PATH" ]; then dir="$CONTAINERS_PATH"
-  elif [ -d "${DEV_AGENT_HOME:-$DA_REPO/.dev-agent}/containers" ]; then dir="${DEV_AGENT_HOME:-$DA_REPO/.dev-agent}/containers"
-  else dir="$DA_REPO/containers"; fi
+  elif [ -d "${DJINN_HOME:-$DJINN_REPO/.djinn}/containers" ]; then dir="${DJINN_HOME:-$DJINN_REPO/.djinn}/containers"
+  else dir="$DJINN_REPO/containers"; fi
   local -a names=(${dir}/*.yml(N:t:r)); names=(${names:#TEMPLATE})
   compadd -a names
 }
-compdef _da_names_zsh daup dadown
+compdef _dj_names_zsh djup djdown
 
-_da_services_zsh() {   # plugins that ship a run.sh (:h dir, :t tail = plugin name)
-  local -a names=(${DA_REPO}/plugins/*/run.sh(N:h:t))
+_dj_services_zsh() {   # plugins that ship a run.sh (:h dir, :t tail = plugin name)
+  local -a names=(${DJINN_REPO}/plugins/*/run.sh(N:h:t))
   compadd -a names
 }
-compdef _da_services_zsh dasvc
+compdef _dj_services_zsh djsvc
 ```
 
 ## Firewall egress (`capabilities:`)
@@ -185,11 +193,11 @@ Two shapes, decided by the entry (no `type:` field):
   wired into every installed agent. A local bridge may also dial a Mac-host
   service (`host_port:` + `${HOST_PORT}` in its args, like `rhinomcp`).
 - **Remote** — an HTTP server (`url:`), on the Mac host (`host_port:`, started
-  with `./service.sh <name>`) or a real internet host.
+  with `./djinn service <name>`) or a real internet host.
 
 A plugin may also be **env-only** — a `secrets:` slot with no server. Slots are
 `env`-scoped (one value shared by all agents) or `agent`-scoped (per-agent,
-bound under the manifest's `agent_secrets:`). `up.sh` derives the wiring and
+bound under the manifest's `agent_secrets:`). `djinn up` derives the wiring and
 folds each plugin's `egress`/`host_port` into the firewall; de-listing one
 removes its wiring on the next up.
 
@@ -260,7 +268,7 @@ Claude's skills. By default this is the repo's bundled `rules/`; set
 `RULES_PATH` (in `./.env`) to your own rules repo — e.g. `~/git/agent-conf/rules`
 — to override. Rule layers: global → `/workspace/rules.local.md`
 (container-local, uncommitted) → the project repo's own CLAUDE.md.
-Agents propose rule changes via PR; for an external rules repo, `up.sh`
+Agents propose rule changes via PR; for an external rules repo, `djinn up`
 `git pull`s it each run so merged changes land in every container.
 
 ## Persistence map
@@ -271,20 +279,22 @@ Agents propose rule changes via PR; for an external rules repo, `up.sh`
 | Agent logins, MCP approvals | per-container auth volumes | ✓ | ✗ |
 | Identity keys | `secrets.env` (composed at up) | ✓ | ✓ |
 | Rules & skills | bundled `rules/` (or your `RULES_PATH` repo) | ✓ | ✓ |
-| Non-code outputs | `$DEV_AGENT_HOME/artifacts/<name>/` (`/artifacts`) | ✓ | ✓ |
+| Non-code outputs | `$DJINN_HOME/artifacts/<name>/` (`/artifacts`) | ✓ | ✓ |
 
 ## Repo map
 
-- `up.sh` / `down.sh` / `service.sh` — the commands you run from the repo root:
-  `up.sh` / `down.sh` are container lifecycle from manifests; `service.sh <name>`
-  starts a plugin's Mac-side host service (see `plugins/`)
+- `djinn` — the dispatcher you run from the repo root: `djinn up|down|service|allow|keys|migrate <args>`
+- `up.sh` / `down.sh` / `service.sh` — the container-lifecycle scripts `djinn`
+  dispatches to (still runnable directly): `up.sh` / `down.sh` are container
+  lifecycle from manifests; `service.sh <name>` starts a plugin's Mac-side
+  host service (see `plugins/`)
 - `containers/` — manifests (`TEMPLATE.yml` to copy; your own are gitignored)
 - `plugins/` — drop-in MCP tools, one directory each (`<name>/plugin.yml` +
-  optional host-only `<name>/run.sh`, started via `./service.sh <name>`). See
+  optional host-only `<name>/run.sh`, started via `./djinn service <name>`). See
   [`plugins/README.md`](plugins/README.md) for the schema and how to add one
 - `rules/` — bundled default agent rules & skills (override via `RULES_PATH`)
-- `bin/` — host commands you run occasionally (`up.sh` / `down.sh` / `service.sh`
-  are the daily ones and stay at the root):
+- `bin/` — host commands `djinn allow` / `djinn keys` dispatch to (still
+  runnable directly as `bin/<name>.sh`):
   - `allow-egress.sh` — add egress domains to a running container (no restart)
   - `update-agent-keys.sh` — temporary per-agent key override; durable changes
     go in secrets.env
@@ -310,17 +320,17 @@ Agents propose rule changes via PR; for an external rules repo, `up.sh`
   `plugins/*/run.sh` token generation)
 - `Dockerfile` — the shared image and its contracts
 - `secrets.env.example` — template for your `secrets.env`
-- `.env` (gitignored) — optional `DEV_AGENT_HOME` / `RULES_PATH` /
-  `DEV_AGENT_SUBNET` overrides
+- `.env` (gitignored) — optional `DJINN_HOME` / `RULES_PATH` /
+  `DJINN_SUBNET` overrides
 
 ## Remote hosts (Linux server or VPS)
 
 Same system, same files, one addition. On any Linux box with Docker:
 
 1. Install `yq` (static binary) and `python3`, and clone this repo. The bundled `rules/`
-   and gitignored `./.dev-agent/` work as-is; set `DEV_AGENT_HOME` /
+   and gitignored `./.djinn/` work as-is; set `DJINN_HOME` /
    `RULES_PATH` in `./.env` only if you want them elsewhere.
-2. Put your secrets in `secrets.env` (default `./.dev-agent/secrets.env`,
+2. Put your secrets in `secrets.env` (default `./.djinn/secrets.env`,
    600) — including `SSH_AUTHORIZED_KEY` (your public key).
 3. Add an `ssh:` section to the container's manifest:
 
@@ -330,7 +340,7 @@ Same system, same files, one addition. On any Linux box with Docker:
      bind: 127.0.0.1   # keep loopback; reach it through your tunnel
    ```
 
-4. `./up.sh <name>` — identical to the Mac. Connect with VS Code
+4. `./djinn up <name>` — identical to the Mac. Connect with VS Code
    **Remote-SSH** to the host/port; everything else (firewall, secrets,
    rules, artifacts) behaves exactly the same.
 
@@ -364,12 +374,34 @@ remote:  { tmux: true, mosh: true, notify: ntfy }
   the session goes idle at a prompt and nobody is attached. Set `NTFY_URL`
   (+ optional `NTFY_TOPIC`) in `secrets.env`; the host is auto-allowlisted.
 
-**Reach.** All containers sit on one shared bridge (`dev-agent-net`,
-`172.30.0.0/24` by default, `DEV_AGENT_SUBNET` in `./.env` to override;
-created automatically by `up.sh`). Point your WireGuard/VPN layer at that
-CIDR once and every container is reachable at its bridge IP from any
-enrolled device — `up.sh` prints the IP in its summary. sshd and the mosh
-range stay loopback/tunnel-only; nothing listens publicly.
+**Reach.** All containers sit on one shared bridge (`djinn-net`,
+`172.30.0.0/24` by default, `DJINN_SUBNET` in `./.env` to override; the old
+`DEV_AGENT_SUBNET` is still honored; created automatically by `djinn up`).
+Point your WireGuard/VPN layer at that CIDR once and every container is
+reachable at its bridge IP from any enrolled device — `djinn up` prints the
+IP in its summary. sshd and the mosh range stay loopback/tunnel-only; nothing
+listens publicly.
+
+## Migrating from docker-dev
+
+This repo was renamed **brassbottle** on GitHub (old clone/remote URLs
+redirect, so an existing `git remote` keeps working). To bring an existing
+setup along:
+
+1. Move the runtime home: `mv ~/dev-agent ~/djinn`, or leave it in place and
+   set `DJINN_HOME` instead — either way, `DEV_AGENT_HOME` still works if
+   you'd rather not touch it yet.
+2. Per container: `./djinn migrate <name>` copies its volumes to the
+   `djinn-<name>` prefix (the `dev-agent-<name>` originals are left in
+   place, not deleted), then `./djinn up <name>` brings it up under the new
+   name.
+3. Once every container has been re-upped, remove the old `dev-agent-net`
+   bridge — `djinn-net` replaces it on the same subnet.
+
+**Manifest filename = container identity.** A `containers/<name>.yml` under
+your own (untracked) manifests directory names the container it produces, so
+renaming the file is the same as renaming the container — `./djinn migrate`
+applies there too, not just to the docker-dev → brassbottle move.
 
 ## License
 

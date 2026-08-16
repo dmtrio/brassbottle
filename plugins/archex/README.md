@@ -49,5 +49,5 @@ acting — don't treat a partial bundle as the whole picture.
   vector embeddings downloads a FastEmbed model from HuggingFace; the plugin
   pre-allows the HuggingFace hosts, but if another host is needed, add it live:
   ```bash
-  ./bin/allow-egress.sh dev-agent-<name> <host> --save yml
+  ./djinn allow djinn-<name> <host> --save yml
   ```

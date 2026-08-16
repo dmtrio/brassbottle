@@ -9,7 +9,7 @@ one place and both halves are unit-testable:
                   payload; booleans use the same strict string comparison the
                   old bash used ([ "$X" = "true" ]), so a manifest value like
                   `gateway: yes` stays OFF instead of leaking into the JSON.
-  container side: python3 /usr/local/lib/dev-agent/wire_plugins.py
+  container side: python3 /usr/local/lib/djinn/wire_plugins.py
                   reads that payload on stdin and wires MCP servers into every
                   installed agent's config files — the work that used to live
                   in up.sh as jq/sed programs inside triple-quoted
@@ -74,10 +74,10 @@ from pathlib import Path
 # The codex managed block. Detection matches on the PREFIX (like the old sed
 # ranges did), so a stale block written by an older up.sh with different
 # trailing text is still stripped.
-CODEX_OPEN_PREFIX = "# >>> dev-agent plugin MCP"
-CODEX_CLOSE_PREFIX = "# <<< dev-agent plugin MCP"
-CODEX_OPEN_MARKER = "# >>> dev-agent plugin MCP (managed by up.sh; edits inside are overwritten) >>>"
-CODEX_CLOSE_MARKER = "# <<< dev-agent plugin MCP <<<"
+CODEX_OPEN_PREFIX = "# >>> djinn plugin MCP"
+CODEX_CLOSE_PREFIX = "# <<< djinn plugin MCP"
+CODEX_OPEN_MARKER = "# >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>"
+CODEX_CLOSE_MARKER = "# <<< djinn plugin MCP <<<"
 
 
 class WireError(Exception):
@@ -398,13 +398,13 @@ def reconcile_agent_servers(agent, required, home):
     `disabled: true`, or its plugin was removed. A remote literal entry carries
     the credential inline, so a bare upsert would leave a disabled agent's token
     live and its server reachable; the exact set this module manages is tracked
-    in a <config>.dev-agent-servers sidecar so hand-added and local-plugin
+    in a <config>.djinn-servers sidecar so hand-added and local-plugin
     entries are never touched. `required` maps server name -> (spec, keys)."""
     rel = _AGENT_SERVER_CONFIG.get(agent)
     if rel is None:
         return
     path = home / rel
-    sidecar = path.parent / (path.name + ".dev-agent-servers")
+    sidecar = path.parent / (path.name + ".djinn-servers")
     old = []
     if sidecar.is_file() and sidecar.stat().st_size > 0:
         old = _load_json_file(sidecar)
@@ -425,9 +425,9 @@ def reconcile_agent_servers(agent, required, home):
 def wire_plugin_servers_json(path, plugins):
     """Sync the plugin stdio servers into a JSON agent config (cursor, gemini,
     pi). The set of plugin-managed names is tracked in a sidecar
-    (<file>.dev-agent-plugins) so stale entries from a plugin removed from the
+    (<file>.djinn-plugins) so stale entries from a plugin removed from the
     manifest are deleted without touching identity or hand-added servers."""
-    sidecar = path.parent / (path.name + ".dev-agent-plugins")
+    sidecar = path.parent / (path.name + ".djinn-plugins")
     old = []
     if sidecar.is_file() and sidecar.stat().st_size > 0:
         old = _load_json_file(sidecar)
@@ -496,7 +496,7 @@ def wire_codex_toml(path, plugins):
         # second opener, or a closer that sits above its opener) — the old
         # sed silently deleted from the stray opener to EOF in those cases.
         raise WireError(
-            f"{path} has an opening dev-agent plugin marker but no closing one "
+            f"{path} has an opening djinn plugin marker but no closing one "
             "— repair the markers (the strip would delete everything below them)"
         )
     stripped = "\n".join(kept) + "\n" if kept else ""

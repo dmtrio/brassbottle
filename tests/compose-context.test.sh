@@ -27,11 +27,11 @@ grep -q -- '--project-directory "$SCRIPT_DIR"' up.sh \
     || fail "up.sh must pass --project-directory \"\$SCRIPT_DIR\" (else context resolves to compose/)"
 
 echo "── build context resolves from the repo root"
-CONTEXT="$(yq -r '.services.dev-agent.build.context // ""' compose/docker-compose.local.yml)"
-DOCKERFILE="$(yq -r '.services.dev-agent.build.dockerfile // "Dockerfile"' compose/docker-compose.local.yml)"
+CONTEXT="$(yq -r '.services.djinn.build.context // ""' compose/docker-compose.local.yml)"
+DOCKERFILE="$(yq -r '.services.djinn.build.dockerfile // "Dockerfile"' compose/docker-compose.local.yml)"
 [ -n "$CONTEXT" ] \
     && pass "local compose declares a build context ($CONTEXT)" \
-    || fail "local compose is missing services.dev-agent.build.context"
+    || fail "local compose is missing services.djinn.build.context"
 [ -f "$SCRIPT_DIR/$CONTEXT/$DOCKERFILE" ] \
     && pass "$CONTEXT/$DOCKERFILE exists relative to the repo root" \
     || fail "$CONTEXT/$DOCKERFILE does not exist relative to the repo root"

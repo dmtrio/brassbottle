@@ -13,7 +13,7 @@ plugin name.
 ```
 plugins/<name>/
   plugin.yml     required — what the server is and what it needs
-  run.sh         optional — a host-side service, started with ./service.sh <name>
+  run.sh         optional — a host-side service, started with ./djinn service <name>
   README.md      optional — human docs for this plugin
   test_*.py      optional — unit tests, discovered automatically (below)
   AGENTS.md      optional — agent-facing usage guidance (when/how to use the
@@ -41,9 +41,9 @@ opinion.
 | [`serena`](serena/) | local (stdio, baked) | — | [README](serena/README.md) |
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
 | [`codebase-memory`](codebase-memory/) | local (stdio, baked) | — | [README](codebase-memory/README.md) |
-| [`gateway`](gateway/) | remote HTTP | `./service.sh gateway` | [README](gateway/README.md) |
-| [`proxyman`](proxyman/) | remote HTTP | `./service.sh proxyman` | [README](proxyman/README.md) |
-| [`browser`](browser/) | remote HTTP | `./service.sh browser <container>` | [README](browser/README.md) |
+| [`gateway`](gateway/) | remote HTTP | `./djinn service gateway` | [README](gateway/README.md) |
+| [`proxyman`](proxyman/) | remote HTTP | `./djinn service proxyman` | [README](proxyman/README.md) |
+| [`browser`](browser/) | remote HTTP | `./djinn service browser <container>` | [README](browser/README.md) |
 | [`obsidian-annotated`](obsidian-annotated/) | remote HTTP (real host) | — | [README](obsidian-annotated/README.md) |
 | [`axiom`](axiom/) | local (stdio bridge → mcp.axiom.co, baked) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
@@ -83,7 +83,7 @@ egress: [blob.core.windows.net]
 ```yaml
 host_port: 8811
 secrets:
-  MCP_GATEWAY_TOKEN: {hint: "gateway (run ./service.sh gateway once)"}
+  MCP_GATEWAY_TOKEN: {hint: "gateway (run ./djinn service gateway once)"}
 mcp:
   coding:
     url: http://host.docker.internal:8811/mcp
@@ -94,7 +94,7 @@ mcp:
 ## `volumes` — state that survives a recreate
 
 Anything a plugin writes into the container's filesystem is image layer: it
-dies with the container, so every `./up.sh` costs a rebuild of that state (a
+dies with the container, so every `./djinn up` costs a rebuild of that state (a
 code index, a downloaded model, a language-server cache). Declare a volume and
 it survives instead:
 
@@ -104,8 +104,8 @@ volumes:
 ```
 
 Compose prefixes the name with the project, so `cbm-cache` is really
-`dev-agent-<container>_cbm-cache` — **per container**, exactly like the auth
-volumes, and removed by `./down.sh <container> --purge` (never by a plain
+`djinn-<container>_cbm-cache` — **per container**, exactly like the auth
+volumes, and removed by `./djinn down <container> --purge` (never by a plain
 `down`). Two containers running the same plugin get separate volumes.
 
 The rules, all enforced by `src/manifest.py` at derive time:
@@ -179,15 +179,15 @@ warns and yields no binding.
 
 ## How it loads
 
-- **`up.sh`** globs `plugins/*/plugin.yml` → `src/manifest.py --derive` validates
+- **`djinn up`** (via `up.sh`) globs `plugins/*/plugin.yml` → `src/manifest.py --derive` validates
   and derives the wiring → `src/wire_plugins.py` (baked in the image) writes each
   agent's MCP config.
 - **`Dockerfile`** bakes every local plugin's `install:` block at build.
 - **Compose** gets a generated overlay when an enabled plugin declares
   `volumes:` (`$BASE_PATH/compose/<container>.plugins.yml`, one more `-f`); the
   entrypoint chowns its mountpoints to coder.
-- **`service.sh <name>`** runs `plugins/<name>/run.sh` on the host (resolves
-  `BASE_PATH` and hands it down); it never touches docker.
+- **`djinn service <name>`** (via `service.sh`) runs `plugins/<name>/run.sh` on
+  the host (resolves `BASE_PATH` and hands it down); it never touches docker.
 
 ### `test_*.py` — unit tests
 
@@ -213,11 +213,11 @@ otherwise leave the suite reporting OK while covering nothing.
 
 1. `mkdir plugins/<name>` and write `plugin.yml` (see schema above).
 2. Needs a Mac-side service? Add `run.sh` (reads `BASE_PATH` from the
-   environment; started via `./service.sh <name>`).
+   environment; started via `./djinn service <name>`).
 3. Enable it in a manifest: `plugins: [<name>]` (+ a secret binding if it
    declares `secrets:`).
 4. **Local** plugin → rebuild the image so `install:` bakes. **Remote** → just
-   rerun `./up.sh <container>`.
+   rerun `./djinn up <container>`.
 5. Writes state worth keeping across a recreate (an index, a cache, a
    downloaded model)? Declare `volumes:` (see above) — no compose edit.
 6. Tests, if the plugin has logic worth pinning: `plugins/<name>/test_*.py`,
@@ -227,4 +227,4 @@ otherwise leave the suite reporting OK while covering nothing.
    containers' rules — see above). The fragment is baked with the image, so a
    change to it needs a rebuild, like `install:`.
 
-No `up.sh` / `Dockerfile` edits — the loader globs the directory.
+No `djinn` / `Dockerfile` edits — the loader globs the directory.
