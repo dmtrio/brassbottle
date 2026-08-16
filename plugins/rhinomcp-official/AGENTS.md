@@ -1,6 +1,6 @@
 ## Rhino MCP Platform (official)
 
-The `rhino-mcp` server drives a **real Rhino/Grasshopper session on the user's
+The `rhinomcp-official` server drives a **real Rhino/Grasshopper session on the user's
 desktop** — it does not run in this container, and there is no Rhino here to
 install or launch.
 

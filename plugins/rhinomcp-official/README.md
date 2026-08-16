@@ -1,4 +1,4 @@
-# rhino-mcp
+# rhinomcp-official
 
 [McNeel's official **Rhino MCP Platform**](https://mcneel.github.io/RhinoMCP/)
 ([mcneel/RhinoMCP](https://github.com/mcneel/RhinoMCP), MIT) — the first-party
@@ -61,8 +61,8 @@ listener started.
 
 ```yaml
 # manifest
-plugins: [rhino-mcp]
-# plugin_ports: {rhino-mcp: 10501}   # optional override; must match MCPStart's port
+plugins: [rhinomcp-official]
+# plugin_ports: {rhinomcp-official: 10501}   # optional override; must match MCPStart's port
 ```
 
 On the Mac (once):
