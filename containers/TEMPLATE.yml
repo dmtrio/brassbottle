@@ -91,7 +91,8 @@ plugins: []
 # exclusive, so two containers running the same plugin need different values —
 # same reason each container has its own ssh.port / remote.mosh_ports. Overrides
 # the plugin's default host_port in plugin.yml and re-points any ${HOST_PORT} in
-# the plugin's remote url; the resolved port also feeds the firewall grant.
+# the plugin's remote url or local bridge command/args; the resolved port also
+# feeds the firewall grant.
 # Keep a browser bridge port BELOW 9222: the launcher derives that container's
 # Chrome debug port as bridge+408, so a bridge at or above 9222 could collide
 # with another container's debug port.
