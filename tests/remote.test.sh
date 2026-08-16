@@ -161,7 +161,7 @@ src/manifest.py	remote.get("mosh")
 src/manifest.py	remote.get("notify")
 src/manifest.py	remote.get("mosh_ports")
 up.sh	compose/docker-compose.mosh.yml
-up.sh	djinn-net
+src/ensure_net.py	djinn-net
 src/manifest.py	remote.notify requires remote.tmux
 src/manifest.py	re.sub(r"^[A-Za-z]+://", "", ntfy_url)
 src/manifest.py	[0-9]{1,5}:[0-9]{1,5}

@@ -51,23 +51,36 @@ case "${SAVE:-}" in yml|firewall|none|"") ;; *) echo "Error: --save must be yml,
 
 # ── Verify the container ──────────────────────────────────────────────────────
 # Accept the short manifest name (coding-personal-site) or the full container
-# name (djinn-coding-personal-site); normalise to both. The pre-rebrand
-# dev-agent- prefix is also accepted so an existing container's full name
-# still resolves.
-SHORT="${RAW#djinn-}"; SHORT="${SHORT#dev-agent-}"
-CONTAINER="djinn-$SHORT"
-# Sourced here (not at the top) so --help / usage / bad-flag paths don't depend
-# on ./.env; only the manifest path below needs CONTAINERS_PATH.
-. "$SCRIPT_DIR/../src/common.sh"   # sets CDD_ROOT (repo root) + CONTAINERS_PATH
+# name (djinn-coding-personal-site); normalise to both. Sourced here (not at
+# the top) so --help / usage / bad-flag paths don't depend on ./.env; only the
+# resolution below needs CONTAINERS_PATH / DJINN_CTR_PREFIX / OLD_CTR_PREFIX.
+. "$SCRIPT_DIR/../src/common.sh"   # sets CDD_ROOT (repo root) + CONTAINERS_PATH + *_CTR_PREFIX
+SHORT="${RAW#$DJINN_CTR_PREFIX}"; SHORT="${SHORT#$OLD_CTR_PREFIX}"
+CONTAINER="$DJINN_CTR_PREFIX$SHORT"
 MANIFEST="$CONTAINERS_PATH/$SHORT.yml"
 
 command -v docker >/dev/null || { echo "Error: docker not found"; exit 1; }
 
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-    echo "Error: no container named '$CONTAINER'."
-    echo "Existing djinn containers:"
-    docker ps -a --filter "name=djinn-" --format '  {{.Names}} ({{.State}})' 2>/dev/null || true
-    exit 1
+    # rebrand-transitional: the djinn- name doesn't exist — this may still be
+    # a REAL pre-rebrand container that hasn't been migrated/re-upped yet, in
+    # which case its actual name is the dev-agent- one. Try that exact name
+    # before giving up (stripping-then-rebuilding the prefix, as before this
+    # fix, never resolved a real pre-rebrand container — only cosmetically
+    # accepted dev-agent- as an input spelling). Delete this branch once every
+    # container has been migrated.
+    OLD_CONTAINER="$OLD_CTR_PREFIX$SHORT"
+    if docker inspect "$OLD_CONTAINER" >/dev/null 2>&1; then
+        CONTAINER="$OLD_CONTAINER"
+        echo "  (using pre-rebrand container '$OLD_CONTAINER' — not yet migrated; see './djinn migrate $SHORT')"
+    else
+        echo "Error: no container named '$CONTAINER' (also tried '$OLD_CONTAINER')."
+        echo "Existing djinn containers:"
+        docker ps -a --filter "name=$DJINN_CTR_PREFIX" --format '  {{.Names}} ({{.State}})' 2>/dev/null || true
+        echo "Existing pre-rebrand containers (transitional):"
+        docker ps -a --filter "name=$OLD_CTR_PREFIX" --format '  {{.Names}} ({{.State}})' 2>/dev/null || true
+        exit 1
+    fi
 fi
 RUNNING="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo false)"
 
