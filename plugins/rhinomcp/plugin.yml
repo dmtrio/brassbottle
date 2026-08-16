@@ -1,0 +1,23 @@
+# rhinomcp — jingcheng-chen's community RhinoMCP. A LOCAL stdio bridge (PyPI
+# `rhinomcp`, baked) that dials the Rhino-side plugin (yak: rhinomcp) over raw
+# TCP on the Mac (default 1999). The Rhino plugin speaks a custom JSON protocol,
+# NOT MCP — unlike rhino-mcp/cordyceps there is no HTTP endpoint to reach, so
+# the bridge must run in-container. host_port is the local-bridge-dials-host
+# case: it opens the firewall to host.docker.internal:1999 and ${HOST_PORT} in
+# args is substituted at derive time, so a manifest plugin_ports: override
+# re-points the firewall grant and the dial target together.
+#
+# RHINO_MCP_ALLOW_REMOTE=1 acknowledges the bridge's own non-loopback guard:
+# the TCP link carries unauthenticated commands including arbitrary-code
+# execution in Rhino, which is exactly why the port-scoped firewall grant is
+# the only thing between this container and the Mac's Rhino. See ./README.md.
+
+host_port: 1999
+
+install: |
+  uv tool install -p 3.13 rhinomcp
+
+mcp:
+  rhinomcp:
+    command: bash
+    args: [-c, 'RHINO_MCP_HOST=host.docker.internal RHINO_MCP_PORT=${HOST_PORT} RHINO_MCP_ALLOW_REMOTE=1 exec rhinomcp']

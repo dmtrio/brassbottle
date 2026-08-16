@@ -1,0 +1,14 @@
+# cordyceps — Grasshopper MCP served BY the Cordyceps.gha component itself:
+# dropping the component on a GH canvas starts a streamable-HTTP MCP server on
+# the Mac (default port 26929, path /mcp), loopback-bound. Docker Desktop's
+# host.docker.internal proxy connects onto the Mac loopback, so this is a plain
+# remote plugin — config only, nothing baked, nothing runs in the container.
+# The endpoint has NO auth; the port-scoped firewall grant (HOST_MCP_PORTS) is
+# the only gate. Port is changeable via the component's Port input — keep it in
+# sync with host_port / a manifest plugin_ports: override. See ./README.md.
+
+host_port: 26929
+
+mcp:
+  cordyceps:
+    url: http://host.docker.internal:${HOST_PORT}/mcp
