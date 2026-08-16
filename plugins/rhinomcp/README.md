@@ -14,7 +14,7 @@ Deep, per-component control of a live Rhino 8 + Grasshopper session: an agent
 placing and wiring actual components on the canvas, setting parameters, and
 solving — rather than generating scripts. Its Grasshopper tool surface is the
 richest surveyed anywhere, which is why it earns a slot alongside the official
-[rhino-mcp](../rhino-mcp/) platform.
+[rhinomcp-official](../rhinomcp-official/) platform.
 
 ## Benefits
 

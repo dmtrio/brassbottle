@@ -44,7 +44,7 @@ surface stays broad.
   the open canvas; close the definition and the server is gone. Multiple open
   definitions with the component means port juggling.
 - **Grasshopper-first** — Rhino-side coverage (`rhino_scene`) is shallower
-  than [rhino-mcp](../rhino-mcp/) or [rhinomcp](../rhinomcp/); no
+  than [rhinomcp-official](../rhinomcp-official/) or [rhinomcp](../rhinomcp/); no
   arbitrary-code escape hatch (arguably also a benefit).
 
 ## Enable it

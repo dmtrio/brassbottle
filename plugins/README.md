@@ -48,7 +48,7 @@ opinion.
 | [`axiom`](axiom/) | local (stdio bridge → mcp.axiom.co, baked) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
 | [`ngrok`](ngrok/) | CLI binary + secret (no server) | — | [README](ngrok/README.md) |
-| [`rhino-mcp`](rhino-mcp/) | remote HTTP (in-Rhino server, official) | Rhino: `MCPStart` | [README](rhino-mcp/README.md) |
+| [`rhinomcp-official`](rhinomcp-official/) | remote HTTP (in-Rhino server, official) | Rhino: `MCPStart` | [README](rhinomcp-official/README.md) |
 | [`rhinomcp`](rhinomcp/) | local (stdio bridge → host TCP 1999, baked) | Rhino: `mcpstart` | [README](rhinomcp/README.md) |
 | [`cordyceps`](cordyceps/) | remote HTTP (in-Grasshopper server) | GH: Cordyceps component | [README](cordyceps/README.md) |
 

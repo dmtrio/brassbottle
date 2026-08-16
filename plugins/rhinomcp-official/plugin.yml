@@ -1,4 +1,4 @@
-# rhino-mcp — McNeel's OFFICIAL Rhino MCP Platform, reached directly over
+# rhinomcp-official — McNeel's OFFICIAL Rhino MCP Platform, reached directly over
 # streamable HTTP. The Rhino-side plugin (yak: Rhino-MCP-Platform) hosts a
 # Kestrel MCP server bound to the Mac's loopback (default port 10500); Docker
 # Desktop proxies host.docker.internal connections onto the host loopback, so
@@ -12,5 +12,5 @@
 host_port: 10500
 
 mcp:
-  rhino-mcp:
+  rhinomcp-official:
     url: http://host.docker.internal:${HOST_PORT}/
