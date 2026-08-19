@@ -282,7 +282,7 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
 
 ## Repo map
 
-- `djinn` — the dispatcher you run from the repo root: `djinn up|down|service|allow|keys|migrate <args>`
+- `djinn` — the dispatcher you run from the repo root: `djinn up|down|service|allow|keys <args>`
 - `up.sh` / `down.sh` / `service.sh` — the container-lifecycle scripts `djinn`
   dispatches to (still runnable directly): `up.sh` / `down.sh` are container
   lifecycle from manifests; `service.sh <name>` starts a plugin's Mac-side

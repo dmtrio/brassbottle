@@ -2,6 +2,10 @@
 # repo-local config + runtime home (secrets, keys, artifacts) — never commit
 .env
 .djinn/
+# The pre-rebrand home. The code that read it is gone, but a clone predating
+# the rebrand can still have this directory on disk holding real secrets —
+# keep it ignored so `git add -A` there can never commit them.
+.dev-agent/
 secrets.env
 # personal container manifests carry semi-private data (private repo URLs, LAN
 # subnets, identity-ref naming) — keep only the generic TEMPLATE.yml
