@@ -65,8 +65,7 @@ CHROME_APP="/Applications/Chromium.app"            # (defaults are /Applications
 (When `DJINN_HOME` is set and `$DJINN_HOME/rules` exists, it's used as
 the rules dir automatically — no need to set `RULES_PATH` too. The same applies
 to manifests: if `$DJINN_HOME/containers` exists it's used automatically, so
-you don't need to set `CONTAINERS_PATH` either. The old `DEV_AGENT_HOME` is
-still honored if set.)
+you don't need to set `CONTAINERS_PATH` either.)
 
 When your manifests are their own git repo, `djinn up` fast-forwards that
 checkout before reading the manifest, so a merged manifest PR takes effect on
@@ -382,43 +381,16 @@ remote:  { tmux: true, mosh: true, notify: ntfy }
   (+ optional `NTFY_TOPIC`) in `secrets.env`; the host is auto-allowlisted.
 
 **Reach.** All containers sit on one shared bridge (`djinn-net`,
-`172.30.0.0/24` by default, `DJINN_SUBNET` in `./.env` to override; the old
-`DEV_AGENT_SUBNET` is still honored; created automatically by `djinn up`).
+`172.30.0.0/24` by default, `DJINN_SUBNET` in `./.env` to override; created
+automatically by `djinn up`).
 Point your WireGuard/VPN layer at that CIDR once and every container is
 reachable at its bridge IP from any enrolled device — `djinn up` prints the
 IP in its summary. sshd and the mosh range stay loopback/tunnel-only; nothing
 listens publicly.
 
-## Migrating from docker-dev
-
-<!-- rebrand-transitional -->
-This repo was renamed **brassbottle** on GitHub (old clone/remote URLs
-redirect, so an existing `git remote` keeps working). To bring an existing
-setup along:
-
-1. Move the runtime home: `mv ~/dev-agent ~/djinn`, or leave it in place and
-   set `DJINN_HOME` instead — either way, `DEV_AGENT_HOME` still works if
-   you'd rather not touch it yet.
-2. Per container: `./djinn migrate <name>` copies its volumes to the
-   `djinn-<name>` prefix (the `dev-agent-<name>` originals are left in
-   place, not deleted), then `./djinn up <name>` brings it up under the new
-   name. If `djinn-net` can't be created because the old `dev-agent-net`
-   bridge still holds the subnet, `./djinn up` reclaims it automatically once
-   that container has no `dev-agent-*` containers left attached.
-3. Once every container has been re-upped, remove the old `dev-agent-net`
-   bridge — `djinn-net` replaces it on the same subnet.
-
-**Once every container has migrated**, every shim this rebrand left behind is
-one grep away: `grep -rn rebrand-transitional .` lists them all — the
-`DEV_AGENT_HOME`/`.dev-agent` fallbacks, the `DEV_AGENT_SUBNET` fallback, the
-old codex/sidecar marker compat, and this section itself. Deleting them (and
-`src/migrate.py`, `tests/test_migrate.py`, and the `./djinn migrate`
-subcommand) completes the rebrand.
-
 **Manifest filename = container identity.** A `containers/<name>.yml` under
 your own (untracked) manifests directory names the container it produces, so
-renaming the file is the same as renaming the container — `./djinn migrate`
-applies there too, not just to the docker-dev → brassbottle move.
+renaming the file is the same as renaming the container.
 
 ## License
 

@@ -16,7 +16,6 @@ Usage: ./djinn <subcommand> [args...]
   service  <name> [args...]    start a plugin's host-side service on this Mac
   allow    <container> <domain...>  add domains to a running container's egress allowlist
   keys     <container> ...     edit one container's agent MCP credentials
-  migrate  <name> [--dry-run]  copy a container's volumes to the djinn- prefix (rebrand-transitional)
   help                         show this message
 EOF
 }
@@ -27,9 +26,6 @@ case "${1:-}" in
     service) shift; exec "$SCRIPT_DIR/service.sh" "$@" ;;
     allow)   shift; exec "$SCRIPT_DIR/bin/allow-egress.sh" "$@" ;;
     keys)    shift; exec "$SCRIPT_DIR/bin/update-agent-keys.sh" "$@" ;;
-    # rebrand-transitional: migrate + its subcommand go away with
-    # src/migrate.py once every container has been migrated.
-    migrate) shift; exec python3 "$SCRIPT_DIR/src/migrate.py" "$@" ;;
     help|-h|--help) usage; exit 0 ;;
     "")      usage >&2; exit 1 ;;
     *)       echo "Error: unknown subcommand '$1'" >&2; usage >&2; exit 1 ;;

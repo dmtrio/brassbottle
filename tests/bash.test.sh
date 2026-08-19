@@ -227,27 +227,6 @@ printf 'DJINN_HOME=%s/from-dotenv\n' "$WORK" > "$cfg/.env"
 assert_eq "./.env sets DJINN_HOME" "$WORK/from-dotenv" "$(env -i bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh")"
 rm -f "$cfg/.env"
 
-# Compat: DEV_AGENT_HOME still overrides BASE_PATH when DJINN_HOME is unset,
-# but DJINN_HOME wins when both are set.
-bp_dev() { env -i DEV_AGENT_HOME="${1-}" bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh"; }
-assert_eq "DEV_AGENT_HOME still overrides BASE_PATH (compat)" "/legacy/home" "$(bp_dev /legacy/home)"
-assert_eq "DJINN_HOME wins over DEV_AGENT_HOME when both set" "/new/home" \
-    "$(env -i DJINN_HOME=/new/home DEV_AGENT_HOME=/legacy/home bash -c '. "$1"; echo "$BASE_PATH"' _ "$cfg/src/common.sh")"
-
-# Auto-detect: default chosen (no override), no ./.djinn yet, but a
-# pre-rebrand ./.dev-agent exists → keep using it (and say so on stderr)
-# rather than silently starting a second, empty home. A separate sandbox so
-# it doesn't interact with $cfg's own (djinn-only) default-path assertions.
-adcfg="$WORK/adcfg"; mkdir -p "$adcfg/src" "$adcfg/.dev-agent"
-cp "$REPO/src/common.sh" "$adcfg/src/common.sh"
-out=$(env -i bash -c '. "$1"; echo "$BASE_PATH"' _ "$adcfg/src/common.sh" 2>"$WORK/ad.err")
-assert_eq "pre-existing .dev-agent is auto-detected" "$adcfg/.dev-agent" "$out"
-assert_contains "auto-detect note suggests the move" "$(cat "$WORK/ad.err")" "mv .dev-agent .djinn"
-# ...but once ./.djinn also exists, the new default wins outright (no note).
-mkdir -p "$adcfg/.djinn"
-out=$(env -i bash -c '. "$1"; echo "$BASE_PATH"' _ "$adcfg/src/common.sh" 2>"$WORK/ad2.err")
-assert_eq "an existing .djinn wins over .dev-agent auto-detect" "$adcfg/.djinn" "$out"
-assert_eq "no auto-detect note once .djinn exists" "" "$(cat "$WORK/ad2.err")"
 
 # A failing COMMAND in ./.env (as opposed to an explicit `exit`, which would
 # terminate the shell directly) is what common.sh's set +e guard converts into
@@ -281,7 +260,7 @@ run_ae() { ( cd "$SBOX" && env CONTAINERS_PATH="$WORK/no-such-manifests" \
 # so the live-apply path is skipped) for a name in the space-separated
 # MOCK_EXISTING_CONTAINERS allowlist (env var the test sets) — everything else
 # reports not-found. Tightened from "inspect always succeeds" so the
-# djinn-/dev-agent- fallback resolution in allow-egress.sh is actually
+# djinn- prefix resolution in allow-egress.sh is actually
 # exercised instead of short-circuited by an inspect that always says yes.
 mkdir -p "$WORK/aebin"
 cat > "$WORK/aebin/docker" <<'MOCK'
@@ -320,26 +299,12 @@ assert_contains "short name resolves to the djinn- prefixed container" "$out" "C
 out=$(run_ae djinn-mycontainer cdn.playwright.dev --save none)
 assert_contains "full djinn- prefixed name also accepted" "$out" "Container: djinn-mycontainer"
 
-# rebrand-transitional: a REAL pre-rebrand container (the djinn- name does
-# NOT exist; the dev-agent- name does) resolves via the fallback, using its
-# actual (old) name — not a rebuilt-but-nonexistent djinn- name.
-MOCK_EXISTING_CONTAINERS="dev-agent-mycontainer"
-out=$(run_ae mycontainer cdn.playwright.dev --save none)
-assert_contains "pre-rebrand-only container resolves via fallback" "$out" "Container: dev-agent-mycontainer"
-assert_contains "fallback use is announced" "$out" "using pre-rebrand container"
-out=$(run_ae dev-agent-mycontainer cdn.playwright.dev --save none)
-assert_contains "dev-agent- prefixed input also resolves via fallback" "$out" "Container: dev-agent-mycontainer"
-unset MOCK_EXISTING_CONTAINERS
-
-# Neither the djinn- nor the dev-agent- name exists → a clear error naming
-# both attempts, plus a ps -a hint for both prefixes.
+# An unknown container → a clear error naming the attempt, plus a ps -a hint.
 MOCK_EXISTING_CONTAINERS=""
 out=$(run_ae ghost cdn.playwright.dev --save none 2>&1); rc=$?
-assert_rc "neither name exists → rc 1" 1 "$rc"
-assert_contains "error names the djinn- attempt" "$out" "no container named 'djinn-ghost'"
-assert_contains "error names the dev-agent- attempt" "$out" "also tried 'dev-agent-ghost'"
+assert_rc "unknown container → rc 1" 1 "$rc"
+assert_contains "error names the container it looked for" "$out" "no container named 'djinn-ghost'"
 assert_contains "not-found hint lists djinn- containers" "$out" "Existing djinn containers:"
-assert_contains "not-found hint lists pre-rebrand containers too" "$out" "Existing pre-rebrand containers"
 unset MOCK_EXISTING_CONTAINERS
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -207,15 +207,12 @@ if [ -n "$SSH_PORT" ] && [ -z "${SSH_AUTHORIZED_KEY:-}" ]; then
 fi
 
 # ── Shared network (all containers; single CIDR for VPN/tunnel targeting) ───
-# One user-defined bridge with a stable subnet (override via DJINN_SUBNET
-# in ./.env; DEV_AGENT_SUBNET still honored for compat — rebrand-transitional,
-# delete once every ./.env has moved to DJINN_SUBNET). Existing containers
-# adopt it on their next recreate. The create/verify logic — including
-# reclaiming the subnet from a pre-rebrand dev-agent-net bridge, so a
-# pre-existing install's first up.sh doesn't fail with "pool overlaps" — lives
-# in src/ensure_net.py (unit-tested; see tests/test_ensure_net.py), modeled on
-# src/migrate.py. up.sh only resolves the desired subnet and aborts on error.
-DESIRED_SUBNET="${DJINN_SUBNET:-${DEV_AGENT_SUBNET:-172.30.0.0/24}}"
+# One user-defined bridge with a stable subnet (override via DJINN_SUBNET in
+# ./.env). Existing containers adopt it on their next recreate. The
+# create/verify logic lives in src/ensure_net.py (unit-tested; see
+# tests/test_ensure_net.py). up.sh only resolves the desired subnet and aborts
+# on error.
+DESIRED_SUBNET="${DJINN_SUBNET:-172.30.0.0/24}"
 python3 "$SCRIPT_DIR/src/ensure_net.py" "$DESIRED_SUBNET" || exit 1
 
 # ── Apply ─────────────────────────────────────────────────────────────────────
