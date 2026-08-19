@@ -49,11 +49,17 @@ fi
 # naming) live OUTSIDE this repo, e.g. as their own private git repo at
 # ~/djinn/containers — and fall back to the repo's containers/ (which ships
 # only TEMPLATE.yml). A [ -d ] read only; still no filesystem side effects.
+# CONTAINERS_BUNDLED marks the last case — the fallback lives INSIDE this repo,
+# so up.sh must never `git pull` it (that would pull brassbottle). The flag is
+# set where the fallback is chosen, the same way RULES_BUNDLED is, because a
+# post-hoc path comparison misfires through a symlink.
+CONTAINERS_BUNDLED=0
 if [ -z "${CONTAINERS_PATH:-}" ]; then
     if [ -d "$BASE_PATH/containers" ]; then
         CONTAINERS_PATH="$BASE_PATH/containers"
     else
         CONTAINERS_PATH="$CDD_ROOT/containers"
+        CONTAINERS_BUNDLED=1
     fi
 fi
 

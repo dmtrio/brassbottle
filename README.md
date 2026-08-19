@@ -68,6 +68,13 @@ to manifests: if `$DJINN_HOME/containers` exists it's used automatically, so
 you don't need to set `CONTAINERS_PATH` either. The old `DEV_AGENT_HOME` is
 still honored if set.)
 
+When your manifests are their own git repo, `djinn up` fast-forwards that
+checkout before reading the manifest, so a merged manifest PR takes effect on
+the next run rather than waiting for you to remember `git pull`. It never
+touches the bundled `containers/` (that would pull brassbottle), never fails
+the run — offline, no upstream, or a manifest you're mid-edit all just carry
+on — and prints which case it took.
+
 **Keep your manifests out of this repo.** Your real `containers/*.yml` carry
 semi-private data (private repo URLs, LAN subnets, identity naming), so this
 repo ships only `containers/TEMPLATE.yml`. Point manifests at a directory of
