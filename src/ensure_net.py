@@ -61,7 +61,7 @@ def create_network(subnet):
 def ensure_net(subnet):
     """Ensure djinn-net exists with (best-effort) the desired subnet. Returns
     the process exit code (0/1); never raises EnsureNetError itself — this is
-    the sole catcher, mirroring migrate.migrate()."""
+    the sole catcher."""
     if network_exists(NET_NAME):
         actual = network_subnet(NET_NAME)
         if actual and actual != subnet:

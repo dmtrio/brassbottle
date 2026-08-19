@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Unit tests for src/ensure_net.py — the shared djinn-net bridge creator,
-extracted out of up.sh's inline network block to fix "pool overlaps" on a
-pre-existing install (SEVERE PR #43 finding).
+extracted out of up.sh's inline network block so it could be unit-tested.
 
 No real docker calls: every subprocess.run() is mocked via a small command
 dispatcher (FakeDocker) keyed on the docker network subcommand. Covers every
-branch: djinn-net already present (matching/mismatched subnet), djinn-net missing with no old net
-(create success/race-tolerant/failure).
+branch: djinn-net already present (matching subnet, mismatched subnet,
+unreadable subnet) and djinn-net missing (create success, create failure,
+and losing a concurrent create race).
 """
 
 import subprocess
@@ -112,7 +112,7 @@ class DjinnNetExistsTests(QuietTestCase):
         self.assertNotIn("already exists with subnet", self.out)
 
 
-class NoOldNetTests(QuietTestCase):
+class CreateNetTests(QuietTestCase):
     def test_missing_both_creates_djinn_net(self):
         fake = FakeDocker(existing=set())
         with unittest.mock.patch.object(ensure_net.subprocess, "run", side_effect=fake):
