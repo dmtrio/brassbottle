@@ -264,6 +264,13 @@ assert_eq "default CONTAINERS_PATH is the repo's containers/" "$cfg/containers" 
 dah="$WORK/dah-cp"; mkdir -p "$dah/containers"
 assert_eq "\$BASE_PATH/containers wins when it exists" "$dah/containers" "$(cpath "$dah" '')"
 assert_eq "CONTAINERS_PATH env override wins over everything" "/my/private/manifests" "$(cpath "$dah" /my/private/manifests)"
+# CONTAINERS_BUNDLED gates whether up.sh may `git pull` the manifests dir. It
+# must be 1 for exactly the in-repo fallback: reporting 0 there would have a
+# fresh clone try to pull its own checkout (i.e. pull brassbottle).
+cbundled() { env -i DJINN_HOME="${1-}" CONTAINERS_PATH="${2-}" bash -c '. "$1"; echo "$CONTAINERS_BUNDLED"' _ "$cfg/src/common.sh"; }
+assert_eq "bundled flag set for the repo's own containers/" "1" "$(cbundled '' '')"
+assert_eq "bundled flag clear for \$BASE_PATH/containers" "0" "$(cbundled "$dah" '')"
+assert_eq "bundled flag clear for a CONTAINERS_PATH override" "0" "$(cbundled "$dah" /my/private/manifests)"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── allow-egress.sh ──"

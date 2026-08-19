@@ -108,6 +108,89 @@ class Decide(Base):
         self.assertTrue(should)
 
 
+class RepoIdentity(Base):
+    def test_a_linked_worktree_is_the_same_repository(self):
+        # The layout this project's own workspace contract mandates: manifests
+        # pointed at a brassbottle WORKTREE while --self is the main checkout.
+        # --show-toplevel differs between them, so a toplevel comparison would
+        # wave this through and pull a branch another agent has checked out.
+        repo = init_repo(self.path("brassbottle"))
+        wt = self.path("worktrees", "feature")
+        git("worktree", "add", "-q", "-b", "feature", wt, cwd=repo)
+        self.assertEqual(pm.repo_identity(wt), pm.repo_identity(repo))
+        should, reason = pm.decide(wt, repo, bundled=False)
+        self.assertFalse(should)
+        self.assertIn("would pull brassbottle", reason)
+
+    def test_containers_dir_inside_a_worktree_is_also_refused(self):
+        repo = init_repo(self.path("brassbottle"))
+        wt = self.path("worktrees", "feature")
+        git("worktree", "add", "-q", "-b", "feature", wt, cwd=repo)
+        inside = os.path.join(wt, "containers")
+        os.makedirs(inside)
+        should, _ = pm.decide(inside, repo, bundled=False)
+        self.assertFalse(should)
+
+    def test_an_unrelated_repo_keeps_its_own_identity(self):
+        a = init_repo(self.path("manifests"))
+        b = init_repo(self.path("brassbottle"))
+        self.assertNotEqual(pm.repo_identity(a), pm.repo_identity(b))
+        should, _ = pm.decide(a, b, bundled=False)
+        self.assertTrue(should)
+
+    def test_plain_directory_has_no_identity(self):
+        plain = self.path("plain")
+        os.makedirs(plain)
+        self.assertIsNone(pm.repo_identity(plain))
+
+
+class Hardening(Base):
+    def test_git_runs_without_prompting(self):
+        # An HTTPS credential prompt or unknown SSH host key would block up.sh
+        # forever with its output captured — nothing on screen, no timeout.
+        seen = {}
+        real = pm.subprocess.run
+
+        def spy(cmd, **kwargs):
+            seen.update(kwargs.get("env") or {})
+            seen["_timeout"] = kwargs.get("timeout")
+            return real(cmd, **kwargs)
+
+        pm.subprocess.run = spy
+        self.addCleanup(setattr, pm.subprocess, "run", real)
+        pm.git(["rev-parse", "HEAD"], cwd=init_repo(self.path("r")))
+        self.assertEqual(seen.get("GIT_TERMINAL_PROMPT"), "0")
+        self.assertIn("BatchMode=yes", seen.get("GIT_SSH_COMMAND", ""))
+
+    def test_pull_passes_a_timeout(self):
+        seen = {}
+        real = pm.subprocess.run
+
+        def spy(cmd, **kwargs):
+            if "pull" in cmd:
+                seen["timeout"] = kwargs.get("timeout")
+            return real(cmd, **kwargs)
+
+        pm.subprocess.run = spy
+        self.addCleanup(setattr, pm.subprocess, "run", real)
+        pm.pull(init_repo(self.path("solo")), out=io.StringIO())
+        self.assertEqual(seen.get("timeout"), pm.PULL_TIMEOUT_SECONDS)
+
+    def test_a_hanging_remote_is_reported_not_raised(self):
+        real = pm.subprocess.run
+
+        def spy(cmd, **kwargs):
+            if "pull" in cmd:
+                raise pm.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+            return real(cmd, **kwargs)
+
+        pm.subprocess.run = spy
+        self.addCleanup(setattr, pm.subprocess, "run", real)
+        buf = io.StringIO()
+        self.assertFalse(pm.pull(init_repo(self.path("solo")), out=buf))
+        self.assertIn("timed out", buf.getvalue())
+
+
 class Pull(Base):
     def clone_pair(self):
         """(upstream, clone) — a clone whose upstream has moved ahead."""
@@ -127,6 +210,22 @@ class Pull(Base):
         self.assertTrue(pulled)
         self.assertTrue(os.path.exists(os.path.join(clone, "new-bottle.yml")))
         self.assertIn("fast-forwarded", output)
+
+    def test_an_already_current_clone_says_so(self):
+        # "already up to date" and "a merged bottle just landed" must not read
+        # identically, or the line stops carrying information.
+        _, clone = self.clone_pair()
+        self.run_pull(clone)                       # first pull takes the commit
+        pulled, output = self.run_pull(clone)      # second has nothing to take
+        self.assertTrue(pulled)
+        self.assertIn("already current", output)
+        self.assertNotIn("fast-forwarded", output)
+
+    def test_a_real_fast_forward_names_the_commits(self):
+        _, clone = self.clone_pair()
+        _, output = self.run_pull(clone)
+        self.assertIn("fast-forwarded", output)
+        self.assertIn("..", output)
 
     def test_bundled_flag_leaves_the_checkout_alone(self):
         _, clone = self.clone_pair()

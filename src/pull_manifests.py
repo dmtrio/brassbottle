@@ -14,15 +14,18 @@ Two things must never be pulled:
     there pulls brassbottle. up.sh's rules code guards this with a flag set
     where the fallback is chosen rather than a path comparison, because a
     symlinked path makes comparison misfire; CONTAINERS_BUNDLED is the same
-    idea. The toplevel check below additionally catches an explicit
-    CONTAINERS_PATH aimed back at this repo's own containers/.
+    idea. The repo-identity check below additionally catches an explicit
+    CONTAINERS_PATH aimed back at this repo's own containers/ — including
+    from one of its linked worktrees, which this project's own layout makes
+    routine.
   * Anything that isn't a git checkout at all — the plain-directory setup stays
     supported and must not start erroring.
 
-Never fatal: a laptop offline, a detached HEAD, an unpushed local edit to a
-manifest are all ordinary, and none is a reason to refuse to bring a container
-up. Every outcome prints one line saying which it was, so a stale manifest can
-never be mistaken for a fresh one.
+Never fatal, and never stuck: a laptop offline, a detached HEAD, an unpushed
+local edit to a manifest are all ordinary, and none is a reason to refuse to
+bring a container up — nor is a remote that hangs, which is why the pull is
+capped and runs with prompting disabled. Every outcome prints one line saying
+which it was, so a stale manifest can never be mistaken for a fresh one.
 
 Exit status is always 0.
 """
@@ -32,12 +35,27 @@ import os
 import subprocess
 import sys
 
+# A pull that waits forever is worse than one that fails: up.sh captures this
+# output, so a blackholed remote, an unknown SSH host key, or an HTTPS
+# credential prompt would hang `./djinn up` with nothing on screen. Cap it, and
+# refuse to prompt at all — unattended is the only mode this ever runs in.
+PULL_TIMEOUT_SECONDS = 45
+GIT_BATCH_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_SSH_COMMAND": "ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new",
+    "GCM_INTERACTIVE": "never",
+}
 
-def git(args, cwd=None):
-    """(returncode, stdout, stderr) — never raises."""
+
+def git(args, cwd=None, timeout=None):
+    """(returncode, stdout, stderr) — never raises, never prompts, never hangs."""
+    env = dict(os.environ)
+    env.update(GIT_BATCH_ENV)
     try:
         p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
-                           text=True)
+                           text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 1, "", "timed out after %ss" % timeout
     except (OSError, ValueError) as e:      # git absent, bad cwd
         return 1, "", str(e)
     return p.returncode, p.stdout.strip(), p.stderr.strip()
@@ -51,6 +69,29 @@ def toplevel(path):
     return out or None if rc == 0 else None
 
 
+def repo_identity(path):
+    """What REPOSITORY path belongs to, as a realpath'd common git dir.
+
+    --show-toplevel would name a linked worktree's own root, so a worktree of
+    brassbottle reads as a different repo from brassbottle and the self-guard
+    waves it through — then pulls a feature branch another agent has checked
+    out. --git-common-dir is shared by a repo and all its worktrees, which is
+    exactly the identity the guard means."""
+    if not os.path.isdir(path):
+        return None
+    rc, out, _ = git(["rev-parse", "--git-common-dir"], cwd=path)
+    if rc != 0 or not out:
+        return None
+    return os.path.realpath(out if os.path.isabs(out)
+                            else os.path.join(path, out))
+
+
+def head(path):
+    """Current commit, or None. Used only to tell a real pull from a no-op."""
+    rc, out, _ = git(["rev-parse", "HEAD"], cwd=path)
+    return out or None if rc == 0 else None
+
+
 def decide(containers_path, self_root, bundled):
     """(should_pull, reason). Pure: no git writes, so it is cheap to test."""
     if bundled:
@@ -58,9 +99,11 @@ def decide(containers_path, self_root, bundled):
     top = toplevel(containers_path)
     if top is None:
         return False, "not a git checkout — nothing to pull"
-    self_top = toplevel(self_root) if self_root else None
-    if self_top and os.path.realpath(top) == os.path.realpath(self_top):
-        return False, "same checkout as brassbottle — a pull here would pull brassbottle"
+    mine = repo_identity(containers_path)
+    theirs = repo_identity(self_root) if self_root else None
+    if mine and theirs and mine == theirs:
+        return False, ("same repository as brassbottle (or one of its "
+                       "worktrees) — a pull here would pull brassbottle")
     return True, top
 
 
@@ -70,9 +113,18 @@ def pull(containers_path, self_root=None, bundled=False, out=sys.stdout):
     if not should:
         print("  manifests: %s" % reason, file=out)
         return False
-    rc, _, err = git(["pull", "--ff-only", "-q"], cwd=containers_path)
+    before = head(containers_path)
+    rc, _, err = git(["pull", "--ff-only", "-q"], cwd=containers_path,
+                     timeout=PULL_TIMEOUT_SECONDS)
     if rc == 0:
-        print("  manifests: fast-forwarded %s" % reason, file=out)
+        after = head(containers_path)
+        if before and after and before == after:
+            # "Already up to date" and "a merged bottle just landed" must not
+            # read identically — the point of this line is to tell them apart.
+            print("  manifests: already current %s" % reason, file=out)
+        else:
+            print("  manifests: fast-forwarded %s (%s..%s)"
+                  % (reason, (before or "?")[:8], (after or "?")[:8]), file=out)
         return True
     # Offline, no upstream, dirty tree, diverged history — all ordinary, none
     # worth blocking on. Say so rather than continuing in silence: the whole

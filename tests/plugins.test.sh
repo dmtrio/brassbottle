@@ -323,6 +323,7 @@ yq -o=json -I=0 "$MANIFEST"
 src/manifest.py" --derive
 --build-payload
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
+src/pull_manifests.py" "$CONTAINERS_PATH"
 python3 /usr/local/lib/djinn/wire_plugins.py
 PRESENT_SECRET_VARS
 DRIFT
