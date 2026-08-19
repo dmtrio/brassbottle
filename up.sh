@@ -60,13 +60,14 @@ fi
 # it took.
 # NB: an if, not ${CONTAINERS_BUNDLED:+…} — the flag is the string "0" when
 # unset-by-value, which :+ treats as set and would disable the pull outright.
-if [ "${CONTAINERS_BUNDLED:-0}" = 1 ]; then
-    "$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$CONTAINERS_PATH" \
-        --self "$SCRIPT_DIR" --bundled
-else
-    "$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$CONTAINERS_PATH" \
-        --self "$SCRIPT_DIR"
-fi
+BUNDLED_FLAG=""
+if [ "${CONTAINERS_BUNDLED:-0}" = 1 ]; then BUNDLED_FLAG="--bundled"; fi
+# `|| true`, like the RULES_PATH pull below: main() returning 0 only covers
+# failures INSIDE the module. A missing or unreadable src/pull_manifests.py, or
+# any unhandled traceback, would exit non-zero and abort bring-up under set -e
+# — the one thing this feature promises it can never do.
+"$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$CONTAINERS_PATH" \
+    --self "$SCRIPT_DIR" $BUNDLED_FLAG || true
 
 MANIFEST="$CONTAINERS_PATH/$NAME.yml"
 [ -f "$MANIFEST" ] || { echo "Error: no manifest at $MANIFEST (cp $SCRIPT_DIR/containers/TEMPLATE.yml $MANIFEST)"; exit 1; }
