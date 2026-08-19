@@ -34,16 +34,12 @@ fi
 # bin/allow-egress.sh build/resolve off the same var).
 CNAME="$DJINN_CTR_PREFIX$NAME"
 
-# CONTAINERS_PATH (resolved in common.sh) is where manifests live: the repo's
-# containers/ by default, or $BASE_PATH/containers / a CONTAINERS_PATH override
-# when you keep them in a private repo outside this one.
-MANIFEST="$CONTAINERS_PATH/$NAME.yml"
-[ -f "$MANIFEST" ] || { echo "Error: no manifest at $MANIFEST (cp $SCRIPT_DIR/containers/TEMPLATE.yml $MANIFEST)"; exit 1; }
-command -v yq >/dev/null || { echo "Error: yq required (brew install yq)"; exit 1; }
 # Host python3 (stdlib-only, builds the wiring payload): prefer the SYSTEM
 # interpreter over whatever shim leads $PATH — pyenv/homebrew pythons can be
 # present-but-broken (dyld: library not loaded) in ways `command -v` cannot
 # see, so each candidate must actually RUN. Override with PYTHON3=/path.
+# Resolved BEFORE the manifest is read: src/pull_manifests.py runs next, and a
+# manifest merged upstream only exists locally once that pull has happened.
 if [ -z "${PYTHON3:-}" ]; then
     for cand in /usr/bin/python3 python3; do
         if "$cand" -c '' 2>/dev/null; then PYTHON3="$cand"; break; fi
@@ -51,6 +47,30 @@ if [ -z "${PYTHON3:-}" ]; then
 fi
 [ -n "${PYTHON3:-}" ] && "$PYTHON3" -c '' 2>/dev/null \
     || { echo "Error: no working python3 (tried /usr/bin/python3 and PATH — broken pyenv/brew shim? Install Xcode CLT on macOS, or set PYTHON3=/path/to/python3)"; exit 1; }
+
+# CONTAINERS_PATH (resolved in common.sh) is where manifests live: the repo's
+# containers/ by default, or $BASE_PATH/containers / a CONTAINERS_PATH override
+# when you keep them in a private repo outside this one.
+#
+# Fast-forward that checkout first, the way RULES_PATH is pulled below: once
+# manifests live in their own repo, a merged bottle PR is invisible here until
+# someone pulls by hand, and up.sh would apply the stale file without a word.
+# Never fatal, and never pulls the bundled containers/ (that would pull
+# brassbottle) — src/pull_manifests.py owns those rules and prints which case
+# it took.
+# NB: an if, not ${CONTAINERS_BUNDLED:+…} — the flag is the string "0" when
+# unset-by-value, which :+ treats as set and would disable the pull outright.
+if [ "${CONTAINERS_BUNDLED:-0}" = 1 ]; then
+    "$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$CONTAINERS_PATH" \
+        --self "$SCRIPT_DIR" --bundled
+else
+    "$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$CONTAINERS_PATH" \
+        --self "$SCRIPT_DIR"
+fi
+
+MANIFEST="$CONTAINERS_PATH/$NAME.yml"
+[ -f "$MANIFEST" ] || { echo "Error: no manifest at $MANIFEST (cp $SCRIPT_DIR/containers/TEMPLATE.yml $MANIFEST)"; exit 1; }
+command -v yq >/dev/null || { echo "Error: yq required (brew install yq)"; exit 1; }
 
 mkdir -p "$BASE_PATH"   # create the djinn home now that we're proceeding
 SHARED_PATH="$BASE_PATH/shared"
