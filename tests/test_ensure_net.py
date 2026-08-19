@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Unit tests for src/ensure_net.py — the shared djinn-net bridge creator,
 extracted out of up.sh's inline network block to fix "pool overlaps" on a
-pre-existing dev-agent-net install (SEVERE PR #43 finding).
+pre-existing install (SEVERE PR #43 finding).
 
 No real docker calls: every subprocess.run() is mocked via a small command
-dispatcher (FakeDocker) keyed on the docker network subcommand, mirroring
-tests/test_migrate.py's approach. Covers every branch: djinn-net already
-present (matching/mismatched subnet), djinn-net missing with no old net
-(create success/race-tolerant/failure), and the rebrand-transitional
-dev-agent-net handoff (empty -> reclaimed, attached -> hard abort).
+dispatcher (FakeDocker) keyed on the docker network subcommand. Covers every
+branch: djinn-net already present (matching/mismatched subnet), djinn-net missing with no old net
+(create success/race-tolerant/failure).
 """
 
 import subprocess
@@ -30,20 +28,14 @@ class FakeDocker:
     """Dispatches a mocked subprocess.run() by docker network subcommand.
 
     `existing` — network names `docker network inspect <name>` reports as
-    present. `subnets` — {name: subnet} for the -f Subnet query. `counts` —
-    {name: int} for the -f len(.Containers) query. `names` — {name: [container,
-    ...]} for the -f range(.Containers) query. `fail_create`/`fail_rm` — names
-    whose create/rm step errors.
+    present. `subnets` — {name: subnet} for the -f Subnet query.
+    `fail_create` — the create step errors.
     """
 
-    def __init__(self, existing=(), subnets=None, counts=None, names=None,
-                 fail_create=False, fail_rm=()):
+    def __init__(self, existing=(), subnets=None, fail_create=False):
         self.existing = set(existing)
         self.subnets = dict(subnets or {})
-        self.counts = dict(counts or {})
-        self.names = dict(names or {})
         self.fail_create = fail_create
-        self.fail_rm = set(fail_rm)
         self.calls = []  # every command, in order — asserted against directly
         self.created_after_fail = False  # simulates winning a concurrent create race
 
@@ -56,22 +48,11 @@ class FakeDocker:
                     return _completed(cmd, returncode=1, stderr=f"no such network: {name}")
                 if "Subnet" in fmt:
                     return _completed(cmd, stdout=self.subnets.get(name, "") + "\n")
-                if "len" in fmt:
-                    return _completed(cmd, stdout=str(self.counts.get(name, 0)) + "\n")
-                if "range" in fmt:
-                    joined = " ".join(self.names.get(name, []))
-                    return _completed(cmd, stdout=(joined + " \n") if joined else "\n")
                 raise AssertionError(f"unexpected inspect format: {fmt}")
             name = cmd[3]
             ok = name in self.existing
             return _completed(cmd, returncode=0 if ok else 1,
                                stderr="" if ok else f"no such network: {name}")
-        if cmd[:3] == ["docker", "network", "rm"]:
-            name = cmd[3]
-            if name in self.fail_rm:
-                return _completed(cmd, returncode=1, stderr=f"rm failed: {name}")
-            self.existing.discard(name)
-            return _completed(cmd, returncode=0)
         if cmd[:3] == ["docker", "network", "create"]:
             if self.fail_create:
                 return _completed(cmd, returncode=1, stderr="pool overlaps")
@@ -165,51 +146,6 @@ class NoOldNetTests(QuietTestCase):
             rc = ensure_net.ensure_net("172.30.0.0/24")
         self.assertEqual(rc, 0)
         self.assertEqual(self.err, "")
-
-
-class OldNetHandoffTests(QuietTestCase):
-    """rebrand-transitional: djinn-net missing, dev-agent-net still around."""
-
-    def test_empty_old_net_is_removed_then_djinn_net_created(self):
-        fake = FakeDocker(existing={"dev-agent-net"}, counts={"dev-agent-net": 0})
-        with unittest.mock.patch.object(ensure_net.subprocess, "run", side_effect=fake):
-            rc = ensure_net.ensure_net("172.30.0.0/24")
-        self.assertEqual(rc, 0)
-        self.assertIn("no attached containers", self.out)
-        rm_calls = [c for c in fake.calls if c[:3] == ["docker", "network", "rm"]]
-        self.assertEqual(rm_calls, [["docker", "network", "rm", "dev-agent-net"]])
-        create_calls = [c for c in fake.calls if c[:3] == ["docker", "network", "create"]]
-        self.assertEqual(create_calls, [["docker", "network", "create", "--subnet",
-                                          "172.30.0.0/24", "djinn-net"]])
-        # rm must happen before create (the subnet has to be freed first).
-        self.assertLess(fake.calls.index(rm_calls[0]), fake.calls.index(create_calls[0]))
-
-    def test_rm_failure_on_empty_old_net_is_a_hard_error(self):
-        fake = FakeDocker(existing={"dev-agent-net"}, counts={"dev-agent-net": 0},
-                           fail_rm={"dev-agent-net"})
-        with unittest.mock.patch.object(ensure_net.subprocess, "run", side_effect=fake):
-            rc = ensure_net.ensure_net("172.30.0.0/24")
-        self.assertEqual(rc, 1)
-        self.assertIn("could not remove old network dev-agent-net", self.err)
-        # Never reached the create step.
-        create_calls = [c for c in fake.calls if c[:3] == ["docker", "network", "create"]]
-        self.assertEqual(create_calls, [])
-
-    def test_attached_containers_aborts_and_names_them(self):
-        fake = FakeDocker(existing={"dev-agent-net"}, counts={"dev-agent-net": 2},
-                           names={"dev-agent-net": ["dev-agent-mysite", "dev-agent-other"]})
-        with unittest.mock.patch.object(ensure_net.subprocess, "run", side_effect=fake):
-            rc = ensure_net.ensure_net("172.30.0.0/24")
-        self.assertEqual(rc, 1)
-        self.assertIn("dev-agent-mysite", self.err)
-        self.assertIn("dev-agent-other", self.err)
-        self.assertIn("djinn migrate", self.err)
-        self.assertIn("DJINN_SUBNET", self.err)
-        # Never removed the old net, never attempted to create the new one.
-        rm_calls = [c for c in fake.calls if c[:3] == ["docker", "network", "rm"]]
-        create_calls = [c for c in fake.calls if c[:3] == ["docker", "network", "create"]]
-        self.assertEqual(rm_calls, [])
-        self.assertEqual(create_calls, [])
 
 
 class MainTests(QuietTestCase):

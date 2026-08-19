@@ -16,8 +16,7 @@ All the scripts below source `src/common.sh` (not run directly), which resolves 
 "djinn home" — where secrets/keys/artifacts live. It defaults to a
 gitignored `./.djinn/`; override via `DJINN_HOME` / `RULES_PATH` /
 `CONTAINERS_PATH` in a gitignored `./.env` at the repo root (keeps your own
-setup working; the old `DEV_AGENT_HOME` is still honored — rebrand-transitional,
-see "Migrating from docker-dev" below). `CONTAINERS_PATH`
+setup working). `CONTAINERS_PATH`
 is where `containers/<name>.yml` manifests are read from — it defaults to
 `$DJINN_HOME/containers` when that exists, so your real manifests can live
 outside this repo.
@@ -100,24 +99,6 @@ Operate on a live container without a rebuild or restart.
   ./djinn down my-app            # stop, keep the code
   ./djinn down my-app --purge    # full teardown
   ```
-
-## Migrating from docker-dev (rebrand-transitional)
-
-<!-- rebrand-transitional -->
-- **`./djinn migrate <name> [--dry-run]`** (dispatches to `src/migrate.py`) —
-  copies one container's docker volumes from the pre-rebrand `dev-agent-<name>_*`
-  prefix to `djinn-<name>_*`, leaving the old volumes untouched. Only needed
-  once per not-yet-migrated container; see the README's "Migrating from
-  docker-dev" section for the full sequence. This whole subcommand goes away
-  once every container has been migrated — `grep -rn rebrand-transitional`
-  lists it and everything else that goes with it.
-
-  ```bash
-  ./djinn migrate my-app --dry-run   # print the plan, change nothing
-  ./djinn migrate my-app             # copy the volumes
-  ```
-
----
 
 ## Inside the image (baked from `src/` — automatic, you don't run these)
 

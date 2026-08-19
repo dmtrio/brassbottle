@@ -79,17 +79,6 @@ CODEX_CLOSE_PREFIX = "# <<< djinn plugin MCP"
 CODEX_OPEN_MARKER = "# >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>"
 CODEX_CLOSE_MARKER = "# <<< djinn plugin MCP <<<"
 
-# rebrand-transitional: the pre-rebrand marker pair (dev-agent, not djinn). A
-# config wired by an older up.sh still carries one of these; the strip loop
-# below recognizes either pair so the old block is folded into the new one
-# instead of being left alongside it — the original bug (SEVERE, PR #43):
-# only the new prefix was matched, so the old block survived, the new block
-# was appended, and codex ended up with duplicate [mcp_servers.*] tables.
-# Delete once every container has re-upped and no config carries this marker
-# any more (`grep -rn rebrand-transitional`).
-OLD_CODEX_OPEN_PREFIX = "# >>> dev-agent plugin MCP"
-OLD_CODEX_CLOSE_PREFIX = "# <<< dev-agent plugin MCP"
-
 
 class WireError(Exception):
     """Fatal wiring error; main() prints it as 'Error: …' and exits 1."""
@@ -410,32 +399,17 @@ def reconcile_agent_servers(agent, required, home):
     the credential inline, so a bare upsert would leave a disabled agent's token
     live and its server reachable; the exact set this module manages is tracked
     in a <config>.djinn-servers sidecar so hand-added and local-plugin
-    entries are never touched. A pre-rebrand <config>.dev-agent-servers
-    sidecar is read once (rebrand-transitional) when the new one doesn't
-    exist yet, then migrated forward. `required` maps server name -> (spec,
-    keys)."""
+    entries are never touched. `required` maps server name -> (spec, keys)."""
     rel = _AGENT_SERVER_CONFIG.get(agent)
     if rel is None:
         return
     path = home / rel
     sidecar = path.parent / (path.name + ".djinn-servers")
-    # rebrand-transitional: the pre-rebrand sidecar name. A volume copied over
-    # by migrate.py carries this file, never the new one — read it once (so
-    # its tracked servers, some carrying inlined credentials, are still
-    # pruned) and fold it into the new name below. Delete this branch (and
-    # old_sidecar) once every container has re-upped.
-    old_sidecar = path.parent / (path.name + ".dev-agent-servers")
     old = []
-    migrate_from = None
     if sidecar.is_file() and sidecar.stat().st_size > 0:
         old = _load_json_file(sidecar)
         if not isinstance(old, list):
             raise WireError(f"{sidecar}: expected a JSON array of names")
-    elif old_sidecar.is_file() and old_sidecar.stat().st_size > 0:
-        old = _load_json_file(old_sidecar)
-        if not isinstance(old, list):
-            raise WireError(f"{old_sidecar}: expected a JSON array of names")
-        migrate_from = old_sidecar
     stale = [n for n in old if n not in required]
     if not required and not stale:
         return  # nothing managed now or before — don't create empty files
@@ -446,33 +420,19 @@ def reconcile_agent_servers(agent, required, home):
     for name, (spec, keys) in required.items():
         write_agent_server(agent, name, spec, keys, home)
     _write_atomic(sidecar, json.dumps(sorted(required), separators=(",", ":")) + "\n", mode=0o600)
-    if migrate_from is not None:
-        # rename-forward, one-way: the old sidecar is never written again.
-        migrate_from.unlink(missing_ok=True)
 
 
 def wire_plugin_servers_json(path, plugins):
     """Sync the plugin stdio servers into a JSON agent config (cursor, gemini,
     pi). The set of plugin-managed names is tracked in a sidecar
     (<file>.djinn-plugins) so stale entries from a plugin removed from the
-    manifest are deleted without touching identity or hand-added servers. A
-    pre-rebrand <file>.dev-agent-plugins sidecar (rebrand-transitional) is
-    read once when the new one doesn't exist yet — a volume copied over by
-    migrate.py carries the old name, and without this its stale plugin
-    servers would never be pruned — then migrated forward."""
+    manifest are deleted without touching identity or hand-added servers."""
     sidecar = path.parent / (path.name + ".djinn-plugins")
-    old_sidecar = path.parent / (path.name + ".dev-agent-plugins")  # rebrand-transitional
     old = []
-    migrate_from = None
     if sidecar.is_file() and sidecar.stat().st_size > 0:
         old = _load_json_file(sidecar)
         if not isinstance(old, list):
             raise WireError(f"{sidecar}: expected a JSON array of names")
-    elif old_sidecar.is_file() and old_sidecar.stat().st_size > 0:
-        old = _load_json_file(old_sidecar)
-        if not isinstance(old, list):
-            raise WireError(f"{old_sidecar}: expected a JSON array of names")
-        migrate_from = old_sidecar
 
     data, servers = _load_servers(path)
     if data is None:
@@ -485,9 +445,6 @@ def wire_plugin_servers_json(path, plugins):
 
     _write_atomic(path, _dump_json(data), mode=0o600)
     _write_atomic(sidecar, json.dumps(sorted(plugins), separators=(",", ":")) + "\n", mode=0o600)
-    if migrate_from is not None:
-        # rename-forward, one-way: the old sidecar is never written again.
-        migrate_from.unlink(missing_ok=True)
     print(f"  ✓ plugin MCP servers synced into {path}")
 
 
@@ -525,15 +482,11 @@ def wire_codex_toml(path, plugins):
     kept = []
     in_block = False
     for line in lines:
-        # rebrand-transitional: accept either marker pair as an opener/closer
-        # so a pre-rebrand block is reconciled into the new one, not kept
-        # alongside it.
-        if not in_block and (line.startswith(CODEX_OPEN_PREFIX)
-                              or line.startswith(OLD_CODEX_OPEN_PREFIX)):
+        if not in_block and line.startswith(CODEX_OPEN_PREFIX):
             in_block = True
             continue
         if in_block:
-            if line.startswith(CODEX_CLOSE_PREFIX) or line.startswith(OLD_CODEX_CLOSE_PREFIX):
+            if line.startswith(CODEX_CLOSE_PREFIX):
                 in_block = False
             continue
         kept.append(line)
