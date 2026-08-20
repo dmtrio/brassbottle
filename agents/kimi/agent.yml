@@ -1,0 +1,21 @@
+# kimi — Moonshot's Kimi Code CLI (v1.49+ docs, July 2026).
+# Ref-style MCP wiring: kimi's mcpServers format supports bearerTokenEnvVar,
+# so configs carry env-var NAMES (no literal secrets) and the shim env supplies
+# values at process start.
+# No named strategy: this rides the generic non-strategy JSON+mcpServers path.
+
+binary: kimi
+
+install: |
+  curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+
+state_dirs:
+  - {path: .kimi-code, volume: kimi-state}
+
+rules_file: .kimi-code/AGENTS.md
+
+mcp:
+  config_path: .kimi-code/mcp.json
+  format: json
+  dialect: mcpServers
+  env_refs: bearerTokenEnvVar

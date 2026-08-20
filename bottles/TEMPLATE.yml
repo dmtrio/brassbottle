@@ -65,9 +65,10 @@ memory: 10g
 #  mosh_ports: 60000:60010
 #  notify: ntfy
 
-# Agent CLIs baked into the image. Omit this key entirely = all of them.
+# Agent CLIs baked into the image. Names are exact agents/<dir> matches.
+# Omit this key entirely = every shipped descriptor under agents/.
 # tools: is accepted as a deprecated alias for one release.
-agents: [claude, codex, pi, gemini, cursor, aider]
+agents: [claude, codex, pi, gemini, cursor, aider, kimi]
 
 # Firewall egress. Extra outbound the base allowlist doesn't already cover.
 capabilities:
