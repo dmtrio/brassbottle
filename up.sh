@@ -1,6 +1,6 @@
 #!/bin/bash
 # up.sh <name> — declaratively create or update an agent dev container from
-# bottles/<name>.yml. Idempotent: edit the manifest, rerun, done.
+# bottles/<name>.yml. Idempotent: edit the bottle, rerun, done.
 #
 # Kept:     the bottle (bottles/*.yml) and ~/djinn/secrets.env
 # Derived:  ~/djinn/keys/<name>/ (recomposed every run), the container,
@@ -8,7 +8,7 @@
 # Survives: workspace volume (code), ~/djinn/artifacts/<name>/
 #
 # Requires: docker, yq (brew install yq / static binary on Linux), python3
-# (stdlib only — owns ALL manifest validation/derivation via src/manifest.py
+# (stdlib only — owns ALL bottle validation/derivation via src/bottle.py
 # and builds the wiring payload; yq only converts YAML→JSON. The wiring
 # itself runs in-container via the baked-in src/wire_plugins.py).
 
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 NAME="$1"
 if [ -z "$NAME" ]; then
     echo "Usage: ./up.sh <name>    (reads $BOTTLES_PATH/<name>.yml)"
-    echo "Manifests:"
+    echo "Bottles:"
     for f in "$BOTTLES_PATH"/*.yml; do
         [ -f "$f" ] || continue
         n=$(basename "$f" .yml)
@@ -38,8 +38,8 @@ CNAME="$DJINN_CTR_PREFIX$NAME"
 # interpreter over whatever shim leads $PATH — pyenv/homebrew pythons can be
 # present-but-broken (dyld: library not loaded) in ways `command -v` cannot
 # see, so each candidate must actually RUN. Override with PYTHON3=/path.
-# Resolved BEFORE the manifest is read: src/pull_manifests.py runs next, and a
-# manifest merged upstream only exists locally once that pull has happened.
+# Resolved BEFORE the bottle is read: src/pull_bottles.py runs next, and a
+# bottle merged upstream only exists locally once that pull has happened.
 if [ -z "${PYTHON3:-}" ]; then
     for cand in /usr/bin/python3 python3; do
         if "$cand" -c '' 2>/dev/null; then PYTHON3="$cand"; break; fi
@@ -48,29 +48,29 @@ fi
 [ -n "${PYTHON3:-}" ] && "$PYTHON3" -c '' 2>/dev/null \
     || { echo "Error: no working python3 (tried /usr/bin/python3 and PATH — broken pyenv/brew shim? Install Xcode CLT on macOS, or set PYTHON3=/path/to/python3)"; exit 1; }
 
-# BOTTLES_PATH (resolved in common.sh) is where manifests live: the repo's
+# BOTTLES_PATH (resolved in common.sh) is where bottles live: the repo's
 # bottles/ by default, or $BASE_PATH/bottles / a BOTTLES_PATH override
 # when you keep them in a private repo outside this one.
 #
 # Fast-forward that checkout first, the way RULES_PATH is pulled below: once
-# manifests live in their own repo, a merged bottle PR is invisible here until
+# bottles live in their own repo, a merged bottle PR is invisible here until
 # someone pulls by hand, and up.sh would apply the stale file without a word.
 # Never fatal, and never pulls the bundled bottles/ (that would pull
-# brassbottle) — src/pull_manifests.py owns those rules and prints which case
+# brassbottle) — src/pull_bottles.py owns those rules and prints which case
 # it took.
 # NB: an if, not ${BOTTLES_BUNDLED:+…} — the flag is the string "0" when
 # unset-by-value, which :+ treats as set and would disable the pull outright.
 BUNDLED_FLAG=""
 if [ "${BOTTLES_BUNDLED:-0}" = 1 ]; then BUNDLED_FLAG="--bundled"; fi
 # `|| true`, like the RULES_PATH pull below: main() returning 0 only covers
-# failures INSIDE the module. A missing or unreadable src/pull_manifests.py, or
+# failures INSIDE the module. A missing or unreadable src/pull_bottles.py, or
 # any unhandled traceback, would exit non-zero and abort bring-up under set -e
 # — the one thing this feature promises it can never do.
-"$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$BOTTLES_PATH" \
+"$PYTHON3" "$SCRIPT_DIR/src/pull_bottles.py" "$BOTTLES_PATH" \
     --self "$SCRIPT_DIR" $BUNDLED_FLAG || true
 
-MANIFEST="$BOTTLES_PATH/$NAME.yml"
-[ -f "$MANIFEST" ] || { echo "Error: no manifest at $MANIFEST (cp $SCRIPT_DIR/bottles/TEMPLATE.yml $MANIFEST)"; exit 1; }
+BOTTLE="$BOTTLES_PATH/$NAME.yml"
+[ -f "$BOTTLE" ] || { echo "Error: no bottle at $BOTTLE (cp $SCRIPT_DIR/bottles/TEMPLATE.yml $BOTTLE)"; exit 1; }
 command -v yq >/dev/null || { echo "Error: yq required (brew install yq)"; exit 1; }
 
 mkdir -p "$BASE_PATH"   # create the djinn home now that we're proceeding
@@ -79,13 +79,13 @@ SECRETS_FILE="$BASE_PATH/secrets.env"
 [ -f "$SECRETS_FILE" ] || { touch "$SECRETS_FILE"; chmod 600 "$SECRETS_FILE"; }
 . "$SECRETS_FILE"
 
-# ── Read + validate manifest (src/manifest.py owns the rules) ────────────────
+# ── Read + validate bottle (src/bottle.py owns the rules) ────────────────
 # yq only converts YAML→JSON here; every validation rule, default, and derived
-# value lives in src/manifest.py (unit-tested table-driven — named errors
+# value lives in src/bottle.py (unit-tested table-driven — named errors
 # instead of cryptic yq failures). Secret VALUES stay out of the call: it
 # receives only the NAMES of the identity key vars that are set, plus
-# NTFY_URL/NTFY_TOPIC which the manifest may route into the container.
-# The manifest only receives NAMES of set values. Hybrid secret resolution
+# NTFY_URL/NTFY_TOPIC which the bottle may route into the container.
+# The bottle only receives NAMES of set values. Hybrid secret resolution
 # needs to tell an explicit common default from an unset source, while secret
 # values remain in this shell and reach the container through keyfiles.sh.
 # The universe of legitimate secret sources is secrets.env itself, so scan the
@@ -100,8 +100,8 @@ for v in $(grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' 
     fi
 done
 # The set of GH_TOKEN* var names present in secrets.env (NAMES only — values
-# stay on the host). manifest.py validates every git.token / git.orgs.*.token
-# against this list, hard-failing a manifest that names a token var that isn't
+# stay on the host). bottle.py validates every git.token / git.orgs.*.token
+# against this list, hard-failing a bottle that names a token var that isn't
 # set rather than silently falling back to the wrong identity.
 GH_TOKEN_VARS=""
 for v in $(compgen -v | grep -E '^GH_TOKEN' || true); do
@@ -109,13 +109,13 @@ for v in $(compgen -v | grep -E '^GH_TOKEN' || true); do
 done
 DERIVED=$(
     {
-        yq -o=json -I=0 "$MANIFEST"
+        yq -o=json -I=0 "$BOTTLE"
         for f in "$SCRIPT_DIR/plugins"/*/plugin.yml; do
             [ -e "$f" ] || continue
             # Each plugin is a directory: plugins/<name>/plugin.yml (+ optional
             # host-only run.sh). The plugin NAME is the parent dir name.
-            # '!' = unreadable. manifest.py errors on it ONLY when the
-            # manifest lists that plugin — a broken/WIP file in plugins/
+            # '!' = unreadable. bottle.py errors on it ONLY when the
+            # bottle lists that plugin — a broken/WIP file in plugins/
             # must not block bring-up of containers that never use it.
             DOC=$(yq -o=json -I=0 "$f" 2>/dev/null) \
                 && [ "$(printf '%s\n' "$DOC" | wc -l)" -eq 1 ] || DOC='!'
@@ -126,13 +126,13 @@ DERIVED=$(
         GIT_NAME_DEFAULT="$(git config --global user.name 2>/dev/null || true)" \
         GIT_EMAIL_DEFAULT="$(git config --global user.email 2>/dev/null || true)" \
         NTFY_URL="${NTFY_URL:-}" NTFY_TOPIC="${NTFY_TOPIC:-}" \
-        "$PYTHON3" "$SCRIPT_DIR/src/manifest.py" --derive
+        "$PYTHON3" "$SCRIPT_DIR/src/bottle.py" --derive
 )
 eval "$DERIVED"
 
-# Resolve the container's default git token from the manifest's git.token (a
-# secrets.env var NAME; manifest.py already checked it is set). Absent → keep
-# GH_TOKEN as sourced from secrets.env, so manifests with no git.token keep the
+# Resolve the container's default git token from the bottle's git.token (a
+# secrets.env var NAME; bottle.py already checked it is set). Absent → keep
+# GH_TOKEN as sourced from secrets.env, so bottles with no git.token keep the
 # global machine-user token (backward compatible). This GH_TOKEN is what
 # keyfiles.sh fans into every <agent>.env and the clone bootstrap hands to git.
 if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
@@ -143,8 +143,8 @@ COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
 
 # Plugin-declared volumes (plugins/<name>/volumes:) ride in as one more overlay,
 # the same mechanism as ssh/mosh — except this one is DERIVED per container from
-# its manifest, which is what keeps compose/ free of any plugin's name.
-# manifest.py renders the YAML (unit-tested); up.sh only places the file and
+# its bottle, which is what keeps compose/ free of any plugin's name.
+# bottle.py renders the YAML (unit-tested); up.sh only places the file and
 # adds the -f. Written under BASE_PATH, not the repo: it is per-container
 # derived state, like keys/<name>/. Removed when no enabled plugin declares a
 # volume, so de-listing the plugin really drops the mount on the next up.
@@ -203,7 +203,7 @@ fi
 
 # ── SSH preflight check ──────────────────────────────────────────────────────
 if [ -n "$SSH_PORT" ] && [ -z "${SSH_AUTHORIZED_KEY:-}" ]; then
-    echo "Error: manifest has ssh.port but SSH_AUTHORIZED_KEY is missing from secrets.env"; exit 1
+    echo "Error: bottle has ssh.port but SSH_AUTHORIZED_KEY is missing from secrets.env"; exit 1
 fi
 
 # ── Shared network (all containers; single CIDR for VPN/tunnel targeting) ───
@@ -216,7 +216,7 @@ DESIRED_SUBNET="${DJINN_SUBNET:-172.30.0.0/24}"
 python3 "$SCRIPT_DIR/src/ensure_net.py" "$DESIRED_SUBNET" || exit 1
 
 # ── Apply ─────────────────────────────────────────────────────────────────────
-echo "Applying $MANIFEST → $CNAME"
+echo "Applying $BOTTLE → $CNAME"
 REMOTE_SUMMARY=""
 [ "$REMOTE_TMUX" = "true" ] && REMOTE_SUMMARY="tmux"
 [ "$REMOTE_MOSH" = "true" ] && REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}mosh"
@@ -374,8 +374,8 @@ fi
 docker exec -u coder "$CNAME" bash -c \
     'src=/home/coder/.claude/projects/-workspace-main; dst=/home/coder/.claude/projects/-workspace-repos; if [ -d "$src" ] && [ ! -e "$dst" ]; then cp -a "$src" "$dst"; fi'
 
-# Merge the manifest's repo list into dev.code-workspace (idempotent): a
-# manifest edit on a live container adds its folder entry on the next up,
+# Merge the bottle's repo list into dev.code-workspace (idempotent): a
+# bottle edit on a live container adds its folder entry on the next up,
 # while agent-managed worktree entries and hand-added folders survive.
 REPO_NAMES="$(printf '%s' "$REPOS" | cut -f1 | tr '\n' ' ')"
 docker exec -u coder -e REPO_NAMES="${REPO_NAMES:-scratch}" "$CNAME" \
@@ -477,7 +477,7 @@ docker exec "$CNAME" bash -c '
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  $CNAME is up (manifest: $MANIFEST)"
+echo "  $CNAME is up (bottle: $BOTTLE)"
 echo ""
 echo "  VS Code / Cursor:  Dev Containers: Attach to Running Container"
 echo "  Terminal:          docker exec -it -u coder $CNAME bash"

@@ -31,7 +31,7 @@ else
 fi
 
 # Where bottles are read from (up.sh, allow-egress.sh). A BOTTLE is the
-# manifest — the YAML that declares a container. The container is the running
+# bottle — the YAML that declares a container. The container is the running
 # thing (DJINN_CTR_PREFIX below); one word for both is what this naming fixes.
 #
 # Same override philosophy as RULES_PATH: an explicit BOTTLES_PATH (env or

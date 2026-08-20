@@ -5,7 +5,7 @@
 #
 # WARNING: ~/djinn/keys/<container>/ is DERIVED output — the next
 # ./djinn up <container> wipes and recomposes it from ~/djinn/secrets.env
-# and the manifest. Make DURABLE changes there instead; use this script only
+# and the bottle. Make DURABLE changes there instead; use this script only
 # for quick between-runs experiments.
 #
 # Usage:

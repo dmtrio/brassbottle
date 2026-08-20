@@ -1,7 +1,7 @@
 # Plugins
 
 A **plugin** is one directory — `plugins/<name>/` — that describes an MCP server
-(or just a secret) a container can get. A manifest opts in by name:
+(or just a secret) a container can get. A bottle opts in by name:
 
 ```yaml
 plugins: [serena, gateway, obsidian-annotated]
@@ -18,7 +18,7 @@ plugins/<name>/
   test_*.py      optional — unit tests, discovered automatically (below)
   AGENTS.md      optional — agent-facing usage guidance (when/how to use the
                  tools). Merged into each agent's global rules, but ONLY in
-                 containers whose manifest enables this plugin.
+                 containers whose bottle enables this plugin.
 ```
 
 ### `AGENTS.md` — agent usage guidance
@@ -62,7 +62,7 @@ one** of `command:` (local) or `url:` (remote).
 | `mcp: {<server>: {command, args}}` | **Local** stdio server, runs in the container. Requires `install:`. |
 | `mcp: {<server>: {url, headers}}` | **Remote** HTTP server, reached on the host or internet. |
 | `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists. |
-| `host_port: <int>` | Opens the container firewall to `host.docker.internal:<port>`. Valid with a remote (`url:`) server **or** a local bridge that dials the host (`rhinomcp`); rejected with no MCP server, and a local-only plugin must reference `${HOST_PORT}` in the bridge's `command`/`args` (proof something dials the grant). `${HOST_PORT}` in a remote `url` or a local `command`/`args` resolves to it. A manifest `plugin_ports:` override replaces this default (see below). |
+| `host_port: <int>` | Opens the container firewall to `host.docker.internal:<port>`. Valid with a remote (`url:`) server **or** a local bridge that dials the host (`rhinomcp`); rejected with no MCP server, and a local-only plugin must reference `${HOST_PORT}` in the bridge's `command`/`args` (proof something dials the grant). `${HOST_PORT}` in a remote `url` or a local `command`/`args` resolves to it. A bottle `plugin_ports:` override replaces this default (see below). |
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
 | `volumes: {<name>: /container/path}` | Per-container named volume(s) for state that must outlive a container recreate — see below. Mounted only in containers that enable the plugin. |
 | `requires: [<SLOT>, …]` | Optional MCP-server field. The server is configured only for agents with every required slot; uncredentialed servers omit it. |
@@ -108,7 +108,7 @@ Compose prefixes the name with the project, so `cbm-cache` is really
 volumes, and removed by `./djinn down <container> --purge` (never by a plain
 `down`). Two containers running the same plugin get separate volumes.
 
-The rules, all enforced by `src/manifest.py` at derive time:
+The rules, all enforced by `src/bottle.py` at derive time:
 
 | Rule | Why |
 |---|---|
@@ -121,7 +121,7 @@ The rules, all enforced by `src/manifest.py` at derive time:
 Overlap is compared component-wise, so `/home/coder/.curse` is not treated as
 containing `/home/coder/.cursor`.
 
-Nothing outside `plugins/<name>/` names the plugin. At `up`, `src/manifest.py`
+Nothing outside `plugins/<name>/` names the plugin. At `up`, `src/bottle.py`
 renders the volumes of the **enabled** plugins into a generated compose overlay
 under `$BASE_PATH/compose/<container>.plugins.yml` and `up.sh` adds it as one
 more `-f`, the same way the ssh/mosh overlays work. De-list the plugin and the
@@ -142,7 +142,7 @@ Host-service plugins (`host_port:` in `plugin.yml`) listen on a Mac port. Host
 ports are exclusive, so two containers running the same plugin need different
 values — the same reason `ssh.port` and `remote.mosh_ports` are per-container.
 
-Set `plugin_ports:` in the **manifest** (not in `plugin.yml`):
+Set `plugin_ports:` in the **bottle** (not in `plugin.yml`):
 
 ```yaml
 plugins: [browser]
@@ -156,7 +156,7 @@ bridge's `args` (`rhinomcp`) — so the port stays a single source of truth. A
 plugin may use `${HOST_PORT}` there instead of a literal port to stay in sync
 with `host_port` / `plugin_ports`.
 
-## Binding secrets in a manifest
+## Binding secrets in a bottle
 
 Slots declare *what* a plugin needs; `common_secrets` supplies an explicit
 default and `agent_secrets` overrides or removes it for one agent:
@@ -179,7 +179,7 @@ warns and yields no binding.
 
 ## How it loads
 
-- **`djinn up`** (via `up.sh`) globs `plugins/*/plugin.yml` → `src/manifest.py --derive` validates
+- **`djinn up`** (via `up.sh`) globs `plugins/*/plugin.yml` → `src/bottle.py --derive` validates
   and derives the wiring → `src/wire_plugins.py` (baked in the image) writes each
   agent's MCP config.
 - **`Dockerfile`** bakes every local plugin's `install:` block at build.
@@ -214,7 +214,7 @@ otherwise leave the suite reporting OK while covering nothing.
 1. `mkdir plugins/<name>` and write `plugin.yml` (see schema above).
 2. Needs a Mac-side service? Add `run.sh` (reads `BASE_PATH` from the
    environment; started via `./djinn service <name>`).
-3. Enable it in a manifest: `plugins: [<name>]` (+ a secret binding if it
+3. Enable it in a bottle: `plugins: [<name>]` (+ a secret binding if it
    declares `secrets:`).
 4. **Local** plugin → rebuild the image so `install:` bakes. **Remote** → just
    rerun `./djinn up <container>`.

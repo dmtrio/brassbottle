@@ -1,13 +1,13 @@
 #!/bin/bash
 # tests/plugins.test.sh — host-runnable checks for the plugin mechanism.
-# The validation and wiring LOGIC is real Python now (src/manifest.py,
+# The validation and wiring LOGIC is real Python now (src/bottle.py,
 # src/wire_plugins.py — unit-tested by tests/test_*.py, run below), so this
 # suite is down to what only a shell can check: every SHIPPED plugin file
-# passes the real validator, the TEMPLATE manifest derives cleanly, the
+# passes the real validator, the TEMPLATE bottle derives cleanly, the
 # derive → build-payload chain holds together, the Dockerfile bake contract
 # stands, and up.sh still calls the modules (pin greps). The docker build/up
 # path itself is covered by the manual build-test against a throwaway
-# manifest (see PLN/LOG - Baked-in Plugins).
+# bottle (see PLN/LOG - Baked-in Plugins).
 
 # SC2015 (`A && pass || fail` is not if-else): intentional here — pass() is a
 # bare echo and cannot fail, so the || arm only runs when the check fails.
@@ -31,16 +31,16 @@ bash -n up.sh && pass "bash -n up.sh" || fail "up.sh has syntax errors"
 if ! command -v python3 >/dev/null; then
     # python3 is a hard up.sh requirement — a green run must never mean
     # "the validation/wiring logic went untested".
-    fail "python3 not installed — manifest/wiring tests did NOT run (up.sh requires python3)"
+    fail "python3 not installed — bottle/wiring tests did NOT run (up.sh requires python3)"
 else
 
-echo "── shipped plugin files (validated through the real src/manifest.py)"
+echo "── shipped plugin files (validated through the real src/bottle.py)"
 found=0
 for f in plugins/*/plugin.yml; do
     [ -e "$f" ] || continue
     found=1
     name=$(basename "$(dirname "$f")")
-    # Same conversion up.sh feeds --derive, with a manifest enabling just
+    # Same conversion up.sh feeds --derive, with a bottle enabling just
     # this plugin: the real validator applies every rule (name charset, mcp
     # schema, reserved names, egress hostnames) — no mirrored copies.
     OUT=$(
@@ -48,17 +48,17 @@ for f in plugins/*/plugin.yml; do
             printf '{"plugins": ["%s"]}\n' "$name"
             printf '%s\t' "$name"
             yq -o=json -I=0 "$f"
-        } | python3 src/manifest.py --derive 2>&1
+        } | python3 src/bottle.py --derive 2>&1
     ) \
-        && pass "$name: passes manifest.py validation" \
-        || fail "$name: rejected by manifest.py: $(printf '%s' "$OUT" | head -3)"
+        && pass "$name: passes bottle.py validation" \
+        || fail "$name: rejected by bottle.py: $(printf '%s' "$OUT" | head -3)"
 
     # install: is required iff the plugin has a LOCAL (command:) server — those
     # bake a binary. Remote (url:) and egress-only plugins carry no install:.
     has_local=$(yq -r '[(.mcp // {})[] | select(has("command"))] | length' "$f")
     install=$(yq -r '.install // ""' "$f")
     if [ "${has_local:-0}" != "0" ] && { [ -z "$install" ] || [ "$install" = "null" ]; }; then
-        fail "$name: local (command:) server needs an install: block (manifest.py fails derive)"
+        fail "$name: local (command:) server needs an install: block (bottle.py fails derive)"
     else
         pass "$name: install present iff local server"
     fi
@@ -77,12 +77,12 @@ echo "── template"
         printf '%s\t' "$(basename "$(dirname "$f")")"
         yq -o=json -I=0 "$f"
     done
-} | python3 src/manifest.py --derive >/dev/null \
-    && pass "TEMPLATE.yml passes manifest.py --derive" \
-    || fail "TEMPLATE.yml rejected by manifest.py"
+} | python3 src/bottle.py --derive >/dev/null \
+    && pass "TEMPLATE.yml passes bottle.py --derive" \
+    || fail "TEMPLATE.yml rejected by bottle.py"
 
 echo "── all shipped plugins as a set (cross-plugin rules)"
-# A manifest enabling EVERY shipped plugin: catches two shipped files
+# A bottle enabling EVERY shipped plugin: catches two shipped files
 # defining the same MCP server name or squatting a reserved one — rules the
 # per-file checks above can't see.
 ALL_PLUGINS=$(for f in plugins/*/plugin.yml; do [ -e "$f" ] && printf '"%s",' "$(basename "$(dirname "$f")")"; done)
@@ -94,7 +94,7 @@ ALL_DERIVED=$(
             printf '%s\t' "$(basename "$(dirname "$f")")"
             yq -o=json -I=0 "$f"
         done
-    } | python3 src/manifest.py --derive
+    } | python3 src/bottle.py --derive
 ) \
     && pass "all shipped plugins coexist (no cross-plugin dup/reserved names)" \
     || fail "shipped plugins conflict as a set"
@@ -114,31 +114,31 @@ EXPECTED="AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVE
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
 
 echo "── plugin-declared volumes (plugins/<name>/volumes: → generated overlay)"
-# The reserved sets in manifest.py exist to stop a plugin from colliding with a
+# The reserved sets in bottle.py exist to stop a plugin from colliding with a
 # STATIC compose volume/mount — compose merges by key, so a collision silently
 # remounts a real directory instead of erroring. Pin them against the compose
-# file: adding a volume there without updating manifest.py re-opens the hole.
+# file: adding a volume there without updating bottle.py re-opens the hole.
 COMPOSE_VOLS=$(yq -r '.volumes | keys | .[]' compose/docker-compose.local.yml | LC_ALL=C sort | tr '\n' ' ')
-MANIFEST_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_VOLUME_NAMES)) + " ")')
-[ "$COMPOSE_VOLS" = "$MANIFEST_VOLS" ] \
-    && pass "manifest.py COMPOSE_VOLUME_NAMES matches the compose file" \
-    || fail "compose volumes '$COMPOSE_VOLS' != manifest.py reserved '$MANIFEST_VOLS'"
+BOTTLE_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import bottle; print(" ".join(sorted(bottle.COMPOSE_VOLUME_NAMES)) + " ")')
+[ "$COMPOSE_VOLS" = "$BOTTLE_VOLS" ] \
+    && pass "bottle.py COMPOSE_VOLUME_NAMES matches the compose file" \
+    || fail "compose volumes '$COMPOSE_VOLS' != bottle.py reserved '$BOTTLE_VOLS'"
 # Mount targets: everything the service mounts, named volume or bind, INCLUDING
 # the :ro ones — a plugin remounting a read-only path (/agent-rules, the keys
 # dir) is the same silent breakage as remounting a writable one.
 COMPOSE_TARGETS=$(yq -r '.services.djinn.volumes[]' compose/docker-compose.local.yml \
     | awk -F: '{print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
-MANIFEST_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_MOUNT_PATHS)) + " ")')
-[ "$COMPOSE_TARGETS" = "$MANIFEST_TARGETS" ] \
-    && pass "manifest.py COMPOSE_MOUNT_PATHS matches the compose file" \
-    || fail "compose targets '$COMPOSE_TARGETS' != manifest.py reserved '$MANIFEST_TARGETS'"
+BOTTLE_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import bottle; print(" ".join(sorted(bottle.COMPOSE_MOUNT_PATHS)) + " ")')
+[ "$COMPOSE_TARGETS" = "$BOTTLE_TARGETS" ] \
+    && pass "bottle.py COMPOSE_MOUNT_PATHS matches the compose file" \
+    || fail "compose targets '$COMPOSE_TARGETS' != bottle.py reserved '$BOTTLE_TARGETS'"
 # The generated overlay must be real compose input, not just well-formed YAML:
 # render a shipped plugin's declaration and let compose itself validate it.
 VOL_DERIVED=$(
     {
         printf '{"plugins": ["codebase-memory"]}\n'
         printf 'codebase-memory\t'; yq -o=json -I=0 plugins/codebase-memory/plugin.yml
-    } | python3 src/manifest.py --derive
+    } | python3 src/bottle.py --derive
 ) || fail "--derive exited non-zero on a volume-declaring plugin"
 eval "$VOL_DERIVED"
 OVERLAY=$(mktemp -t plugins-overlay.XXXXXX)
@@ -238,7 +238,7 @@ grep -q 'PLUGIN_COMPOSE_YAML' up.sh \
     || fail "up.sh no longer consumes PLUGIN_COMPOSE_YAML (declared volumes never mount)"
 
 echo "── derive → build-payload chain (both host halves, real serena + gateway files)"
-# A local plugin (serena) + a required remote plugin (gateway): manifest.py
+# A local plugin (serena) + a required remote plugin (gateway): bottle.py
 # derives its host_port, resolves the explicit common default for every agent,
 # and routes gateway through the per-agent server path.
 DERIVED=$(
@@ -246,8 +246,8 @@ DERIVED=$(
         printf '{"plugins": ["serena", "gateway"], "common_secrets": ["MCP_GATEWAY_TOKEN"]}\n'
         printf 'serena\t'; yq -o=json -I=0 plugins/serena/plugin.yml
         printf 'gateway\t'; yq -o=json -I=0 plugins/gateway/plugin.yml
-    } | PRESENT_SECRET_VARS="MCP_GATEWAY_TOKEN" python3 src/manifest.py --derive
-) || fail "--derive exited non-zero on a serena+gateway manifest"
+    } | PRESENT_SECRET_VARS="MCP_GATEWAY_TOKEN" python3 src/bottle.py --derive
+) || fail "--derive exited non-zero on a serena+gateway bottle"
 eval "$DERIVED"
 [ "$HOST_MCP_PORTS" = "8811" ] \
     && pass "gateway host_port folds into HOST_MCP_PORTS" \
@@ -274,8 +274,8 @@ A_DERIVED=$(
     {
         printf '{"plugins": ["obsidian-annotated"], "agent_secrets": [{"agent":"claude","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_a_claude"},{"agent":"cursor-agent","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_b_cursor_agent"}]}\n'
         printf 'obsidian-annotated\t'; yq -o=json -I=0 plugins/obsidian-annotated/plugin.yml
-    } | PRESENT_SECRET_VARS="OBSIDIAN_KEY_a_claude OBSIDIAN_KEY_b_cursor_agent" SECRETS_FILE=/sec/secrets.env python3 src/manifest.py --derive
-) || fail "--derive exited non-zero on an agent_secrets manifest"
+    } | PRESENT_SECRET_VARS="OBSIDIAN_KEY_a_claude OBSIDIAN_KEY_b_cursor_agent" SECRETS_FILE=/sec/secrets.env python3 src/bottle.py --derive
+) || fail "--derive exited non-zero on an agent_secrets bottle"
 eval "$A_DERIVED"
 [ "$AGENT_SERVER_SLOTS" = "OBSIDIAN_ANNOTATED_KEY" ] \
     && pass "obsidian-annotated derives a required server slot" \
@@ -303,7 +303,7 @@ printf '%s' "$A_PAYLOAD" | jq -e '
     && pass "hybrid overrides → build-payload yields per-agent obsidian wiring" \
     || fail "agent_servers payload wrong: $A_PAYLOAD"
 
-echo "── python unit tests (src/manifest.py + src/wire_plugins.py)"
+echo "── python unit tests (src/bottle.py + src/wire_plugins.py)"
 UNIT_OUT=$(python3 -m unittest discover -s tests 2>&1) \
     && pass "python3 -m unittest discover -s tests" \
     || { fail "unit tests failed:"; printf '%s\n' "$UNIT_OUT" | tail -30; }
@@ -319,24 +319,24 @@ while IFS= read -r expr; do
         && pass "up.sh still contains: $expr" \
         || fail "up.sh no longer contains (update this suite!): $expr"
 done <<'DRIFT'
-yq -o=json -I=0 "$MANIFEST"
-src/manifest.py" --derive
+yq -o=json -I=0 "$BOTTLE"
+src/bottle.py" --derive
 --build-payload
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
-src/pull_manifests.py" "$BOTTLES_PATH"
+src/pull_bottles.py" "$BOTTLES_PATH"
 python3 /usr/local/lib/djinn/wire_plugins.py
 PRESENT_SECRET_VARS
 DRIFT
 # The identity-key prefixes and hostname rule each live in two places by
-# design (bash glue ↔ module, manifest.py ↔ allow-egress.sh) — cross-pin
+# design (bash glue ↔ module, bottle.py ↔ allow-egress.sh) — cross-pin
 # them so tightening one side can't silently strand the other.
-grep -qF "OBSIDIAN_KEY" src/manifest.py && grep -qF "OBSIDIAN_WATCH_KEY" src/manifest.py \
-    && pass "manifest.py uses the same identity-key prefixes up.sh's compgen scans" \
-    || fail "identity-key prefixes drifted between up.sh and manifest.py"
+grep -qF "OBSIDIAN_KEY" src/bottle.py && grep -qF "OBSIDIAN_WATCH_KEY" src/bottle.py \
+    && pass "bottle.py uses the same identity-key prefixes up.sh's compgen scans" \
+    || fail "identity-key prefixes drifted between up.sh and bottle.py"
 DOMAIN_BODY='([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+'
-grep -qF -- "$DOMAIN_BODY" bin/allow-egress.sh && grep -qF -- "$DOMAIN_BODY" src/manifest.py \
-    && pass "hostname rule matches between manifest.py and allow-egress.sh" \
-    || fail "hostname rule drifted between manifest.py and allow-egress.sh"
+grep -qF -- "$DOMAIN_BODY" bin/allow-egress.sh && grep -qF -- "$DOMAIN_BODY" src/bottle.py \
+    && pass "hostname rule matches between bottle.py and allow-egress.sh" \
+    || fail "hostname rule drifted between bottle.py and allow-egress.sh"
 # The shim-agent list lives in three places (the Dockerfile bakes the shims;
 # up.sh writes one <agent>.env per shim agent; update-agent-keys.sh fans 'common'
 # across them). Drift would strand an agent with no env file or no override.
@@ -346,14 +346,14 @@ grep -qF "for a in $SHIM_LIST; do" Dockerfile \
     && grep -qF "SHIM_AGENTS=\"$SHIM_LIST\"" bin/update-agent-keys.sh \
     && pass "shim-agent list matches across Dockerfile, up.sh, update-agent-keys.sh" \
     || fail "shim-agent list drifted (Dockerfile ↔ up.sh ↔ update-agent-keys.sh)"
-# ...and it must set-equal manifest.py's AGENT_NAMES (the agents agent_secrets
+# ...and it must set-equal bottle.py's AGENT_NAMES (the agents agent_secrets
 # may bind). If they drift, a bound agent could get a file with no shared block
 # — or a shim agent could be un-bindable.
 if command -v python3 >/dev/null; then
-    AGENT_NAMES_SORTED=$(python3 -c 'import sys; sys.path.insert(0,"src"); import manifest; print(" ".join(sorted(manifest.AGENT_NAMES)))')
+    AGENT_NAMES_SORTED=$(python3 -c 'import sys; sys.path.insert(0,"src"); import bottle; print(" ".join(sorted(bottle.AGENT_NAMES)))')
     SHIM_SORTED=$(printf '%s\n' $SHIM_LIST | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
     [ "$AGENT_NAMES_SORTED" = "$SHIM_SORTED" ] \
-        && pass "manifest.py AGENT_NAMES set-equals the shim-agent list" \
+        && pass "bottle.py AGENT_NAMES set-equals the shim-agent list" \
         || fail "AGENT_NAMES ($AGENT_NAMES_SORTED) != shim agents ($SHIM_SORTED)"
 fi
 # common.env is retired: up.sh must no longer WRITE it (the shim keeps a

@@ -124,13 +124,13 @@ assert_absent "per-org token is not the default" "$out" "password=defval"
 out=$(cred other/repo.git GH_TOKEN=defval)   # no GH_TOKEN_other set
 assert_contains "unknown owner → default GH_TOKEN" "$out" "password=defval"
 
-# owner sanitization parity with manifest.py:_canonical_token_var (- → _):
+# owner sanitization parity with bottle.py:_canonical_token_var (- → _):
 # acme-corp reads GH_TOKEN_acme_corp, not GH_TOKEN_acme-corp.
 out=$(cred acme-corp/thing.git GH_TOKEN_acme_corp=atok GH_TOKEN=defval)
 assert_contains "hyphenated owner sanitized to GH_TOKEN_acme_corp" "$out" "password=atok"
 
 # case-folding parity: a mixed-case URL owner (github is case-insensitive; the
-# manifest lowercases) must read the lowercased GH_TOKEN_<owner>, not fall back.
+# bottle lowercases) must read the lowercased GH_TOKEN_<owner>, not fall back.
 out=$(cred PlanetExpress/ship.git GH_TOKEN_planetexpress=ptok GH_TOKEN=defval)
 assert_contains "mixed-case owner folds to GH_TOKEN_planetexpress" "$out" "password=ptok"
 assert_absent "mixed-case owner does not fall back to default" "$out" "password=defval"
@@ -239,7 +239,7 @@ rm -f "$cfg/.env"
 
 # BOTTLES_PATH resolution, in order: BOTTLES_PATH → CONTAINERS_PATH (deprecated)
 # → $BASE_PATH/bottles → $BASE_PATH/containers (deprecated) → the repo's bottles/.
-# All five branches are pinned: a wrong pick here reads someone's stale manifest
+# All five branches are pinned: a wrong pick here reads someone's stale bottle
 # directory and applies it, which looks like a successful run.
 cpath() { env -i DJINN_HOME="${1-}" BOTTLES_PATH="${2-}" CONTAINERS_PATH="${3-}" bash -c '. "$1"; echo "$BOTTLES_PATH"' _ "$cfg/src/common.sh" 2>/dev/null; }
 cerr()  { env -i DJINN_HOME="${1-}" BOTTLES_PATH="${2-}" CONTAINERS_PATH="${3-}" bash -c '. "$1"; echo "$BOTTLES_PATH" >/dev/null' _ "$cfg/src/common.sh" 2>&1; }
@@ -249,9 +249,9 @@ assert_eq "\$BASE_PATH/bottles wins when it exists" "$dah/bottles" "$(cpath "$da
 assert_eq "BOTTLES_PATH env override wins over everything" "/my/private/bottles" "$(cpath "$dah" /my/private/bottles)"
 
 # Deprecated spellings stay honored so a live ./.env keeps working — each warns.
-assert_eq "CONTAINERS_PATH is still honored" "/legacy/manifests" "$(cpath '' '' /legacy/manifests)"
-assert_contains "CONTAINERS_PATH warns" "$(cerr '' '' /legacy/manifests)" "CONTAINERS_PATH is deprecated"
-assert_eq "BOTTLES_PATH wins over CONTAINERS_PATH" "/new/bottles" "$(cpath '' /new/bottles /legacy/manifests)"
+assert_eq "CONTAINERS_PATH is still honored" "/legacy/bottles" "$(cpath '' '' /legacy/bottles)"
+assert_contains "CONTAINERS_PATH warns" "$(cerr '' '' /legacy/bottles)" "CONTAINERS_PATH is deprecated"
+assert_eq "BOTTLES_PATH wins over CONTAINERS_PATH" "/new/bottles" "$(cpath '' /new/bottles /legacy/bottles)"
 assert_eq "no warning when only BOTTLES_PATH is set" "" "$(cerr '' /new/bottles '')"
 dac="$WORK/dac-cp"; mkdir -p "$dac/containers"
 assert_eq "\$BASE_PATH/containers is still honored" "$dac/containers" "$(cpath "$dac" '')"
@@ -267,11 +267,11 @@ cbundled() { env -i DJINN_HOME="${1-}" BOTTLES_PATH="${2-}" CONTAINERS_PATH="${3
 assert_eq "bundled flag set for the repo's own bottles/" "1" "$(cbundled '' '')"
 assert_eq "bundled flag clear for \$BASE_PATH/bottles" "0" "$(cbundled "$dah" '')"
 assert_eq "bundled flag clear for a BOTTLES_PATH override" "0" "$(cbundled "$dah" /my/private/bottles)"
-assert_eq "bundled flag clear for a deprecated CONTAINERS_PATH" "0" "$(cbundled '' '' /legacy/manifests)"
+assert_eq "bundled flag clear for a deprecated CONTAINERS_PATH" "0" "$(cbundled '' '' /legacy/bottles)"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── allow-egress.sh ──"
-run_ae() { ( cd "$SBOX" && env BOTTLES_PATH="$WORK/no-such-manifests" \
+run_ae() { ( cd "$SBOX" && env BOTTLES_PATH="$WORK/no-such-bottles" \
     MOCK_EXISTING_CONTAINERS="${MOCK_EXISTING_CONTAINERS-djinn-mycontainer}" \
     PATH="$WORK/aebin:$PATH" bash bin/allow-egress.sh "$@" ) 2>&1; }
 # docker mock: `inspect [-f fmt] <name>` only "succeeds" (State.Running=false,

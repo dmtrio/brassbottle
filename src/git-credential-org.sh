@@ -9,7 +9,7 @@
 # one credential lane serves agents (token by owner) AND humans (gh fallback).
 #
 # The <owner> → GH_TOKEN_<owner> sanitization MUST match
-# manifest.py:_canonical_token_var byte-for-byte: lowercase the owner (github
+# bottle.py:_canonical_token_var byte-for-byte: lowercase the owner (github
 # owners are case-insensitive; the owner here comes from the clone URL, whose
 # case we don't control), then GH_TOKEN_ + every non-alphanumeric byte replaced
 # by '_'. A mismatch silently mis-routes to the default token — the exact bug

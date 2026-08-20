@@ -50,7 +50,7 @@ surface stays broad.
 ## Enable it
 
 ```yaml
-# manifest
+# bottle
 plugins: [cordyceps]
 # plugin_ports: {cordyceps: 26930}   # optional; must match the component's Port input
 ```

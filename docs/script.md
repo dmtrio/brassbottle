@@ -5,12 +5,12 @@ the repo root on the host (macOS or Linux) unless noted — `djinn` (the
 dispatcher) plus the `up.sh` / `down.sh` it wraps live at the root; the other
 host commands live in `bin/` (so you invoke them directly as `bin/<name>.sh`,
 or via `djinn allow` / `djinn keys`). Names in `<>` are placeholders; `<name>`
-is a manifest/container short name (the container itself is `djinn-<name>`).
+is a bottle/container short name (the container itself is `djinn-<name>`).
 
 The one non-script prerequisite: `secrets.env` holds every secret value (chmod
 600, never mounted). By default it's the gitignored `./.djinn/secrets.env`;
 copy `secrets.env.example` to fill it in. `up.sh` composes per-container
-credentials from it according to each manifest.
+credentials from it according to each bottle.
 
 All the scripts below source `src/common.sh` (not run directly), which resolves the
 "djinn home" — where secrets/keys/artifacts live. It defaults to a
@@ -18,7 +18,7 @@ gitignored `./.djinn/`; override via `DJINN_HOME` / `RULES_PATH` /
 `BOTTLES_PATH` in a gitignored `./.env` at the repo root (keeps your own
 setup working). `BOTTLES_PATH`
 is where `bottles/<name>.yml` are read from — it defaults to
-`$DJINN_HOME/bottles` when that exists, so your real manifests can live
+`$DJINN_HOME/bottles` when that exists, so your real bottles can live
 outside this repo.
 
 ---
@@ -26,7 +26,7 @@ outside this repo.
 ## Before you create a container
 
 Some plugins are backed by a service that runs on your Mac (the container
-reaches it over `host.docker.internal`). Start the ones a container's manifest
+reaches it over `host.docker.internal`). Start the ones a container's bottle
 lists **before** `./djinn up`, and leave them running (tmux or launchd):
 
 ```bash
@@ -43,16 +43,16 @@ the token each uses, are documented in `plugins/<name>/README.md`.
 ## Creating / updating a container
 
 `djinn up` (dispatching to `up.sh`) is the one entry point. It's declarative
-and idempotent: edit the manifest, rerun, done.
+and idempotent: edit the bottle, rerun, done.
 
 - **`./djinn up <name>`** — create or update `djinn-<name>` from
   `bottles/<name>.yml`. Composes `$DJINN_HOME/keys/<name>/` from `secrets.env`,
   builds the per-container image, waits for the firewall to come up, clones/inits
   the workspace, and generates each agent's MCP config. Re-run any time after
-  editing the manifest or rotating a secret.
+  editing the bottle or rotating a secret.
 
 ```bash
-./djinn up my-app      # no args → lists available manifests
+./djinn up my-app      # no args → lists available bottles
 ```
 
 ## While a container runs
@@ -65,7 +65,7 @@ Operate on a live container without a rebuild or restart.
   `ipset=/<domain>/allowed-domains` zones to its `/etc/dnsmasq.conf` and reloads
   only dnsmasq (the ipset and iptables rules stay up). The live change is
   ephemeral; at the end it asks where to persist:
-  `yml` → this manifest's `capabilities.egress` (next `./djinn up`),
+  `yml` → this bottle's `capabilities.egress` (next `./djinn up`),
   `firewall` → `src/init-firewall.sh` base zones (all containers, next build),
   `none` → live only. Validates every domain first.
 
@@ -80,7 +80,7 @@ Operate on a live container without a rebuild or restart.
   starts (the shims read `~/.agent-keys` at launch). No arguments beyond the
   container name lists the current composed keys. Note: `$DJINN_HOME/keys/<name>/`
   is derived — the next `./djinn up <name>` wipes and recomposes it, so make durable
-  changes in `secrets.env`/the manifest and use this only for quick experiments.
+  changes in `secrets.env`/the bottle and use this only for quick experiments.
 
   ```bash
   ./djinn keys my-app pi OBSIDIAN_ANNOTATED_KEY   # prompts for the value
@@ -92,7 +92,7 @@ Operate on a live container without a rebuild or restart.
 - **`./djinn down <name> [--purge]`** (dispatches to `./down.sh`) — stop and
   remove the container. Default keeps the workspace volume (your code), so
   `./djinn up <name>` restores the container around it. `--purge` also deletes
-  the volume, the per-container image, and the derived keys; the manifest,
+  the volume, the per-container image, and the derived keys; the bottle,
   `secrets.env`, and `artifacts/<name>/` always survive.
 
   ```bash
@@ -103,7 +103,7 @@ Operate on a live container without a rebuild or restart.
 ## Inside the image (baked from `src/` — automatic, you don't run these)
 
 The host commands above live in `bin/`; `src/` is internal source — the
-`common.sh` those commands source, the host-side `manifest.py` / `wire_plugins.py`
+`common.sh` those commands source, the host-side `bottle.py` / `wire_plugins.py`
 `up.sh` calls, and the files below, which get baked into the image by the
 `Dockerfile` and run themselves inside the container (listed for completeness).
 

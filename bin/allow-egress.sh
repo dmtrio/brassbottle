@@ -10,7 +10,7 @@
 #
 # The live change is EPHEMERAL (lost when the container is recreated). At the
 # end you're asked where to persist it:
-#   yml       → the container's manifest, capabilities.egress (this container,
+#   yml       → the container's bottle, capabilities.egress (this container,
 #               next ./up.sh) — resolved via BOTTLES_PATH, so not necessarily
 #               inside this repo
 #   firewall  → src/init-firewall.sh base ALLOWED_ZONES (ALL containers, next build)
@@ -50,14 +50,14 @@ fi
 case "${SAVE:-}" in yml|firewall|none|"") ;; *) echo "Error: --save must be yml, firewall, or none"; exit 1 ;; esac
 
 # ── Verify the container ──────────────────────────────────────────────────────
-# Accept the short manifest name (coding-personal-site) or the full container
+# Accept the short bottle name (coding-personal-site) or the full container
 # name (djinn-coding-personal-site); normalise to both. Sourced here (not at
 # the top) so --help / usage / bad-flag paths don't depend on ./.env; only the
 # resolution below needs BOTTLES_PATH / DJINN_CTR_PREFIX.
 . "$SCRIPT_DIR/../src/common.sh"   # sets CDD_ROOT (repo root) + BOTTLES_PATH + DJINN_CTR_PREFIX
 SHORT="${RAW#$DJINN_CTR_PREFIX}"
 CONTAINER="$DJINN_CTR_PREFIX$SHORT"
-MANIFEST="$BOTTLES_PATH/$SHORT.yml"
+BOTTLE="$BOTTLES_PATH/$SHORT.yml"
 
 command -v docker >/dev/null || { echo "Error: docker not found"; exit 1; }
 
@@ -135,16 +135,16 @@ fi
 
 # ── Persist permanently ───────────────────────────────────────────────────────
 save_yml() {
-    if [ ! -f "$MANIFEST" ]; then
-        echo "  ✗ no manifest at $MANIFEST — cannot save to yml"; return 1
+    if [ ! -f "$BOTTLE" ]; then
+        echo "  ✗ no bottle at $BOTTLE — cannot save to yml"; return 1
     fi
     if ! command -v yq >/dev/null; then
         echo "  ✗ yq not found — cannot save to yml (brew install yq)"; return 1
     fi
     for d in "${DOMAINS[@]}"; do
-        D="$d" yq -i '.capabilities.egress = ((.capabilities.egress // []) + [env(D)] | unique)' "$MANIFEST"
+        D="$d" yq -i '.capabilities.egress = ((.capabilities.egress // []) + [env(D)] | unique)' "$BOTTLE"
     done
-    echo "  ✓ added to $MANIFEST (capabilities.egress) — applies on next ./up.sh $SHORT"
+    echo "  ✓ added to $BOTTLE (capabilities.egress) — applies on next ./up.sh $SHORT"
 }
 
 save_firewall() {
@@ -173,9 +173,9 @@ save_firewall() {
 
 if [ -z "$SAVE" ]; then
     echo "Persist permanently? (the live change above is lost when the container is recreated)"
-    # $MANIFEST is a full path of unknown width, so these are listed one per
+    # $BOTTLE is a full path of unknown width, so these are listed one per
     # line rather than column-aligned against it.
-    echo "  [y] manifest  → this container, next ./up.sh   ($MANIFEST)"
+    echo "  [y] bottle  → this container, next ./up.sh   ($BOTTLE)"
     echo "  [f] firewall  → ALL containers, next build     (src/init-firewall.sh)"
     echo "  [s] skip      → live only"
     printf "Choice [y/f/s]: "
@@ -188,7 +188,7 @@ if [ -z "$SAVE" ]; then
 fi
 
 case "$SAVE" in
-    yml)      echo "Saving to manifest...";       save_yml ;;
+    yml)      echo "Saving to bottle...";       save_yml ;;
     firewall) echo "Saving to base firewall...";  save_firewall ;;
     none)     echo "Not persisted (live only)." ;;
 esac

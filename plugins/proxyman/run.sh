@@ -12,7 +12,7 @@
 # Run in tmux or wrap in launchd. Proxyman.app must be running.
 # Key: PROXYMAN_BRIDGE_KEY in ~/djinn/secrets.env (self-generated on
 # first run). Containers get access by listing the `proxyman` plugin in the
-# manifest — up.sh grants port 8813, composes the key, and generates the
+# bottle — up.sh grants port 8813, composes the key, and generates the
 # .mcp.json entry.
 
 set -e

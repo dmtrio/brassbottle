@@ -18,7 +18,7 @@ Behavior:
 Every docker/subprocess call goes through _run(), so the outbound half of
 each boundary call is logged to stdout before it runs.
 
-Stdlib only (matches wire_plugins.py / manifest.py).
+Stdlib only (matches wire_plugins.py / bottle.py).
 """
 
 import subprocess

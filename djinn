@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 usage() {
     cat <<'EOF'
 Usage: ./djinn <subcommand> [args...]
-  up       <name>              create/update a container from its manifest
+  up       <name>              create/update a container from its bottle
   down     <name> [--purge]    stop (or purge) a container
   service  <name> [args...]    start a plugin's host-side service on this Mac
   allow    <container> <domain...>  add domains to a running container's egress allowlist

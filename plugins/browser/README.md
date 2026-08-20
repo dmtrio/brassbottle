@@ -22,7 +22,7 @@ from `containers/<container>.yml` (falling back to `host_port` in
 `plugin.yml`, default **8814**).
 
 Which `secrets.env` variable holds this container's API key is whatever the
-manifest binds `RESEARCH_BROWSER_KEY` to in `common_secrets` — the launcher
+bottle binds `RESEARCH_BROWSER_KEY` to in `common_secrets` — the launcher
 reads that binding, so the bridge and the container always agree:
 
 ```yaml

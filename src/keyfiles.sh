@@ -6,7 +6,7 @@
 #
 # Writes ONE COMPLETE env file per shim agent. Plugin credentials arrive as
 # already-resolved per-agent records (common defaults, overrides, and disables
-# were handled by manifest.py), so `cat <agent>.env` is the full audit of what
+# were handled by bottle.py), so `cat <agent>.env` is the full audit of what
 # that agent sees.
 #
 # The VALUES come from the current environment via indirect expansion
@@ -19,8 +19,8 @@ warn_missing() { echo "  ⚠ $1 not in secrets.env — $2 will not authenticate 
 #   keys_dir            already exists, mode 700, wiped of *.env by the caller
 #   shim_agents         space-separated agent names (match the Dockerfile shims)
 #   plugin_env_secrets  legacy shared passthrough records (currently empty)
-#   agent_secrets       AGENT<TAB>SLOT<TAB>SOURCE resolved records (manifest.py)
-#   git_org_tokens      OWNER<TAB>CANONICAL<TAB>SOURCE per line (per-org, from manifest.py)
+#   agent_secrets       AGENT<TAB>SLOT<TAB>SOURCE resolved records (bottle.py)
+#   git_org_tokens      OWNER<TAB>CANONICAL<TAB>SOURCE per line (per-org, from bottle.py)
 # Reads GH_TOKEN and every SOURCE var from the environment (indirect expansion).
 write_keyfiles() {
     local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" git_org_tokens="${5:-}"
@@ -44,7 +44,7 @@ EOF
     # Per-org tokens sit in the shared block alongside GH_TOKEN, one canonical
     # GH_TOKEN_<owner>=<value> per line, so git-credential-org can route by
     # owner. No warn_missing: a per-org source var absent from secrets.env is a
-    # hard error in manifest.py (like agent_secrets), so it can't reach here.
+    # hard error in bottle.py (like agent_secrets), so it can't reach here.
     while IFS=$'\t' read -r owner canonical src; do
         [ -n "$owner" ] || continue
         shared="${shared}${canonical}=${!src}"$'\n'
@@ -60,7 +60,7 @@ EOF
     done
 
     # Append each agent's resolved plugin secrets. No warn_missing here: an
-    # override source is validated by manifest.py, while an unset common source
+    # override source is validated by bottle.py, while an unset common source
     # is omitted before it becomes a resolved record.
     while IFS=$'\t' read -r agent slot src; do
         [ -n "$agent" ] || continue

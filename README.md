@@ -2,7 +2,7 @@
 
 Isolated, firewalled Docker environments where AI coding agents work with
 full permissions — locally on your Mac (or any Docker host). One container
-per project, declared by a manifest. The assembly is a config.
+per project, declared by a bottle. The assembly is a config.
 
 brassbottle — the vessel; `djinn` — the word that calls them.
 *(“Genie” traces back to Latin* genius loci *— a spirit bound to a place.)*
@@ -33,7 +33,7 @@ Runtime state (`secrets.env`, keys, artifacts) defaults to a gitignored
    Copy `bottles/TEMPLATE.yml` and edit.
 2. **`secrets.env`** — every secret value, one file, mode 600, never mounted
    (default `./.djinn/secrets.env`, gitignored). Copy `secrets.env.example`
-   and fill in what your manifests reference.
+   and fill in what your bottles reference.
 
 Everything else is derived: `./djinn up <name>` (idempotent) composes
 credentials, applies the firewall, clones the repos, lays out worktrees, and
@@ -46,7 +46,7 @@ generates MCP configs. `./djinn down <name>` stops (code survives);
 - `yq` (`brew install yq`)
 - `python3` (any 3.9+, stdlib only — present via Xcode CLT on macOS; on a
   minimal Linux box, `apt install python3`). `up.sh` (what `djinn up` calls)
-  uses it for manifest validation and the wiring payload, preferring
+  uses it for bottle validation and the wiring payload, preferring
   `/usr/bin/python3` over version-manager shims (`PYTHON3=/path` overrides).
 
 That's it — the repo is self-contained. `djinn` keeps its runtime state
@@ -67,8 +67,8 @@ the rules dir automatically — no need to set `RULES_PATH` too. The same applie
 to bottles: if `$DJINN_HOME/bottles` exists it's used automatically, so
 you don't need to set `BOTTLES_PATH` either.)
 
-**A bottle is the manifest; a container is the running thing.** The two used to
-share the word "container", which read badly next to the container the manifest
+**A bottle is the bottle; a container is the running thing.** The two used to
+share the word "container", which read badly next to the container the bottle
 produces. The old spellings still work: `CONTAINERS_PATH` and
 `$DJINN_HOME/containers` are honored, each printing a one-line deprecation
 notice naming the path it used. Rename yours and they go quiet.
@@ -123,7 +123,7 @@ argument):
 
 ```bash
 export DJINN_REPO="$HOME/git/brassbottle"      # adjust to your clone
-alias djup="$DJINN_REPO/djinn up"              # djup <name>          (no arg → lists manifests)
+alias djup="$DJINN_REPO/djinn up"              # djup <name>          (no arg → lists bottles)
 alias djdown="$DJINN_REPO/djinn down"          # djdown <name> [--purge]
 alias djsvc="$DJINN_REPO/djinn service"        # djsvc <name> [args]  (no arg → lists host services)
 alias djallow="$DJINN_REPO/djinn allow"        # djallow <container> <domain>…
@@ -176,7 +176,7 @@ compdef _dj_services_zsh djsvc
 
 ## Firewall egress (`capabilities:`)
 
-| Manifest key | Effect |
+| Bottle key | Effect |
 |---|---|
 | `egress: [...]` | extra allowed zones (a zone covers its subdomains) |
 | `egress_cidrs: [...]` | IP-range escape hatch (LAN subnets) |
@@ -192,7 +192,7 @@ outrun it).
 ## Plugins (every MCP server is a file)
 
 A **plugin** is a directory — `plugins/<name>/` — describing an MCP server (or
-just a secret) a container can get. A manifest opts in by name; unlisted plugins
+just a secret) a container can get. A bottle opts in by name; unlisted plugins
 stay dormant in the shared image:
 
 ```yaml
@@ -209,7 +209,7 @@ Two shapes, decided by the entry (no `type:` field):
 
 A plugin may also be **env-only** — a `secrets:` slot with no server. Slots are
 `env`-scoped (one value shared by all agents) or `agent`-scoped (per-agent,
-bound under the manifest's `agent_secrets:`). `djinn up` derives the wiring and
+bound under the bottle's `agent_secrets:`). `djinn up` derives the wiring and
 folds each plugin's `egress`/`host_port` into the firewall; de-listing one
 removes its wiring on the next up.
 
@@ -220,7 +220,7 @@ plugin.
 ## Secrets model
 
 Secret **values** live in one file — `secrets.env` (mode 600, gitignored, never
-mounted). Manifests and the Python modules handle only secret **names**; values
+mounted). Bottles and the Python modules handle only secret **names**; values
 are resolved host-side at `up` time. Plugins declare **secret slots**. Every
 slot uses one hybrid resolution order:
 
@@ -247,7 +247,7 @@ agent PRs/comments show as the bot (you review and merge as you).
 
 **Per-org git identity.** When one machine user can't reach every repo (it isn't
 a member of every org), give the container its own token — and route by repo
-**owner** — from the manifest's `git:` block:
+**owner** — from the bottle's `git:` block:
 
 ```yaml
 git:
@@ -262,7 +262,7 @@ git:
 ```
 
 `token`/`orgs.*.token` name vars in `secrets.env` (values never enter the
-manifest). At `up`, a repo owned by `<owner>` authenticates with `GH_TOKEN_<owner>`
+bottle). At `up`, a repo owned by `<owner>` authenticates with `GH_TOKEN_<owner>`
 if set, else the container's `git.token`, else the global `GH_TOKEN` — resolved by
 the `git-credential-org` helper on every `github.com` fetch/push. A `git.orgs`
 owner with a `name`/`email` also gets that identity stamped repo-locally, so its
@@ -298,7 +298,7 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
 - `djinn` — the dispatcher you run from the repo root: `djinn up|down|service|allow|keys <args>`
 - `up.sh` / `down.sh` / `service.sh` — the container-lifecycle scripts `djinn`
   dispatches to (still runnable directly): `up.sh` / `down.sh` are container
-  lifecycle from manifests; `service.sh <name>` starts a plugin's Mac-side
+  lifecycle from bottles; `service.sh <name>` starts a plugin's Mac-side
   host service (see `plugins/`)
 - `bottles/` — bottles (`TEMPLATE.yml` to copy; your own are gitignored)
 - `plugins/` — drop-in MCP tools, one directory each (`<name>/plugin.yml` +
@@ -312,7 +312,7 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
     go in secrets.env
 - `src/` — internal source, never run directly:
   - `common.sh` — shared path resolution (sourced by the scripts)
-  - `manifest.py` — host-side manifest validation; `wire_plugins.py` — the
+  - `bottle.py` — host-side bottle validation; `wire_plugins.py` — the
     agent-config writer `up.sh` execs after boot; `keyfiles.sh` — host-side
     key-file composition `up.sh` sources
   - `entrypoint.sh`, `init-firewall.sh`, `tmux*`, `mosh-server-wrapper.sh` —
@@ -321,12 +321,12 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
     readout of container config age (last `up` + image build date); `up.sh`
     stamps the two timestamps into `/etc/environment` after boot
 - `compose/` — `docker-compose.local.yml` (base) plus the `ssh.yml` / `mosh.yml`
-  overlays `up.sh` applies for a manifest's `ssh:` / `remote.mosh` settings
+  overlays `up.sh` applies for a bottle's `ssh:` / `remote.mosh` settings
 - `docs/` — `script.md` (every script, grouped by lifecycle), `TIPS.md`,
   `workspace.CLAUDE.md` (copied into each container as `/workspace/CLAUDE.md`)
 - `tests/` — host-runnable checks. `plugins.test.sh` is the entry point (yq +
-  jq + python3); it runs the Python unit tests (`test_manifest.py` /
-  `test_wire_plugins.py` — manifest validation + wiring logic) and the
+  jq + python3); it runs the Python unit tests (`test_bottle.py` /
+  `test_wire_plugins.py` — bottle validation + wiring logic) and the
   host-side bash unit tests (`bash.test.sh` — `keyfiles.sh`, `common.sh`,
   `allow-egress.sh`, `update-agent-keys.sh`, `service.sh`, the
   `plugins/*/run.sh` token generation)
@@ -344,7 +344,7 @@ Same system, same files, one addition. On any Linux box with Docker:
    `RULES_PATH` in `./.env` only if you want them elsewhere.
 2. Put your secrets in `secrets.env` (default `./.djinn/secrets.env`,
    600) — including `SSH_AUTHORIZED_KEY` (your public key).
-3. Add an `ssh:` section to the container's manifest:
+3. Add an `ssh:` section to the container's bottle:
 
    ```yaml
    ssh:
@@ -364,7 +364,7 @@ host.
 
 ## Remote agent access (phone / second device)
 
-The `remote:` manifest block (requires `ssh:`) turns an SSH-reachable
+The `remote:` bottle block (requires `ssh:`) turns an SSH-reachable
 container into something you can drive from a phone — start a task, walk
 away, get pinged when the agent needs you, answer from anywhere. Works for
 every agent in the image; nothing is vendor-hosted or public-facing.
@@ -377,7 +377,7 @@ remote:  { tmux: true, mosh: true, notify: ntfy }
 - **tmux** — interactive SSH/mosh logins land attached to one durable
   session (`agent`). Phone and laptop share the same view; agents survive
   disconnects. `docker exec` and editor terminals are exempt.
-- **mosh** — a per-manifest UDP range (`remote.mosh_ports`, default
+- **mosh** — a per-bottle UDP range (`remote.mosh_ports`, default
   60000:60010; disjoint per container, like `ssh.port`), published next to
   sshd with the same bind rules and pinned server-side. Survives phone
   sleep and WiFi↔cellular switches; use a mosh-capable client (e.g. Moshi
@@ -395,7 +395,7 @@ IP in its summary. sshd and the mosh range stay loopback/tunnel-only; nothing
 listens publicly.
 
 **Bottle filename = container identity.** A `bottles/<name>.yml` under
-your own (untracked) manifests directory names the container it produces, so
+your own (untracked) bottles directory names the container it produces, so
 renaming the file is the same as renaming the container.
 
 ## License

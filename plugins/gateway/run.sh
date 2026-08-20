@@ -7,7 +7,7 @@
 #
 # Run it in tmux, or wrap in a launchd plist for boot persistence.
 # Token: MCP_GATEWAY_TOKEN in ~/djinn/secrets.env (self-generated on
-# first run); up.sh composes it into containers whose manifest lists the
+# first run); up.sh composes it into containers whose bottle lists the
 # gateway plugin.
 #
 # Security posture:

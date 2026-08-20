@@ -5,7 +5,7 @@
 # remote plugin — config only, nothing baked, nothing runs in the container.
 # The endpoint has NO auth; the port-scoped firewall grant (HOST_MCP_PORTS) is
 # the only gate. Port is changeable via the component's Port input — keep it in
-# sync with host_port / a manifest plugin_ports: override. See ./README.md.
+# sync with host_port / a bottle plugin_ports: override. See ./README.md.
 
 host_port: 26929
 

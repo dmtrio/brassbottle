@@ -12,14 +12,14 @@ import launch as bl
 
 
 class TestBridgePortResolution(unittest.TestCase):
-    def test_default_when_manifest_has_no_plugin_ports(self):
+    def test_default_when_bottle_has_no_plugin_ports(self):
         self.assertEqual(bl.resolve_bridge_port({}), 8814)
         self.assertEqual(bl.resolve_bridge_port({}, plugin_host_port=8814), 8814)
 
     def test_plugin_yml_fallback(self):
         self.assertEqual(bl.resolve_bridge_port({}, plugin_host_port=8815), 8815)
 
-    def test_manifest_override(self):
+    def test_bottle_override(self):
         man = {"plugin_ports": {"browser": 8815}}
         self.assertEqual(bl.resolve_bridge_port(man), 8815)
         self.assertEqual(bl.resolve_bridge_port(man, plugin_host_port=8814), 8815)
@@ -29,8 +29,8 @@ class TestBridgePortResolution(unittest.TestCase):
         self.assertEqual(bl.resolve_bridge_port({"plugin_ports": "8815"}), 8814)
 
     def test_non_integer_port_is_rejected(self):
-        # The launcher reads the manifest directly, so it cannot rely on
-        # manifest.py having validated a hand-edited value.
+        # The launcher reads the bottle directly, so it cannot rely on
+        # bottle.py having validated a hand-edited value.
         for bad in ("8815", 8815.5, True, []):
             with self.subTest(bad=bad):
                 with self.assertRaises(SystemExit):
@@ -99,7 +99,7 @@ class TestBridgeCommand(unittest.TestCase):
 
 
 class TestApiKeyVar(unittest.TestCase):
-    def test_manifest_binding_wins(self):
+    def test_bottle_binding_wins(self):
         man = {"common_secrets": {"RESEARCH_BROWSER_KEY": "RESEARCH_BROWSER_KEY_job_hunt"}}
         self.assertEqual(bl.api_key_var("job-hunt", man), "RESEARCH_BROWSER_KEY_job_hunt")
 
@@ -165,7 +165,7 @@ class TestReadSecret(unittest.TestCase):
 
 class TestContainerNameValidation(unittest.TestCase):
     def test_path_escaping_names_rejected(self):
-        # The name is interpolated into the manifest/profile/TMPDIR paths.
+        # The name is interpolated into the bottle/profile/TMPDIR paths.
         for bad in ("../etc", "a/b", "..", "", "a b", "x;y"):
             with self.subTest(bad=bad):
                 with self.assertRaises(SystemExit):
@@ -226,8 +226,8 @@ class TestBrowserAppOverrides(unittest.TestCase):
 class TestContainersDir(unittest.TestCase):
     def test_env_override_wins(self):
         self.assertEqual(
-            bl.bottles_dir("/base", env_override="/custom/manifests"),
-            Path("/custom/manifests"),
+            bl.bottles_dir("/base", env_override="/custom/bottles"),
+            Path("/custom/bottles"),
         )
 
     def test_base_path_bottles_when_present(self):

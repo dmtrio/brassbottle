@@ -1,7 +1,7 @@
 #!/bin/bash
 # tests/remote.test.sh — host-runnable checks for the RFC 04 remote-access
 # mechanism. Needs only yq (+ standard tools, no docker): validates the
-# manifest plumbing expressions up.sh uses, the compose overlays, the
+# bottle plumbing expressions up.sh uses, the compose overlays, the
 # firewall/wrapper port-range agreement, and pins mirrored expressions to
 # the source files (drift guard). The end-to-end SSH/mosh/phone path is the
 # manual smoke test (IMP 04 A5/B2 acceptance).
@@ -47,10 +47,10 @@ for var in NTFY_URL NTFY_TOPIC; do
         || fail "ssh overlay is missing $var"
 done
 
-echo "── mosh port-range agreement (manifest.py is the source; defaults must align)"
+echo "── mosh port-range agreement (bottle.py is the source; defaults must align)"
 # The overlay carries fallbacks (${MOSH_PORTS:-...} / ${MOSH_PORTS_DASH:-...})
-# for the values manifest.py computes from remote.mosh_ports. All defaults — env
-# (colon form), publish (dash form), wrapper, manifest.py — must be one range.
+# for the values bottle.py computes from remote.mosh_ports. All defaults — env
+# (colon form), publish (dash form), wrapper, bottle.py — must be one range.
 ENV_DEFAULT=$(yq -r '.services.djinn.environment[]' compose/docker-compose.mosh.yml | sed -n 's/^MOSH_PORTS=${MOSH_PORTS:-\(.*\)}$/\1/p')
 [ "$ENV_DEFAULT" = "60000:60010" ] \
     && pass "mosh overlay env default is 60000:60010" \
@@ -62,11 +62,11 @@ DASH_DEFAULT=$(yq -r '.services.djinn.ports[0]' compose/docker-compose.mosh.yml 
 grep -qF "\${MOSH_PORTS:-$ENV_DEFAULT}" src/mosh-server-wrapper.sh \
     && pass "mosh-server wrapper default matches the overlay default" \
     || fail "wrapper default range drifted from the overlay"
-grep -qF '"60000:60010"' src/manifest.py \
-    && pass "manifest.py default range matches the overlay" \
-    || fail "manifest.py default range drifted"
+grep -qF '"60000:60010"' src/bottle.py \
+    && pass "bottle.py default range matches the overlay" \
+    || fail "bottle.py default range drifted"
 
-# manifest.py's remote.mosh_ports validation (MOSH_PORTS_RE) must reject malformed/reversed ranges
+# bottle.py's remote.mosh_ports validation (MOSH_PORTS_RE) must reject malformed/reversed ranges
 check_range() { printf '%s' "$1" | grep -qE '^[0-9]{1,5}:[0-9]{1,5}$'; }
 check_range "60000:60010" && pass "range validation accepts 60000:60010" || fail "validation rejects the default range"
 check_range "60000-60010" && fail "range validation accepted dash form" || pass "range validation rejects dash form"
@@ -81,7 +81,7 @@ awk '/for a in "\$@"/,/^fi$/' src/mosh-server-wrapper.sh | grep -qF '"--"' \
     && pass "wrapper splices the pin before '--'" \
     || fail "wrapper no longer handles the '--' separator"
 
-echo "── manifest plumbing simulation (same expressions as up.sh)"
+echo "── bottle plumbing simulation (same expressions as up.sh)"
 M=$(mktemp); trap 'rm -f "$M"' EXIT
 printf 'ssh:\n  port: 2222\nremote:\n  tmux: true\n  mosh: true\n  notify: ntfy\n' > "$M"
 [ "$(yq '.remote.tmux // false' "$M")" = "true" ]  && pass "remote.tmux reads back"  || fail "remote.tmux read broken"
@@ -156,15 +156,15 @@ while IFS=$'\t' read -r file expr; do
         && pass "$file still contains: $expr" \
         || fail "$file no longer contains (update this suite!): $expr"
 done <<'DRIFT'
-src/manifest.py	remote.get("tmux")
-src/manifest.py	remote.get("mosh")
-src/manifest.py	remote.get("notify")
-src/manifest.py	remote.get("mosh_ports")
+src/bottle.py	remote.get("tmux")
+src/bottle.py	remote.get("mosh")
+src/bottle.py	remote.get("notify")
+src/bottle.py	remote.get("mosh_ports")
 up.sh	compose/docker-compose.mosh.yml
 src/ensure_net.py	djinn-net
-src/manifest.py	remote.notify requires remote.tmux
-src/manifest.py	re.sub(r"^[A-Za-z]+://", "", ntfy_url)
-src/manifest.py	[0-9]{1,5}:[0-9]{1,5}
+src/bottle.py	remote.notify requires remote.tmux
+src/bottle.py	re.sub(r"^[A-Za-z]+://", "", ntfy_url)
+src/bottle.py	[0-9]{1,5}:[0-9]{1,5}
 src/init-firewall.sh	^[0-9]+:[0-9]+$
 src/init-firewall.sh	--dport "$MOSH_PORTS"
 src/init-firewall.sh	-s "$HOST_IP"

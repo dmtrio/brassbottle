@@ -60,7 +60,7 @@ listener started.
 ## Enable it
 
 ```yaml
-# manifest
+# bottle
 plugins: [rhinomcp-official]
 # plugin_ports: {rhinomcp-official: 10501}   # optional override; must match MCPStart's port
 ```

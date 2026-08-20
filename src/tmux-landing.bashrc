@@ -4,7 +4,7 @@
 # same view, and whatever runs there survives disconnects.
 #
 # Scope guards, in order:
-#   $REMOTE_TMUX   — only containers whose manifest sets remote.tmux (the
+#   $REMOTE_TMUX   — only containers whose bottle sets remote.tmux (the
 #                    entrypoint persists it to /etc/environment for PAM)
 #   $TMUX          — shells inside tmux must not recurse
 #   $- has i       — non-interactive channels (scp, VS Code Remote-SSH's

@@ -3,7 +3,7 @@
 The Annotated Obsidian MCP endpoint (`mcp-obsidian.dmetr.io`). **Remote** HTTP
 server on a real internet host (reached via the egress allowlist, so no
 `host_port`, no host service). Its required secret resolves per agent, and the
-server is wired only where the manifest supplies an effective key.
+server is wired only where the bottle supplies an effective key.
 
 ```yaml
 plugins: [obsidian-annotated]

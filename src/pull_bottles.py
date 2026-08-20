@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""pull_manifests.py — fast-forward the manifests checkout before up.sh reads it.
+"""pull_bottles.py — fast-forward the bottles checkout before up.sh reads it.
 
 up.sh already keeps an EXTERNAL rules repo current (`git -C "$RULES_PATH" pull
 --ff-only`), because merged rule PRs have to reach the container somehow. Once
-manifests moved out of this repo into their own — the BOTTLES_PATH override
+bottles moved out of this repo into their own — the BOTTLES_PATH override
 in ./.env, e.g. ~/git/djinn-bottles — they acquired exactly the same problem
-and none of the same treatment: a merged manifest PR sat unread until someone
+and none of the same treatment: a merged bottle PR sat unread until someone
 remembered to pull by hand, and `./djinn up` cheerfully applied the stale file.
 
 Two things must never be pulled:
@@ -22,10 +22,10 @@ Two things must never be pulled:
     supported and must not start erroring.
 
 Never fatal, and never stuck: a laptop offline, a detached HEAD, an unpushed
-local edit to a manifest are all ordinary, and none is a reason to refuse to
+local edit to a bottle are all ordinary, and none is a reason to refuse to
 bring a container up — nor is a remote that hangs, which is why the pull is
 capped and runs with prompting disabled. Every outcome prints one line saying
-which it was, so a stale manifest can never be mistaken for a fresh one.
+which it was, so a stale bottle can never be mistaken for a fresh one.
 
 Exit status is always 0.
 """
@@ -111,7 +111,7 @@ def pull(bottles_path, self_root=None, bundled=False, out=sys.stdout):
     """Fast-forward when it is safe to. Returns True when a pull ran and won."""
     should, reason = decide(bottles_path, self_root, bundled)
     if not should:
-        print("  manifests: %s" % reason, file=out)
+        print("  bottles: %s" % reason, file=out)
         return False
     before = head(bottles_path)
     rc, _, err = git(["pull", "--ff-only", "-q"], cwd=bottles_path,
@@ -121,17 +121,17 @@ def pull(bottles_path, self_root=None, bundled=False, out=sys.stdout):
         if before and after and before == after:
             # "Already up to date" and "a merged bottle just landed" must not
             # read identically — the point of this line is to tell them apart.
-            print("  manifests: already current %s" % reason, file=out)
+            print("  bottles: already current %s" % reason, file=out)
         else:
-            print("  manifests: fast-forwarded %s (%s..%s)"
+            print("  bottles: fast-forwarded %s (%s..%s)"
                   % (reason, (before or "?")[:8], (after or "?")[:8]), file=out)
         return True
     # Offline, no upstream, dirty tree, diverged history — all ordinary, none
     # worth blocking on. Say so rather than continuing in silence: the whole
     # point of this file is that nobody should have to wonder whether the
-    # manifest about to be applied is the merged one.
+    # bottle about to be applied is the merged one.
     detail = " ".join(err.split())[:160] or "git pull exited %d" % rc
-    print("  manifests: could not fast-forward %s — using it as-is (%s)"
+    print("  bottles: could not fast-forward %s — using it as-is (%s)"
           % (reason, detail), file=out)
     return False
 

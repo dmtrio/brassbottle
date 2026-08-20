@@ -7,7 +7,7 @@ one place and both halves are unit-testable:
   host side:      python3 src/wire_plugins.py --build-payload
                   reads env vars (see build_payload) and prints the JSON
                   payload; booleans use the same strict string comparison the
-                  old bash used ([ "$X" = "true" ]), so a manifest value like
+                  old bash used ([ "$X" = "true" ]), so a bottle value like
                   `gateway: yes` stays OFF instead of leaking into the JSON.
   container side: python3 /usr/local/lib/djinn/wire_plugins.py
                   reads that payload on stdin and wires MCP servers into every
@@ -31,7 +31,7 @@ Payload:
     }
 
 - plugin_mcp_entries carries one object per NON-agent-scoped plugin (host-side
-  manifest.py extracts them from plugins/<name>.yml). A spec is LOCAL
+  bottle.py extracts them from plugins/<name>.yml). A spec is LOCAL
   ({command, args} — stdio, wired into every agent) or env-scoped REMOTE
   ({url, headers} — http, wired into Claude's .mcp.json only). Cross-plugin
   duplicate server names hard-fail here as well as host-side (last-wins merge).
@@ -194,11 +194,11 @@ def generate_claude_mcp(workspace, claude_servers, plugins):
         print(f"  (skipping .mcp.json — {repos_dir} does not exist yet; rerun up.sh)")
         return
     if mcp_path.is_file() and not marker.is_file():
-        print("  (workspace ships its own .mcp.json — leaving it alone; manifest plugins are NOT merged into it)")
+        print("  (workspace ships its own .mcp.json — leaving it alone; bottle plugins are NOT merged into it)")
         return
 
     # Agent-scoped servers bound to claude first (ref form), then ordinary
-    # plugins. The two sets are disjoint by construction (manifest.py routes
+    # plugins. The two sets are disjoint by construction (bottle.py routes
     # agent-scoped plugins away from plugin_mcp_entries).
     servers = dict(claude_servers)
     for name, spec in plugins.items():
@@ -237,7 +237,7 @@ def link_repo_mcp(workspace):
 
 def preapprove_claude(home, workspace):
     """Approval state lives in ~/.claude.json; since .mcp.json came from the
-    manifest, its servers are approved by construction. Merge, don't clobber.
+    bottle, its servers are approved by construction. Merge, don't clobber.
 
     Approval is per project path: repos/ itself (canonical .mcp.json) plus each
     cloned repos/<name>. .mcp.json may be workspace-shipped or per-repo rather
@@ -426,7 +426,7 @@ def wire_plugin_servers_json(path, plugins):
     """Sync the plugin stdio servers into a JSON agent config (cursor, gemini,
     pi). The set of plugin-managed names is tracked in a sidecar
     (<file>.djinn-plugins) so stale entries from a plugin removed from the
-    manifest are deleted without touching identity or hand-added servers."""
+    bottle are deleted without touching identity or hand-added servers."""
     sidecar = path.parent / (path.name + ".djinn-plugins")
     old = []
     if sidecar.is_file() and sidecar.stat().st_size > 0:
@@ -556,7 +556,7 @@ def run(payload, home, workspace, env):
             reconcile_agent_servers(agent, required_by_agent.get(agent, {}), home)
 
     # Runs for every installed agent even with no plugins enabled, so entries
-    # from a plugin removed from the manifest are cleaned up, not orphaned
+    # from a plugin removed from the bottle are cleaned up, not orphaned
     # (Claude gets this for free from wholesale .mcp.json regeneration). Uniform
     # LOCAL plugins go to every agent; an agent-scoped LOCAL server (axiom's
     # mcp-remote) is added only for the agents bound to it (its token gates who
@@ -589,7 +589,7 @@ def build_payload(env):
     Booleans arrive as the raw yq scalars (WIRE_CURSOR/…) and only the literal
     string "true" turns a flag on — the exact semantics of the old
     `[ "$X" = "true" ]` checks. PLUGIN_MCP_ENTRIES is the newline-separated
-    one-line-JSON-per-plugin accumulation from manifest.py (local + env-scoped
+    one-line-JSON-per-plugin accumulation from bottle.py (local + env-scoped
     remote plugins only).
 
     Required servers are assembled from three inputs:

@@ -124,11 +124,11 @@ RUN if [ "$INSTALL_CODEX" = "true" ]; then \
 # and is skipped here; nothing is baked, it's pure config wired by up.sh.
 # The host-only run.sh launchers are excluded from the image via .dockerignore.
 # Which containers actually USE a plugin is a separate, per-container decision:
-# up.sh wires mcp + egress only for the names in that manifest's `plugins:`
+# up.sh wires mcp + egress only for the names in that bottle's `plugins:`
 # list. Adding a tool = adding one file; this loop never changes. Runs as
 # $USERNAME with the toolchain live — uv via ~/.local/bin, node/npm via the fnm
 # env eval — so installers land in the user's home like everything else. The
-# "install: required iff a local server" rule is enforced by src/manifest.py at
+# "install: required iff a local server" rule is enforced by src/bottle.py at
 # derive time (a local plugin missing install: fails up.sh), so here `yq -e`
 # non-zero simply means "no install: block → remote/config-only, skip"; set -e
 # still aborts on a failed install.
@@ -219,7 +219,7 @@ COPY src/git-credential-org.sh /usr/local/bin/git-credential-org
 RUN chmod +x /usr/local/bin/git-credential-org
 
 # ── SSH server (always installed, runs only when SSH_ENABLED=true) ──────────
-# One image everywhere: Mac attach-mode and any remote Linux host. The manifest's ssh:
+# One image everywhere: Mac attach-mode and any remote Linux host. The bottle's ssh:
 # section turns sshd on at RUNTIME (entrypoint injects SSH_AUTHORIZED_KEY).
 RUN apt-get update && apt-get install -y openssh-server \
     && rm -rf /var/lib/apt/lists/* \
@@ -246,7 +246,7 @@ RUN chmod 644 /usr/local/lib/djinn/wire_plugins.py
 COPY src/compose_rules.py /usr/local/lib/djinn/compose_rules.py
 RUN chmod 644 /usr/local/lib/djinn/compose_rules.py
 
-# Merges the manifest's repo list into /workspace/dev.code-workspace on every
+# Merges the bottle's repo list into /workspace/dev.code-workspace on every
 # `up` (idempotent — preserves agent-managed worktree entries; layout v2).
 COPY src/code_workspace.py /usr/local/lib/djinn/code_workspace.py
 RUN chmod 644 /usr/local/lib/djinn/code_workspace.py

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for src/manifest.py (Phase 2 of the Python extraction).
+"""Unit tests for src/bottle.py (Phase 2 of the Python extraction).
 
 Table-driven: every validation rule the old up.sh bash enforced is a row
 here, with the EXACT error message the bash produced (parity was verified
@@ -16,10 +16,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-import manifest as m
+import bottle as m
 import wire_plugins
 
-MODULE = Path(__file__).parent.parent / "src" / "manifest.py"
+MODULE = Path(__file__).parent.parent / "src" / "bottle.py"
 
 SERENA = {"install": "x", "mcp": {"serena": {"command": "bash", "args": ["-lc", "s"]}},
           "egress": ["blob.core.windows.net"]}
@@ -77,19 +77,19 @@ class TestErrorTable(unittest.TestCase):
         ("bad forge", {"forge": "bitbucket"}, None,
          "forge must be github or gitea"),
         ("scalar plugins", {"plugins": "serena"}, None,
-         "manifest plugins: must be a list, e.g. plugins: [serena]"),
+         "bottle plugins: must be a list, e.g. plugins: [serena]"),
         ("plugin name charset", {"plugins": ["../evil"]}, None,
-         "manifest plugins failed validation:\n"
+         "bottle plugins failed validation:\n"
          "  plugin '../evil': illegal characters (allowed: letters, digits, underscore, dash)"),
         ("missing plugin file", {"plugins": ["ghost"]}, None,
-         "manifest plugins failed validation:\n"
+         "bottle plugins failed validation:\n"
          "  plugin 'ghost': no plugin file at plugins/ghost/plugin.yml"),
         ("aggregated plugin errors", {"plugins": ["../evil", "ghost"]}, None,
-         "manifest plugins failed validation:\n"
+         "bottle plugins failed validation:\n"
          "  plugin '../evil': illegal characters (allowed: letters, digits, underscore, dash)\n"
          "  plugin 'ghost': no plugin file at plugins/ghost/plugin.yml"),
         ("remote without ssh", {"remote": {"tmux": True}}, None,
-         "manifest has remote: but no ssh: section — remote access rides the SSH login path (add ssh.port)"),
+         "bottle has remote: but no ssh: section — remote access rides the SSH login path (add ssh.port)"),
         ("bad notify kind", {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "slack"}}, None,
          "remote.notify must be 'ntfy' (got 'slack')"),
         ("notify without tmux", {"ssh": {"port": 22}, "remote": {"notify": "ntfy"}}, None,
@@ -107,22 +107,22 @@ class TestErrorTable(unittest.TestCase):
          {"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "3000:2000"}}, None,
          "remote.mosh_ports '3000:2000' out of range (need 1024 <= START <= END <= 65535)"),
         ("illegal ref char", {"identities": {"obsidian": ["bad-dash_claude"]}}, None,
-         "manifest identity references failed validation:\n"
+         "bottle identity references failed validation:\n"
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)"),
         ("unknown agent suffix", {"identities": {"obsidian": ["me_nobody"]}}, None,
-         "manifest identity references failed validation:\n"
+         "bottle identity references failed validation:\n"
          "  obsidian ref 'me_nobody': suffix is not a known agent (_claude/_codex/_pi/_gemini/_cursor_agent)"),
         ("secret missing", {"identities": {"obsidian": ["gone_claude"]}}, None,
-         "manifest identity references failed validation:\n"
+         "bottle identity references failed validation:\n"
          "  obsidian ref 'gone_claude': OBSIDIAN_KEY_gone_claude not found in /sec/secrets.env"),
         ("aggregated identity errors",
          {"identities": {"obsidian": ["bad-dash_claude"], "watch": ["w_nobody"]}}, None,
-         "manifest identity references failed validation:\n"
+         "bottle identity references failed validation:\n"
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)\n"
          "  watch ref 'w_nobody': suffix is not a known agent (_claude/_codex/_pi/_gemini/_cursor_agent)"),
         ("ntfy url missing",
          {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}}, ENV,
-         "manifest has remote.notify: ntfy but NTFY_URL is missing from /sec/secrets.env"),
+         "bottle has remote.notify: ntfy but NTFY_URL is missing from /sec/secrets.env"),
         ("ntfy url with hash",
          {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}},
          dict(ENV, NTFY_URL="https://x.com/#frag"),
@@ -136,7 +136,7 @@ class TestErrorTable(unittest.TestCase):
     def test_error_table(self):
         for name, man, env, message in self.CASES:
             with self.subTest(name):
-                with self.assertRaises(m.ManifestError) as cm:
+                with self.assertRaises(m.BottleError) as cm:
                     derive(man, env=env)
                 self.assertEqual(str(cm.exception), message)
 
@@ -167,7 +167,7 @@ class TestErrorTable(unittest.TestCase):
         for name, mcp, message in self.PLUGIN_MCP_CASES:
             with self.subTest(name):
                 files = {"p": {"install": "x", "mcp": mcp}}
-                with self.assertRaises(m.ManifestError) as cm:
+                with self.assertRaises(m.BottleError) as cm:
                     derive({"plugins": ["p"]}, plugin_files=files)
                 self.assertEqual(str(cm.exception), message)
 
@@ -175,7 +175,7 @@ class TestErrorTable(unittest.TestCase):
         for bad in ("https://x.com", "x.com/path", "*.foo.com", "foo", "a b.com"):
             with self.subTest(bad):
                 files = {"p": {"install": "x", "egress": [bad]}}
-                with self.assertRaises(m.ManifestError) as cm:
+                with self.assertRaises(m.BottleError) as cm:
                     derive({"plugins": ["p"]}, plugin_files=files)
                 self.assertEqual(
                     str(cm.exception),
@@ -184,7 +184,7 @@ class TestErrorTable(unittest.TestCase):
     def test_duplicate_server_name_across_plugins(self):
         files = {"a": {"install": "x", "mcp": {"srv": {"command": "x"}}},
                  "b": {"install": "x", "mcp": {"srv": {"command": "y"}}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["a", "b"]}, plugin_files=files)
         self.assertEqual(str(cm.exception),
                          "multiple enabled plugins define the same MCP server name: srv")
@@ -204,12 +204,12 @@ class TestYqSemanticsPins(unittest.TestCase):
         # layout v2: any presence of repo: (even null/false) is a hard error.
         for val in ("https://github.com/x/app.git", "", False, None):
             with self.subTest(val=val):
-                with self.assertRaises(m.ManifestError) as cm:
+                with self.assertRaises(m.BottleError) as cm:
                     derive({"repo": val})
                 self.assertIn("repos:", str(cm.exception))
                 self.assertEqual(
                     str(cm.exception),
-                    "manifest repo: is gone — declare repos: [<url>, ...] instead "
+                    "bottle repo: is gone — declare repos: [<url>, ...] instead "
                     "(layout v2: each repo clones to /workspace/repos/<name>)")
 
     def test_tools_contains_is_substring_match(self):
@@ -274,14 +274,14 @@ class TestRepos(unittest.TestCase):
 
     def test_map_entry_unknown_key_raises(self):
         # A typo'd key must not silently fall back to the URL basename.
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": [{"nmae": "lib", "url": "https://github.com/x/lib.git"}]})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos failed validation:\n"
+            "bottle repos failed validation:\n"
             "  repos entry: unsupported field(s): nmae (only name and url)")
 
-    def test_multiple_entries_preserve_manifest_order(self):
+    def test_multiple_entries_preserve_bottle_order(self):
         d = derive({"repos": [
             "https://github.com/x/beta.git",
             {"name": "alpha", "url": "https://github.com/x/other.git"},
@@ -294,65 +294,65 @@ class TestRepos(unittest.TestCase):
             "gamma\tgit@github.com:org/gamma.git\n")
 
     def test_duplicate_derived_names_raise(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": [
                 "https://github.com/x/app.git",
                 "https://github.com/y/app.git",
             ]})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos failed validation:\n"
+            "bottle repos failed validation:\n"
             "  repos entry: duplicate name 'app'")
 
     def test_bad_name_leading_dot_raises(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": [{"name": ".hidden", "url": "https://github.com/x/app.git"}]})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos failed validation:\n"
+            "bottle repos failed validation:\n"
             "  repos entry: illegal name '.hidden' "
             "(must start with letter/digit/underscore; only letters, digits, . _ - thereafter — "
             "it becomes a directory under /workspace/repos)")
 
     def test_bad_name_slash_raises(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": [{"name": "a/b", "url": "https://github.com/x/app.git"}]})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos failed validation:\n"
+            "bottle repos failed validation:\n"
             "  repos entry: illegal name 'a/b' "
             "(must start with letter/digit/underscore; only letters, digits, . _ - thereafter — "
             "it becomes a directory under /workspace/repos)")
 
     def test_blank_url_in_map_raises(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": [{"name": "x", "url": ""}]})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos failed validation:\n"
+            "bottle repos failed validation:\n"
             "  repos entry: url must be a non-empty string")
 
     def test_entry_wrong_type_raises(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": [1]})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos failed validation:\n"
+            "bottle repos failed validation:\n"
             "  repos entry: must be a URL string or {name, url} map (got a number)")
 
     def test_repos_not_a_list_raises(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": "https://github.com/x/app.git"})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos: must be a list of URLs or {name, url} maps")
+            "bottle repos: must be a list of URLs or {name, url} maps")
 
     def test_url_with_space_raises(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"repos": ["https://github.com/x/a pp.git"]})
         self.assertEqual(
             str(cm.exception),
-            "manifest repos failed validation:\n"
+            "bottle repos failed validation:\n"
             "  repos entry: URL 'https://github.com/x/a pp.git' contains whitespace")
 
 
@@ -374,11 +374,11 @@ class TestGitIdentity(unittest.TestCase):
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_hank")
 
     def test_default_token_missing_var_hard_fails(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"token": "GH_TOKEN_nope"})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.token: GH_TOKEN_nope not found in secrets.env")
 
     def test_per_org_token_routing_and_canonical_var(self):
@@ -398,7 +398,7 @@ class TestGitIdentity(unittest.TestCase):
     def test_mixed_case_owner_folds_to_lowercase(self):
         # github owners are case-insensitive; the router derives the owner from
         # the clone URL, so the emitted owner + canonical var fold to lowercase
-        # (a `PlanetExpress` manifest key must route a `planetexpress/*` clone).
+        # (a `PlanetExpress` bottle key must route a `planetexpress/*` clone).
         d = self._d({"orgs": {"PlanetExpress": {"token": "GH_TOKEN_v2",
                                                 "name": "Leela Bot"}}})
         self.assertEqual(d["GIT_ORG_TOKENS"],
@@ -406,68 +406,68 @@ class TestGitIdentity(unittest.TestCase):
         self.assertEqual(d["GIT_ORG_IDENTITIES"], "planetexpress\tLeela Bot\t\n")
 
     def test_case_insensitive_duplicate_owner_hard_fails(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"orgs": {"Acme": {"token": "GH_TOKEN_v2"},
                               "acme": {"token": "GH_TOKEN_vendor"}}})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.orgs: duplicate owner 'acme' (case-insensitive clash with 'Acme')")
 
     def test_org_missing_token_hard_fails(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"orgs": {"vendor": {"name": "Bot"}}})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.orgs.vendor.token: needs token: (a secrets.env var name)")
 
     def test_org_token_missing_var_hard_fails(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"orgs": {"vendor": {"token": "GH_TOKEN_nope"}}})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.orgs.vendor.token: GH_TOKEN_nope not found in secrets.env")
 
     def test_org_unsupported_field_hard_fails(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"orgs": {"vendor": {"token": "GH_TOKEN_vendor", "tokne": "x"}}})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.orgs.vendor: unsupported field(s): tokne (only token, name, email)")
 
     def test_illegal_owner_hard_fails(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"orgs": {"-bad": {"token": "GH_TOKEN_vendor"}}})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.orgs: illegal owner '-bad' (a forge org/user name)")
 
     def test_orgs_wrong_type_hard_fails(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"orgs": ["vendor"]})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.orgs: must be a map of <owner>: {token, name, email}")
 
     def test_errors_aggregate(self):
         # Both a bad default and a bad org surface together (aggregated list).
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"token": "GH_TOKEN_nope",
                      "orgs": {"vendor": {"token": "GH_TOKEN_alsonope"}}})
         self.assertEqual(
             str(cm.exception),
-            "manifest git identity failed validation:\n"
+            "bottle git identity failed validation:\n"
             "  git.token: GH_TOKEN_nope not found in secrets.env\n"
             "  git.orgs.vendor.token: GH_TOKEN_alsonope not found in secrets.env")
 
 
 class TestDerivedValues(unittest.TestCase):
-    def test_defaults_on_empty_manifest(self):
+    def test_defaults_on_empty_bottle(self):
         d = derive({})
         self.assertEqual(d["FORGE"], "github")
         self.assertEqual(d["MEM_LIMIT"], "2g")
@@ -558,16 +558,16 @@ class TestRenderAndStdin(unittest.TestCase):
         self.assertEqual(man, {"plugins": ["p"]})
         self.assertEqual(files, {"p": {"mcp": {}}})
 
-    def test_read_stdin_null_manifest_is_empty(self):
+    def test_read_stdin_null_bottle_is_empty(self):
         man, files = m.read_stdin_docs(io.StringIO("null\n"))
         self.assertEqual(man, {})
 
     def test_read_stdin_errors(self):
-        with self.assertRaises(m.ManifestError):
+        with self.assertRaises(m.BottleError):
             m.read_stdin_docs(io.StringIO(""))
-        with self.assertRaises(m.ManifestError):
+        with self.assertRaises(m.BottleError):
             m.read_stdin_docs(io.StringIO("{bad\n"))
-        with self.assertRaises(m.ManifestError):
+        with self.assertRaises(m.BottleError):
             m.read_stdin_docs(io.StringIO('{}\nno-tab-here\n'))
 
     def test_main_derive_end_to_end(self):
@@ -594,17 +594,17 @@ class TestReviewFixes(unittest.TestCase):
     def test_trailing_newline_rejected_by_all_validators(self):
         # Python's $ matches before a trailing \n; the port must use \Z.
         files = {"p": {"egress": ["evil.com\n"]}}
-        with self.assertRaises(m.ManifestError):
+        with self.assertRaises(m.BottleError):
             derive({"plugins": ["p"]}, plugin_files=files)
         files = {"p": {"mcp": {"srv\n": {"command": "x"}}}}
-        with self.assertRaises(m.ManifestError):
+        with self.assertRaises(m.BottleError):
             derive({"plugins": ["p"]}, plugin_files=files)
-        with self.assertRaises(m.ManifestError):
+        with self.assertRaises(m.BottleError):
             derive({"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "2000:3000\n"}})
 
     def test_null_entries_drop_from_word_lists(self):
         # plugins: [serena,] parses as [serena, null]; old join+word-split
-        # dropped the null — a working manifest must keep working.
+        # dropped the null — a working bottle must keep working.
         d = derive({"plugins": ["serena", None]})
         self.assertEqual(d["PLUGINS"], "serena")
         # identity refs run through the same _word_list; a trailing-comma null
@@ -621,13 +621,13 @@ class TestReviewFixes(unittest.TestCase):
     def test_wrong_typed_sections_are_named_errors(self):
         for key in ("git", "capabilities", "ssh", "remote", "identities"):
             with self.subTest(key):
-                with self.assertRaises(m.ManifestError) as cm:
+                with self.assertRaises(m.BottleError) as cm:
                     derive({key: [{"x": 1}]})
-                self.assertIn(f"manifest {key}: must be a map", str(cm.exception))
+                self.assertIn(f"bottle {key}: must be a map", str(cm.exception))
 
     def test_sequence_root_plugin_file_is_named_error(self):
         files = {"p": [{"mcp": {"srv": {"command": "x"}}}]}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["p"]}, plugin_files=files)
         self.assertIn("plugins/p/plugin.yml must be a YAML map", str(cm.exception))
 
@@ -639,12 +639,12 @@ class TestReviewFixes(unittest.TestCase):
         files = {"good": {"mcp": {}}, "broken": m.UNREADABLE}
         d = derive({"plugins": ["good"]}, plugin_files=files)  # no error
         self.assertEqual(d["PLUGINS"], "good")
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["broken"]}, plugin_files=files)
         self.assertIn("plugins/broken/plugin.yml is not valid YAML", str(cm.exception))
 
     def test_non_scalar_leaf_is_named_error(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"memory": ["2g"]})
         self.assertIn("memory must be a single value", str(cm.exception))
 
@@ -664,7 +664,7 @@ class TestReviewFixes(unittest.TestCase):
     def test_stdin_unreadable_sentinel_and_multidoc_hint(self):
         man, files = m.read_stdin_docs(io.StringIO('{}\nbroken\t!\n'))
         self.assertIs(files["broken"], m.UNREADABLE)
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             m.read_stdin_docs(io.StringIO('{}\n{"second": "doc"}\n'))
         self.assertIn("stray '---'", str(cm.exception))
 
@@ -680,7 +680,7 @@ class TestHybridSchemaRules(unittest.TestCase):
 
     # ── plugin shape: install-iff-local, host_port ───────────────────────
     def test_install_required_only_for_local_servers(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["p"]}, files={"p": {"mcp": {"s": {"command": "x"}}}})
         self.assertIn("needs an install: block", str(cm.exception))
         # remote server needs no install:
@@ -704,7 +704,7 @@ class TestHybridSchemaRules(unittest.TestCase):
         self.assertIn("claude\tA\tA\n", d["AGENT_SECRETS"])
         # a local server with no install: is still rejected
         bad = {"secrets": {"A": {}}, "mcp": {"s": {"command": "bash", "requires": ["A"]}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["bad"]}, files=dict(PLUGIN_FILES, bad=bad))
         self.assertIn("needs an install: block", str(cm.exception))
 
@@ -719,29 +719,29 @@ class TestHybridSchemaRules(unittest.TestCase):
         # ...a local server that never references the port would leave the
         # firewall grant pointing at a port nothing dials (and a plugin_ports:
         # override would move the grant but not the dial target)
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["p"]},
                     files={"p": {"install": "x", "host_port": 1999,
                                  "mcp": {"s": {"command": "x"}}}})
         self.assertIn("needs a ${HOST_PORT} reference", str(cm.exception))
         # ...and with no mcp server at all there is nothing to use the grant
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["p"]},
                     files={"p": {"host_port": 8811, "egress": ["a.com"]}})
         self.assertIn("host_port needs an mcp server", str(cm.exception))
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["p"]},
                     files={"p": {"host_port": "8811", "mcp": {"s": {"url": "http://h/mcp"}}}})
         self.assertIn("host_port must be an integer", str(cm.exception))
         # out-of-range (typo like 88111) is a named error, not a bogus grant
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["p"]},
                     files={"p": {"host_port": 88111, "mcp": {"s": {"url": "http://h/mcp"}}}})
         self.assertIn("out of range (1-65535)", str(cm.exception))
 
     def test_duplicate_secret_slot_across_plugins(self):
         files = {"a": {"secrets": {"TOK": {}}}, "b": {"secrets": {"TOK": {}}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["a", "b"]}, files=files)
         self.assertIn("declared by more than one enabled plugin", str(cm.exception))
 
@@ -752,35 +752,35 @@ class TestHybridSchemaRules(unittest.TestCase):
         self.assertIn("claude\tMCP_GATEWAY_TOKEN\tGW_PROD\n", d["AGENT_SECRETS"])
 
     def test_common_secrets_unknown_slot_errors(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["serena"], "common_secrets": {"NOPE": "SRC"}},
                     env={"PRESENT_SECRET_VARS": "SRC", "SECRETS_FILE": "/sec/secrets.env"})
         self.assertIn("no enabled plugin declares that secret slot", str(cm.exception))
 
     # ── agent_secrets validation ─────────────────────────────────────────
     def test_unknown_agent_rejected(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["obsidian-annotated"],
                      "agent_secrets": [{"agent": "nope", "slot": "OBSIDIAN_ANNOTATED_KEY",
                                         "secret": "OBSIDIAN_KEY_me_claude"}]})
         self.assertIn("unknown agent 'nope'", str(cm.exception))
 
     def test_agent_secrets_slot_unknown_rejected(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["gateway"],
                      "agent_secrets": [{"agent": "claude", "slot": "NOPE",
                                         "secret": "OBSIDIAN_KEY_me_claude"}]})
         self.assertIn("not a secret of any enabled plugin", str(cm.exception))
 
     def test_agent_secret_source_missing(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["obsidian-annotated"],
                      "agent_secrets": [{"agent": "claude", "slot": "OBSIDIAN_ANNOTATED_KEY",
                                         "secret": "OBSIDIAN_KEY_gone"}]})
         self.assertIn("not found in /sec/secrets.env", str(cm.exception))
 
     def test_duplicate_agent_slot_binding_rejected(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self._d({"plugins": ["obsidian-annotated"],
                      "agent_secrets": [
                          {"agent": "claude", "slot": "OBSIDIAN_ANNOTATED_KEY", "secret": "OBSIDIAN_KEY_me_claude"},
@@ -827,8 +827,8 @@ class TestUniversalHybridSecrets(unittest.TestCase):
         },
     }
 
-    def derive(self, manifest, present=""):
-        return m.derive(manifest, self.FILES,
+    def derive(self, bottle, present=""):
+        return m.derive(bottle, self.FILES,
                         {"PRESENT_SECRET_VARS": present, "SECRETS_FILE": "/sec/secrets.env"})
 
     def test_common_default_binds_every_enabled_agent(self):
@@ -882,12 +882,12 @@ class TestUniversalHybridSecrets(unittest.TestCase):
     def test_requires_must_name_declared_slot(self):
         files = {"p": {"install": "x", "secrets": {"TOKEN": {}},
                        "mcp": {"one": {"command": "server", "requires": ["MISSING"]}}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             m.derive({"plugins": ["p"]}, files, {"PRESENT_SECRET_VARS": ""})
         self.assertIn("requires unknown secret slot(s): MISSING", str(cm.exception))
 
     def test_disabled_and_secret_are_mutually_exclusive(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             self.derive(
                 {"plugins": ["p"], "agent_secrets": [
                     {"agent": "claude", "slot": "TOKEN", "secret": "X", "disabled": True}]},
@@ -953,7 +953,7 @@ class TestPluginPorts(unittest.TestCase):
         self.assertIn("${HOST_PORT}", self.LOCAL_BRIDGE["p"]["mcp"]["s"]["args"][1])
 
     def test_host_port_ref_in_local_without_host_port_errors(self):
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["p"]},
                    plugin_files={"p": {"install": "x",
                                        "mcp": {"s": {"command": "bash",
@@ -962,7 +962,7 @@ class TestPluginPorts(unittest.TestCase):
 
     ERROR_CASES = [
         ("not a map", {"plugins": ["browser"], "plugin_ports": [8815]},
-         "manifest plugin_ports: must be a map of plugin: port, e.g. plugin_ports: {browser: 8815}"),
+         "bottle plugin_ports: must be a map of plugin: port, e.g. plugin_ports: {browser: 8815}"),
         ("plugin not enabled", {"plugins": ["browser"], "plugin_ports": {"ghost": 8815}},
          "plugin_ports 'ghost': not an enabled plugin (add it to plugins: first)"),
         ("non-int value", {"plugins": ["browser"], "plugin_ports": {"browser": "8815"}},
@@ -980,14 +980,14 @@ class TestPluginPorts(unittest.TestCase):
     def test_error_cases(self):
         for name, man, message in self.ERROR_CASES:
             with self.subTest(name):
-                with self.assertRaises(m.ManifestError) as cm:
+                with self.assertRaises(m.BottleError) as cm:
                     derive(man)
                 self.assertEqual(str(cm.exception), message)
 
     def test_host_port_ref_without_resolved_port(self):
         files = {"p": {"mcp": {"browser": {
             "url": "http://host.docker.internal:${HOST_PORT}/mcp"}}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["p"]}, plugin_files=files)
         self.assertEqual(
             str(cm.exception),
@@ -1120,14 +1120,14 @@ class TestPluginVolumes(unittest.TestCase):
     def test_error_cases(self):
         for name, doc, message in self.ERROR_CASES:
             with self.subTest(name):
-                with self.assertRaises(m.ManifestError) as cm:
+                with self.assertRaises(m.BottleError) as cm:
                     derive({"plugins": ["p"]}, plugin_files={"p": doc})
                 self.assertEqual(str(cm.exception), message)
 
     def test_two_plugins_cannot_share_a_volume_name(self):
         files = {"a": {"volumes": {"shared": "/home/coder/a"}},
                  "b": {"volumes": {"shared": "/home/coder/b"}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["a", "b"]}, plugin_files=files)
         self.assertEqual(
             str(cm.exception),
@@ -1137,7 +1137,7 @@ class TestPluginVolumes(unittest.TestCase):
     def test_two_plugins_cannot_share_a_mount_path(self):
         files = {"a": {"volumes": {"a-cache": "/home/coder/cache"}},
                  "b": {"volumes": {"b-cache": "/home/coder/cache"}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["a", "b"]}, plugin_files=files)
         self.assertEqual(
             str(cm.exception),
@@ -1147,7 +1147,7 @@ class TestPluginVolumes(unittest.TestCase):
     def test_one_plugin_cannot_nest_inside_another(self):
         files = {"a": {"volumes": {"a-cache": "/home/coder/cache"}},
                  "b": {"volumes": {"b-cache": "/home/coder/cache/inner"}}}
-        with self.assertRaises(m.ManifestError) as cm:
+        with self.assertRaises(m.BottleError) as cm:
             derive({"plugins": ["a", "b"]}, plugin_files=files)
         self.assertEqual(
             str(cm.exception),

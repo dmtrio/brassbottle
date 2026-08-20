@@ -4,7 +4,7 @@
 # NOT MCP — unlike rhinomcp-official/cordyceps there is no HTTP endpoint to reach, so
 # the bridge must run in-container. host_port is the local-bridge-dials-host
 # case: it opens the firewall to host.docker.internal:1999 and ${HOST_PORT} in
-# args is substituted at derive time, so a manifest plugin_ports: override
+# args is substituted at derive time, so a bottle plugin_ports: override
 # re-points the firewall grant and the dial target together.
 #
 # RHINO_MCP_ALLOW_REMOTE=1 acknowledges the bridge's own non-loopback guard:

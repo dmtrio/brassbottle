@@ -1,12 +1,12 @@
-"""Unit tests for src/pull_manifests.py.
+"""Unit tests for src/pull_bottles.py.
 
 Real git repositories in temp dirs, not mocks: the whole value of this file is
-that it correctly distinguishes "an external manifests repo" from "brassbottle
+that it correctly distinguishes "an external bottles repo" from "brassbottle
 itself" and from "a plain directory", and every one of those distinctions is a
 git question. A mocked `git` would test the mock.
 
 The failure this guards against is silent in both directions — pulling
-brassbottle when asked to pull manifests, or leaving a merged manifest unread —
+brassbottle when asked to pull bottles, or leaving a merged bottle unread —
 so each case asserts on the printed line as well as the return value.
 """
 
@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-import pull_manifests as pm  # noqa: E402
+import pull_bottles as pm  # noqa: E402
 
 
 def git(*args, cwd):
@@ -95,13 +95,13 @@ class Decide(Base):
         self.assertFalse(should)
 
     def test_external_repo_is_pulled(self):
-        repo = init_repo(self.path("manifests"))
+        repo = init_repo(self.path("bottles"))
         should, _ = pm.decide(repo, init_repo(self.path("brassbottle")),
                               bundled=False)
         self.assertTrue(should)
 
     def test_subdirectory_of_an_external_repo_is_pulled(self):
-        repo = init_repo(self.path("manifests"))
+        repo = init_repo(self.path("bottles"))
         sub = os.path.join(repo, "sub")
         os.makedirs(sub)
         should, _ = pm.decide(sub, None, bundled=False)
@@ -110,7 +110,7 @@ class Decide(Base):
 
 class RepoIdentity(Base):
     def test_a_linked_worktree_is_the_same_repository(self):
-        # The layout this project's own workspace contract mandates: manifests
+        # The layout this project's own workspace contract mandates: bottles
         # pointed at a brassbottle WORKTREE while --self is the main checkout.
         # --show-toplevel differs between them, so a toplevel comparison would
         # wave this through and pull a branch another agent has checked out.
@@ -132,7 +132,7 @@ class RepoIdentity(Base):
         self.assertFalse(should)
 
     def test_an_unrelated_repo_keeps_its_own_identity(self):
-        a = init_repo(self.path("manifests"))
+        a = init_repo(self.path("bottles"))
         b = init_repo(self.path("brassbottle"))
         self.assertNotEqual(pm.repo_identity(a), pm.repo_identity(b))
         should, _ = pm.decide(a, b, bundled=False)
@@ -203,7 +203,7 @@ class Pull(Base):
         git("commit", "-q", "-m", "add bottle", cwd=upstream)
         return upstream, clone
 
-    def test_merged_manifest_arrives(self):
+    def test_merged_bottle_arrives(self):
         _, clone = self.clone_pair()
         self.assertFalse(os.path.exists(os.path.join(clone, "new-bottle.yml")))
         pulled, output = self.run_pull(clone)
@@ -244,7 +244,7 @@ class Pull(Base):
         # git fast-forwards a dirty tree happily as long as the incoming commit
         # touches no edited file — so the merged bottle arrives AND the local
         # edit stays. Pinned because it is the common case: someone tweaking a
-        # manifest by hand while an unrelated bottle lands upstream.
+        # bottle by hand while an unrelated bottle lands upstream.
         _, clone = self.clone_pair()          # upstream adds new-bottle.yml
         Path(clone, "seed.yml").write_text("task: locally-edited\n")
         pulled, _ = self.run_pull(clone)
@@ -254,7 +254,7 @@ class Pull(Base):
                          "task: locally-edited\n")
 
     def test_local_edit_to_an_incoming_file_blocks_the_pull_not_the_run(self):
-        # Here git refuses rather than clobber the edit. The manifest the user
+        # Here git refuses rather than clobber the edit. The bottle the user
         # is mid-edit must win, and up.sh must still proceed.
         upstream = init_repo(self.path("upstream2"))
         clone = self.path("clone2")
@@ -289,7 +289,7 @@ class Pull(Base):
 
     def test_every_path_prints_exactly_one_line(self):
         # up.sh prints this inline with its other progress output; a silent or
-        # multi-line result would make a stale manifest easy to miss.
+        # multi-line result would make a stale bottle easy to miss.
         _, clone = self.clone_pair()
         for kwargs in ({}, {"bundled": True}):
             _, output = self.run_pull(clone, **kwargs)
@@ -306,12 +306,12 @@ class Cli(Base):
         self.assertEqual(pm.main([repo, "--bundled"]), 0)
 
     def test_invoked_as_a_subprocess(self):
-        script = Path(__file__).resolve().parent.parent / "src" / "pull_manifests.py"
+        script = Path(__file__).resolve().parent.parent / "src" / "pull_bottles.py"
         repo = init_repo(self.path("solo"))
         p = subprocess.run([sys.executable, str(script), repo],
                            capture_output=True, text=True)
         self.assertEqual(p.returncode, 0)
-        self.assertIn("manifests:", p.stdout)
+        self.assertIn("bottles:", p.stdout)
 
 
 if __name__ == "__main__":

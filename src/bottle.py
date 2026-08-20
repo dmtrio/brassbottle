@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Host-side manifest reading + validation for up.sh (Phase 2 of the Python
+"""Host-side bottle reading + validation for up.sh (Phase 2 of the Python
 extraction; wire_plugins.py was Phase 1).
 
 up.sh feeds this file yq-converted JSON on stdin and evals the derived shell
 assignments it prints:
 
-    input (stdin):  line 1: the manifest as JSON (yq -o=json -I=0)
+    input (stdin):  line 1: the bottle as JSON (yq -o=json -I=0)
                     then one line per plugins/*/plugin.yml: "<name>\t<json>" — or
                     "<name>\t!" when yq could not parse that file (an error
-                    only if the manifest actually lists the plugin; an
+                    only if the bottle actually lists the plugin; an
                     unlisted broken file must not block unrelated containers)
     input (env):    PRESENT_SECRET_VARS — space-separated names of non-empty
                                           secret sources (names only — secret
                                           VALUES never reach this process beyond
                                           NTFY_URL/NTFY_TOPIC below)
                     GIT_NAME_DEFAULT / GIT_EMAIL_DEFAULT — host git config
-                                       fallbacks for manifests without git:
+                                       fallbacks for bottles without git:
                     NTFY_URL / NTFY_TOPIC — from secrets.env, only consumed
-                                       when the manifest asks for ntfy
+                                       when the bottle asks for ntfy
                     SECRETS_FILE     — path, used verbatim in error messages
     output (stdout): one VAR=value line per derived variable, every value
                     shell-quoted (shlex.quote); up.sh does DERIVED=$(…) and
@@ -25,7 +25,7 @@ assignments it prints:
                     exit 1 — the command substitution assignment then aborts
                     up.sh under set -e.
 
-Behavioral fidelity notes (each is pinned by tests/test_manifest.py):
+Behavioral fidelity notes (each is pinned by tests/test_bottle.py):
 - yq/jq `//` treats false AND null as empty: `plugins: false` means "no
   plugins", `repos: false` means no repos, `tools: false` gets the default
   set. The old scalar `repo:` key is rejected outright (layout v2).
@@ -70,7 +70,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 REF_RE = re.compile(r"^[A-Za-z0-9_]+\Z")
 # Placeholder a plugin uses for its own host port — in a remote url, or in a
 # local bridge's command/args when the bridge dials the host (rhinomcp) — so
-# the port lives once in plugin.yml (host_port:) and a manifest plugin_ports:
+# the port lives once in plugin.yml (host_port:) and a bottle plugin_ports:
 # override re-points the dial target and the firewall grant together. Expanded
 # host-side at derive time — cursor/gemini can't expand ${VAR} refs in remote
 # specs.
@@ -160,7 +160,7 @@ AGENT_NAMES = frozenset({"claude", "codex", "pi", "gemini", "cursor-agent"})
 UNREADABLE = object()
 
 
-class ManifestError(Exception):
+class BottleError(Exception):
     """Fatal validation error; main() prints 'Error: …' to stderr, exit 1."""
 
 
@@ -178,7 +178,7 @@ def _scalar(v, field, default=""):
     if v is True:
         return "true"
     if isinstance(v, (dict, list)):
-        raise ManifestError(f"manifest {field} must be a single value, not a map/list")
+        raise BottleError(f"bottle {field} must be a single value, not a map/list")
     return str(v)
 
 
@@ -190,20 +190,20 @@ def _raw_flag(v, field):
     if v is True:
         return "true"
     if isinstance(v, (dict, list)):
-        raise ManifestError(f"manifest {field} must be a single value, not a map/list")
+        raise BottleError(f"bottle {field} must be a single value, not a map/list")
     return str(v)
 
 
-def _section(manifest, key):
+def _section(bottle, key):
     """A top-level map section: absent/null → {}; any other non-map type is a
     named error (the old yq aborted with a cryptic 'cannot index' here — and
     silently-empty would be worse: a list-typo'd identities: must not bring
     the container up unauthenticated)."""
-    v = manifest.get(key)
+    v = bottle.get(key)
     if v is None:
         return {}
     if not isinstance(v, dict):
-        raise ManifestError(f"manifest {key}: must be a map (got a {_yaml_type(v)})")
+        raise BottleError(f"bottle {key}: must be a map (got a {_yaml_type(v)})")
     return v
 
 
@@ -214,7 +214,7 @@ def _word_list(v, field):
     if _falsy(v):
         return []
     if not isinstance(v, list):
-        raise ManifestError(f"manifest {field} must be a list")
+        raise BottleError(f"bottle {field} must be a list")
     rendered = (_scalar(x, f"{field} entry") for x in v)
     return [r for r in rendered if r != ""]
 
@@ -227,7 +227,7 @@ def _comma_list(v, field):
     if _falsy(v):
         return []
     if not isinstance(v, list):
-        raise ManifestError(f"manifest {field} must be a list")
+        raise BottleError(f"bottle {field} must be a list")
     return [_scalar(x, f"{field} entry") for x in v]
 
 
@@ -260,14 +260,14 @@ def plugin_compose_overlay(volumes):
 
     `volumes` is {volume name: container path}. Emitted sorted by name so the
     file is a function of WHICH plugins are enabled, not of their order in the
-    manifest — a reordered plugins: list must not rewrite the overlay.
+    bottle — a reordered plugins: list must not rewrite the overlay.
     """
     if not volumes:
         return ""
     names = sorted(volumes)
     paths = " ".join(volumes[n] for n in names)
     lines = [
-        "# GENERATED by src/manifest.py — do not edit; ./up.sh rewrites it.",
+        "# GENERATED by src/bottle.py — do not edit; ./up.sh rewrites it.",
         "# Named volumes declared by the plugins THIS container enables",
         "# (plugins/<name>/volumes:). Compose prefixes each name with the project,",
         "# so `foo` is really `djinn-<container>_foo` — per container, like the",
@@ -304,16 +304,16 @@ def _parse_secret(val, plugin, slot):
     elif isinstance(val, dict):
         extra = ",".join(k for k in val if k != "hint")
         if extra:
-            raise ManifestError(
+            raise BottleError(
                 f"plugin '{plugin}' secret '{slot}': unsupported field(s): {extra} (only hint)")
         hint = val.get("hint", "")
         if not isinstance(hint, str):
-            raise ManifestError(f"plugin '{plugin}' secret '{slot}': hint must be a string")
+            raise BottleError(f"plugin '{plugin}' secret '{slot}': hint must be a string")
     else:
-        raise ManifestError(
+        raise BottleError(
             f"plugin '{plugin}' secret '{slot}': must be empty or a map with an optional hint: key")
     if "\t" in hint or "\n" in hint:
-        raise ManifestError(f"plugin '{plugin}' secret '{slot}': hint must be a single line (no tab/newline)")
+        raise BottleError(f"plugin '{plugin}' secret '{slot}': hint must be a single line (no tab/newline)")
     return hint
 
 
@@ -364,7 +364,7 @@ def _git_identity(git, env, secrets_file):
 
     orgs = git.get("orgs")
     records = []  # (owner_lc, canonical_var, source_var, name, email)
-    seen_owners = {}  # lowercased owner → the manifest key that claimed it
+    seen_owners = {}  # lowercased owner → the bottle key that claimed it
     if not _falsy(orgs):
         if not isinstance(orgs, dict):
             errors.append("  git.orgs: must be a map of <owner>: {token, name, email}")
@@ -401,7 +401,7 @@ def _git_identity(git, env, secrets_file):
                             _scalar(spec.get("email"), f"{field}.email")))
 
     if errors:
-        raise ManifestError("manifest git identity failed validation:\n" + "\n".join(errors))
+        raise BottleError("bottle git identity failed validation:\n" + "\n".join(errors))
 
     return {
         "GIT_TOKEN_SOURCE": default_source,
@@ -417,27 +417,27 @@ class Derived(dict):
         return "".join(f"{k}={shlex.quote(v)}\n" for k, v in self.items())
 
 
-def derive(manifest, plugin_files, env):
-    """The whole old 'Read manifest' section of up.sh as one function.
-    manifest: parsed manifest JSON; plugin_files: {name: parsed plugin JSON,
+def derive(bottle, plugin_files, env):
+    """The whole old 'Read bottle' section of up.sh as one function.
+    bottle: parsed bottle JSON; plugin_files: {name: parsed plugin JSON,
     or UNREADABLE for a file yq couldn't parse} for every file shipped under
     plugins/; env: os.environ-like mapping."""
-    if not isinstance(manifest, dict):
-        raise ManifestError("manifest must be a YAML mapping")
+    if not isinstance(bottle, dict):
+        raise BottleError("bottle must be a YAML mapping")
     out = Derived()
     secrets_file = env.get("SECRETS_FILE", "secrets.env")
 
     # ── Scalars (old Y() reads + defaults) ──────────────────────────────
     # layout v2: repo: (scalar) is gone; repos: is a list of URLs / {name, url}.
-    if "repo" in manifest:
-        raise ManifestError(
-            "manifest repo: is gone — declare repos: [<url>, ...] instead "
+    if "repo" in bottle:
+        raise BottleError(
+            "bottle repo: is gone — declare repos: [<url>, ...] instead "
             "(layout v2: each repo clones to /workspace/repos/<name>)")
-    repos_val = manifest.get("repos")
+    repos_val = bottle.get("repos")
     if _falsy(repos_val):
         repos_val = []
     elif not isinstance(repos_val, list):
-        raise ManifestError("manifest repos: must be a list of URLs or {name, url} maps")
+        raise BottleError("bottle repos: must be a list of URLs or {name, url} maps")
     repo_errors = []
     parsed_repos = []
     seen_repo_names = set()
@@ -493,25 +493,25 @@ def derive(manifest, plugin_files, env):
         seen_repo_names.add(name)
         parsed_repos.append((name, url))
     if repo_errors:
-        raise ManifestError(
-            "manifest repos failed validation:\n" + "\n".join(repo_errors))
+        raise BottleError(
+            "bottle repos failed validation:\n" + "\n".join(repo_errors))
     out["REPOS"] = "".join(f"{name}\t{url}\n" for name, url in parsed_repos)
-    forge = _scalar(manifest.get("forge"), "forge") or "github"
+    forge = _scalar(bottle.get("forge"), "forge") or "github"
     if forge not in ("github", "gitea"):
-        raise ManifestError("forge must be github or gitea")
+        raise BottleError("forge must be github or gitea")
     out["FORGE"] = forge
-    git = _section(manifest, "git")
+    git = _section(bottle, "git")
     out["GIT_USER_NAME"] = _scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
     out["GIT_USER_EMAIL"] = _scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
     out.update(_git_identity(git, env, secrets_file))
-    out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
+    out["MEM_LIMIT"] = _scalar(bottle.get("memory"), "memory") or "2g"
 
     # ── Tools ───────────────────────────────────────────────────────────
-    tools = manifest.get("tools")
+    tools = bottle.get("tools")
     if _falsy(tools):
         tools = DEFAULT_TOOLS
     if not isinstance(tools, list):
-        raise ManifestError("manifest tools: must be a list")
+        raise BottleError("bottle tools: must be a list")
     for var, name in (("INSTALL_CLAUDE", "claude"), ("INSTALL_CODEX", "codex"),
                       ("INSTALL_PI", "pi"), ("INSTALL_GEMINI", "gemini"),
                       ("INSTALL_CURSOR", "cursor"), ("INSTALL_AIDER", "aider")):
@@ -519,7 +519,7 @@ def derive(manifest, plugin_files, env):
 
     # ── Capabilities: egress firewall keys stay; gateway/proxyman/browser are
     #    deprecated sugar for the equivalent plugins (PLN - Plugins v2). ──────
-    caps = _section(manifest, "capabilities")
+    caps = _section(bottle, "capabilities")
     egress_items = _comma_list(caps.get("egress"), "capabilities.egress")
     cidr_items = _comma_list(caps.get("egress_cidrs"), "capabilities.egress_cidrs")
     sugar_plugins = []
@@ -534,7 +534,7 @@ def derive(manifest, plugin_files, env):
     #    agent_secrets bindings (PLN - Plugins v2 Phase 2). Reading the refs
     #    here lets the sugar auto-enable the plugin files so they validate like
     #    any other; the ref→binding conversion + validation happens below. ────
-    ids = _section(manifest, "identities")
+    ids = _section(bottle, "identities")
     obs_refs = _word_list(ids.get("obsidian"), "identities.obsidian")
     watch_refs = _word_list(ids.get("watch"), "identities.watch")
     if obs_refs:
@@ -547,9 +547,9 @@ def derive(manifest, plugin_files, env):
               "sugar and will be removed", file=sys.stderr)
 
     # ── Plugins list (aggregated errors, old order) ─────────────────────
-    plugins_val = manifest.get("plugins")
+    plugins_val = bottle.get("plugins")
     if not _falsy(plugins_val) and not isinstance(plugins_val, list):
-        raise ManifestError("manifest plugins: must be a list, e.g. plugins: [serena]")
+        raise BottleError("bottle plugins: must be a list, e.g. plugins: [serena]")
     plugins = _word_list(plugins_val, "plugins")
     # capabilities: sugar appends the equivalent plugin names (dedup, explicit
     # list first) so gateway/proxyman/browser flow through the one pipeline.
@@ -567,8 +567,8 @@ def derive(manifest, plugin_files, env):
         elif plugin_files[p] is UNREADABLE:
             plugin_errors.append(f"  plugin '{p}': plugins/{p}/plugin.yml is not valid YAML (yq could not parse it)")
     if plugin_errors:
-        raise ManifestError(
-            "manifest plugins failed validation:\n" + "\n".join(plugin_errors))
+        raise BottleError(
+            "bottle plugins failed validation:\n" + "\n".join(plugin_errors))
     out["PLUGINS"] = " ".join(plugins)
 
     # ── plugin_ports: per-container host port for a host-service plugin ──
@@ -577,39 +577,39 @@ def derive(manifest, plugin_files, env):
     # and remote.mosh_ports are per-container. An override re-points BOTH the
     # firewall grant (HOST_MCP_PORTS) and the ${HOST_PORT} placeholder in the
     # plugin's url, so the port stays a single value with one source of truth.
-    plugin_ports_val = manifest.get("plugin_ports")
+    plugin_ports_val = bottle.get("plugin_ports")
     plugin_ports = {}
     if not _falsy(plugin_ports_val):
         if not isinstance(plugin_ports_val, dict):
-            raise ManifestError(
-                "manifest plugin_ports: must be a map of plugin: port, e.g. plugin_ports: {browser: 8815}")
+            raise BottleError(
+                "bottle plugin_ports: must be a map of plugin: port, e.g. plugin_ports: {browser: 8815}")
         for name, val in plugin_ports_val.items():
             if name not in plugins:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin_ports '{name}': not an enabled plugin (add it to plugins: first)")
             if isinstance(val, bool) or not isinstance(val, int):
-                raise ManifestError(f"plugin_ports '{name}': must be an integer port number")
+                raise BottleError(f"plugin_ports '{name}': must be an integer port number")
             if not 1 <= val <= 65535:
-                raise ManifestError(f"plugin_ports '{name}': port {val} out of range (1-65535)")
+                raise BottleError(f"plugin_ports '{name}': port {val} out of range (1-65535)")
             plugin_ports[name] = val
 
     # ── ssh / remote (RFC 04) ───────────────────────────────────────────
-    ssh = _section(manifest, "ssh")
+    ssh = _section(bottle, "ssh")
     ssh_port = _scalar(ssh.get("port"), "ssh.port")
     out["SSH_PORT"] = ssh_port
     out["SSH_BIND"] = _scalar(ssh.get("bind"), "ssh.bind") or "127.0.0.1"
 
-    remote = _section(manifest, "remote")
+    remote = _section(bottle, "remote")
     remote_tmux = _raw_flag(remote.get("tmux"), "remote.tmux")
     remote_mosh = _raw_flag(remote.get("mosh"), "remote.mosh")
     remote_notify = _scalar(remote.get("notify"), "remote.notify")
     if (remote_tmux == "true" or remote_mosh == "true" or remote_notify) and not ssh_port:
-        raise ManifestError(
-            "manifest has remote: but no ssh: section — remote access rides the SSH login path (add ssh.port)")
+        raise BottleError(
+            "bottle has remote: but no ssh: section — remote access rides the SSH login path (add ssh.port)")
     if remote_notify not in ("", "ntfy"):
-        raise ManifestError(f"remote.notify must be 'ntfy' (got '{remote_notify}')")
+        raise BottleError(f"remote.notify must be 'ntfy' (got '{remote_notify}')")
     if remote_notify and remote_tmux != "true":
-        raise ManifestError(
+        raise BottleError(
             "remote.notify requires remote.tmux: true (the idle monitor runs inside the tmux session)")
     out["REMOTE_TMUX"] = remote_tmux
     out["REMOTE_MOSH"] = remote_mosh
@@ -620,10 +620,10 @@ def derive(manifest, plugin_files, env):
     if remote_mosh == "true":
         mosh_ports = _scalar(remote.get("mosh_ports"), "remote.mosh_ports") or "60000:60010"
         if not MOSH_PORTS_RE.match(mosh_ports):
-            raise ManifestError(f"remote.mosh_ports must be START:END (got '{mosh_ports}')")
+            raise BottleError(f"remote.mosh_ports must be START:END (got '{mosh_ports}')")
         lo, hi = (int(x) for x in mosh_ports.split(":"))
         if lo > hi or hi > 65535 or lo < 1024:
-            raise ManifestError(
+            raise BottleError(
                 f"remote.mosh_ports '{mosh_ports}' out of range (need 1024 <= START <= END <= 65535)")
         mosh_ports_dash = f"{lo}-{hi}"
     out["MOSH_PORTS"] = mosh_ports
@@ -659,8 +659,8 @@ def derive(manifest, plugin_files, env):
     for ref in watch_refs:
         check_ref("watch", "ANNOTATED_WATCH_KEY", "OBSIDIAN_WATCH_KEY", ref)
     if identity_errors:
-        raise ManifestError(
-            "manifest identity references failed validation:\n" + "\n".join(identity_errors))
+        raise BottleError(
+            "bottle identity references failed validation:\n" + "\n".join(identity_errors))
 
     # Plugins fold their own egress (obsidian-annotated ships mcp-obsidian.dmetr.io).
     def add_egress_domain(domain):
@@ -688,11 +688,11 @@ def derive(manifest, plugin_files, env):
         if doc is None:
             doc = {}  # empty yaml file → null → a valid no-op plugin
         if not isinstance(doc, dict):
-            raise ManifestError(
+            raise BottleError(
                 f"plugin '{p}': plugins/{p}/plugin.yml must be a YAML map (got a {_yaml_type(doc)})")
         for d in _comma_list(doc.get("egress"), f"plugin '{p}' egress"):
             if not DOMAIN_RE.match(d):
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' egress entry '{d}' is not a bare hostname (no scheme, path, port, or wildcard — a domain already covers its subdomains)")
             add_egress_domain(d)
 
@@ -701,107 +701,107 @@ def derive(manifest, plugin_files, env):
         secrets = doc.get("secrets")
         secrets = {} if _falsy(secrets) else secrets
         if not isinstance(secrets, dict):
-            raise ManifestError(f"plugin '{p}' secrets must be a map of SLOT: {{hint: ...}}")
+            raise BottleError(f"plugin '{p}' secrets must be a map of SLOT: {{hint: ...}}")
         plugin_slots = set()
         for slot, val in secrets.items():
             if not REF_RE.match(slot):
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' secret slot '{slot}': illegal characters (must be a shell env var name)")
             if slot in secret_slots:
-                raise ManifestError(f"secret slot '{slot}' is declared by more than one enabled plugin")
+                raise BottleError(f"secret slot '{slot}' is declared by more than one enabled plugin")
             secret_slots[slot] = (p, _parse_secret(val, p, slot))
             plugin_slots.add(slot)
 
         mcp = doc.get("mcp")
         mcp = {} if _falsy(mcp) else mcp
         if not isinstance(mcp, dict):
-            raise ManifestError(f"plugin '{p}' mcp must be a map of MCP servers")
+            raise BottleError(f"plugin '{p}' mcp must be a map of MCP servers")
         has_local = False
         has_remote = False
         for n, spec in mcp.items():
             if not NAME_RE.match(n):
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' mcp server '{n}': illegal characters in name (allowed: letters, digits, underscore, dash — it becomes a TOML/JSON key)")
             spec = spec if isinstance(spec, dict) else {}
             is_local = "command" in spec
             is_remote = "url" in spec
             if is_local and is_remote:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' mcp server '{n}': set exactly one of command: (local stdio) or url: (remote http), not both")
             if not is_local and not is_remote:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' mcp server '{n}': needs command: (local stdio) or url: (remote http)")
             requires = spec.get("requires", [])
             if _falsy(requires):
                 requires = []
             if not isinstance(requires, list) or not all(isinstance(s, str) for s in requires):
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' mcp server '{n}': requires must be a list of this plugin's secret slots")
             if len(set(requires)) != len(requires):
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' mcp server '{n}': requires must not repeat a secret slot")
             unknown = [slot for slot in requires if slot not in plugin_slots]
             if unknown:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' mcp server '{n}': requires unknown secret slot(s): {', '.join(unknown)}")
             if is_local:
                 has_local = True
                 if not isinstance(spec.get("command"), str):
-                    raise ManifestError(
+                    raise BottleError(
                         f"plugin '{p}' mcp server '{n}': command must be a string (local stdio server)")
                 extra = ",".join(k for k in spec if k not in ("command", "args", "requires"))
                 if extra:
-                    raise ManifestError(
+                    raise BottleError(
                         f"plugin '{p}' mcp server '{n}': unsupported field(s) for a local server: {extra} (only command, args, and requires)")
             else:
                 has_remote = True
                 if not isinstance(spec.get("url"), str):
-                    raise ManifestError(
+                    raise BottleError(
                         f"plugin '{p}' mcp server '{n}': url must be a string (remote http server)")
                 headers = spec.get("headers", {})
                 if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
-                    raise ManifestError(
+                    raise BottleError(
                         f"plugin '{p}' mcp server '{n}': headers must be a map of string values")
                 extra = ",".join(k for k in spec if k not in ("url", "headers", "requires"))
                 if extra:
-                    raise ManifestError(
+                    raise BottleError(
                         f"plugin '{p}' mcp server '{n}': unsupported field(s) for a remote server: {extra} (only url, headers, and requires)")
             if n in seen_server_names:
-                raise ManifestError(
+                raise BottleError(
                     f"multiple enabled plugins define the same MCP server name: {n}")
             seen_server_names.add(n)
 
         install = doc.get("install")
         if has_local and (_falsy(install) or not isinstance(install, str) or not install.strip()):
-            raise ManifestError(
+            raise BottleError(
                 f"plugin '{p}': a local (command:) server needs an install: block (baked into the image)")
 
         # ── volumes: state that must outlive a container recreate ────────────
         # A per-container named volume, mounted at a path the plugin names.
         # Declared here rather than in compose/ so nothing outside plugins/<p>/
         # knows this plugin exists; up.sh feeds the generated overlay to compose
-        # only for the containers whose manifest enables it.
+        # only for the containers whose bottle enables it.
         vols = doc.get("volumes")
         vols = {} if _falsy(vols) else vols
         if not isinstance(vols, dict):
-            raise ManifestError(
+            raise BottleError(
                 f"plugin '{p}' volumes must be a map of NAME: /container/path")
         for vname, vpath in vols.items():
             if not VOLUME_NAME_RE.match(vname):
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' volume '{vname}': name must be at least two characters, start with a letter or digit, and use only letters, digits, underscore, dash (it becomes a compose volume key)")
             if vname in COMPOSE_VOLUME_NAMES:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' volume '{vname}': that name is already a compose volume (compose would merge into it and remount a real directory)")
             if vname in volume_owner:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' volume '{vname}': already declared by plugin '{volume_owner[vname]}' (two plugins cannot share one volume)")
             vpath = _scalar(vpath, f"plugin '{p}' volumes.{vname}")
             if not VOLUME_PATH_RE.match(vpath) or ".." in vpath.split("/"):
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' volume '{vname}': path '{vpath}' is not an absolute container path (letters, digits, and . _ - + @ only — no spaces, ':', '$', globs, '..', or trailing slash)")
             if not _path_overlaps(vpath, VOLUME_ROOT) or vpath == VOLUME_ROOT:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' volume '{vname}': path '{vpath}' must be under {VOLUME_ROOT}/ (a volume elsewhere would shadow image content or the workspace)")
             # Not just an exact hit: a volume at a PARENT of a compose mount
             # freezes that whole tree in a volume (a rebuilt image never reaches
@@ -809,11 +809,11 @@ def derive(manifest, plugin_files, env):
             # both silent, both only visible as lost auth or missing repos.
             clash = next((m for m in sorted(COMPOSE_MOUNT_PATHS) if _path_overlaps(vpath, m)), None)
             if clash:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' volume '{vname}': path '{vpath}' collides with the compose mount '{clash}'")
             clash = next((q for q in sorted(path_owner) if _path_overlaps(vpath, q)), None)
             if clash:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' volume '{vname}': path '{vpath}' collides with '{clash}', mounted by plugin '{path_owner[clash]}'")
             plugin_volumes[vname] = vpath
             volume_owner[vname] = p
@@ -826,7 +826,7 @@ def derive(manifest, plugin_files, env):
             # host over TCP (rhinomcp). Anything else would open a firewall
             # hole nothing uses.
             if not mcp:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}': host_port needs an mcp server to use it — a remote "
                     "(url:) server, or a local bridge that dials the host")
             if not has_remote and not any(
@@ -836,19 +836,19 @@ def derive(manifest, plugin_files, env):
                 # demonstrably take the port — otherwise the firewall opens for
                 # a port nothing dials, and a plugin_ports: override would move
                 # the grant while the bridge kept dialing the old port.
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}': host_port with only local servers needs a "
                     f"{HOST_PORT_REF} reference in the bridge's command/args")
             if isinstance(hp, bool) or not isinstance(hp, int):
-                raise ManifestError(f"plugin '{p}': host_port must be an integer port number")
+                raise BottleError(f"plugin '{p}': host_port must be an integer port number")
             if not 1 <= hp <= 65535:
-                raise ManifestError(f"plugin '{p}': host_port {hp} out of range (1-65535)")
+                raise BottleError(f"plugin '{p}': host_port {hp} out of range (1-65535)")
         elif p in plugin_ports:
             # Overriding a port the plugin never declares would open a firewall
             # grant to a port nothing serves — almost certainly a typo'd name.
-            raise ManifestError(
+            raise BottleError(
                 f"plugin_ports '{p}': plugin declares no host_port (it has no host-side service to re-point)")
-        # The manifest override wins over the plugin's default; either way the
+        # The bottle override wins over the plugin's default; either way the
         # SAME value feeds the firewall grant and the url placeholder below.
         resolved_port = plugin_ports.get(p, hp if not _falsy(hp) else None)
         if resolved_port is not None:
@@ -871,7 +871,7 @@ def derive(manifest, plugin_files, env):
             if not any(HOST_PORT_REF in v for v in _host_port_ref_fields(spec)):
                 continue
             if resolved_port is None:
-                raise ManifestError(
+                raise BottleError(
                     f"plugin '{p}' mcp server '{n}': {'url' if 'url' in spec else 'command/args'} "
                     f"uses {HOST_PORT_REF} but the plugin declares no host_port to substitute")
             port = str(resolved_port)
@@ -926,27 +926,27 @@ def derive(manifest, plugin_files, env):
     # common_secrets declares the optional default source for a slot. An
     # agent_secrets record either replaces that source for one agent or
     # explicitly disables the slot for that agent.
-    common = manifest.get("common_secrets")
+    common = bottle.get("common_secrets")
     defaults = {}
     if not _falsy(common):
         if isinstance(common, list):
             for slot in _word_list(common, "common_secrets"):
                 if slot not in secret_slots:
-                    raise ManifestError(
+                    raise BottleError(
                         f"common_secrets slot '{slot}': no enabled plugin declares that secret slot")
                 defaults[slot] = slot
         elif isinstance(common, dict):
             for slot, source in common.items():
                 source = _scalar(source, f"common_secrets.{slot}")
                 if slot not in secret_slots:
-                    raise ManifestError(
+                    raise BottleError(
                         f"common_secrets slot '{slot}': no enabled plugin declares that secret slot")
                 if not REF_RE.match(source):
-                    raise ManifestError(
+                    raise BottleError(
                         f"common_secrets slot '{slot}': source '{source}' is not a valid env var name")
                 defaults[slot] = source
         else:
-            raise ManifestError("manifest common_secrets: must be a list of slots or a map of SLOT: source")
+            raise BottleError("bottle common_secrets: must be a list of slots or a map of SLOT: source")
     for slot, source in list(defaults.items()):
         if source not in present_vars:
             plugin, hint = secret_slots[slot]
@@ -955,31 +955,31 @@ def derive(manifest, plugin_files, env):
                   file=sys.stderr)
             del defaults[slot]
 
-    explicit = manifest.get("agent_secrets")
+    explicit = bottle.get("agent_secrets")
     explicit_bindings = []
     if not _falsy(explicit):
         if not isinstance(explicit, list):
-            raise ManifestError(
-                "manifest agent_secrets: must be a list of {agent, slot, secret} overrides or {agent, slot, disabled: true}")
+            raise BottleError(
+                "bottle agent_secrets: must be a list of {agent, slot, secret} overrides or {agent, slot, disabled: true}")
         for rec in explicit:
             if not isinstance(rec, dict):
-                raise ManifestError(
+                raise BottleError(
                     "agent_secrets: each entry must be a map with agent, slot, and exactly one of secret or disabled: true")
             agent = _scalar(rec.get("agent"), "agent_secrets.agent")
             slot = _scalar(rec.get("slot"), "agent_secrets.slot")
             has_secret = "secret" in rec
             disabled = rec.get("disabled", False)
             if not isinstance(disabled, bool):
-                raise ManifestError("agent_secrets.disabled must be true or false")
+                raise BottleError("agent_secrets.disabled must be true or false")
             if not agent or not slot or has_secret == disabled:
-                raise ManifestError(
+                raise BottleError(
                     "agent_secrets: each entry needs agent, slot, and exactly one of secret or disabled: true")
             source = _scalar(rec.get("secret"), "agent_secrets.secret") if has_secret else ""
             if has_secret and not source:
-                raise ManifestError("agent_secrets.secret must be a non-empty env var name")
+                raise BottleError("agent_secrets.secret must be a non-empty env var name")
             extra = ",".join(k for k in rec if k not in ("agent", "slot", "secret", "disabled"))
             if extra:
-                raise ManifestError(
+                raise BottleError(
                     f"agent_secrets: unsupported field(s): {extra} (only agent, slot, secret, disabled)")
             explicit_bindings.append((agent, slot, None if disabled else source))
 
@@ -987,17 +987,17 @@ def derive(manifest, plugin_files, env):
     overrides = {}
     for agent, slot, source in sugar_bindings + explicit_bindings:
         if agent not in AGENT_NAMES:
-            raise ManifestError(
+            raise BottleError(
                 f"agent_secrets: unknown agent '{agent}' (one of {', '.join(sorted(AGENT_NAMES))})")
         if slot not in secret_slots:
-            raise ManifestError(
+            raise BottleError(
                 f"agent_secrets: slot '{slot}' is not a secret of any enabled plugin")
         if source is not None and source not in present_vars:
-            raise ManifestError(
+            raise BottleError(
                 f"agent_secrets: secret '{source}' (for {agent}/{slot}) not found in {secrets_file} "
                 "(agent_secrets sources must be non-empty variables)")
         if (agent, slot) in seen_binds:
-            raise ManifestError(f"agent_secrets: {agent} is bound to slot '{slot}' more than once")
+            raise BottleError(f"agent_secrets: {agent} is bound to slot '{slot}' more than once")
         seen_binds.add((agent, slot))
         overrides[(agent, slot)] = source
 
@@ -1006,7 +1006,7 @@ def derive(manifest, plugin_files, env):
         ("gemini", "gemini"), ("cursor-agent", "cursor"),
     ) if _tool_installed(tools, t)]
 
-    # Explicit overrides retain manifest order. Defaults fill every enabled
+    # Explicit overrides retain bottle order. Defaults fill every enabled
     # agent not overridden or disabled, so a disabled entry intentionally
     # leaves no key or server configuration behind.
     agent_secret_records = []
@@ -1022,7 +1022,7 @@ def derive(manifest, plugin_files, env):
 
     # An enabled plugin slot with no effective credential is inert. Warn rather
     # than fail: listing a plugin before adding a default/override is deliberate
-    # for some manifests.
+    # for some bottles.
     bound_slots = {slot for _, slot, _ in agent_secret_records}
     for slot, (plugin, _) in secret_slots.items():
         if slot not in bound_slots:
@@ -1040,10 +1040,10 @@ def derive(manifest, plugin_files, env):
     if remote_notify == "ntfy":
         ntfy_url = env.get("NTFY_URL") or ""
         if not ntfy_url:
-            raise ManifestError(
-                f"manifest has remote.notify: ntfy but NTFY_URL is missing from {secrets_file}")
+            raise BottleError(
+                f"bottle has remote.notify: ntfy but NTFY_URL is missing from {secrets_file}")
         if any(c in ntfy_url for c in ('#', '"', "'")):
-            raise ManifestError(
+            raise BottleError(
                 "NTFY_URL must be a bare origin (no '#', quotes) — put the topic in NTFY_TOPIC")
         # Host = URL minus scheme, path, userinfo, port — the path strip must
         # precede the userinfo strip so an '@' in a path can't masquerade as
@@ -1053,7 +1053,7 @@ def derive(manifest, plugin_files, env):
         host = re.sub(r"^.*@", "", host)
         host = re.sub(r":[0-9]+$", "", host)
         if not host:
-            raise ManifestError(f"cannot parse a host from NTFY_URL '{ntfy_url}'")
+            raise BottleError(f"cannot parse a host from NTFY_URL '{ntfy_url}'")
         if IPV4_RE.match(host):
             # IP literal: the domain allowlist is dnsmasq-driven, so an IP
             # host must go through the CIDR path or the push is firewalled.
@@ -1071,45 +1071,45 @@ def derive(manifest, plugin_files, env):
 
 
 def read_stdin_docs(stream):
-    """Line 1: manifest JSON. Then '<name>\\t<json>' per plugins/*/plugin.yml file,
+    """Line 1: bottle JSON. Then '<name>\\t<json>' per plugins/*/plugin.yml file,
     with '!' in place of the JSON when yq could not parse the file."""
     first = stream.readline()
     if not first.strip():
-        raise ManifestError("no manifest JSON on stdin")
+        raise BottleError("no bottle JSON on stdin")
     try:
-        manifest = json.loads(first)
+        bottle = json.loads(first)
     except ValueError as e:
-        raise ManifestError(
-            f"manifest did not convert to valid JSON ({e}) — is the manifest YAML valid? (see any yq error above)")
-    # yq maps an EMPTY yaml file to null; treat as empty manifest.
-    if manifest is None:
-        manifest = {}
+        raise BottleError(
+            f"bottle did not convert to valid JSON ({e}) — is the bottle YAML valid? (see any yq error above)")
+    # yq maps an EMPTY yaml file to null; treat as empty bottle.
+    if bottle is None:
+        bottle = {}
     plugin_files = {}
     for line in stream:
         if not line.strip():
             continue
         name, sep, doc = line.partition("\t")
         if not sep:
-            raise ManifestError(
-                f"unexpected document after the manifest (a stray '---' making it multi-document?): {line.strip()[:120]}")
+            raise BottleError(
+                f"unexpected document after the bottle (a stray '---' making it multi-document?): {line.strip()[:120]}")
         if doc.strip() == "!":
             plugin_files[name] = UNREADABLE
             continue
         try:
             plugin_files[name] = json.loads(doc)
         except ValueError as e:
-            raise ManifestError(f"plugin file '{name}' is not valid JSON ({e})")
-    return manifest, plugin_files
+            raise BottleError(f"plugin file '{name}' is not valid JSON ({e})")
+    return bottle, plugin_files
 
 
 def main(argv):
     if "--derive" not in argv:
-        print("Error: manifest.py requires --derive (see module docstring)", file=sys.stderr)
+        print("Error: bottle.py requires --derive (see module docstring)", file=sys.stderr)
         return 2
     try:
-        manifest, plugin_files = read_stdin_docs(sys.stdin)
-        derived = derive(manifest, plugin_files, os.environ)
-    except ManifestError as e:
+        bottle, plugin_files = read_stdin_docs(sys.stdin)
+        derived = derive(bottle, plugin_files, os.environ)
+    except BottleError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     sys.stdout.write(derived.render())

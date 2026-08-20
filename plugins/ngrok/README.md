@@ -11,7 +11,7 @@ secret, so this plugin uses the server-less shape (like
   tunnel connection at runtime.
 
 Because it carries an `install:` block, ngrok is **baked into the shared image**:
-enabling it in a new manifest needs an **image rebuild**, not just `./djinn up`.
+enabling it in a new bottle needs an **image rebuild**, not just `./djinn up`.
 
 ## Enable it
 

@@ -55,7 +55,7 @@ kept in sync with any `plugin_ports:` override.
 ## Enable it
 
 ```yaml
-# manifest
+# bottle
 plugins: [rhinomcp]
 ```
 

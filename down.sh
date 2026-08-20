@@ -2,7 +2,7 @@
 # down.sh <name> [--purge] — stop and remove a container.
 # Default keeps the workspace volume (code) — ./up.sh <name> restores the
 # container around it. --purge also deletes the volume and derived keys;
-# the manifest, secrets.env, and artifacts/<name>/ always survive.
+# the bottle, secrets.env, and artifacts/<name>/ always survive.
 
 set -e
 
@@ -21,7 +21,7 @@ if [ "$2" = "--purge" ]; then
     # The generated plugin-volume overlay (up.sh writes it per container) is
     # derived state like keys/, so a purge collects it too.
     rm -f "$BASE_PATH/compose/$NAME.plugins.yml"
-    echo "Purged $CNAME (container, volume, image, derived keys). Kept: manifest, secrets.env, artifacts/$NAME/"
+    echo "Purged $CNAME (container, volume, image, derived keys). Kept: bottle, secrets.env, artifacts/$NAME/"
 else
     docker compose -p "$CNAME" down
     echo "Stopped $CNAME (workspace volume kept — ./djinn up $NAME to restore)"

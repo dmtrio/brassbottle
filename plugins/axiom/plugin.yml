@@ -13,7 +13,7 @@
 # and
 # mcp-remote itself substitutes ${AXIOM_TOKEN} into the header at connect time.
 # So the secret is in NO MCP config file AND never on the process command line
-# (argv holds the literal "${AXIOM_TOKEN}", not the value). Bind it in a manifest:
+# (argv holds the literal "${AXIOM_TOKEN}", not the value). Bind it in a bottle:
 #   common_secrets: [AXIOM_TOKEN]               # shared default
 #   agent_secrets:                              # per-agent override / disable
 #     - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}

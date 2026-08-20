@@ -7,7 +7,7 @@ This file governs every session in this container. It lives at
 
 ```
 /workspace/
-  repos/<name>/        # every repo the manifest declares — equal siblings
+  repos/<name>/        # every repo the bottle declares — equal siblings
   repos/.mcp.json      # canonical MCP config (generated; repos symlink to it)
   worktrees/<repo>/<branch>/  # one directory per active worktree (yours to manage)
   dev.code-workspace   # multi-root VS Code workspace — keep in sync (see below)
@@ -88,8 +88,8 @@ watch you work). Consequences:
 
 - Egress is firewalled to an allowlist of zones (GitHub, npm, PyPI, agent
   APIs, apt, plus per-container extra zones and LAN CIDR grants from the
-  manifest). A refused outbound connection is the firewall, not a network
+  bottle). A refused outbound connection is the firewall, not a network
   flake — say so instead of retrying, and ask the user to add the zone or
-  CIDR to the container's manifest if it's genuinely needed.
+  CIDR to the container's bottle if it's genuinely needed.
 - The host is unreachable except for ports listed in `HOST_MCP_PORTS`.
 - Run long tasks inside `tmux` so a dropped editor window never orphans them.

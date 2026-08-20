@@ -25,11 +25,11 @@ No `mcp:`, no `secrets:`, no `run.sh`, no `host_port:` — this is the binary-on
 plugin shape (like [`ngrok`](../ngrok/README.md), minus the secret). Nothing needs runtime
 network either: stitching is pure local compute, so there is no `egress:` grant.
 
-**Consequence worth knowing:** listing `gear360` in a manifest's `plugins:` has
+**Consequence worth knowing:** listing `gear360` in a bottle's `plugins:` has
 exactly one effect — `AGENTS.md` is merged into that container's agent rules.
 The install bakes into **every** djinn image regardless, because the
 Dockerfile's bake loop globs all of `plugins/*/plugin.yml` and does not consult
-any manifest. See "Cost" below.
+any bottle. See "Cost" below.
 
 ## Layout
 

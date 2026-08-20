@@ -10,7 +10,7 @@ be appended there. up.sh runs this once at `up`; an interactive-shell hook
 the fragments themselves are image-fixed (baked under /opt/plugins).
 
 Enabled-only: the image bakes EVERY plugin's fragment, but a container is told
-how to use only the plugins its manifest turned on. up.sh writes that list (the
+how to use only the plugins its bottle turned on. up.sh writes that list (the
 derived PLUGINS var) to the enabled-file, the single source of truth both the
 `up`-time and shell-start composes read.
 
@@ -85,7 +85,7 @@ def read_enabled(enabled_file):
 
 
 def _safe_name(name):
-    """A plugin name is a single path segment. up.sh feeds manifest-validated
+    """A plugin name is a single path segment. up.sh feeds bottle-validated
     names ([A-Za-z0-9_-]), but this module also reads an on-disk enabled-file
     standalone, so reject anything that could escape the plugins root (a '..'
     or a separator) before it reaches a filesystem read — defense in depth."""
@@ -94,7 +94,7 @@ def _safe_name(name):
 
 def load_fragments(plugins_root, names):
     """(name, text) for each enabled plugin that ships a non-empty AGENTS.md,
-    in the given order (manifest order — deterministic, author-controllable).
+    in the given order (bottle order — deterministic, author-controllable).
     A plugin without a fragment, or with an empty one, is silently skipped."""
     root = Path(plugins_root)
     fragments = []

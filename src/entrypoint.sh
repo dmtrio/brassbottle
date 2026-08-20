@@ -25,14 +25,14 @@ su coder -c 'if [ ! -L /home/coder/.claude.json ]; then [ -f /home/coder/.claude
 #
 # The loop is unquoted to word-split the space-separated list, which also turns
 # on globbing: `set -f` off/on around it so a path containing '*' can never
-# chown a DIFFERENT directory than the one that was mounted (manifest.py also
+# chown a DIFFERENT directory than the one that was mounted (bottle.py also
 # rejects glob characters — this is the second lock on the same door).
 #
 # Docker creates every missing PARENT of the mountpoint root-owned too, so walk
 # up from the mountpoint chowning root-owned ancestors and stop at the first one
 # that is already coder's. Without it a path one level below an existing image
 # directory leaves its parent unwritable — the plugin can write its own file but
-# not a sibling next to it. Bounded twice: manifest.py confines these paths to
+# not a sibling next to it. Bounded twice: bottle.py confines these paths to
 # /home/coder/, and the walk halts as soon as ownership is already right, so it
 # can never climb past the coder-owned home. Each chown is non-recursive: only
 # freshly created directories can be wrong, and they are empty by definition —
@@ -119,7 +119,7 @@ su -c "git config --global --add credential.'https://github.com'.helper /usr/loc
 # ── SSH mode vs attach mode ───────────────────────────────────────────────────
 if [ "$SSH_ENABLED" = "true" ]; then
     # Runtime key injection — same image everywhere, key comes from the
-    # manifest deploy (SSH_AUTHORIZED_KEY in secrets.env). Fail loud rather
+    # bottle deploy (SSH_AUTHORIZED_KEY in secrets.env). Fail loud rather
     # than start sshd nobody can log into.
     if [ -z "$SSH_AUTHORIZED_KEY" ]; then
         echo "FATAL: SSH_ENABLED=true but SSH_AUTHORIZED_KEY is empty."
@@ -151,7 +151,7 @@ if [ "$SSH_ENABLED" = "true" ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Container:  djinn-${CONTAINER_NAME}   (sshd on :22, published"
-    echo "              on the host at the manifest's ssh.port)"
+    echo "              on the host at the bottle's ssh.port)"
     echo "  SSH:        ssh -p <ssh.port> coder@<docker-host>"
     echo "  VS Code:    Remote-SSH to the same host/port"
     echo "  Workspace:  /workspace"

@@ -3,7 +3,7 @@
 ## Update container memory
 
 The durable way: set `memory:` in `bottles/<name>.yml` and rerun
-`./djinn up <name>` — the manifest is the source of truth, and anything set
+`./djinn up <name>` — the bottle is the source of truth, and anything set
 another way is overwritten on the next up.
 
 For a **temporary** bump on a running container without a restart

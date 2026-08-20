@@ -2,9 +2,9 @@
 """Per-container browser launcher (host-side).
 
 Invoked via ./service.sh browser <container> [brave|chrome]. Reads the bridge
-port from the container manifest (plugin_ports.browser) with a fallback to
+port from the container bottle (plugin_ports.browser) with a fallback to
 host_port in plugins/browser/plugin.yml. CDP port is offset from the bridge
-port so one manifest field controls both: CDP = bridge - 8814 + 9222.
+port so one bottle field controls both: CDP = bridge - 8814 + 9222.
 """
 
 import json
@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-# Mirrors service.sh / manifest.py's name rule (letters, digits, _, -).
+# Mirrors service.sh / bottle.py's name rule (letters, digits, _, -).
 CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 
 BRIDGE_PORT_DEFAULT = 8814
@@ -61,13 +61,13 @@ def bottles_dir(base_path: str, env_override: str | None = None) -> Path:
     return repo_root() / "bottles"
 
 
-def resolve_bridge_port(manifest: dict, plugin_host_port: int = BRIDGE_PORT_DEFAULT) -> int:
-    """Bridge port from manifest plugin_ports.browser, else plugin.yml host_port."""
-    plugin_ports = manifest.get("plugin_ports")
+def resolve_bridge_port(bottle: dict, plugin_host_port: int = BRIDGE_PORT_DEFAULT) -> int:
+    """Bridge port from bottle plugin_ports.browser, else plugin.yml host_port."""
+    plugin_ports = bottle.get("plugin_ports")
     if isinstance(plugin_ports, dict):
         port = plugin_ports.get("browser")
-        # manifest.py validates this at `up` time, but the launcher reads the
-        # manifest directly — a hand-edited non-integer must not silently
+        # bottle.py validates this at `up` time, but the launcher reads the
+        # bottle directly — a hand-edited non-integer must not silently
         # become a bogus port on the command line.
         if port is not None:
             if isinstance(port, bool) or not isinstance(port, int):
@@ -109,16 +109,16 @@ def browser_tmp_dir(base_path: str, container: str) -> Path:
     return Path(base_path) / "browser-tmp" / container
 
 
-def api_key_var(container: str, manifest: dict | None = None) -> str:
+def api_key_var(container: str, bottle: dict | None = None) -> str:
     """Which secrets.env variable holds this container's bridge key.
 
-    The manifest's common_secrets binding is authoritative — that is the value
+    The bottle's common_secrets binding is authoritative — that is the value
     up.sh wires into the container, so reading it here keeps the bridge and the
     container on the same key by construction. The derived fallback is only for
-    a manifest that leaves the slot unbound; note it is not injective ('a-b' and
+    a bottle that leaves the slot unbound; note it is not injective ('a-b' and
     'a_b' both fold to 'a_b'), which is the other reason to prefer the binding.
     """
-    common = (manifest or {}).get("common_secrets")
+    common = (bottle or {}).get("common_secrets")
     if isinstance(common, dict):
         bound = common.get(SLOT)
         if isinstance(bound, str) and bound:
@@ -279,7 +279,7 @@ def main(argv: list[str] | None = None) -> None:
     container = args[0]
     # Same charset rule service.sh applies to the plugin name, for the same
     # reason: the container name is interpolated into filesystem paths below
-    # (manifest, profile dir, TMPDIR), so a slash or '..' must not escape.
+    # (bottle, profile dir, TMPDIR), so a slash or '..' must not escape.
     if not CONTAINER_NAME_RE.match(container):
         raise SystemExit(
             f"ERROR: invalid container name '{container}' "
@@ -291,18 +291,18 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(
             "ERROR: BASE_PATH not set — run via ./service.sh browser <container>")
 
-    manifest_path = bottles_dir(
+    bottle_path = bottles_dir(
         base_path, os.environ.get("BOTTLES_PATH")) / f"{container}.yml"
-    manifest = load_yaml(manifest_path)
+    bottle = load_yaml(bottle_path)
     bridge_port = validate_bridge_port(
-        resolve_bridge_port(manifest, plugin_default_bridge_port()))
+        resolve_bridge_port(bottle, plugin_default_bridge_port()))
     cdp = cdp_port(bridge_port)
     profile = profile_dir(base_path, container)
     tmp_dir = browser_tmp_dir(base_path, container)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     secrets_file = Path(base_path) / "secrets.env"
-    api_key = ensure_api_key(secrets_file, api_key_var(container, manifest))
+    api_key = ensure_api_key(secrets_file, api_key_var(container, bottle))
 
     app = pick_browser(browser_choice)
     if not cdp_ready(cdp):

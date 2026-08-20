@@ -2,7 +2,7 @@
 """Merge the declared multi-repo list into /workspace/dev.code-workspace.
 
 up.sh used to write the multi-root workspace file once with a heredoc guarded
-by if-not-exists, so manifest edits on a live container never updated it.
+by if-not-exists, so bottle edits on a live container never updated it.
 This helper replaces that: it MERGES REPO_NAMES (space-separated repo dir
 names) into the file idempotently — adding any missing repos/<n> folders,
 never deleting worktree or hand-added entries, and always leaving /artifacts

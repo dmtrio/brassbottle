@@ -48,7 +48,7 @@ if [ -z "$NAME" ]; then
     list_services
     exit 1
 fi
-# Same charset as manifest.py's plugin-name rule (letters, digits, _, -). The
+# Same charset as bottle.py's plugin-name rule (letters, digits, _, -). The
 # name is interpolated into a filesystem path below, so reject anything with a
 # slash or '..' before it can escape plugins/.
 case "$NAME" in
@@ -77,7 +77,7 @@ fi
 # the environment rather than computing a path to common.sh itself.
 # BOTTLES_PATH rides along for the same reason: common.sh resolves it (from
 # ./.env, the env, or the per-setup default), and a launcher that reads a
-# container manifest must see the SAME directory up.sh does. Without the export
+# container bottle must see the SAME directory up.sh does. Without the export
 # it is only a shell variable here, and a ./.env override would be silently
 # ignored one process down.
 . "$SCRIPT_DIR/src/common.sh"   # sets BASE_PATH, BOTTLES_PATH
