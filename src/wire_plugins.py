@@ -27,7 +27,7 @@ Payload:
       "agent_servers": [
         {"name": "obsidian-annotated", "slot": "OBSIDIAN_ANNOTATED_KEY",
          "spec": {"url": ..., "headers": {...${SLOT}...}},
-         "ref":     ["claude"],                            # env-ref configs
+         "ref":     ["claude", "kimi"],                    # env-ref configs
          "literal": [{"agent": "cursor-agent",
                       "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}],
          "warn":    ["codex"],                             # REMOTE spec only
@@ -46,8 +46,11 @@ Payload:
 - agent_servers carries the AGENT-SCOPED plugins, wired only for the agents
   bound to the slot (its key gates who sees the server). A REMOTE spec (obsidian)
   presents each bound agent's own role derived from AGENTS_MCP_JSON:
-  ref-style agents keep ${SLOT} refs (`ref`), literal agents bake per-agent
-  key env names (`literal`), managed-block agents warn for remote (`warn`),
+  - bool-ref agents (`env_refs: true`) keep ${SLOT} refs (`ref`),
+  - named-ref agents (`env_refs: "<field>"`) keep remote URL/header shape but
+    swap the bearer header ref for `<field>: "SLOT"` (`ref`),
+  - literal agents bake per-agent key env names (`literal`),
+  - managed-block agents warn for remote (`warn`),
   and LOCAL specs route through each bound agent's local wiring path (`local`
   for non-ref-style, `ref` for ref-style). Env-only agent-scoped slots (watch
   keys — no server) never reach the payload; up.sh delivers them straight into
@@ -305,6 +308,45 @@ def _claude_server(spec):
     if "command" in spec:
         return spec
     return {"type": "http", **spec}
+
+
+def _render_named_env_ref_server(spec, requires, env_ref_field, server_name, binary):
+    """Render a remote ref-style server for agents whose env_refs is a STRING
+    destination field name (e.g. kimi's bearerTokenEnvVar).
+
+    Contract (validated host-side in build_payload and re-checked defensively
+    here): one required slot, and a header value containing ${SLOT}. The header
+    carrying that bearer ref is removed and replaced with <env_ref_field>: SLOT.
+    """
+    if len(requires) != 1:
+        raise WireError(
+            f"agent server '{server_name}' cannot be rendered for agent '{binary}': "
+            "string env_refs remote wiring requires exactly one required slot")
+    slot = requires[0]
+    headers = spec.get("headers")
+    if not isinstance(headers, dict):
+        raise WireError(
+            f"agent server '{server_name}' cannot be rendered for agent '{binary}': "
+            f"string env_refs remote wiring requires headers with a ${{{slot}}} bearer reference")
+
+    marker = "${" + slot + "}"
+    matches = [
+        key for key, value in headers.items()
+        if isinstance(value, str) and marker in value
+    ]
+    if not matches:
+        raise WireError(
+            f"agent server '{server_name}' cannot be rendered for agent '{binary}': "
+            f"string env_refs remote wiring requires a headers entry containing {marker}")
+
+    # Canonical shape uses Authorization; if multiple match, strip that one.
+    header_to_strip = "Authorization" if "Authorization" in matches else matches[0]
+    rendered = dict(spec)
+    rendered_headers = dict(headers)
+    del rendered_headers[header_to_strip]
+    rendered["headers"] = rendered_headers
+    rendered[env_ref_field] = slot
+    return rendered
 
 
 def _local_plugins(plugins):
@@ -659,8 +701,17 @@ def run(payload, home, workspace, env):
     literal_required_by_agent = {}  # binary -> {name: rendered entry}
     for s in agent_servers:
         for binary in s["ref"]:
-            if binary in agents_by_binary:
-                ref_required_by_agent.setdefault(binary, {})[s["name"]] = _claude_server(s["spec"])
+            agent = agents_by_binary.get(binary)
+            if agent is None:
+                continue
+            env_refs = agent["env_refs"]
+            if isinstance(env_refs, str) and "command" not in s["spec"]:
+                rendered = _render_named_env_ref_server(
+                    s["spec"], s["requires"], env_refs, s["name"], binary
+                )
+            else:
+                rendered = _claude_server(s["spec"])
+            ref_required_by_agent.setdefault(binary, {})[s["name"]] = rendered
         for lit in s["literal"]:
             binary = lit["agent"]
             agent = agents_by_binary.get(binary)
@@ -748,8 +799,8 @@ def build_payload(env):
       IDENTITY_SECRETS   — "agent:key_env:slot" records for literal-key agents;
                            the docker-exec environment supplies those values.
     A server is present only where all of its required slots resolve. Role
-    routing is descriptor-driven: ref-style env_refs, managed-block strategy,
-    literal dialects, and local command servers.
+    routing is descriptor-driven: bool-ref env_refs, named-ref env_refs,
+    managed-block strategy, literal dialects, and local command servers.
     """
     try:
         raw_agents = json.loads(env.get("AGENTS_MCP_JSON") or "[]")
@@ -813,6 +864,14 @@ def build_payload(env):
                 continue
             agent = agents_by_binary[binary]
             if agent["env_refs"]:
+                if isinstance(agent["env_refs"], str) and not is_local:
+                    # Closed contract: a named env_refs field (e.g.
+                    # bearerTokenEnvVar) is only legal for the single-slot
+                    # bearer-header remote shape. Validate HOST-side so
+                    # unsupported descriptors fail before container wiring.
+                    _render_named_env_ref_server(
+                        sd["spec"], requires, agent["env_refs"], name, binary
+                    )
                 e["ref"].append(binary)
                 continue
             if is_local:

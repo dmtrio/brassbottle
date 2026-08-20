@@ -7,7 +7,9 @@ ENV TZ=America/Chicago
 ARG USERNAME=coder
 ARG USER_UID=1000
 ARG USER_GID=1000
-ARG AGENTS_ENABLED="aider claude codex cursor gemini pi"
+# Fail-closed default for direct `docker build .`; up.sh always passes the
+# manifest-derived set explicitly.
+ARG AGENTS_ENABLED=""
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
@@ -115,7 +117,9 @@ RUN set -e; \
             continue; \
         fi; \
         echo "── plugin install: $name"; \
-        bash -e /tmp/plugin-install.sh; \
+        # Keep pipefail: many installers are `curl ... | bash` and must fail
+        # this build if the download side fails.
+        bash -e -o pipefail /tmp/plugin-install.sh; \
     done; \
     rm -f /tmp/plugin-install.sh
 
@@ -138,7 +142,9 @@ RUN set -e; \
         esac; \
         echo "── agent install: $name"; \
         yq -e -r '.install' "$f" > /tmp/agent-install.sh; \
-        bash -e /tmp/agent-install.sh; \
+        # Keep pipefail: many installers are `curl ... | bash` and must fail
+        # this build if the download side fails.
+        bash -e -o pipefail /tmp/agent-install.sh; \
     done; \
     rm -f /tmp/agent-install.sh
 

@@ -18,6 +18,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UP_SH = REPO_ROOT / "up.sh"
+COMPOSE_LOCAL = REPO_ROOT / "compose" / "docker-compose.local.yml"
 
 # Variables the compose files interpolate; if the prefix chain is broken these
 # reach compose as blank strings and produce malformed mounts/ports.
@@ -85,6 +86,15 @@ class TestComposeInvocation(unittest.TestCase):
             "the compose invocation's logical line contains a '#' — a comment "
             "was spliced in by a trailing backslash, commenting out the rest "
             "of the command",
+        )
+
+    def test_compose_agents_enabled_default_is_fail_closed(self):
+        compose_text = COMPOSE_LOCAL.read_text()
+        self.assertIn(
+            'AGENTS_ENABLED: "${AGENTS_ENABLED-}"',
+            compose_text,
+            "compose default must be empty unless AGENTS_ENABLED is explicitly exported "
+            "(up.sh always sets it from manifest derive)",
         )
 
 

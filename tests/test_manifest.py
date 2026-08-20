@@ -283,7 +283,7 @@ class TestYqSemanticsPins(unittest.TestCase):
         self.assertEqual(d["PLUGINS"], "")
         self.assertEqual(d["REPOS"], "")
         self.assertEqual(d["MEM_LIMIT"], "2g")
-        self.assertEqual(d["AGENTS_ENABLED"], "aider claude codex cursor gemini pi")  # default tool set
+        self.assertEqual(d["AGENTS_ENABLED"], " ".join(sorted(AGENT_FILES)))  # default tool set
 
     def test_legacy_repo_key_rejected(self):
         # layout v2: any presence of repo: (even null/false) is a hard error.

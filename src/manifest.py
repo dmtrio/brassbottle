@@ -472,7 +472,8 @@ def _normalize_agent_docs(agent_files):
             # wire_plugins.py: any combination accepted here must actually wire
             # there. A combo this block does not admit would pass derive, then
             # brick up.sh only AFTER the container is up — the worst place to
-            # learn a descriptor is wrong. Keep the two in lockstep.
+            # learn a descriptor is wrong. Keep the two in lockstep, and update
+            # agents/README.md ("Closed MCP combo rules") alongside this block.
             if strategy == "claude_preapprove":
                 if config_path != ".mcp.json":
                     raise ManifestError(

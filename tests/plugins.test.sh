@@ -286,14 +286,9 @@ PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENT
     IDENTITY_SECRETS="cursor-agent:IDENTITY_KEY_0:MCP_GATEWAY_TOKEN gemini:IDENTITY_KEY_1:MCP_GATEWAY_TOKEN pi:IDENTITY_KEY_2:MCP_GATEWAY_TOKEN" \
     python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero"
-# Expected payload agents = the glob's mcp-capable binaries in DESCRIPTOR DIR
-# order (AGENTS_MCP_JSON order) — derived, so a new agents/<name>/ never
-# stales this pin.
-EXPECTED_MCP_BINARIES=$(for f in agents/*/agent.yml; do
-    [ -e "$f" ] || continue
-    yq -e '.mcp' "$f" >/dev/null 2>&1 || continue
-    yq -r '.binary' "$f"
-done | jq -R . | jq -cs .)
+# AGENTS_MCP_JSON is manifest.py's own mcp-capable projection, so this checks
+# build_payload against derive output (not a re-implementation here).
+EXPECTED_MCP_BINARIES=$(printf '%s' "$AGENTS_MCP_JSON" | jq -c '[.[].binary]')
 printf '%s' "$PAYLOAD" | jq -e --argjson exp "$EXPECTED_MCP_BINARIES" '
     ([.agents[] | .binary] == $exp)
     and ([.plugin_mcp_entries[] | keys[0]] == ["serena"])
@@ -441,6 +436,9 @@ grep -qxF -- 'plugins/*/run.sh' .dockerignore \
 grep -qF -- "yq -e -r '.install'" Dockerfile \
     && pass "Dockerfile bake still gates on .install via yq -e" \
     || fail "Dockerfile bake no longer reads .install"
+grep -qF -- 'ARG AGENTS_ENABLED=""' Dockerfile \
+    && pass "Dockerfile AGENTS_ENABLED default is fail-closed (empty)" \
+    || fail "Dockerfile AGENTS_ENABLED default is no longer empty"
 grep -qF -- "config-only, nothing to bake" Dockerfile \
     && pass "Dockerfile bake skips remote (no-install) plugins instead of failing the build" \
     || fail "Dockerfile bake no longer skips no-install plugins (remote plugins would break the build)"

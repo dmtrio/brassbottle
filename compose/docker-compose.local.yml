@@ -15,8 +15,9 @@ services:
         # ${VAR-default}, NOT ${VAR:-default}: up.sh always sets this, possibly
         # to the EMPTY set (a manifest whose tools: enables no agent), and the
         # :- form would silently swap that explicit empty set for all agents.
-        # The unset-only default covers direct `docker compose` runs.
-        AGENTS_ENABLED: "${AGENTS_ENABLED-aider claude codex cursor gemini pi}"
+        # up.sh always sets this from manifest.py; direct `docker compose` runs
+        # must export AGENTS_ENABLED explicitly (unset defaults fail-closed).
+        AGENTS_ENABLED: "${AGENTS_ENABLED-}"
     # Per-container tag: each container builds/uses its own image tag
     image: djinn:${IMAGE_TAG:-local}
 
