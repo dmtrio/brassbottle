@@ -217,6 +217,33 @@ class TestYqSemanticsPins(unittest.TestCase):
         self.assertEqual(d["INSTALL_CLAUDE"], "true")   # jq contains() quirk
         self.assertEqual(d["INSTALL_CODEX"], "false")
 
+    def test_agents_contains_is_substring_match(self):
+        d = derive({"agents": ["claude-code"]})
+        self.assertEqual(d["INSTALL_CLAUDE"], "true")   # jq contains() quirk
+        self.assertEqual(d["INSTALL_CODEX"], "false")
+
+    def test_agents_and_tools_together_is_error_even_when_false(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"agents": False, "tools": False})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest sets both agents: and tools: — use agents: (tools: is a deprecated alias)")
+
+    def test_tools_alias_emits_deprecation_warning(self):
+        import contextlib
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"tools": ["codex"]})
+        self.assertEqual(d["INSTALL_CODEX"], "true")
+        self.assertEqual(d["INSTALL_CLAUDE"], "false")
+        self.assertIn(
+            "  ⚠ tools: is deprecated — rename the key to agents: (same values; tools: will be removed)",
+            err.getvalue())
+
+    def test_agents_false_defaults_to_default_tool_set(self):
+        d = derive({"agents": False})
+        self.assertEqual(d["INSTALL_AIDER"], "true")
+
     def test_capabilities_sugar_only_literal_true_maps_to_plugin(self):
         # capabilities: gateway/proxyman/browser are deprecated sugar now; only
         # the literal boolean true maps onto the plugin (yq `// false` raw-flag

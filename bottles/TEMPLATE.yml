@@ -66,7 +66,8 @@ memory: 10g
 #  notify: ntfy
 
 # Agent CLIs baked into the image. Omit this key entirely = all of them.
-tools: [claude, codex, pi, gemini, cursor, aider]
+# tools: is accepted as a deprecated alias for one release.
+agents: [claude, codex, pi, gemini, cursor, aider]
 
 # Firewall egress. Extra outbound the base allowlist doesn't already cover.
 capabilities:

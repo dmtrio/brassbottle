@@ -29,7 +29,7 @@ Runtime state (`secrets.env`, keys, artifacts) defaults to a gitignored
 ## The two files you author
 
 1. **`bottles/<name>.yml`** — one bottle = one container: repos, memory,
-   tools, capability grants, per-agent identities. Secret-free, committable.
+   agent selection, capability grants, per-agent identities. Secret-free, committable.
    Copy `bottles/TEMPLATE.yml` and edit.
 2. **`secrets.env`** — every secret value, one file, mode 600, never mounted
    (default `./.djinn/secrets.env`, gitignored). Copy `secrets.env.example`

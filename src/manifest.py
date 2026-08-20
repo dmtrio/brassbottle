@@ -27,10 +27,11 @@ assignments it prints:
 
 Behavioral fidelity notes (each is pinned by tests/test_manifest.py):
 - yq/jq `//` treats false AND null as empty: `plugins: false` means "no
-  plugins", `repos: false` means no repos, `tools: false` gets the default
-  set. The old scalar `repo:` key is rejected outright (layout v2).
+  plugins", `repos: false` means no repos, `agents: false` gets the default
+  set (`tools: false` still aliases it, deprecated for one release). The old
+  scalar `repo:` key is rejected outright (layout v2).
 - The old `tools | contains(["claude"])` had jq's SUBSTRING semantics for
-  strings inside arrays (tools: [claude-code] enabled claude too). Ported
+  strings inside arrays (agents: [claude-code] enables claude too). Ported
   as-is; tightening it is a deliberate future change, not a port surprise.
 - null entries inside word-split lists (plugins, identity refs) vanish, the
   way the old `join(" ")` + word splitting dropped them — so a trailing
@@ -506,12 +507,23 @@ def derive(manifest, plugin_files, env):
     out.update(_git_identity(git, env, secrets_file))
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
-    # ── Tools ───────────────────────────────────────────────────────────
-    tools = manifest.get("tools")
+    # ── Tools (agents: preferred; tools: deprecated alias) ─────────────
+    has_agents = "agents" in manifest
+    has_tools = "tools" in manifest
+    if has_agents and has_tools:
+        raise ManifestError(
+            "manifest sets both agents: and tools: — use agents: (tools: is a deprecated alias)")
+    tools_key = "agents"
+    tools = manifest.get("agents")
+    if has_tools:
+        tools_key = "tools"
+        tools = manifest.get("tools")
+        print("  ⚠ tools: is deprecated — rename the key to agents: (same values; tools: will be removed)",
+              file=sys.stderr)
     if _falsy(tools):
         tools = DEFAULT_TOOLS
     if not isinstance(tools, list):
-        raise ManifestError("manifest tools: must be a list")
+        raise ManifestError(f"manifest {tools_key}: must be a list")
     for var, name in (("INSTALL_CLAUDE", "claude"), ("INSTALL_CODEX", "codex"),
                       ("INSTALL_PI", "pi"), ("INSTALL_GEMINI", "gemini"),
                       ("INSTALL_CURSOR", "cursor"), ("INSTALL_AIDER", "aider")):
