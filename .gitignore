@@ -21,3 +21,8 @@ bottles/*.yml
 
 # Python bytecode (tests / wiring module)
 __pycache__/
+
+# The golden-parity fixture is FAKE secrets by construction (its own tests
+# assert the values are the *-golden-*-not-real placeholders) — carve it out
+# of the bare secrets.env pattern above or the suite errors on fresh clones.
+!tests/fixtures/golden/secrets.env

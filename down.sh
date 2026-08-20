@@ -18,9 +18,9 @@ if [ "$2" = "--purge" ]; then
     IMAGE_TAG="$NAME" docker compose -p "$CNAME" down -v
     docker image rm "djinn:$NAME" 2>/dev/null || true
     rm -rf "$BASE_PATH/keys/$NAME"
-    # The generated plugin-volume overlay (up.sh writes it per container) is
-    # derived state like keys/, so a purge collects it too.
-    rm -f "$BASE_PATH/compose/$NAME.plugins.yml"
+    # The generated plugin-volume and agent-state overlays (up.sh writes them
+    # per container) are derived state like keys/, so a purge collects them too.
+    rm -f "$BASE_PATH/compose/$NAME.plugins.yml" "$BASE_PATH/compose/$NAME.agents.yml"
     echo "Purged $CNAME (container, volume, image, derived keys). Kept: manifest, secrets.env, artifacts/$NAME/"
 else
     docker compose -p "$CNAME" down

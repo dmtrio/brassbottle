@@ -12,7 +12,11 @@ services:
         USERNAME: coder
         USER_UID: ${USER_UID:-1000}
         USER_GID: ${USER_GID:-1000}
-        AGENTS_ENABLED: "${AGENTS_ENABLED:-aider claude codex cursor gemini pi}"
+        # ${VAR-default}, NOT ${VAR:-default}: up.sh always sets this, possibly
+        # to the EMPTY set (a manifest whose tools: enables no agent), and the
+        # :- form would silently swap that explicit empty set for all agents.
+        # The unset-only default covers direct `docker compose` runs.
+        AGENTS_ENABLED: "${AGENTS_ENABLED-aider claude codex cursor gemini pi}"
     # Per-container tag: each container builds/uses its own image tag
     image: djinn:${IMAGE_TAG:-local}
 

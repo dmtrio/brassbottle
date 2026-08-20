@@ -1245,6 +1245,55 @@ class TestHybridBuildPayload(unittest.TestCase):
                              {"Authorization": "Bearer first", "X-Second": "second"})
 
 
+class TestDescriptorDriftPins(unittest.TestCase):
+    """Phase 1 (PLN - Agents as Plugins) ships wire_plugins.py with per-agent
+    knowledge still hardcoded — Phase 2 replaces it with descriptor-driven
+    rendering. Until then, pin the duplicated ground truth to the
+    agents/*/agent.yml descriptors so they cannot drift apart silently: a new
+    mcp-capable agents/<name>/ directory, or an edited mcp.config_path, must
+    fail HERE instead of shipping an agent that silently wires to nowhere."""
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        import subprocess
+        if not shutil.which("yq"):
+            raise unittest.SkipTest("yq not available")
+        cls.mcp_by_binary = {}
+        agents_dir = Path(__file__).resolve().parents[1] / "agents"
+        for f in sorted(agents_dir.glob("*/agent.yml")):
+            doc = json.loads(subprocess.run(
+                ["yq", "-o=json", str(f)],
+                capture_output=True, text=True, check=True).stdout)
+            if doc.get("mcp"):
+                cls.mcp_by_binary[doc["binary"]] = doc["mcp"]
+
+    def test_literal_trio_config_paths_match_descriptors(self):
+        """_AGENT_SERVER_CONFIG (the agents wire_plugins writes directly) must
+        mirror the descriptors' mcp.config_path for every non-strategy agent."""
+        expected = {b: mcp["config_path"] for b, mcp in self.mcp_by_binary.items()
+                    if not mcp.get("strategy")}
+        actual = {agent: str(rel) for agent, rel in wire_plugins._AGENT_SERVER_CONFIG.items()}
+        self.assertEqual(actual, expected)
+
+    def test_strategy_agents_config_paths_appear_in_source(self):
+        """claude/codex are wired by named strategies with paths built inline;
+        pin each descriptor path's components to the source text."""
+        src = Path(wire_plugins.__file__).read_text(encoding="utf-8")
+        for binary in ("claude", "codex"):
+            parts = Path(self.mcp_by_binary[binary]["config_path"]).parts
+            joined = " / ".join(f'"{p}"' for p in parts)
+            self.assertIn(joined, src,
+                          f"{binary}'s descriptor config_path {parts} not found in "
+                          "wire_plugins.py — update the descriptor or the wiring together")
+
+    def test_every_mcp_capable_agent_is_known_to_wire_plugins(self):
+        known = set(wire_plugins._AGENT_SERVER_CONFIG) | {"claude", "codex"}
+        self.assertEqual(set(self.mcp_by_binary), known,
+                         "an mcp-capable agent descriptor exists that wire_plugins.py "
+                         "never wires — that is Phase 2 work; do not ship it silently unwired")
+
+
 class TestMainSubprocess(unittest.TestCase):
     """Test main() entry point via subprocess."""
 
