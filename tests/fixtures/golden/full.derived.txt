@@ -10,6 +10,7 @@ GIT_ORG_IDENTITIES=''
 MEM_LIMIT=4g
 AGENTS_ENABLED='aider claude codex cursor gemini pi'
 SHIM_AGENTS='claude codex cursor-agent gemini pi'
+LITERAL_KEY_AGENTS='cursor-agent gemini pi'
 AGENTS_MCP_JSON='[{"binary":"claude","config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove"},{"binary":"codex","config_path":".codex/config.toml","format":"toml","dialect":"","env_refs":false,"strategy":"codex_managed_block"},{"binary":"cursor-agent","config_path":".cursor/mcp.json","format":"json","dialect":"url","env_refs":false,"strategy":""},{"binary":"gemini","config_path":".gemini/settings.json","format":"json","dialect":"httpUrl","env_refs":false,"strategy":""},{"binary":"pi","config_path":".pi/agent/mcp.json","format":"json","dialect":"type-http","env_refs":false,"strategy":""}]'
 PLUGINS='axiom obsidian-annotated codebase-memory'
 SSH_PORT=''
