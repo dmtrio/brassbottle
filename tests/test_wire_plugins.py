@@ -1269,6 +1269,14 @@ class TestBuildPayload(unittest.TestCase):
         {"binary": "cursor-agent", "config_path": ".cursor/mcp.json", "format": "json",
          "dialect": "url", "env_refs": False, "strategy": ""},
     ]
+    KIMI_REF_AGENT = [{
+        "binary": "kimi",
+        "config_path": ".kimi-code/mcp.json",
+        "format": "json",
+        "dialect": "mcpServers",
+        "env_refs": "bearerTokenEnvVar",
+        "strategy": "",
+    }]
 
     def test_missing_env_means_everything_off_and_empty(self):
         payload = wire_plugins.build_payload({})
@@ -1306,6 +1314,43 @@ class TestBuildPayload(unittest.TestCase):
                     "dialect": "url", "env_refs": False, "strategy": "unknown",
                 }])
             })
+
+    def test_named_env_refs_remote_requires_single_required_slot(self):
+        env = {
+            "AGENTS_MCP_JSON": json.dumps(self.KIMI_REF_AGENT, separators=(",", ":")),
+            "AGENT_SERVERS_JSON": json.dumps({
+                "obsidian-annotated": {
+                    "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
+                             "headers": {"Authorization": "Bearer ${TOKEN_A}"}},
+                    "requires": ["TOKEN_A", "TOKEN_B"],
+                }
+            }),
+            "AGENT_SECRETS": (
+                "kimi\tTOKEN_A\tSRC\n"
+                "kimi\tTOKEN_B\tSRC\n"
+            ),
+        }
+        with self.assertRaises(wire_plugins.WireError) as cm:
+            wire_plugins.build_payload(env)
+        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", str(cm.exception))
+        self.assertIn("exactly one required slot", str(cm.exception))
+
+    def test_named_env_refs_remote_requires_bearer_header_reference(self):
+        env = {
+            "AGENTS_MCP_JSON": json.dumps(self.KIMI_REF_AGENT, separators=(",", ":")),
+            "AGENT_SERVERS_JSON": json.dumps({
+                "obsidian-annotated": {
+                    "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
+                             "headers": {"Authorization": "Bearer STATIC_TOKEN"}},
+                    "requires": ["OBSIDIAN_ANNOTATED_KEY"],
+                }
+            }),
+            "AGENT_SECRETS": "kimi\tOBSIDIAN_ANNOTATED_KEY\tSRC\n",
+        }
+        with self.assertRaises(wire_plugins.WireError) as cm:
+            wire_plugins.build_payload(env)
+        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", str(cm.exception))
+        self.assertIn("headers entry containing ${OBSIDIAN_ANNOTATED_KEY}", str(cm.exception))
 
     def test_round_trips_through_run(self):
         """The payload build_payload emits is exactly what run() consumes: a
@@ -1442,7 +1487,7 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
             "config_path": ".kimi/mcp.json",
             "format": "json",
             "dialect": "mcpServers",
-            "env_refs": "shim-env",
+            "env_refs": "bearerTokenEnvVar",
             "strategy": "",
         }]
         payload = wire_plugins.build_payload({
@@ -1464,10 +1509,11 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
             workspace.mkdir()
             wire_plugins.run(payload, home, workspace, {})
             kimi = json.loads((home / ".kimi" / "mcp.json").read_text())["mcpServers"]
-            self.assertEqual(kimi["obsidian-annotated"]["type"], "http")
+            self.assertEqual(kimi["obsidian-annotated"]["url"], "https://mcp-obsidian.dmetr.io/mcp")
+            self.assertEqual(kimi["obsidian-annotated"]["headers"], {})
             self.assertEqual(
-                kimi["obsidian-annotated"]["headers"]["Authorization"],
-                "Bearer ${OBSIDIAN_ANNOTATED_KEY}",
+                kimi["obsidian-annotated"]["bearerTokenEnvVar"],
+                "OBSIDIAN_ANNOTATED_KEY",
             )
 
 

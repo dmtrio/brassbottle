@@ -11,6 +11,16 @@ tools: [claude, kimi]
 `tools` matching is exact string equality against `agents/<name>/`. The
 directory name is the tool name.
 
+**What belongs here — and what doesn't.** An agent is an AI CLI a human talks
+to, with its own identity: its own shim, its own key file, optionally its own
+state volume and rules file. The system's split is *agents use plugins*:
+`agents/` holds the things you talk to, `plugins/` holds the MCP capabilities
+they use. The schema only *requires* `binary` + `install` (aider is the
+minimal case — an AI CLI with no MCP wiring), but that looseness is not an
+invitation: a plain binary with no identity of its own belongs in the image's
+package layers or a plugin's `install:` block, not here — otherwise this
+directory quietly becomes a second package manager.
+
 ```
 agents/<name>/
   agent.yml      required — descriptor consumed by derive + wiring
@@ -19,15 +29,8 @@ agents/<name>/
 
 ## Shipped agents
 
-| Agent dir (`tools:` value) | Binary |
-|---|---|
-| `aider` | `aider` |
-| `claude` | `claude` |
-| `codex` | `codex` |
-| `cursor` | `cursor-agent` |
-| `gemini` | `gemini` |
-| `pi` | `pi` |
-| `kimi` | `kimi` |
+The registry is `agents/*/agent.yml` (not this README table); list them with
+`for f in agents/*/agent.yml; do printf '%s -> %s\n' "$(basename "$(dirname "$f")")" "$(yq -r '.binary' "$f")"; done`.
 
 ## `agent.yml` schema
 

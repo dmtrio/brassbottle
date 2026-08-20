@@ -66,9 +66,9 @@ memory: 10g
 #  notify: ntfy
 
 # Agent CLIs baked into the image. Names are exact agents/<dir> matches.
-# Omit this key entirely = every shipped descriptor under agents/.
-# tools: is accepted as a deprecated alias for one release.
-agents: [claude, codex, pi, gemini, cursor, aider, kimi]
+# Omit this key entirely to enable every descriptor under agents/.
+# tools: is accepted as a deprecated alias for one release. Example subset:
+agents: [claude, aider]
 
 # Firewall egress. Extra outbound the base allowlist doesn't already cover.
 capabilities:
