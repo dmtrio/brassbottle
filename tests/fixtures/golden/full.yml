@@ -1,7 +1,7 @@
 task: coding
 forge: github
 memory: 4g
-tools: [claude, codex, pi, gemini, cursor, aider]
+agents: [claude, codex, pi, gemini, cursor, aider]
 repos:
   - https://github.com/example/alpha.git
   - {name: beta, url: https://github.com/example/beta.git}

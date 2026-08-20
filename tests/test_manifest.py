@@ -279,7 +279,7 @@ class TestYqSemanticsPins(unittest.TestCase):
     """The jq/yq quirks the port must NOT silently fix."""
 
     def test_alternative_operator_fires_on_false(self):
-        d = derive({"plugins": False, "repos": False, "memory": False, "tools": False})
+        d = derive({"plugins": False, "repos": False, "memory": False, "agents": False})
         self.assertEqual(d["PLUGINS"], "")
         self.assertEqual(d["REPOS"], "")
         self.assertEqual(d["MEM_LIMIT"], "2g")
@@ -298,7 +298,7 @@ class TestYqSemanticsPins(unittest.TestCase):
                     "(layout v2: each repo clones to /workspace/repos/<name>)")
 
     def test_tools_match_is_exact_string_equality(self):
-        d = derive({"tools": ["claude-code"]})
+        d = derive({"agents": ["claude-code"]})
         self.assertEqual(d["INSTALL_CLAUDE"], "false")
         self.assertEqual(d["INSTALL_CODEX"], "false")
 
@@ -309,23 +309,13 @@ class TestYqSemanticsPins(unittest.TestCase):
         self.assertEqual(d["INSTALL_CLAUDE"], "false")
         self.assertEqual(d["INSTALL_CODEX"], "false")
 
-    def test_agents_and_tools_together_is_error_even_when_false(self):
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"agents": False, "tools": False})
-        self.assertEqual(
-            str(cm.exception),
-            "manifest sets both agents: and tools: — use agents: (tools: is a deprecated alias)")
-
-    def test_tools_alias_emits_deprecation_warning(self):
-        import contextlib
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            d = derive({"tools": ["codex"]})
-        self.assertEqual(d["INSTALL_CODEX"], "true")
-        self.assertEqual(d["INSTALL_CLAUDE"], "false")
-        self.assertIn(
-            "  ⚠ tools: is deprecated — rename the key to agents: (same values; tools: will be removed)",
-            err.getvalue())
+    def test_tools_key_is_rejected_by_name(self):
+        for value in (["codex"], False):
+            with self.assertRaises(m.ManifestError) as cm:
+                derive({"tools": value})
+            self.assertEqual(
+                str(cm.exception),
+                "manifest tools: was renamed to agents: — update the manifest (same values)")
 
     def test_agents_false_defaults_to_default_tool_set(self):
         d = derive({"agents": False})
@@ -763,7 +753,7 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         self.assertIn("already declared by agent 'claude'", str(cm.exception))
 
     def test_agents_enabled_and_shim_agents_subset(self):
-        d = derive({"tools": ["claude", "aider"]})
+        d = derive({"agents": ["claude", "aider"]})
         self.assertEqual(d["AGENTS_ENABLED"], "aider claude")
         self.assertEqual(d["SHIM_AGENTS"], "claude")
 
@@ -792,7 +782,7 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         )
 
     def test_agents_compose_yaml_empty_when_no_state_dirs_enabled(self):
-        d = derive({"tools": ["aider", "pi"]})
+        d = derive({"agents": ["aider", "pi"]})
         self.assertEqual(d["AGENTS_COMPOSE_YAML"], "")
 
     def test_traversal_rules_file_rejected(self):
@@ -849,7 +839,7 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         agents["claude"] = dict(AGENT_FILES["claude"], egress=["api.anthropic.com"])
         d = derive({}, agent_files=agents)
         self.assertIn("api.anthropic.com", d["EGRESS"].split(","))
-        d = derive({"tools": ["aider"]}, agent_files=agents)
+        d = derive({"agents": ["aider"]}, agent_files=agents)
         self.assertNotIn("api.anthropic.com", d["EGRESS"].split(","))
 
     def test_agent_egress_rejects_non_hostname(self):
