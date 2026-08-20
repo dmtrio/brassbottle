@@ -733,6 +733,96 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
             derive({}, agent_files=agents)
         self.assertIn("agent 'claude' mcp: unsupported field(s): nope", str(cm.exception))
 
+    def test_non_strategy_literal_dialect_with_env_refs_true_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["cursor"] = dict(AGENT_FILES["cursor"])
+        agents["cursor"]["mcp"] = dict(AGENT_FILES["cursor"]["mcp"], env_refs=True)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("literal-key rendering", str(cm.exception))
+
+    def test_non_strategy_toml_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["cursor"] = dict(AGENT_FILES["cursor"])
+        agents["cursor"]["mcp"] = dict(AGENT_FILES["cursor"]["mcp"], format="toml")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("non-strategy wiring requires format json", str(cm.exception))
+
+    def test_non_strategy_json_without_dialect_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["cursor"] = dict(AGENT_FILES["cursor"])
+        mcp_doc = dict(AGENT_FILES["cursor"]["mcp"])
+        del mcp_doc["dialect"]
+        agents["cursor"]["mcp"] = mcp_doc
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("non-strategy wiring requires a dialect", str(cm.exception))
+
+    def test_claude_preapprove_requires_workspace_mcp_path(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"])
+        agents["claude"]["mcp"] = dict(AGENT_FILES["claude"]["mcp"], config_path=".claude/mcp.json")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("strategy claude_preapprove requires config_path '.mcp.json'", str(cm.exception))
+
+    def test_claude_preapprove_requires_truthy_env_refs(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"])
+        agents["claude"]["mcp"] = dict(AGENT_FILES["claude"]["mcp"], env_refs=False)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("requires format json and truthy env_refs", str(cm.exception))
+
+    def test_codex_managed_block_requires_toml(self):
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(AGENT_FILES["codex"])
+        agents["codex"]["mcp"] = dict(AGENT_FILES["codex"]["mcp"], format="json")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("strategy codex_managed_block requires format toml", str(cm.exception))
+
+    def test_duplicate_mcp_binary_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["aider"] = dict(AGENT_FILES["aider"], binary="claude")
+        agents["aider"]["mcp"] = {
+            "config_path": ".aider/mcp.json",
+            "format": "json",
+            "dialect": "url",
+            "env_refs": False,
+        }
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("already used by mcp-capable agent", str(cm.exception))
+
+    def test_duplicate_mcp_config_path_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["aider"] = dict(AGENT_FILES["aider"], binary="aider2")
+        agents["aider"]["mcp"] = {
+            "config_path": ".mcp.json",
+            "format": "json",
+            "dialect": "url",
+            "env_refs": False,
+        }
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("mcp.config_path '.mcp.json': already used by agent", str(cm.exception))
+
+    def test_traversal_mcp_config_path_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"])
+        agents["claude"]["mcp"] = dict(AGENT_FILES["claude"]["mcp"], config_path="../x")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("illegal component '..'", str(cm.exception))
+
+    def test_literal_key_agents_emission(self):
+        d = derive({})
+        self.assertEqual(d["LITERAL_KEY_AGENTS"], "cursor-agent gemini pi")
+        d = derive({"tools": ["claude", "aider"]})
+        self.assertEqual(d["LITERAL_KEY_AGENTS"], "")
+
     def test_absolute_agent_state_path_is_rejected(self):
         agents = dict(AGENT_FILES)
         agents["claude"] = dict(AGENT_FILES["claude"])

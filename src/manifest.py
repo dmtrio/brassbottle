@@ -351,7 +351,9 @@ def _normalize_agent_docs(agent_files):
 
     normalized = {}
     volume_owner = {}
-    mount_owner = {}   # container mount path -> agent, for overlap messages
+    mount_owner = {}        # container mount path -> agent, for overlap messages
+    mcp_binary_owner = {}   # binary -> agent, mcp-capable only (payload key)
+    mcp_config_owner = {}   # mcp config_path -> agent (sidecar clobber guard)
     for agent in sorted(agent_files):
         doc = agent_files[agent]
         if not NAME_RE.match(agent):
@@ -440,7 +442,7 @@ def _normalize_agent_docs(agent_files):
                     "(only config_path, format, dialect, env_refs, strategy)")
             if "config_path" not in mcp:
                 raise ManifestError(f"agent '{agent}' mcp.config_path is required")
-            config_path = _agent_string(agent, "mcp.config_path", mcp.get("config_path"))
+            config_path = _agent_home_path(agent, "mcp.config_path", mcp.get("config_path"))
             if "format" not in mcp:
                 raise ManifestError(f"agent '{agent}' mcp.format is required")
             fmt = _agent_string(agent, "mcp.format", mcp.get("format"))
@@ -466,6 +468,39 @@ def _normalize_agent_docs(agent_files):
                 if strategy not in AGENT_MCP_STRATEGIES:
                     raise ManifestError(
                         f"agent '{agent}' mcp.strategy must be one of {', '.join(sorted(AGENT_MCP_STRATEGIES))}")
+            # The descriptor contract is CLOSED against run()'s dispatch in
+            # wire_plugins.py: any combination accepted here must actually wire
+            # there. A combo this block does not admit would pass derive, then
+            # brick up.sh only AFTER the container is up — the worst place to
+            # learn a descriptor is wrong. Keep the two in lockstep.
+            if strategy == "claude_preapprove":
+                if config_path != ".mcp.json":
+                    raise ManifestError(
+                        f"agent '{agent}' mcp: strategy claude_preapprove requires "
+                        "config_path '.mcp.json' (the workspace-level file the strategy owns)")
+                if fmt != "json" or not env_refs:
+                    raise ManifestError(
+                        f"agent '{agent}' mcp: strategy claude_preapprove requires "
+                        "format json and truthy env_refs (it writes ${SLOT} refs)")
+            elif strategy == "codex_managed_block":
+                if fmt != "toml":
+                    raise ManifestError(
+                        f"agent '{agent}' mcp: strategy codex_managed_block requires format toml")
+            else:
+                if fmt != "json":
+                    raise ManifestError(
+                        f"agent '{agent}' mcp: non-strategy wiring requires format json "
+                        "(a toml agent needs a named strategy)")
+                if dialect in ("url", "httpUrl", "type-http"):
+                    if env_refs:
+                        raise ManifestError(
+                            f"agent '{agent}' mcp: dialect '{dialect}' is literal-key "
+                            "rendering — env_refs must be false (a ref-capable agent "
+                            "uses dialect mcpServers)")
+                elif dialect != "mcpServers":
+                    raise ManifestError(
+                        f"agent '{agent}' mcp: non-strategy wiring requires a dialect — "
+                        "url/httpUrl/type-http (literal keys) or mcpServers (generic)")
             parsed_mcp = {
                 "config_path": config_path,
                 "format": fmt,
@@ -473,6 +508,19 @@ def _normalize_agent_docs(agent_files):
                 "env_refs": env_refs,
                 "strategy": strategy,
             }
+            owner = mcp_binary_owner.get(binary)
+            if owner is not None:
+                raise ManifestError(
+                    f"agent '{agent}' binary '{binary}': already used by mcp-capable "
+                    f"agent '{owner}' (binaries key the wiring payload and must be unique)")
+            mcp_binary_owner[binary] = agent
+            owner = mcp_config_owner.get(config_path)
+            if owner is not None:
+                raise ManifestError(
+                    f"agent '{agent}' mcp.config_path '{config_path}': already used by "
+                    f"agent '{owner}' (two agents sharing a config would clobber each "
+                    "other's sidecar-reconciled servers)")
+            mcp_config_owner[config_path] = agent
 
         normalized[agent] = {
             "binary": binary,
@@ -733,6 +781,17 @@ def derive(manifest, plugin_files, agent_files, env):
         sorted(agents[name]["binary"] for name in enabled_agent_dirs
                if agents[name]["mcp"] is not None)
     )
+    # The agents whose remote agent-scoped keys must travel as one-shot docker
+    # exec env (IDENTITY_KEY_n) because their configs bake literal values.
+    # Ref-style and managed-block agents get keys via their shim env instead —
+    # routing by descriptor role here keeps up.sh from ever shipping a
+    # ref-capable agent's secret on the exec environment unnecessarily.
+    out["LITERAL_KEY_AGENTS"] = " ".join(sorted(
+        agents[name]["binary"] for name in enabled_agent_dirs
+        if agents[name]["mcp"] is not None
+        and not agents[name]["mcp"]["env_refs"]
+        and agents[name]["mcp"]["dialect"] in ("url", "httpUrl", "type-http")
+    ))
     out["AGENTS_MCP_JSON"] = json.dumps(
         [
             {

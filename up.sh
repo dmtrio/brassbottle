@@ -435,27 +435,29 @@ echo "  ✓ skills linked (read-only; rules changes go via PR to the rules repo)
 # (--build-payload, host python3), so the descriptor-driven schema and runtime
 # wiring rules live in one tested place; bash only routes env vars. Keys never enter the
 # payload: they travel as docker-exec env vars the payload references by name —
-# and only for cursor-agent/gemini/pi (claude expands the ${VAR} ref from its
-# shim env; codex is a pending warning and ships no key at all).
+# and only for descriptor-marked literal-key agents (their configs bake values).
+# Ref-style and managed-block roles keep ${SLOT} refs in config and must not get
+# an inline key on argv.
 #
 # Build literal remote-agent inputs from resolved AGENT_SECRETS. Only slots
 # required by a REMOTE MCP server travel through docker exec; env-only slots and
 # LOCAL-server slots are already in the per-agent key file (a local server reads
 # ${SLOT} from its own process env, so putting the value on the `docker exec`
-# argv would only leak it into `ps`). Claude keeps ${SLOT} references and Codex
-# still warns for remote MCPs, so neither receives a literal key here.
+# argv would only leak it into `ps`). Descriptor role decides which agents need
+# literal values at all: only binaries listed in LITERAL_KEY_AGENTS receive
+# IDENTITY_KEY_n for the wiring exec.
 IDENTITY_ENV=()
 IDENTITY_SECRETS=""
 i=0
 while IFS=$'\t' read -r agent slot source; do
     [ -n "$agent" ] || continue
     case " $AGENT_SERVER_REMOTE_SLOTS " in *" $slot "*) ;; *) continue ;; esac
-    case "$agent" in
-        claude|codex) ;;
-        *)
+    case " $LITERAL_KEY_AGENTS " in
+        *" $agent "*)
             IDENTITY_ENV+=(-e "IDENTITY_KEY_${i}=${!source}")
             IDENTITY_SECRETS="${IDENTITY_SECRETS:+$IDENTITY_SECRETS }$agent:IDENTITY_KEY_$i:$slot"
             i=$((i + 1)) ;;
+        *) ;;
     esac
 done <<EOF
 $AGENT_SECRETS
