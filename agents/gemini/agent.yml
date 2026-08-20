@@ -1,0 +1,20 @@
+# gemini — Google's Gemini CLI (npm @google/gemini-cli).
+# Remote servers render as {httpUrl, headers} in ~/.gemini/settings.json.
+# gemini cannot expand ${VAR} refs in headers, so agent-scoped remotes get
+# LITERAL keys baked into the (volume-persisted, chmod-guarded) config.
+
+binary: gemini
+
+install: |
+  npm install -g @google/gemini-cli
+
+state_dirs:
+  - {path: .gemini, volume: gemini-state}
+
+rules_file: .gemini/GEMINI.md
+
+mcp:
+  config_path: .gemini/settings.json
+  format: json
+  dialect: httpUrl
+  env_refs: false
