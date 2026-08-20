@@ -432,8 +432,8 @@ echo "  ✓ skills linked (read-only; rules changes go via PR to the rules repo)
 # sidecar stale-tracking, codex's managed TOML block — lives in
 # src/wire_plugins.py (baked into the image, unit-tested by
 # tests/test_wire_plugins.py). The SAME file also builds the JSON payload
-# (--build-payload, host python3), so the schema and strict boolean semantics
-# live in one tested place; bash only routes env vars. Keys never enter the
+# (--build-payload, host python3), so the descriptor-driven schema and runtime
+# wiring rules live in one tested place; bash only routes env vars. Keys never enter the
 # payload: they travel as docker-exec env vars the payload references by name —
 # and only for cursor-agent/gemini/pi (claude expands the ${VAR} ref from its
 # shim env; codex is a pending warning and ships no key at all).
@@ -461,9 +461,7 @@ done <<EOF
 $AGENT_SECRETS
 EOF
 
-PAYLOAD=$(WIRE_CURSOR="$INSTALL_CURSOR" WIRE_GEMINI="$INSTALL_GEMINI" \
-    WIRE_PI="$INSTALL_PI" WIRE_CODEX="$INSTALL_CODEX" \
-    PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
+PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
     AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
     IDENTITY_SECRETS="$IDENTITY_SECRETS" \
     "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py" --build-payload)

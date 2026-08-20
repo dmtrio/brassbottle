@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -386,8 +387,7 @@ class TestPreapproveClaude(QuietTestCase):
 
 
 class TestWriteAgentServer(QuietTestCase):
-    """Tests for write_agent_server / warn_agent_server (the generalized,
-    per-agent renderer for agent-scoped remote servers)."""
+    """Tests for literal rendering and write_agent_server / warn_agent_server."""
 
     SPEC = {"url": "https://mcp-obsidian.dmetr.io/mcp",
             "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}
@@ -399,9 +399,10 @@ class TestWriteAgentServer(QuietTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             output = io.StringIO()
+            entry = wire_plugins._literal_agent_config("url", self.SPEC, {self.SLOT: "MYKEY123"})
             with contextlib.redirect_stdout(output):
                 wire_plugins.write_agent_server(
-                    "cursor-agent", "obsidian-annotated", self.SPEC, self.SLOT, "MYKEY123", home)
+                    "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", entry, home)
 
             mcp_path = home / ".cursor" / "mcp.json"
             self.assertTrue(mcp_path.exists())
@@ -421,8 +422,9 @@ class TestWriteAgentServer(QuietTestCase):
             mcp_path.parent.mkdir(parents=True)
             mcp_path.write_text(json.dumps({"mcpServers": {"myserena": {"command": "bash"}}}))
 
+            entry = wire_plugins._literal_agent_config("url", self.SPEC, {self.SLOT: "KEY"})
             wire_plugins.write_agent_server(
-                "cursor-agent", "obsidian-annotated", self.SPEC, self.SLOT, "KEY", home)
+                "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", entry, home)
 
             data = json.loads(mcp_path.read_text())
             self.assertIn("myserena", data["mcpServers"])
@@ -436,8 +438,9 @@ class TestWriteAgentServer(QuietTestCase):
             mcp_path.parent.mkdir(parents=True)
             mcp_path.write_text("")  # Zero bytes
 
+            entry = wire_plugins._literal_agent_config("url", self.SPEC, {self.SLOT: "KEY"})
             wire_plugins.write_agent_server(
-                "cursor-agent", "obsidian-annotated", self.SPEC, self.SLOT, "KEY", home)
+                "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", entry, home)
 
             data = json.loads(mcp_path.read_text())
             self.assertEqual(list(data["mcpServers"].keys()), ["obsidian-annotated"])
@@ -446,8 +449,9 @@ class TestWriteAgentServer(QuietTestCase):
         """gemini writes ~/.gemini/settings.json with key 'httpUrl' not 'url'."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
+            entry = wire_plugins._literal_agent_config("httpUrl", self.SPEC, {self.SLOT: "GKEY"})
             wire_plugins.write_agent_server(
-                "gemini", "obsidian-annotated", self.SPEC, self.SLOT, "GKEY", home)
+                "gemini", ".gemini/settings.json", "obsidian-annotated", entry, home)
 
             data = json.loads((home / ".gemini" / "settings.json").read_text())
             entry = data["mcpServers"]["obsidian-annotated"]
@@ -465,8 +469,9 @@ class TestWriteAgentServer(QuietTestCase):
             pi_path.parent.mkdir(parents=True)
             pi_path.write_text(json.dumps({"mcpServers": {"keepme": {"command": "x"}}}))
 
+            entry = wire_plugins._literal_agent_config("type-http", self.SPEC, {self.SLOT: "PIKEY"})
             wire_plugins.write_agent_server(
-                "pi", "obsidian-annotated", self.SPEC, self.SLOT, "PIKEY", home)
+                "pi", ".pi/agent/mcp.json", "obsidian-annotated", entry, home)
 
             data = json.loads(pi_path.read_text())
             self.assertIn("keepme", data["mcpServers"])
@@ -481,12 +486,17 @@ class TestWriteAgentServer(QuietTestCase):
             home = Path(tmp)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                wire_plugins.warn_agent_server("codex", "obsidian-annotated", self.SLOT)
+                wire_plugins.warn_agent_server(
+                    "codex", ".codex/config.toml", "obsidian-annotated", self.SLOT)
 
             self.assertIn("codex agent-scoped server 'obsidian-annotated' not yet wired",
                           output.getvalue())
             self.assertIn("OBSIDIAN_ANNOTATED_KEY", output.getvalue())
             self.assertFalse((home / ".codex" / "config.toml").exists())
+
+    def test_literal_renderer_rejects_unknown_dialect(self):
+        with self.assertRaises(wire_plugins.WireError):
+            wire_plugins._literal_agent_config("mcpServers", self.SPEC, {self.SLOT: "x"})
 
 
 class TestWirePluginServersJson(QuietTestCase):
@@ -761,8 +771,21 @@ class TestWireCodexToml(QuietTestCase):
 class TestRunIntegration(QuietTestCase):
     """Integration tests for the run function."""
 
+    AGENTS_ALL = [
+        {"binary": "claude", "config_path": ".mcp.json", "format": "json",
+         "dialect": "mcpServers", "env_refs": True, "strategy": "claude_preapprove"},
+        {"binary": "codex", "config_path": ".codex/config.toml", "format": "toml",
+         "dialect": "", "env_refs": False, "strategy": "codex_managed_block"},
+        {"binary": "cursor-agent", "config_path": ".cursor/mcp.json", "format": "json",
+         "dialect": "url", "env_refs": False, "strategy": ""},
+        {"binary": "gemini", "config_path": ".gemini/settings.json", "format": "json",
+         "dialect": "httpUrl", "env_refs": False, "strategy": ""},
+        {"binary": "pi", "config_path": ".pi/agent/mcp.json", "format": "json",
+         "dialect": "type-http", "env_refs": False, "strategy": ""},
+    ]
+
     def test_full_payload_all_agents_wired(self):
-        """Full payload with wire all true, capabilities, plugin, identity → configs generated."""
+        """Full payload: descriptors drive claude ref, literal trio, and codex warn/local."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             workspace = Path(tmp) / "workspace"
@@ -775,24 +798,22 @@ class TestRunIntegration(QuietTestCase):
 
             env = {"IDENTITY_KEY_0": "LITERALKEY"}
             payload = {
-                "wire": {
-                    "cursor": True,
-                    "gemini": True,
-                    "pi": True,
-                    "codex": True,
-                },
+                "agents": list(self.AGENTS_ALL),
                 "plugin_mcp_entries": [
                     {"myserena": {"command": "bash", "args": ["-c"]}},   # local
                     {"coding": {"url": "http://host.docker.internal:8811/mcp",  # env-remote
                                 "headers": {"Authorization": "Bearer ${MCP_GATEWAY_TOKEN}"}}},
                 ],
                 "agent_servers": [
-                    {"name": "obsidian-annotated", "slot": "OBSIDIAN_ANNOTATED_KEY",
+                    {"name": "obsidian-annotated",
                      "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
                               "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},
-                     "claude": True,
-                     "literal": [{"agent": "cursor-agent", "key_env": "IDENTITY_KEY_0"}],
-                     "warn": ["codex"]},
+                     "requires": ["OBSIDIAN_ANNOTATED_KEY"],
+                     "ref": ["claude"],
+                     "literal": [{"agent": "cursor-agent",
+                                  "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}],
+                     "warn": ["codex"],
+                     "local": []},
                 ],
             }
 
@@ -834,8 +855,8 @@ class TestRunIntegration(QuietTestCase):
             # codex config exists
             self.assertTrue((home / ".codex" / "config.toml").exists())
 
-    def test_wire_flags_false_no_agent_configs_created(self):
-        """wire flags false → no agent config files created (claude .mcp.json still generated)."""
+    def test_empty_agents_no_agent_configs_created(self):
+        """No payload agents means no agent config wiring runs at all."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             workspace = Path(tmp) / "workspace"
@@ -844,21 +865,14 @@ class TestRunIntegration(QuietTestCase):
             repos_dir.mkdir()
 
             payload = {
-                "wire": {
-                    "cursor": False,
-                    "gemini": False,
-                    "pi": False,
-                    "codex": False,
-                },
-                "capabilities": {},
+                "agents": [],
                 "plugin_mcp_entries": [],
-                "identities": [],
+                "agent_servers": [],
             }
 
             wire_plugins.run(payload, home, workspace, {})
 
-            # claude .mcp.json still generated at the workspace canonical path
-            self.assertTrue((repos_dir / ".mcp.json").exists())
+            self.assertFalse((repos_dir / ".mcp.json").exists())
             # No agent home configs
             self.assertFalse((home / ".cursor").exists())
             self.assertFalse((home / ".gemini").exists())
@@ -878,11 +892,11 @@ class TestRunIntegration(QuietTestCase):
                     "args": ["https://mcp.axiom.co/mcp", "--header",
                              "Authorization: Bearer ${AXIOM_TOKEN}"]}
             payload = {
-                "wire": {"cursor": True, "gemini": True, "pi": True, "codex": True},
+                "agents": list(self.AGENTS_ALL),
                 "plugin_mcp_entries": [],
                 "agent_servers": [
-                    {"name": "axiom", "slot": "AXIOM_TOKEN", "spec": spec,
-                     "claude": True, "literal": [], "warn": [],
+                    {"name": "axiom", "spec": spec, "requires": ["AXIOM_TOKEN"],
+                     "ref": ["claude"], "literal": [], "warn": [],
                      "local": ["cursor-agent", "codex"]},  # gemini/pi NOT bound
                 ],
             }
@@ -922,13 +936,16 @@ class TestRunIntegration(QuietTestCase):
 
             spec = {"url": "https://mcp-obsidian.dmetr.io/mcp",
                     "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}
-            wire = {"cursor": True, "gemini": False, "pi": False, "codex": False}
+            cursor_only = [{
+                "binary": "cursor-agent", "config_path": ".cursor/mcp.json",
+                "format": "json", "dialect": "url", "env_refs": False, "strategy": "",
+            }]
             enabled = {
-                "wire": wire,
+                "agents": cursor_only,
                 "plugin_mcp_entries": [{"serena": {"command": "bash", "args": ["-lc", "s"]}}],
                 "agent_servers": [
                     {"name": "obsidian-annotated", "spec": spec,
-                     "requires": ["OBSIDIAN_ANNOTATED_KEY"], "claude": False,
+                     "requires": ["OBSIDIAN_ANNOTATED_KEY"], "ref": [],
                      "warn": [], "local": [],
                      "literal": [{"agent": "cursor-agent",
                                   "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}]},
@@ -944,7 +961,7 @@ class TestRunIntegration(QuietTestCase):
             self.assertIn("hand-added", cursor)        # hand-added preserved
 
             # Rerun with the server disabled for cursor (no longer in agent_servers).
-            disabled = {"wire": wire, "plugin_mcp_entries": [
+            disabled = {"agents": cursor_only, "plugin_mcp_entries": [
                 {"serena": {"command": "bash", "args": ["-lc", "s"]}}], "agent_servers": []}
             wire_plugins.run(disabled, home, workspace, {"IDENTITY_KEY_0": "sekret-token"})
 
@@ -1106,27 +1123,26 @@ class TestWireCodexTomlMarkerEdges(QuietTestCase):
 
 
 class TestBuildPayload(unittest.TestCase):
-    """Host-side payload assembly: strict [ = \"true\" ] boolean semantics, the
-    PLUGIN_MCP_ENTRIES parsing contract, and the round-trip into run()."""
+    """Host-side payload assembly from descriptor + server env inputs."""
 
-    def test_only_literal_true_enables_flags(self):
-        env = {"WIRE_CURSOR": "true", "WIRE_GEMINI": "yes", "WIRE_PI": "1",
-               "WIRE_CODEX": "True"}
-        payload = wire_plugins.build_payload(env)
-        self.assertEqual(payload["wire"],
-                         {"cursor": True, "gemini": False, "pi": False, "codex": False})
-        # capabilities is gone entirely — obsidian is an agent_server now.
-        self.assertNotIn("capabilities", payload)
+    AGENTS = [
+        {"binary": "claude", "config_path": ".mcp.json", "format": "json",
+         "dialect": "mcpServers", "env_refs": True, "strategy": "claude_preapprove"},
+        {"binary": "cursor-agent", "config_path": ".cursor/mcp.json", "format": "json",
+         "dialect": "url", "env_refs": False, "strategy": ""},
+    ]
 
     def test_missing_env_means_everything_off_and_empty(self):
         payload = wire_plugins.build_payload({})
-        self.assertEqual(payload["wire"],
-                         {"cursor": False, "gemini": False, "pi": False, "codex": False})
+        self.assertEqual(payload["agents"], [])
         self.assertEqual(payload["plugin_mcp_entries"], [])
         self.assertEqual(payload["agent_servers"], [])
 
     def test_plugin_entries_parsed_per_line_blank_lines_ignored(self):
-        env = {"PLUGIN_MCP_ENTRIES": '{"serena": {"command": "bash"}}\n\n{"other": {"command": "x"}}\n'}
+        env = {
+            "AGENTS_MCP_JSON": json.dumps(self.AGENTS, separators=(",", ":")),
+            "PLUGIN_MCP_ENTRIES": '{"serena": {"command": "bash"}}\n\n{"other": {"command": "x"}}\n',
+        }
         payload = wire_plugins.build_payload(env)
         self.assertEqual(payload["plugin_mcp_entries"],
                          [{"serena": {"command": "bash"}}, {"other": {"command": "x"}}])
@@ -1140,6 +1156,19 @@ class TestBuildPayload(unittest.TestCase):
         with self.assertRaises(wire_plugins.WireError):
             wire_plugins.build_payload({"PLUGIN_MCP_ENTRIES": "[1, 2]\n"})
 
+    def test_invalid_agents_json_raises(self):
+        with self.assertRaises(wire_plugins.WireError):
+            wire_plugins.build_payload({"AGENTS_MCP_JSON": "{not json"})
+
+    def test_unknown_agent_strategy_raises(self):
+        with self.assertRaises(wire_plugins.WireError):
+            wire_plugins.build_payload({
+                "AGENTS_MCP_JSON": json.dumps([{
+                    "binary": "x", "config_path": ".x/mcp.json", "format": "json",
+                    "dialect": "url", "env_refs": False, "strategy": "unknown",
+                }])
+            })
+
     def test_round_trips_through_run(self):
         """The payload build_payload emits is exactly what run() consumes: a
         required remote server reaches claude (ref) and cursor (literal); a local
@@ -1151,7 +1180,7 @@ class TestBuildPayload(unittest.TestCase):
             repos = workspace / "repos"
             repo = repos / "app"
             (repo / ".git").mkdir(parents=True)
-            env = {"WIRE_CURSOR": "true",
+            env = {"AGENTS_MCP_JSON": json.dumps(self.AGENTS, separators=(",", ":")),
                    "PLUGIN_MCP_ENTRIES": '{"serena": {"command": "bash"}}\n',
                    "AGENT_SERVERS_JSON": json.dumps({"obsidian-annotated": {
                        "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
@@ -1181,117 +1210,127 @@ class TestBuildPayload(unittest.TestCase):
             self.assertEqual(os.readlink(repo / ".mcp.json"), "../.mcp.json")
 
 
-class TestHybridBuildPayload(unittest.TestCase):
-    def test_required_server_needs_every_effective_slot(self):
+class TestDescriptorDrivenRoles(unittest.TestCase):
+    """Phase-2 seam pins: AGENTS_MCP_JSON descriptors now define role routing."""
+
+    def test_synthetic_descriptors_drive_role_and_order(self):
+        agents = [
+            {"binary": "alpha-ref", "config_path": ".alpha/mcp.json", "format": "json",
+             "dialect": "mcpServers", "env_refs": "shim", "strategy": ""},
+            {"binary": "beta-managed", "config_path": ".beta/config.toml", "format": "toml",
+             "dialect": "", "env_refs": False, "strategy": "codex_managed_block"},
+            {"binary": "gamma-literal", "config_path": ".gamma/mcp.json", "format": "json",
+             "dialect": "url", "env_refs": False, "strategy": ""},
+        ]
         env = {
+            "AGENTS_MCP_JSON": json.dumps(agents, separators=(",", ":")),
             "AGENT_SERVERS_JSON": json.dumps({
-                "remote": {
-                    "spec": {"url": "https://example.test/mcp",
-                             "headers": {"Authorization": "Bearer ${TOKEN}",
-                                         "X-Second": "${SECOND}"}},
-                    "requires": ["TOKEN", "SECOND"]},
-                "local": {
-                    "spec": {"command": "bridge", "args": ["${TOKEN}"]},
-                    "requires": ["TOKEN"]},
+                "remote": {"spec": {"url": "https://example.test/mcp",
+                                       "headers": {"Authorization": "Bearer ${TOKEN}"}},
+                           "requires": ["TOKEN"]},
+                "local": {"spec": {"command": "bridge", "args": ["--stdio"]},
+                          "requires": ["TOKEN"]},
             }),
             "AGENT_SECRETS": (
-                "claude\tTOKEN\tCOMMON\n"
-                "cursor-agent\tTOKEN\tCURSOR\n"
-                "cursor-agent\tSECOND\tCURSOR_SECOND\n"),
-            "IDENTITY_SECRETS": (
-                "cursor-agent:IDENTITY_KEY_0:TOKEN "
-                "cursor-agent:IDENTITY_KEY_1:SECOND"),
+                "alpha-ref\tTOKEN\tSRC\n"
+                "beta-managed\tTOKEN\tSRC\n"
+                "gamma-literal\tTOKEN\tSRC\n"),
+            "IDENTITY_SECRETS": "gamma-literal:K0:TOKEN",
         }
-        servers = {entry["name"]: entry for entry in wire_plugins.build_payload(env)["agent_servers"]}
-        self.assertTrue(servers["local"]["claude"])
-        self.assertEqual(servers["local"]["local"], ["cursor-agent"])
-        self.assertFalse(servers["remote"]["claude"])
+        payload = wire_plugins.build_payload(env)
+        self.assertEqual([a["binary"] for a in payload["agents"]],
+                         ["alpha-ref", "beta-managed", "gamma-literal"])
+        servers = {entry["name"]: entry for entry in payload["agent_servers"]}
+        self.assertEqual(servers["remote"]["ref"], ["alpha-ref"])
+        self.assertEqual(servers["remote"]["warn"], ["beta-managed"])
         self.assertEqual(
             servers["remote"]["literal"],
-            [{"agent": "cursor-agent",
-              "key_envs": {"TOKEN": "IDENTITY_KEY_0", "SECOND": "IDENTITY_KEY_1"}}])
+            [{"agent": "gamma-literal", "key_envs": {"TOKEN": "K0"}}],
+        )
+        self.assertEqual(servers["local"]["ref"], ["alpha-ref"])
+        self.assertEqual(servers["local"]["local"], ["beta-managed", "gamma-literal"])
+        self.assertEqual(servers["local"]["warn"], [])
+        self.assertEqual(servers["local"]["literal"], [])
 
-    def test_local_server_routes_codex_into_local_not_warn(self):
-        # A LOCAL (command) agent-scoped server — axiom's mcp-remote bridge —
-        # puts every non-claude bound agent, codex INCLUDED, into `local`
-        # (codex's TOML supports command servers), never `warn`/`literal`.
-        env = {
-            "AGENT_SERVERS_JSON": json.dumps({
-                "axiom": {"spec": {"command": "mcp-remote",
-                                   "args": ["https://mcp.axiom.co/mcp"]},
-                          "requires": ["AXIOM_TOKEN"]},
-            }),
-            "AGENT_SECRETS": (
-                "claude\tAXIOM_TOKEN\tCOMMON\n"
-                "cursor-agent\tAXIOM_TOKEN\tCOMMON\n"
-                "codex\tAXIOM_TOKEN\tCOMMON\n"),
-        }
-        e = wire_plugins.build_payload(env)["agent_servers"][0]
-        self.assertTrue(e["claude"])
-        self.assertEqual(sorted(e["local"]), ["codex", "cursor-agent"])
-        self.assertEqual(e["literal"], [])
-        self.assertEqual(e["warn"], [])
-
-    def test_literal_agent_substitutes_all_required_keys(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            wire_plugins.write_agent_server(
-                "cursor-agent", "remote",
-                {"url": "https://example.test/mcp",
-                 "headers": {"Authorization": "Bearer ${TOKEN}", "X-Second": "${SECOND}"}},
-                {"TOKEN": "first", "SECOND": "second"}, home)
-            entry = json.loads((home / ".cursor" / "mcp.json").read_text())["mcpServers"]["remote"]
-            self.assertEqual(entry["headers"],
-                             {"Authorization": "Bearer first", "X-Second": "second"})
-
-
-class TestDescriptorDriftPins(unittest.TestCase):
-    """Phase 1 (PLN - Agents as Plugins) ships wire_plugins.py with per-agent
-    knowledge still hardcoded — Phase 2 replaces it with descriptor-driven
-    rendering. Until then, pin the duplicated ground truth to the
-    agents/*/agent.yml descriptors so they cannot drift apart silently: a new
-    mcp-capable agents/<name>/ directory, or an edited mcp.config_path, must
-    fail HERE instead of shipping an agent that silently wires to nowhere."""
-
-    @classmethod
-    def setUpClass(cls):
-        import shutil
-        import subprocess
-        if not shutil.which("yq"):
-            raise unittest.SkipTest("yq not available")
-        cls.mcp_by_binary = {}
+    def test_real_descriptor_round_trip_preserves_current_roles(self):
+        import manifest
         agents_dir = Path(__file__).resolve().parents[1] / "agents"
+        agent_docs = {}
         for f in sorted(agents_dir.glob("*/agent.yml")):
             doc = json.loads(subprocess.run(
                 ["yq", "-o=json", str(f)],
                 capture_output=True, text=True, check=True).stdout)
-            if doc.get("mcp"):
-                cls.mcp_by_binary[doc["binary"]] = doc["mcp"]
+            agent_docs[f.parent.name] = doc
+        derived = manifest.derive(
+            {"tools": ["claude", "codex", "cursor", "gemini", "pi"]},
+            {}, agent_docs, {"PRESENT_SECRET_VARS": "", "SECRETS_FILE": "/sec/secrets.env"},
+        )
+        env = {
+            "AGENTS_MCP_JSON": derived["AGENTS_MCP_JSON"],
+            "AGENT_SERVERS_JSON": json.dumps({
+                "remote": {"spec": {"url": "https://example.test/mcp",
+                                       "headers": {"Authorization": "Bearer ${TOKEN}"}},
+                           "requires": ["TOKEN"]},
+                "local": {"spec": {"command": "bridge", "args": ["--stdio"]},
+                          "requires": ["TOKEN"]},
+            }),
+            "AGENT_SECRETS": (
+                "claude\tTOKEN\tSRC\n"
+                "codex\tTOKEN\tSRC\n"
+                "cursor-agent\tTOKEN\tSRC\n"
+                "gemini\tTOKEN\tSRC\n"
+                "pi\tTOKEN\tSRC\n"),
+            "IDENTITY_SECRETS": (
+                "cursor-agent:K0:TOKEN "
+                "gemini:K1:TOKEN "
+                "pi:K2:TOKEN"),
+        }
+        payload = wire_plugins.build_payload(env)
+        servers = {entry["name"]: entry for entry in payload["agent_servers"]}
+        self.assertEqual(servers["remote"]["ref"], ["claude"])
+        self.assertEqual(servers["remote"]["warn"], ["codex"])
+        self.assertEqual(
+            [lit["agent"] for lit in servers["remote"]["literal"]],
+            ["cursor-agent", "gemini", "pi"],
+        )
+        self.assertEqual(servers["local"]["ref"], ["claude"])
+        self.assertEqual(servers["local"]["local"], ["codex", "cursor-agent", "gemini", "pi"])
+        self.assertEqual(servers["local"]["warn"], [])
+        self.assertEqual(servers["local"]["literal"], [])
 
-    def test_literal_trio_config_paths_match_descriptors(self):
-        """_AGENT_SERVER_CONFIG (the agents wire_plugins writes directly) must
-        mirror the descriptors' mcp.config_path for every non-strategy agent."""
-        expected = {b: mcp["config_path"] for b, mcp in self.mcp_by_binary.items()
-                    if not mcp.get("strategy")}
-        actual = {agent: str(rel) for agent, rel in wire_plugins._AGENT_SERVER_CONFIG.items()}
-        self.assertEqual(actual, expected)
-
-    def test_strategy_agents_config_paths_appear_in_source(self):
-        """claude/codex are wired by named strategies with paths built inline;
-        pin each descriptor path's components to the source text."""
-        src = Path(wire_plugins.__file__).read_text(encoding="utf-8")
-        for binary in ("claude", "codex"):
-            parts = Path(self.mcp_by_binary[binary]["config_path"]).parts
-            joined = " / ".join(f'"{p}"' for p in parts)
-            self.assertIn(joined, src,
-                          f"{binary}'s descriptor config_path {parts} not found in "
-                          "wire_plugins.py — update the descriptor or the wiring together")
-
-    def test_every_mcp_capable_agent_is_known_to_wire_plugins(self):
-        known = set(wire_plugins._AGENT_SERVER_CONFIG) | {"claude", "codex"}
-        self.assertEqual(set(self.mcp_by_binary), known,
-                         "an mcp-capable agent descriptor exists that wire_plugins.py "
-                         "never wires — that is Phase 2 work; do not ship it silently unwired")
+    def test_future_ref_agent_mcpservers_no_strategy(self):
+        agents = [{
+            "binary": "kimi",
+            "config_path": ".kimi/mcp.json",
+            "format": "json",
+            "dialect": "mcpServers",
+            "env_refs": "shim-env",
+            "strategy": "",
+        }]
+        payload = wire_plugins.build_payload({
+            "AGENTS_MCP_JSON": json.dumps(agents, separators=(",", ":")),
+            "AGENT_SERVERS_JSON": json.dumps({
+                "obsidian-annotated": {
+                    "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
+                             "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},
+                    "requires": ["OBSIDIAN_ANNOTATED_KEY"],
+                }
+            }),
+            "AGENT_SECRETS": "kimi\tOBSIDIAN_ANNOTATED_KEY\tSRC\n",
+        })
+        self.assertEqual(payload["agent_servers"][0]["ref"], ["kimi"])
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            workspace = Path(tmp) / "workspace"
+            home.mkdir()
+            workspace.mkdir()
+            wire_plugins.run(payload, home, workspace, {})
+            kimi = json.loads((home / ".kimi" / "mcp.json").read_text())["mcpServers"]
+            self.assertEqual(kimi["obsidian-annotated"]["type"], "http")
+            self.assertEqual(
+                kimi["obsidian-annotated"]["headers"]["Authorization"],
+                "Bearer ${OBSIDIAN_ANNOTATED_KEY}",
+            )
 
 
 class TestMainSubprocess(unittest.TestCase):

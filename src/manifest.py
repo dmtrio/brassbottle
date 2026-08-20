@@ -727,14 +727,27 @@ def derive(manifest, plugin_files, agent_files, env):
         tools = default_tools
     if not isinstance(tools, list):
         raise ManifestError("manifest agents: must be a list")
-    for name in agent_dir_names:
-        var = "INSTALL_" + name.upper().replace("-", "_")
-        out[var] = "true" if _tool_installed(tools, name) else "false"
     enabled_agent_dirs = sorted(name for name in agent_dir_names if _tool_installed(tools, name))
     out["AGENTS_ENABLED"] = " ".join(enabled_agent_dirs)
     out["SHIM_AGENTS"] = " ".join(
         sorted(agents[name]["binary"] for name in enabled_agent_dirs
                if agents[name]["mcp"] is not None)
+    )
+    out["AGENTS_MCP_JSON"] = json.dumps(
+        [
+            {
+                "binary": agents[name]["binary"],
+                "config_path": agents[name]["mcp"]["config_path"],
+                "format": agents[name]["mcp"]["format"],
+                "dialect": agents[name]["mcp"]["dialect"],
+                "env_refs": agents[name]["mcp"]["env_refs"],
+                "strategy": agents[name]["mcp"]["strategy"],
+            }
+            for name in enabled_agent_dirs
+            if agents[name]["mcp"] is not None
+        ],
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
 
     # ── Capabilities: egress firewall keys stay; gateway/proxyman/browser are
