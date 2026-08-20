@@ -70,7 +70,7 @@ assert_eq "gemini.env = shared only (no binding)" \
     $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval' "$(cat "$d/gemini.env")"
 assert_eq "pi.env carries its watch key" \
     $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval\nANNOTATED_WATCH_KEY=pkey' "$(cat "$d/pi.env")"
-assert_eq "every shim agent gets a file" "5" "$(ls "$d"/*.env | wc -l | tr -d ' ')"
+assert_eq "every shim agent gets a file" "$(echo $SHIM | wc -w | tr -d ' ')" "$(ls "$d"/*.env | wc -l | tr -d ' ')"
 assert_absent "no common.env written" "$(ls "$d")" "common.env"
 assert_eq "files are mode 600" "600" "$(mode_of "$d/claude.env")"
 unset MCP_GATEWAY_TOKEN GH_TOKEN SRC_C SRC_P

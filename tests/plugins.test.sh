@@ -286,8 +286,16 @@ PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENT
     IDENTITY_SECRETS="cursor-agent:IDENTITY_KEY_0:MCP_GATEWAY_TOKEN gemini:IDENTITY_KEY_1:MCP_GATEWAY_TOKEN pi:IDENTITY_KEY_2:MCP_GATEWAY_TOKEN" \
     python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero"
-printf '%s' "$PAYLOAD" | jq -e '
-    ([.agents[] | .binary] == ["claude", "codex", "cursor-agent", "gemini", "pi"])
+# Expected payload agents = the glob's mcp-capable binaries in DESCRIPTOR DIR
+# order (AGENTS_MCP_JSON order) — derived, so a new agents/<name>/ never
+# stales this pin.
+EXPECTED_MCP_BINARIES=$(for f in agents/*/agent.yml; do
+    [ -e "$f" ] || continue
+    yq -e '.mcp' "$f" >/dev/null 2>&1 || continue
+    yq -r '.binary' "$f"
+done | jq -R . | jq -cs .)
+printf '%s' "$PAYLOAD" | jq -e --argjson exp "$EXPECTED_MCP_BINARIES" '
+    ([.agents[] | .binary] == $exp)
     and ([.plugin_mcp_entries[] | keys[0]] == ["serena"])
     and ([.agent_servers[] | .name] == ["coding"])' >/dev/null \
     && pass "derive → build-payload yields descriptor-driven wiring payload" \
@@ -305,15 +313,16 @@ eval "$A_DERIVED"
 [ "$AGENT_SERVER_SLOTS" = "OBSIDIAN_ANNOTATED_KEY" ] \
     && pass "obsidian-annotated derives a required server slot" \
     || fail "AGENT_SERVER_SLOTS wrong: '$AGENT_SERVER_SLOTS'"
-# up.sh's wiring loop: cursor-agent gets a literal-key env mapping; Claude
-# retains the ${SLOT} reference from its shim env.
+# up.sh's wiring loop: only descriptor-marked literal-key agents (the derived
+# LITERAL_KEY_AGENTS) get a literal-key env mapping; ref-style agents (claude,
+# kimi) retain the ${SLOT} reference from their shim env.
 A_IDA=""; A_IDENV=(); i=0
 while IFS=$'\t' read -r agent slot source; do
     [ -n "$agent" ] || continue
     case " $AGENT_SERVER_SLOTS " in *" $slot "*) ;; *) continue ;; esac
-    case "$agent" in
-        claude|codex) ;;
-        *) A_IDENV+=(-e "IDENTITY_KEY_${i}=v$i"); A_IDA="${A_IDA:+$A_IDA }$agent:IDENTITY_KEY_$i:$slot"; i=$((i+1)) ;;
+    case " $LITERAL_KEY_AGENTS " in
+        *" $agent "*) A_IDENV+=(-e "IDENTITY_KEY_${i}=v$i"); A_IDA="${A_IDA:+$A_IDA }$agent:IDENTITY_KEY_$i:$slot"; i=$((i+1)) ;;
+        *) ;;
     esac
 done <<AEOF
 $AGENT_SECRETS
