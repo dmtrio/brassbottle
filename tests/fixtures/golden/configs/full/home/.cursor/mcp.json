@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "codebase-memory": {
+      "command": "codebase-memory-mcp",
+      "args": []
+    },
+    "axiom": {
+      "command": "mcp-remote",
+      "args": [
+        "https://mcp.axiom.co/mcp",
+        "--header",
+        "Authorization: Bearer ${AXIOM_TOKEN}"
+      ]
+    }
+  }
+}
