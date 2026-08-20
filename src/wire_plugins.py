@@ -18,18 +18,26 @@ one place and both halves are unit-testable:
 Payload:
 
     {
-      "wire":         {"cursor": bool, "gemini": bool, "pi": bool, "codex": bool},
+      "agents":       [
+                        {"binary": ..., "config_path": ..., "format": ...,
+                         "dialect": ..., "env_refs": ..., "strategy": ...},
+                        ...
+                      ],
       "plugin_mcp_entries": [{"<name>": <local or env-scoped-remote spec>}, ...],
       "agent_servers": [
         {"name": "obsidian-annotated", "slot": "OBSIDIAN_ANNOTATED_KEY",
          "spec": {"url": ..., "headers": {...${SLOT}...}},
-         "claude": bool,                                   # → .mcp.json ref
-         "literal": [{"agent": "cursor-agent", "key_env": "IDENTITY_KEY_0"}],
+         "ref":     ["claude"],                            # env-ref configs
+         "literal": [{"agent": "cursor-agent",
+                      "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}],
          "warn":    ["codex"],                             # REMOTE spec only
          "local":   ["cursor-agent", "codex", ...]}        # LOCAL spec only
       ]
     }
 
+- agents is AGENTS_MCP_JSON from manifest.py, ordered by enabled agent
+  descriptor directory name. This module validates it strictly (shape and
+  allowed dialect/strategy values) before wiring any files.
 - plugin_mcp_entries carries one object per NON-agent-scoped plugin (host-side
   manifest.py extracts them from plugins/<name>.yml). A spec is LOCAL
   ({command, args} — stdio, wired into every agent) or env-scoped REMOTE
@@ -37,18 +45,16 @@ Payload:
   duplicate server names hard-fail here as well as host-side (last-wins merge).
 - agent_servers carries the AGENT-SCOPED plugins, wired only for the agents
   bound to the slot (its key gates who sees the server). A REMOTE spec (obsidian)
-  presents each bound agent's own key: claude gets the ${SLOT} ref in .mcp.json
-  (shim expands it), cursor/gemini/pi get the literal key baked in (`literal`),
-  codex gets a warning (`warn`). A LOCAL spec (axiom's mcp-remote stdio bridge)
-  wires the same command into every bound agent's config (`local`, codex
-  included — its toml supports command servers); the token rides in the agent's
-  env, so nothing is baked into the config. Env-only agent-scoped slots (watch
+  presents each bound agent's own role derived from AGENTS_MCP_JSON:
+  ref-style agents keep ${SLOT} refs (`ref`), literal agents bake per-agent
+  key env names (`literal`), managed-block agents warn for remote (`warn`),
+  and LOCAL specs route through each bound agent's local wiring path (`local`
+  for non-ref-style, `ref` for ref-style). Env-only agent-scoped slots (watch
   keys — no server) never reach the payload; up.sh delivers them straight into
   the agent's env file.
 - Keys never ride in the payload: each literal[] element names an environment
   variable (set on the docker exec) that holds the key, so the payload is
-  secret-free. Only cursor-agent/gemini/pi literal keys are shipped at all —
-  claude's rides in its shim env, codex's is pending (warning only).
+  secret-free. Ref-style and managed-block agents receive no literal key.
 - Version skew between the two halves cannot happen in the up.sh flow: the
   payload is built from the repo checkout and the consumer is baked from the
   same checkout by the `docker compose up --build` that just ran.
@@ -78,6 +84,28 @@ CODEX_OPEN_PREFIX = "# >>> djinn plugin MCP"
 CODEX_CLOSE_PREFIX = "# <<< djinn plugin MCP"
 CODEX_OPEN_MARKER = "# >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>"
 CODEX_CLOSE_MARKER = "# <<< djinn plugin MCP <<<"
+
+AGENT_MCP_FIELDS = frozenset({
+    "binary", "config_path", "format", "dialect", "env_refs", "strategy",
+})
+AGENT_MCP_FORMATS = frozenset({"json", "toml"})
+AGENT_MCP_DIALECTS = frozenset({"url", "httpUrl", "type-http", "mcpServers"})
+AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
+LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http"})
+
+# COSMETIC ONLY: per-agent progress notes. Wiring logic MUST NOT key off these
+# names; agents absent from these maps still wire with generic messages.
+# _AGENT_NOTES suffixes a ✓ line when a required remote server is WRITTEN for
+# the agent (why it got a literal key); _AGENT_SYNC_NOTES prints once after the
+# agent's plugin sync regardless (a standing caveat about the agent itself).
+_AGENT_NOTES = {
+    "cursor-agent": "literal key: env interpolation broken for remote headers",
+    "gemini": "literal key: header env expansion is an open FR",
+    "pi": "inert until the pi-mcp-adapter extension is installed",
+}
+_AGENT_SYNC_NOTES = {
+    "pi": "pi: inert until the pi-mcp-adapter extension is installed",
+}
 
 
 class WireError(Exception):
@@ -109,6 +137,139 @@ def _load_json_file(path):
     except ValueError as e:
         raise WireError(f"{path} is not valid JSON: {e}")
     return data
+
+
+def _agent_note_suffix(binary):
+    note = _AGENT_NOTES.get(binary)
+    return f" ({note})" if note else ""
+
+
+def _home_config_path(home, binary, config_path):
+    rel = Path(config_path)
+    if rel.is_absolute():
+        raise WireError(f"agent '{binary}' config_path must be home-relative (got '{config_path}')")
+    if ".." in rel.parts:
+        raise WireError(f"agent '{binary}' config_path must not traverse directories (got '{config_path}')")
+    return home / rel
+
+
+def _normalize_agent_mcp_entry(entry, where):
+    if not isinstance(entry, dict):
+        raise WireError(f"{where} must be a JSON object")
+    extra = sorted(k for k in entry if k not in AGENT_MCP_FIELDS)
+    if extra:
+        raise WireError(
+            f"{where} has unsupported field(s): {', '.join(extra)} "
+            "(expected binary, config_path, format, dialect, env_refs, strategy)"
+        )
+    missing = sorted(k for k in AGENT_MCP_FIELDS if k not in entry)
+    if missing:
+        raise WireError(f"{where} is missing required field(s): {', '.join(missing)}")
+
+    binary = entry.get("binary")
+    config_path = entry.get("config_path")
+    fmt = entry.get("format")
+    dialect = entry.get("dialect")
+    env_refs = entry.get("env_refs")
+    strategy = entry.get("strategy")
+
+    if not isinstance(binary, str) or not binary:
+        raise WireError(f"{where}.binary must be a non-empty string")
+    if not isinstance(config_path, str) or not config_path:
+        raise WireError(f"{where}.config_path must be a non-empty string")
+    if not isinstance(fmt, str) or fmt not in AGENT_MCP_FORMATS:
+        raise WireError(f"{where}.format must be one of: {', '.join(sorted(AGENT_MCP_FORMATS))}")
+    if not isinstance(dialect, str):
+        raise WireError(f"{where}.dialect must be a string")
+    if dialect and dialect not in AGENT_MCP_DIALECTS:
+        raise WireError(f"{where}.dialect must be one of: {', '.join(sorted(AGENT_MCP_DIALECTS))}")
+    if not isinstance(env_refs, (bool, str)):
+        raise WireError(f"{where}.env_refs must be a boolean or string")
+    if not isinstance(strategy, str):
+        raise WireError(f"{where}.strategy must be a string")
+    if strategy and strategy not in AGENT_MCP_STRATEGIES:
+        raise WireError(f"{where}.strategy must be one of: {', '.join(sorted(AGENT_MCP_STRATEGIES))}")
+
+    return {
+        "binary": binary,
+        "config_path": config_path,
+        "format": fmt,
+        "dialect": dialect,
+        "env_refs": env_refs,
+        "strategy": strategy,
+    }
+
+
+def _parse_agents_payload(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise WireError("agents must be a JSON array")
+    normalized = []
+    seen = set()
+    for i, entry in enumerate(value):
+        agent = _normalize_agent_mcp_entry(entry, f"agents[{i}]")
+        binary = agent["binary"]
+        if binary in seen:
+            raise WireError(f"agents has duplicate binary '{binary}'")
+        seen.add(binary)
+        normalized.append(agent)
+    return normalized
+
+
+def _parse_agent_servers_payload(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise WireError("agent_servers must be a JSON array")
+    out = []
+    for i, entry in enumerate(value):
+        where = f"agent_servers[{i}]"
+        if not isinstance(entry, dict):
+            raise WireError(f"{where} must be a JSON object")
+        if not isinstance(entry.get("name"), str) or not entry.get("name"):
+            raise WireError(f"{where}.name must be a non-empty string")
+        if not isinstance(entry.get("spec"), dict):
+            raise WireError(f"{where}.spec must be a JSON object")
+        requires = entry.get("requires")
+        if not isinstance(requires, list) or not all(isinstance(slot, str) for slot in requires):
+            raise WireError(f"{where}.requires must be a list of slots")
+        ref = entry.get("ref")
+        if not isinstance(ref, list) or not all(isinstance(agent, str) for agent in ref):
+            raise WireError(f"{where}.ref must be a list of agent binaries")
+        warn = entry.get("warn")
+        if not isinstance(warn, list) or not all(isinstance(agent, str) for agent in warn):
+            raise WireError(f"{where}.warn must be a list of agent binaries")
+        local = entry.get("local")
+        if not isinstance(local, list) or not all(isinstance(agent, str) for agent in local):
+            raise WireError(f"{where}.local must be a list of agent binaries")
+        literal = entry.get("literal")
+        if not isinstance(literal, list):
+            raise WireError(f"{where}.literal must be a list")
+        normalized_literal = []
+        for j, lit in enumerate(literal):
+            lit_where = f"{where}.literal[{j}]"
+            if not isinstance(lit, dict):
+                raise WireError(f"{lit_where} must be a JSON object")
+            if not isinstance(lit.get("agent"), str) or not lit.get("agent"):
+                raise WireError(f"{lit_where}.agent must be a non-empty string")
+            key_envs = lit.get("key_envs")
+            if not isinstance(key_envs, dict):
+                raise WireError(f"{lit_where}.key_envs must be a JSON object")
+            if not all(isinstance(slot, str) and isinstance(key_env, str)
+                       for slot, key_env in key_envs.items()):
+                raise WireError(f"{lit_where}.key_envs must map slot names to env-var names")
+            normalized_literal.append({"agent": lit["agent"], "key_envs": dict(key_envs)})
+        out.append({
+            "name": entry["name"],
+            "spec": entry["spec"],
+            "requires": list(requires),
+            "ref": list(ref),
+            "literal": normalized_literal,
+            "warn": list(warn),
+            "local": list(local),
+        })
+    return out
 
 
 def merge_plugin_entries(entries):
@@ -314,10 +475,10 @@ def _merge_named_entry(path, name, entry):
     _write_atomic(path, _dump_json(data), mode=0o600)
 
 
-def _literal_agent_config(agent, spec, keys):
-    """Render a required remote server for a literal-key agent. Replace every
+def _literal_agent_config(dialect, spec, keys):
+    """Render a required remote server for a literal-key dialect. Replace every
     ${SLOT} header reference from the effective per-agent key map, then shape
-    per agent (gemini wants httpUrl; pi wants type: http; cursor takes url)."""
+    by descriptor dialect (url/httpUrl/type-http)."""
     def replace(value):
         if not isinstance(value, str):
             return value
@@ -327,58 +488,29 @@ def _literal_agent_config(agent, spec, keys):
 
     headers = {k: replace(v)
                for k, v in (spec.get("headers") or {}).items()}
-    if agent == "gemini":
+    if dialect == "httpUrl":
         return {"httpUrl": spec.get("url"), "headers": headers}
-    if agent == "pi":
+    if dialect == "type-http":
         return {"type": "http", "url": spec.get("url"), "headers": headers}
-    return {"url": spec.get("url"), "headers": headers}  # cursor-agent
+    if dialect == "url":
+        return {"url": spec.get("url"), "headers": headers}
+    raise WireError(f"literal MCP wiring requires dialect one of: {', '.join(sorted(LITERAL_DIALECTS))}")
 
 
-def write_agent_server(agent, name, spec, keys, *rest):
-    """Wire one required remote server into a LITERAL-key agent's config.
-    Cursor and Gemini cannot reliably expand env vars in remote headers, so
-    their configs carry effective literal keys: home files, mode 600, never
-    inside the repo, regenerated from secrets.env on every up (rotation)."""
-    # Accept the former (slot, key, home) form during the schema migration so
-    # older callers/tests continue to render the same literal remote entry.
-    if len(rest) == 1:
-        home = rest[0]
-    elif len(rest) == 2 and isinstance(keys, str):
-        keys = {keys: rest[0]}
-        home = rest[1]
-    else:
-        raise TypeError("write_agent_server expects (keys, home) or (slot, key, home)")
-    entry = _literal_agent_config(agent, spec, keys)
-    if agent == "cursor-agent":
-        _merge_named_entry(home / ".cursor" / "mcp.json", name, entry)
-        print(f"  ✓ cursor-agent MCP config for {name} (literal key: env interpolation broken for remote headers)")
-    elif agent == "gemini":
-        _merge_named_entry(home / ".gemini" / "settings.json", name, entry)
-        print(f"  ✓ gemini MCP config for {name} (literal key: header env expansion is an open FR)")
-    elif agent == "pi":
-        # Merge (not wholesale write) so multiple agent servers coexist; plugin
-        # entries are re-merged right after by wire_plugin_servers_json.
-        _merge_named_entry(home / ".pi" / "agent" / "mcp.json", name, entry)
-        print(f"  ✓ pi MCP config for {name} (NOTE: inert until pi-mcp-adapter extension is installed — pi has no built-in MCP)")
+def write_agent_server(binary, config_path, name, entry, home):
+    """Wire one required agent-scoped server into this agent's JSON config."""
+    path = _home_config_path(home, binary, config_path)
+    _merge_named_entry(path, name, entry)
+    print(f"  ✓ {binary} MCP config for {name}{_agent_note_suffix(binary)}")
 
 
-def warn_agent_server(agent, name, slots):
-    """codex's remote-MCP config format is still pending, so a required remote
-    server is not wired — but its resolved key slots stay in codex's shim env."""
-    if agent == "codex":
-        if isinstance(slots, str):
-            slots = [slots]
-        print(f"  ⚠ codex agent-scoped server '{name}' not yet wired into ~/.codex/config.toml "
-              "(pending verification of codex's remote-MCP config format). The key(s) "
-              f"{', '.join(slots)} are available to codex processes via its shim.")
-
-
-# The config file each literal-key agent keeps its MCP servers in (home-relative).
-_AGENT_SERVER_CONFIG = {
-    "cursor-agent": Path(".cursor") / "mcp.json",
-    "gemini": Path(".gemini") / "settings.json",
-    "pi": Path(".pi") / "agent" / "mcp.json",
-}
+def warn_agent_server(binary, config_path, name, slots):
+    """A managed-block agent with remote-MCP pending support warns only."""
+    if isinstance(slots, str):
+        slots = [slots]
+    print(f"  ⚠ {binary} agent-scoped server '{name}' not yet wired into ~/{config_path} "
+          "(pending verification of this agent's remote-MCP config format). The key(s) "
+          f"{', '.join(slots)} are available to {binary} processes via its shim.")
 
 
 def _delete_named_servers(path, names):
@@ -392,18 +524,13 @@ def _delete_named_servers(path, names):
         _write_atomic(path, _dump_json(data), mode=0o600)
 
 
-def reconcile_agent_servers(agent, required, home):
-    """Wire this agent's required remote servers AND delete any a prior run wired
-    that this run no longer requires — e.g. the agent's slot was set
-    `disabled: true`, or its plugin was removed. A remote literal entry carries
-    the credential inline, so a bare upsert would leave a disabled agent's token
-    live and its server reachable; the exact set this module manages is tracked
-    in a <config>.djinn-servers sidecar so hand-added and local-plugin
-    entries are never touched. `required` maps server name -> (spec, keys)."""
-    rel = _AGENT_SERVER_CONFIG.get(agent)
-    if rel is None:
-        return
-    path = home / rel
+def reconcile_agent_servers(binary, config_path, required, home):
+    """Wire this agent's required agent-scoped servers AND delete any a prior
+    run wired that this run no longer requires. The exact set this module
+    manages is tracked in a <config>.djinn-servers sidecar so hand-added and
+    plugin-managed entries are never touched. `required` maps server name ->
+    final rendered entry for this agent."""
+    path = _home_config_path(home, binary, config_path)
     sidecar = path.parent / (path.name + ".djinn-servers")
     old = []
     if sidecar.is_file() and sidecar.stat().st_size > 0:
@@ -415,10 +542,10 @@ def reconcile_agent_servers(agent, required, home):
         return  # nothing managed now or before — don't create empty files
     if stale:
         _delete_named_servers(path, stale)
-        print(f"  ✓ {agent}: removed {len(stale)} stale MCP server(s) no longer required "
+        print(f"  ✓ {binary}: removed {len(stale)} stale MCP server(s) no longer required "
               f"({', '.join(sorted(stale))})")
-    for name, (spec, keys) in required.items():
-        write_agent_server(agent, name, spec, keys, home)
+    for name, entry in required.items():
+        write_agent_server(binary, config_path, name, entry, home)
     _write_atomic(sidecar, json.dumps(sorted(required), separators=(",", ":")) + "\n", mode=0o600)
 
 
@@ -517,92 +644,119 @@ def wire_codex_toml(path, plugins):
 def run(payload, home, workspace, env):
     if not isinstance(payload, dict):
         raise WireError("payload must be a JSON object")
+    agents = _parse_agents_payload(payload.get("agents"))
     plugins = merge_plugin_entries(payload.get("plugin_mcp_entries") or [])
-    agent_servers = payload.get("agent_servers") or []
-    wire = payload.get("wire") or {}
+    agent_servers = _parse_agent_servers_payload(payload.get("agent_servers"))
 
-    # Claude's .mcp.json: agent-scoped servers bound to claude (ref form, key
-    # expands from claude's shim env) ahead of the ordinary plugins.
-    claude_servers = {s["name"]: _claude_server(s["spec"])
-                      for s in agent_servers if s.get("claude")}
-    generate_claude_mcp(workspace, claude_servers, plugins)
-    link_repo_mcp(workspace)
-    preapprove_claude(home, workspace)
+    agents_by_binary = {agent["binary"]: agent for agent in agents}
 
-    # Per-agent wiring of required servers (literal keys for cursor/gemini/pi,
-    # a warning for codex). Runs BEFORE the plugin merge so
-    # wire_plugin_servers_json preserves these entries. Collect each literal
-    # agent's required servers first, then reconcile per agent so an entry a
-    # prior run wired but this run dropped (disabled slot / removed plugin) is
-    # deleted, not left behind with its literal credential still live.
-    required_by_agent = {}  # agent -> {name: (spec, keys)}
+    # Resolve agent-scoped servers to per-agent final entries up front so each
+    # strategy loop can stay descriptor-driven and side-effect free.
+    ref_required_by_agent = {}      # binary -> {name: rendered entry}
+    literal_required_by_agent = {}  # binary -> {name: rendered entry}
     for s in agent_servers:
-        for lit in s.get("literal") or []:
-            if "key_envs" in lit:
-                keys = {slot: env.get(key_env, "")
-                        for slot, key_env in (lit.get("key_envs") or {}).items()}
-            else:
-                # Compatibility with payloads emitted before multi-slot
-                # requirements existed.
-                keys = {s.get("slot", ""): env.get(lit.get("key_env") or "", "")}
-            required_by_agent.setdefault(lit.get("agent") or "", {})[s["name"]] = (s["spec"], keys)
-        for agent in s.get("warn") or []:
-            warn_agent_server(agent, s["name"], s.get("requires") or [])
-
-    # Reconcile every wired literal-key agent — including ones with zero required
-    # servers this run, so a fully-disabled agent's stale entries are pruned.
-    for agent, flag in (("cursor-agent", "cursor"), ("gemini", "gemini"), ("pi", "pi")):
-        if wire.get(flag):
-            reconcile_agent_servers(agent, required_by_agent.get(agent, {}), home)
+        for binary in s["ref"]:
+            if binary in agents_by_binary:
+                ref_required_by_agent.setdefault(binary, {})[s["name"]] = _claude_server(s["spec"])
+        for lit in s["literal"]:
+            binary = lit["agent"]
+            agent = agents_by_binary.get(binary)
+            if agent is None:
+                continue
+            keys = {slot: env.get(key_env, "")
+                    for slot, key_env in lit["key_envs"].items()}
+            literal_required_by_agent.setdefault(binary, {})[s["name"]] = _literal_agent_config(
+                agent["dialect"], s["spec"], keys
+            )
 
     # Runs for every installed agent even with no plugins enabled, so entries
     # from a plugin removed from the manifest are cleaned up, not orphaned
     # (Claude gets this for free from wholesale .mcp.json regeneration). Uniform
-    # LOCAL plugins go to every agent; an agent-scoped LOCAL server (axiom's
+    # LOCAL plugins go to every agent; an agent-scoped LOCAL server (e.g.
     # mcp-remote) is added only for the agents bound to it (its token gates who
     # sees it) — the token is delivered separately into each bound agent's env.
-    # Env-scoped remote plugins still live in Claude's .mcp.json alone
-    # (cursor/gemini can't expand ${VAR} in remote headers).
     local = _local_plugins(plugins)
 
-    def local_for(agent_name):
+    def local_for(binary):
         d = dict(local)
         for s in agent_servers:
-            if agent_name in (s.get("local") or []):
+            if binary in s["local"]:
                 d[s["name"]] = s["spec"]
         return d
 
-    if wire.get("cursor"):
-        wire_plugin_servers_json(home / ".cursor" / "mcp.json", local_for("cursor-agent"))
-    if wire.get("gemini"):
-        wire_plugin_servers_json(home / ".gemini" / "settings.json", local_for("gemini"))
-    if wire.get("pi"):
-        wire_plugin_servers_json(home / ".pi" / "agent" / "mcp.json", local_for("pi"))
-        print("    (pi: inert until the pi-mcp-adapter extension is installed)")
-    if wire.get("codex"):
-        wire_codex_toml(home / ".codex" / "config.toml", local_for("codex"))
+    for agent in agents:
+        binary = agent["binary"]
+        config_path = agent["config_path"]
+        strategy = agent["strategy"]
+        fmt = agent["format"]
+        dialect = agent["dialect"]
+        env_refs = agent["env_refs"]
+
+        if strategy == "claude_preapprove":
+            if config_path != ".mcp.json":
+                raise WireError(
+                    f"agent '{binary}' strategy claude_preapprove requires config_path '.mcp.json'")
+            generate_claude_mcp(workspace, ref_required_by_agent.get(binary, {}), plugins)
+            link_repo_mcp(workspace)
+            preapprove_claude(home, workspace)
+            continue
+
+        path = _home_config_path(home, binary, config_path)
+        if strategy == "codex_managed_block":
+            for s in agent_servers:
+                if binary in s["warn"]:
+                    warn_agent_server(binary, config_path, s["name"], s["requires"])
+            wire_codex_toml(path, local_for(binary))
+            continue
+
+        if fmt != "json":
+            raise WireError(
+                f"agent '{binary}' has unsupported non-strategy MCP format '{fmt}'")
+
+        if not env_refs and dialect in LITERAL_DIALECTS:
+            reconcile_agent_servers(binary, config_path,
+                                    literal_required_by_agent.get(binary, {}), home)
+            wire_plugin_servers_json(path, local_for(binary))
+            if binary in _AGENT_SYNC_NOTES:
+                print(f"    ({_AGENT_SYNC_NOTES[binary]})")
+            continue
+
+        if not strategy and dialect == "mcpServers":
+            reconcile_agent_servers(binary, config_path, ref_required_by_agent.get(binary, {}), home)
+            wire_plugin_servers_json(path, local_for(binary))
+            if binary in _AGENT_SYNC_NOTES:
+                print(f"    ({_AGENT_SYNC_NOTES[binary]})")
+            continue
+
+        raise WireError(
+            f"agent '{binary}' has unsupported MCP descriptor combination "
+            f"(format={fmt!r}, dialect={dialect!r}, env_refs={env_refs!r}, strategy={strategy!r})")
 
 
 def build_payload(env):
     """Host side: assemble the payload from env vars set by up.sh.
 
-    Booleans arrive as the raw yq scalars (WIRE_CURSOR/…) and only the literal
-    string "true" turns a flag on — the exact semantics of the old
-    `[ "$X" = "true" ]` checks. PLUGIN_MCP_ENTRIES is the newline-separated
-    one-line-JSON-per-plugin accumulation from manifest.py (local + env-scoped
-    remote plugins only).
+    AGENTS_MCP_JSON is the manifest-derived descriptor list for ENABLED
+    mcp-capable agents. The order of this list is the authoritative role order
+    for agent-scoped servers.
+
+    PLUGIN_MCP_ENTRIES is the newline-separated one-line-JSON-per-plugin
+    accumulation from manifest.py (local + env-scoped remote plugins only).
 
     Required servers are assembled from three inputs:
       AGENT_SERVERS_JSON — {name: {"spec": ..., "requires": [SLOT, ...]}}
       AGENT_SECRETS      — resolved "agent<TAB>slot<TAB>source" records
       IDENTITY_SECRETS   — "agent:key_env:slot" records for literal-key agents;
                            the docker-exec environment supplies those values.
-    A server is present only where all of its required slots resolve. Claude
-    keeps variable references, local servers use normal agent configs, remote
-    cursor/gemini/pi entries get literal substitutions, and codex warns.
+    A server is present only where all of its required slots resolve. Role
+    routing is descriptor-driven: ref-style env_refs, managed-block strategy,
+    literal dialects, and local command servers.
     """
-    def flag(name):
-        return env.get(name) == "true"
+    try:
+        raw_agents = json.loads(env.get("AGENTS_MCP_JSON") or "[]")
+    except ValueError as e:
+        raise WireError(f"AGENTS_MCP_JSON is not valid JSON ({e})")
+    agents = _parse_agents_payload(raw_agents)
 
     entries = []
     for line in (env.get("PLUGIN_MCP_ENTRIES") or "").splitlines():
@@ -642,8 +796,10 @@ def build_payload(env):
             raise WireError(f"IDENTITY_SECRETS has an invalid record: {triple!r}")
         key_envs[(agent, slot)] = key_env
 
+    agents_by_binary = {agent["binary"]: agent for agent in agents}
+    agent_order = [agent["binary"] for agent in agents]
+
     agent_servers = []
-    agent_order = ("claude", "codex", "pi", "gemini", "cursor-agent")
     for name, sd in servers_by_slot.items():
         if not isinstance(sd, dict) or not isinstance(sd.get("spec"), dict):
             raise WireError(f"agent server '{name}' must define an object spec")
@@ -651,30 +807,37 @@ def build_payload(env):
         if not isinstance(requires, list) or not all(isinstance(slot, str) for slot in requires):
             raise WireError(f"agent server '{name}' requires must be a list of slots")
         e = {"name": name, "spec": sd["spec"], "requires": requires,
-             "claude": False, "literal": [], "warn": [], "local": []}
+             "ref": [], "literal": [], "warn": [], "local": []}
         is_local = "command" in sd["spec"]
-        for agent in agent_order:
-            if not all((agent, slot) in effective for slot in requires):
+        for binary in agent_order:
+            if not all((binary, slot) in effective for slot in requires):
                 continue
-            if agent == "claude":
-                e["claude"] = True
-            elif is_local:
-                e["local"].append(agent)
-            elif agent == "codex":
-                e["warn"].append(agent)
-            else:
-                slots = {slot: key_envs.get((agent, slot), "") for slot in requires}
+            agent = agents_by_binary[binary]
+            if agent["env_refs"]:
+                e["ref"].append(binary)
+                continue
+            if is_local:
+                e["local"].append(binary)
+                continue
+            if agent["strategy"] == "codex_managed_block":
+                e["warn"].append(binary)
+                continue
+            if agent["dialect"] in LITERAL_DIALECTS:
+                slots = {slot: key_envs.get((binary, slot), "") for slot in requires}
                 missing = [slot for slot, key_env in slots.items() if not key_env]
                 if missing:
                     raise WireError(
-                        f"agent server '{name}' is missing literal key env for {agent}: {', '.join(missing)}")
-                e["literal"].append({"agent": agent, "key_envs": slots})
-        if e["claude"] or e["literal"] or e["warn"] or e["local"]:
+                        f"agent server '{name}' is missing literal key env for {binary}: {', '.join(missing)}")
+                e["literal"].append({"agent": binary, "key_envs": slots})
+                continue
+            raise WireError(
+                f"agent server '{name}' cannot be rendered for agent '{binary}' "
+                "(unsupported remote MCP dialect/strategy combination)")
+        if e["ref"] or e["literal"] or e["warn"] or e["local"]:
             agent_servers.append(e)
 
     return {
-        "wire": {name: flag("WIRE_" + name.upper())
-                 for name in ("cursor", "gemini", "pi", "codex")},
+        "agents": agents,
         "plugin_mcp_entries": entries,
         "agent_servers": agent_servers,
     }

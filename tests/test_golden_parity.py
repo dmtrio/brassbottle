@@ -204,10 +204,7 @@ def run_pipeline(manifest_name, env):
     )
     payload_env = {
         **env,
-        "WIRE_CURSOR": derived.get("INSTALL_CURSOR", ""),
-        "WIRE_GEMINI": derived.get("INSTALL_GEMINI", ""),
-        "WIRE_PI": derived.get("INSTALL_PI", ""),
-        "WIRE_CODEX": derived.get("INSTALL_CODEX", ""),
+        "AGENTS_MCP_JSON": derived.get("AGENTS_MCP_JSON", ""),
         "PLUGIN_MCP_ENTRIES": derived.get("PLUGIN_MCP_ENTRIES", ""),
         "AGENT_SERVERS_JSON": derived.get("AGENT_SERVERS_JSON", ""),
         "AGENT_SECRETS": derived.get("AGENT_SECRETS", ""),
@@ -429,11 +426,12 @@ class TestGoldenParity(unittest.TestCase):
                 self._assert_snapshot_equal(name, golden, live)
 
     def test_golden_fixtures_are_non_trivial(self):
+        if os.environ.get("GOLDEN_REGEN") == "1":
+            self.skipTest("fixture sanity check runs in non-regen mode")
         full_derived = (FIXTURES / "full.derived.txt").read_text()
         full_vars = parse_derived(full_derived)
         for var in (
-            "INSTALL_CLAUDE", "INSTALL_CODEX", "INSTALL_PI", "INSTALL_GEMINI",
-            "INSTALL_CURSOR", "INSTALL_AIDER", "PLUGINS", "PLUGIN_MCP_ENTRIES",
+            "AGENTS_ENABLED", "AGENTS_MCP_JSON", "PLUGINS", "PLUGIN_MCP_ENTRIES",
             "AGENT_SECRETS",
         ):
             self.assertIn(var, full_vars, msg=f"full.derived.txt missing {var}")
@@ -441,7 +439,7 @@ class TestGoldenParity(unittest.TestCase):
 
         payload = json.loads((FIXTURES / "full.payload.json").read_text())
         self.assertIsInstance(payload, dict)
-        self.assertIn("wire", payload)
+        self.assertIn("agents", payload)
         self.assertIn("plugin_mcp_entries", payload)
 
         combined = (FIXTURES / "secrets.env").read_text()

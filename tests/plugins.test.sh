@@ -120,7 +120,7 @@ echo ",$EGRESS_ALL," | grep -qF ",blob.core.windows.net," \
 # full emitted variable set. grep first: quoted multi-line values (e.g.
 # PLUGIN_MCP_ENTRIES) have continuation lines that are not assignments.
 EMITTED=$(printf '%s\n' "$ALL_DERIVED" | grep -oE '^[A-Z_]+=' | tr -d = | LC_ALL=C sort | tr '\n' ' ')
-EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS INSTALL_AIDER INSTALL_CLAUDE INSTALL_CODEX INSTALL_CURSOR INSTALL_GEMINI INSTALL_PI MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
+EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
 [ "$EMITTED" = "$EXPECTED" ] \
     && pass "--derive emits exactly the variable set up.sh consumes" \
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
@@ -281,17 +281,16 @@ printf '%s' "$AGENT_SECRETS" \
     | grep -qF "$(printf 'cursor-agent\tMCP_GATEWAY_TOKEN\tMCP_GATEWAY_TOKEN')" \
     && pass "gateway common default resolves into agent credentials" \
     || fail "AGENT_SECRETS missing gateway default: '$AGENT_SECRETS'"
-PAYLOAD=$(WIRE_CURSOR=true WIRE_GEMINI=yes WIRE_PI=false WIRE_CODEX=true \
-    PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
+PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
     AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
     IDENTITY_SECRETS="cursor-agent:IDENTITY_KEY_0:MCP_GATEWAY_TOKEN gemini:IDENTITY_KEY_1:MCP_GATEWAY_TOKEN pi:IDENTITY_KEY_2:MCP_GATEWAY_TOKEN" \
     python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero"
 printf '%s' "$PAYLOAD" | jq -e '
-    .wire == {cursor: true, gemini: false, pi: false, codex: true}
+    ([.agents[] | .binary] == ["claude", "codex", "cursor-agent", "gemini", "pi"])
     and ([.plugin_mcp_entries[] | keys[0]] == ["serena"])
     and ([.agent_servers[] | .name] == ["coding"])' >/dev/null \
-    && pass "derive → build-payload yields the wiring payload (strict booleans: yes/1 stay off)" \
+    && pass "derive → build-payload yields descriptor-driven wiring payload" \
     || fail "payload chain output wrong: $PAYLOAD"
 
 echo "── hybrid override chain: obsidian bound to claude + cursor-agent"
@@ -319,12 +318,12 @@ while IFS=$'\t' read -r agent slot source; do
 done <<AEOF
 $AGENT_SECRETS
 AEOF
-A_PAYLOAD=$(AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" IDENTITY_SECRETS="$A_IDA" python3 src/wire_plugins.py --build-payload) \
+A_PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" IDENTITY_SECRETS="$A_IDA" python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero on agent_servers"
 printf '%s' "$A_PAYLOAD" | jq -e '
     (.agent_servers | length) == 1
     and .agent_servers[0].name == "obsidian-annotated"
-    and .agent_servers[0].claude == true
+    and .agent_servers[0].ref == ["claude"]
     and (.agent_servers[0].literal == [{agent: "cursor-agent", key_envs: {OBSIDIAN_ANNOTATED_KEY: "IDENTITY_KEY_0"}}])' >/dev/null \
     && pass "hybrid overrides → build-payload yields per-agent obsidian wiring" \
     || fail "agent_servers payload wrong: $A_PAYLOAD"

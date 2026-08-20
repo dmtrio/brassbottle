@@ -283,7 +283,7 @@ class TestYqSemanticsPins(unittest.TestCase):
         self.assertEqual(d["PLUGINS"], "")
         self.assertEqual(d["REPOS"], "")
         self.assertEqual(d["MEM_LIMIT"], "2g")
-        self.assertEqual(d["INSTALL_AIDER"], "true")  # default tool set
+        self.assertEqual(d["AGENTS_ENABLED"], "aider claude codex cursor gemini pi")  # default tool set
 
     def test_legacy_repo_key_rejected(self):
         # layout v2: any presence of repo: (even null/false) is a hard error.
@@ -297,17 +297,12 @@ class TestYqSemanticsPins(unittest.TestCase):
                     "manifest repo: is gone — declare repos: [<url>, ...] instead "
                     "(layout v2: each repo clones to /workspace/repos/<name>)")
 
-    def test_tools_match_is_exact_string_equality(self):
-        d = derive({"agents": ["claude-code"]})
-        self.assertEqual(d["INSTALL_CLAUDE"], "false")
-        self.assertEqual(d["INSTALL_CODEX"], "false")
-
     def test_agents_match_is_exact_string_equality(self):
         # The rename PR pinned the old jq-substring quirk here; Phase 1's
         # deliberate tightening applies to the agents: key identically.
         d = derive({"agents": ["claude-code"]})
-        self.assertEqual(d["INSTALL_CLAUDE"], "false")
-        self.assertEqual(d["INSTALL_CODEX"], "false")
+        self.assertEqual(d["AGENTS_ENABLED"], "")
+        self.assertEqual(d["AGENTS_MCP_JSON"], "[]")
 
     def test_tools_key_is_rejected_by_name(self):
         for value in (["codex"], False):
@@ -584,7 +579,9 @@ class TestDerivedValues(unittest.TestCase):
         self.assertEqual(d["FORGE"], "github")
         self.assertEqual(d["MEM_LIMIT"], "2g")
         self.assertEqual(d["SSH_BIND"], "127.0.0.1")
-        self.assertEqual(d["INSTALL_CLAUDE"], "true")
+        self.assertIn("claude", d["AGENTS_ENABLED"].split())
+        mcp_agents = json.loads(d["AGENTS_MCP_JSON"])
+        self.assertTrue(any(a["binary"] == "claude" for a in mcp_agents))
         self.assertEqual(d["EGRESS"], "")
         self.assertEqual(d["PLUGIN_MCP_ENTRIES"], "")
 
