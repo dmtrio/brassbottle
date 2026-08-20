@@ -273,9 +273,6 @@ def _capture_config_snapshot(manifest_name, payload):
         for server in payload.get("agent_servers") or []:
             for lit in server.get("literal") or []:
                 key_envs.update((lit.get("key_envs") or {}).values())
-                key_env = lit.get("key_env")
-                if key_env:
-                    key_envs.add(key_env)
         env = {name: f"{name}-golden-value" for name in sorted(key_envs) if name}
 
         with contextlib.redirect_stdout(io.StringIO()):
@@ -348,6 +345,8 @@ def _write_config_golden(manifest_name, snapshot):
 
 
 class TestGoldenParity(unittest.TestCase):
+    WORKSPACE_MCP_FIXTURE = "workspace/repos/.mcp.json"
+
     def setUp(self):
         if shutil.which("yq") is None:
             self.skipTest("yq not available")
@@ -422,6 +421,12 @@ class TestGoldenParity(unittest.TestCase):
                     continue
 
                 golden = _read_config_golden(name)
+                self.assertIn(
+                    self.WORKSPACE_MCP_FIXTURE,
+                    golden["files"],
+                    f"{name}: golden config set must include {self.WORKSPACE_MCP_FIXTURE} "
+                    "(a missing fixture usually means a .gitignore regression)",
+                )
                 live = _capture_config_snapshot(name, payload)
                 self._assert_snapshot_equal(name, golden, live)
 

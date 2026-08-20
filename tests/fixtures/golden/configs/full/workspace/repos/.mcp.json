@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "axiom": {
+      "command": "mcp-remote",
+      "args": [
+        "https://mcp.axiom.co/mcp",
+        "--header",
+        "Authorization: Bearer ${AXIOM_TOKEN}"
+      ]
+    },
+    "obsidian-annotated": {
+      "type": "http",
+      "url": "https://mcp-obsidian.dmetr.io/mcp",
+      "headers": {
+        "Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"
+      }
+    },
+    "codebase-memory": {
+      "command": "codebase-memory-mcp",
+      "args": []
+    }
+  }
+}

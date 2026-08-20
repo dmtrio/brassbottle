@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from pathlib import Path
 
 # Add src/ to path for import
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+import manifest
 import wire_plugins
 
 
@@ -499,6 +501,44 @@ class TestWriteAgentServer(QuietTestCase):
             wire_plugins._literal_agent_config("mcpServers", self.SPEC, {self.SLOT: "x"})
 
 
+class TestHomeConfigPathGuards(QuietTestCase):
+    def test_home_config_path_rejects_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with self.assertRaises(wire_plugins.WireError) as cm:
+                wire_plugins._home_config_path(home, "cursor-agent", "/etc/mcp.json")
+            self.assertIn("must be home-relative", str(cm.exception))
+
+    def test_home_config_path_rejects_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with self.assertRaises(wire_plugins.WireError) as cm:
+                wire_plugins._home_config_path(home, "cursor-agent", "../escape.json")
+            self.assertIn("must not traverse directories", str(cm.exception))
+
+    def test_run_rejects_payload_with_traversal_config_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "repos").mkdir()
+            payload = {
+                "agents": [{
+                    "binary": "cursor-agent",
+                    "config_path": "../escape.json",
+                    "format": "json",
+                    "dialect": "url",
+                    "env_refs": False,
+                    "strategy": "",
+                }],
+                "plugin_mcp_entries": [],
+                "agent_servers": [],
+            }
+            with self.assertRaises(wire_plugins.WireError) as cm:
+                wire_plugins.run(payload, home, workspace, {})
+            self.assertIn("must not traverse directories", str(cm.exception))
+
+
 class TestWirePluginServersJson(QuietTestCase):
     """Tests for wire_plugin_servers_json function."""
 
@@ -771,18 +811,33 @@ class TestWireCodexToml(QuietTestCase):
 class TestRunIntegration(QuietTestCase):
     """Integration tests for the run function."""
 
-    AGENTS_ALL = [
-        {"binary": "claude", "config_path": ".mcp.json", "format": "json",
-         "dialect": "mcpServers", "env_refs": True, "strategy": "claude_preapprove"},
-        {"binary": "codex", "config_path": ".codex/config.toml", "format": "toml",
-         "dialect": "", "env_refs": False, "strategy": "codex_managed_block"},
-        {"binary": "cursor-agent", "config_path": ".cursor/mcp.json", "format": "json",
-         "dialect": "url", "env_refs": False, "strategy": ""},
-        {"binary": "gemini", "config_path": ".gemini/settings.json", "format": "json",
-         "dialect": "httpUrl", "env_refs": False, "strategy": ""},
-        {"binary": "pi", "config_path": ".pi/agent/mcp.json", "format": "json",
-         "dialect": "type-http", "env_refs": False, "strategy": ""},
-    ]
+    AGENTS_ALL = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if shutil.which("yq") is None:
+            raise unittest.SkipTest("yq not available")
+        agents_dir = Path(__file__).resolve().parents[1] / "agents"
+        descriptors = []
+        for f in sorted(agents_dir.glob("*/agent.yml")):
+            doc = json.loads(subprocess.run(
+                ["yq", "-o=json", str(f)],
+                capture_output=True, text=True, check=True).stdout)
+            mcp = doc.get("mcp")
+            if not isinstance(mcp, dict):
+                continue
+            descriptors.append({
+                "binary": doc["binary"],
+                "config_path": mcp["config_path"],
+                "format": mcp["format"],
+                "dialect": mcp.get("dialect", ""),
+                "env_refs": mcp["env_refs"],
+                "strategy": mcp.get("strategy", ""),
+            })
+        if not descriptors:
+            raise unittest.SkipTest("no mcp-capable agent descriptors found")
+        cls.AGENTS_ALL = descriptors
 
     def test_full_payload_all_agents_wired(self):
         """Full payload: descriptors drive claude ref, literal trio, and codex warn/local."""
@@ -879,6 +934,40 @@ class TestRunIntegration(QuietTestCase):
             self.assertFalse((home / ".pi").exists())
             self.assertFalse((home / ".codex").exists())
 
+    def test_cursor_only_agents_do_not_touch_claude_workspace_artifacts(self):
+        """Without a claude_preapprove agent, run() must not generate workspace
+        .mcp.json, marker, repo links, or ~/.claude.json."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            repos_dir = workspace / "repos"
+            repos_dir.mkdir()
+            repo = repos_dir / "app"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+
+            payload = {
+                "agents": [{
+                    "binary": "cursor-agent",
+                    "config_path": ".cursor/mcp.json",
+                    "format": "json",
+                    "dialect": "url",
+                    "env_refs": False,
+                    "strategy": "",
+                }],
+                "plugin_mcp_entries": [],
+                "agent_servers": [],
+            }
+
+            wire_plugins.run(payload, home, workspace, {})
+
+            self.assertFalse((repos_dir / ".mcp.json").exists())
+            self.assertFalse((workspace / ".mcp.generated").exists())
+            self.assertFalse((repo / ".mcp.json").exists())
+            self.assertFalse((home / ".claude.json").exists())
+            self.assertTrue((home / ".cursor" / "mcp.json").exists())
+
     def test_local_agent_scoped_server_wires_only_bound_agents(self):
         """A LOCAL agent-scoped server (axiom mcp-remote) lands in the config of
         each agent in `local` (codex included) and in claude's .mcp.json, but NOT
@@ -919,6 +1008,55 @@ class TestRunIntegration(QuietTestCase):
             for f in (workspace / "repos" / ".mcp.json", home / ".cursor" / "mcp.json",
                       home / ".codex" / "config.toml"):
                 self.assertIn("${AXIOM_TOKEN}", f.read_text())
+
+    def test_literal_remote_substitutes_multiple_slots(self):
+        """A literal-dialect remote server requiring two slots substitutes both
+        key envs when writing the agent config."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "repos").mkdir()
+
+            payload = {
+                "agents": [{
+                    "binary": "cursor-agent",
+                    "config_path": ".cursor/mcp.json",
+                    "format": "json",
+                    "dialect": "url",
+                    "env_refs": False,
+                    "strategy": "",
+                }],
+                "plugin_mcp_entries": [],
+                "agent_servers": [{
+                    "name": "two-slot",
+                    "spec": {
+                        "url": "https://example.test/mcp",
+                        "headers": {
+                            "Authorization": "Bearer ${TOKEN_A}",
+                            "X-Trace": "${TOKEN_B}:${TOKEN_A}",
+                        },
+                    },
+                    "requires": ["TOKEN_A", "TOKEN_B"],
+                    "ref": [],
+                    "literal": [{
+                        "agent": "cursor-agent",
+                        "key_envs": {
+                            "TOKEN_A": "IDENTITY_KEY_0",
+                            "TOKEN_B": "IDENTITY_KEY_1",
+                        },
+                    }],
+                    "warn": [],
+                    "local": [],
+                }],
+            }
+            env = {"IDENTITY_KEY_0": "alpha", "IDENTITY_KEY_1": "beta"}
+            wire_plugins.run(payload, home, workspace, env)
+
+            cursor = json.loads((home / ".cursor" / "mcp.json").read_text())
+            entry = cursor["mcpServers"]["two-slot"]
+            self.assertEqual(entry["headers"]["Authorization"], "Bearer alpha")
+            self.assertEqual(entry["headers"]["X-Trace"], "beta:alpha")
 
     def test_disabled_remote_server_is_removed_from_literal_agent(self):
         """A remote literal-key server (obsidian) wired for cursor on one run must
@@ -1331,6 +1469,91 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
                 kimi["obsidian-annotated"]["headers"]["Authorization"],
                 "Bearer ${OBSIDIAN_ANNOTATED_KEY}",
             )
+
+
+class TestManifestWireParity(unittest.TestCase):
+    """Keep manifest.py acceptance and wire_plugins.py runtime support aligned."""
+
+    def _agent_descriptor_for_combo(self, fmt, dialect, env_refs, strategy):
+        mcp = {
+            "config_path": ".mcp.json" if strategy == "claude_preapprove" else ".combo/mcp.json",
+            "format": fmt,
+            "env_refs": env_refs,
+        }
+        if dialect:
+            mcp["dialect"] = dialect
+        if strategy:
+            mcp["strategy"] = strategy
+        return {"binary": "combo-agent", "install": "x", "mcp": mcp}
+
+    def _manifest_accepts_combo(self, fmt, dialect, env_refs, strategy):
+        agent_files = {"combo": self._agent_descriptor_for_combo(fmt, dialect, env_refs, strategy)}
+        try:
+            manifest.derive(
+                {}, {}, agent_files,
+                {"PRESENT_SECRET_VARS": "", "SECRETS_FILE": "/sec/secrets.env"},
+            )
+        except manifest.ManifestError:
+            return False
+        return True
+
+    def _round_trip_combo(self, fmt, dialect, env_refs, strategy):
+        agent = self._agent_descriptor_for_combo(fmt, dialect, env_refs, strategy)["mcp"]
+        env = {
+            "AGENTS_MCP_JSON": json.dumps([{
+                "binary": "combo-agent",
+                "config_path": agent["config_path"],
+                "format": agent["format"],
+                "dialect": agent.get("dialect", ""),
+                "env_refs": agent["env_refs"],
+                "strategy": agent.get("strategy", ""),
+            }], separators=(",", ":")),
+            "PLUGIN_MCP_ENTRIES": json.dumps({"uniform-local": {"command": "uniform-local"}}) + "\n",
+            "AGENT_SERVERS_JSON": json.dumps({
+                "remote-required": {
+                    "spec": {
+                        "url": "https://example.test/mcp",
+                        "headers": {"Authorization": "Bearer ${TOKEN}"},
+                    },
+                    "requires": ["TOKEN"],
+                },
+                "local-required": {
+                    "spec": {"command": "bridge", "args": ["--stdio", "${TOKEN}"]},
+                    "requires": ["TOKEN"],
+                },
+            }, separators=(",", ":")),
+            "AGENT_SECRETS": "combo-agent\tTOKEN\tTOKEN_SOURCE\n",
+            "IDENTITY_SECRETS": "combo-agent:IDENTITY_KEY_0:TOKEN",
+            "IDENTITY_KEY_0": "literal-key",
+        }
+        payload = wire_plugins.build_payload(env)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            workspace = Path(tmp) / "workspace"
+            home.mkdir()
+            (workspace / "repos" / "repo" / ".git").mkdir(parents=True)
+            wire_plugins.run(payload, home, workspace, env)
+
+    def test_mcp_format_dialect_strategy_sets_match_manifest_module(self):
+        self.assertEqual(wire_plugins.AGENT_MCP_FORMATS, manifest.AGENT_MCP_FORMATS)
+        self.assertEqual(wire_plugins.AGENT_MCP_DIALECTS, manifest.AGENT_MCP_DIALECTS)
+        self.assertEqual(wire_plugins.AGENT_MCP_STRATEGIES, manifest.AGENT_MCP_STRATEGIES)
+
+    def test_every_manifest_legal_combo_round_trips_build_and_run(self):
+        env_ref_variants = [True, False, "ENV_REF"]
+        strategy_variants = ["", *sorted(wire_plugins.AGENT_MCP_STRATEGIES)]
+        accepted = []
+        for fmt in sorted(wire_plugins.AGENT_MCP_FORMATS):
+            for dialect in sorted(wire_plugins.AGENT_MCP_DIALECTS):
+                for env_refs in env_ref_variants:
+                    for strategy in strategy_variants:
+                        if self._manifest_accepts_combo(fmt, dialect, env_refs, strategy):
+                            accepted.append((fmt, dialect, env_refs, strategy))
+
+        self.assertTrue(accepted, "expected at least one manifest-legal MCP combo")
+        for fmt, dialect, env_refs, strategy in accepted:
+            with self.subTest(fmt=fmt, dialect=dialect, env_refs=env_refs, strategy=strategy):
+                self._round_trip_combo(fmt, dialect, env_refs, strategy)
 
 
 class TestMainSubprocess(unittest.TestCase):

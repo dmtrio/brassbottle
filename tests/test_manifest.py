@@ -759,6 +759,15 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
             derive({}, agent_files=agents)
         self.assertIn("non-strategy wiring requires a dialect", str(cm.exception))
 
+    def test_non_strategy_mcpservers_requires_truthy_env_refs(self):
+        agents = dict(AGENT_FILES)
+        agents["cursor"] = dict(AGENT_FILES["cursor"])
+        agents["cursor"]["mcp"] = dict(
+            AGENT_FILES["cursor"]["mcp"], dialect="mcpServers", env_refs=False)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("generic-config agent is by definition ref-style", str(cm.exception))
+
     def test_claude_preapprove_requires_workspace_mcp_path(self):
         agents = dict(AGENT_FILES)
         agents["claude"] = dict(AGENT_FILES["claude"])

@@ -530,6 +530,9 @@ def reconcile_agent_servers(binary, config_path, required, home):
     manages is tracked in a <config>.djinn-servers sidecar so hand-added and
     plugin-managed entries are never touched. `required` maps server name ->
     final rendered entry for this agent."""
+    # Known behavior: this path may rewrite one config up to K+2 times per run
+    # (stale delete + one write per required server + plugin sync). If K grows,
+    # a single-write merge pass is the follow-up optimization.
     path = _home_config_path(home, binary, config_path)
     sidecar = path.parent / (path.name + ".djinn-servers")
     old = []
@@ -713,24 +716,20 @@ def run(payload, home, workspace, env):
             raise WireError(
                 f"agent '{binary}' has unsupported non-strategy MCP format '{fmt}'")
 
-        if not env_refs and dialect in LITERAL_DIALECTS:
-            reconcile_agent_servers(binary, config_path,
-                                    literal_required_by_agent.get(binary, {}), home)
-            wire_plugin_servers_json(path, local_for(binary))
-            if binary in _AGENT_SYNC_NOTES:
-                print(f"    ({_AGENT_SYNC_NOTES[binary]})")
-            continue
+        literal_dialect = (not env_refs and dialect in LITERAL_DIALECTS)
+        if not literal_dialect and dialect != "mcpServers":
+            raise WireError(
+                f"agent '{binary}' has unsupported MCP descriptor combination "
+                f"(format={fmt!r}, dialect={dialect!r}, env_refs={env_refs!r}, strategy={strategy!r})")
 
-        if not strategy and dialect == "mcpServers":
-            reconcile_agent_servers(binary, config_path, ref_required_by_agent.get(binary, {}), home)
-            wire_plugin_servers_json(path, local_for(binary))
-            if binary in _AGENT_SYNC_NOTES:
-                print(f"    ({_AGENT_SYNC_NOTES[binary]})")
-            continue
-
-        raise WireError(
-            f"agent '{binary}' has unsupported MCP descriptor combination "
-            f"(format={fmt!r}, dialect={dialect!r}, env_refs={env_refs!r}, strategy={strategy!r})")
+        required = (literal_required_by_agent.get(binary, {})
+                    if literal_dialect else
+                    ref_required_by_agent.get(binary, {}))
+        reconcile_agent_servers(binary, config_path, required, home)
+        wire_plugin_servers_json(path, local_for(binary))
+        if binary in _AGENT_SYNC_NOTES:
+            print(f"    ({_AGENT_SYNC_NOTES[binary]})")
+        continue
 
 
 def build_payload(env):

@@ -497,6 +497,12 @@ def _normalize_agent_docs(agent_files):
                             f"agent '{agent}' mcp: dialect '{dialect}' is literal-key "
                             "rendering — env_refs must be false (a ref-capable agent "
                             "uses dialect mcpServers)")
+                elif dialect == "mcpServers":
+                    if not env_refs:
+                        raise ManifestError(
+                            f"agent '{agent}' mcp: non-strategy mcpServers is generic-ref "
+                            "wiring — env_refs must be truthy (a generic-config agent is "
+                            "by definition ref-style)")
                 elif dialect != "mcpServers":
                     raise ManifestError(
                         f"agent '{agent}' mcp: non-strategy wiring requires a dialect — "

@@ -26,3 +26,6 @@ __pycache__/
 # assert the values are the *-golden-*-not-real placeholders) — carve it out
 # of the bare secrets.env pattern above or the suite errors on fresh clones.
 !tests/fixtures/golden/secrets.env
+# Golden config snapshots intentionally include workspace/repos/.mcp.json — keep
+# those fixture files tracked despite the top-level .mcp.json ignore.
+!tests/fixtures/golden/configs/**/.mcp.json
