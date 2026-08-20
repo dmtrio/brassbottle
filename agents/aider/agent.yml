@@ -1,0 +1,9 @@
+# aider — pip-installed pair-programming CLI. The minimal descriptor: no MCP
+# support (so it is never MCP-wired, gets no identity shim, and is not a valid
+# `agent_secrets` target), no persisted state, no composed rules file. aider
+# validates that every field except binary/install is optional.
+
+binary: aider
+
+install: |
+  pip3 install aider-chat --break-system-packages

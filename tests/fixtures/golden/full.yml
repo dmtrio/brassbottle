@@ -1,0 +1,24 @@
+task: coding
+forge: github
+memory: 4g
+tools: [claude, codex, pi, gemini, cursor, aider]
+repos:
+  - https://github.com/example/alpha.git
+  - {name: beta, url: https://github.com/example/beta.git}
+capabilities:
+  egress:
+    - api.example.com
+    - hooks.stripe.com
+  egress_cidrs:
+    - 192.168.1.0/24
+    - 10.0.0.0/8
+plugins:
+  - axiom
+  - obsidian-annotated
+  - codebase-memory
+common_secrets:
+  - AXIOM_TOKEN
+agent_secrets:
+  - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}
+  - {agent: claude, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_claude}
+  - {agent: gemini, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_gemini}

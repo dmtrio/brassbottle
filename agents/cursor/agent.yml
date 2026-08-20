@@ -1,0 +1,23 @@
+# cursor — Cursor's CLI agent. The tool name is `cursor`; the BINARY is
+# `cursor-agent` (binary: exists precisely to decouple these — it drives shim
+# generation, `type -aP` resolution, and the identity-ref suffix `_cursor_agent`).
+# The installer lands in ~/.local/share/cursor-agent and symlinks into
+# ~/.local/bin (already on PATH). Two state dirs, two volumes — ~/.cursor and
+# ~/.config/cursor both hold auth/state that must survive re-ups.
+# Remote servers render as a bare {url, headers} in ~/.cursor/mcp.json; no
+# ${VAR} expansion, so agent-scoped remotes get literal keys.
+
+binary: cursor-agent
+
+install: |
+  curl -fsSL https://cursor.com/install | bash
+
+state_dirs:
+  - {path: .cursor, volume: cursor-state}
+  - {path: .config/cursor, volume: cursor-auth}
+
+mcp:
+  config_path: .cursor/mcp.json
+  format: json
+  dialect: url
+  env_refs: false

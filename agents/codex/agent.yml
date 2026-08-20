@@ -1,0 +1,22 @@
+# codex — OpenAI Codex CLI (npm @openai/codex).
+# MCP wiring is a prefix-marked managed block in ~/.codex/config.toml
+# (codex_managed_block strategy owns the rendering, so no dialect is
+# declared). Remote-header secrets are warn-only today: codex gets local
+# (stdio) servers; an agent-scoped remote logs a warning instead of baking
+# a literal key.
+
+binary: codex
+
+install: |
+  npm install -g @openai/codex
+
+state_dirs:
+  - {path: .codex, volume: codex-auth}
+
+rules_file: .codex/AGENTS.md
+
+mcp:
+  config_path: .codex/config.toml
+  format: toml
+  env_refs: false
+  strategy: codex_managed_block

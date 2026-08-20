@@ -1,0 +1,22 @@
+# claude — Anthropic's Claude Code CLI (npm @anthropic-ai/claude-code).
+# Ref-style MCP wiring: the project-level repos/.mcp.json carries ${SLOT} env
+# refs (never literal keys); the shim env supplies the values. The
+# claude_preapprove strategy additionally merges approval state into
+# ~/.claude.json so wired servers come up enabled.
+
+binary: claude
+
+install: |
+  npm install -g @anthropic-ai/claude-code
+
+state_dirs:
+  - {path: .claude, volume: claude-auth}
+
+rules_file: .claude/CLAUDE.md
+
+mcp:
+  config_path: .mcp.json # project-level (workspace repos/.mcp.json), not home-relative
+  format: json
+  dialect: mcpServers
+  env_refs: true
+  strategy: claude_preapprove
