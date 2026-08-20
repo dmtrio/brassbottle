@@ -50,7 +50,13 @@ cp "$REPO"/plugins/gateway/run.sh "$SBOX/plugins/gateway/"
 echo "── src/keyfiles.sh ──"
 # shellcheck disable=SC1091
 . "$REPO/src/keyfiles.sh"   # defines warn_missing + write_keyfiles, no side effects
-SHIM="claude pi gemini cursor-agent codex"
+# The shim-agent list derives from the descriptors — binaries of mcp-capable
+# agents — exactly what manifest.py emits as SHIM_AGENTS with every agent
+# enabled (update-agent-keys.sh itself derives per-container from the keys
+# dir, so there is no static list left to scrape).
+SHIM="$(for f in "$REPO"/agents/*/agent.yml; do yq -r 'select(has("mcp")) | .binary' "$f"; done | LC_ALL=C sort | tr '\n' ' ')"
+SHIM="${SHIM% }"
+[ -n "$SHIM" ] || fail "no mcp-capable agents derived from agents/*/agent.yml (yq missing or descriptors moved?)"
 
 d="$WORK/ck1"; mkdir -p "$d"; chmod 700 "$d"
 MCP_GATEWAY_TOKEN=gwval GH_TOKEN=ghval SRC_C=ckey SRC_P=pkey
@@ -328,6 +334,10 @@ unset MOCK_EXISTING_CONTAINERS
 # ────────────────────────────────────────────────────────────────────────────
 echo "── update-agent-keys.sh ──"
 DAH="$WORK/dah"; KP="$DAH/keys/mysite"; mkdir -p "$KP"
+# up.sh always composes one <agent>.env per enabled shim agent before this
+# helper can run; the helper derives its valid-agent list from those files,
+# so the fixture must seed them like a real keys dir.
+for a in $SHIM; do : > "$KP/$a.env"; chmod 600 "$KP/$a.env"; done
 uak() { ( cd "$SBOX" && env DJINN_HOME="$DAH" bash bin/update-agent-keys.sh "$@" ) ; }
 
 uak mysite claude OBSIDIAN_ANNOTATED_KEY sekret >/dev/null
@@ -338,7 +348,7 @@ assert_eq "idempotent replace (one line, new value)" "OBSIDIAN_ANNOTATED_KEY=new
 printf '\n' | uak mysite claude OBSIDIAN_ANNOTATED_KEY >/dev/null   # empty value → remove
 assert_eq "empty value removes the var" "" "$(cat "$KP/claude.env")"
 uak mysite common MCP_GATEWAY_TOKEN shared >/dev/null
-allhave=1; for a in claude pi gemini cursor-agent codex; do grep -q '^MCP_GATEWAY_TOKEN=shared$' "$KP/$a.env" || allhave=0; done
+allhave=1; for a in $SHIM; do grep -q '^MCP_GATEWAY_TOKEN=shared$' "$KP/$a.env" || allhave=0; done
 assert_eq "common fans out to every shim agent" "1" "$allhave"
 out=$(uak mysite 2>&1); rc=$?
 assert_rc "list mode rc 0" 0 "$rc"

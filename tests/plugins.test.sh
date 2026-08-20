@@ -24,6 +24,14 @@ command -v jq >/dev/null || { echo "SKIP: jq not installed"; exit 0; }
 FAILURES=0
 fail() { echo "  ✗ $1"; FAILURES=$((FAILURES + 1)); }
 pass() { echo "  ✓ $1"; }
+emit_agents_section() {
+    echo "---agents---"
+    for af in agents/*/agent.yml; do
+        [ -e "$af" ] || continue
+        printf '%s\t' "$(basename "$(dirname "$af")")"
+        yq -o=json -I=0 "$af"
+    done
+}
 
 echo "── syntax"
 bash -n up.sh && pass "bash -n up.sh" || fail "up.sh has syntax errors"
@@ -48,6 +56,7 @@ for f in plugins/*/plugin.yml; do
             printf '{"plugins": ["%s"]}\n' "$name"
             printf '%s\t' "$name"
             yq -o=json -I=0 "$f"
+            emit_agents_section
         } | python3 src/manifest.py --derive 2>&1
     ) \
         && pass "$name: passes manifest.py validation" \
@@ -77,6 +86,7 @@ echo "── template"
         printf '%s\t' "$(basename "$(dirname "$f")")"
         yq -o=json -I=0 "$f"
     done
+    emit_agents_section
 } | python3 src/manifest.py --derive >/dev/null \
     && pass "TEMPLATE.yml passes manifest.py --derive" \
     || fail "TEMPLATE.yml rejected by manifest.py"
@@ -94,13 +104,15 @@ ALL_DERIVED=$(
             printf '%s\t' "$(basename "$(dirname "$f")")"
             yq -o=json -I=0 "$f"
         done
+        emit_agents_section
     } | python3 src/manifest.py --derive
 ) \
     && pass "all shipped plugins coexist (no cross-plugin dup/reserved names)" \
     || fail "shipped plugins conflict as a set"
 # Shipped egress must reach the derived EGRESS (a renamed/mis-indented
 # egress: key would otherwise pass every check and firewall the plugin).
-EGRESS_ALL=$(eval "$ALL_DERIVED"; printf '%s' "$EGRESS")
+eval "$ALL_DERIVED"
+EGRESS_ALL="$EGRESS"
 echo ",$EGRESS_ALL," | grep -qF ",blob.core.windows.net," \
     && pass "serena's egress folds into derived EGRESS" \
     || fail "serena egress missing from EGRESS: '$EGRESS_ALL'"
@@ -108,36 +120,48 @@ echo ",$EGRESS_ALL," | grep -qF ",blob.core.windows.net," \
 # full emitted variable set. grep first: quoted multi-line values (e.g.
 # PLUGIN_MCP_ENTRIES) have continuation lines that are not assignments.
 EMITTED=$(printf '%s\n' "$ALL_DERIVED" | grep -oE '^[A-Z_]+=' | tr -d = | LC_ALL=C sort | tr '\n' ' ')
-EXPECTED="AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS INSTALL_AIDER INSTALL_CLAUDE INSTALL_CODEX INSTALL_CURSOR INSTALL_GEMINI INSTALL_PI MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SSH_BIND SSH_PORT "
+EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS INSTALL_AIDER INSTALL_CLAUDE INSTALL_CODEX INSTALL_CURSOR INSTALL_GEMINI INSTALL_PI MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
 [ "$EMITTED" = "$EXPECTED" ] \
     && pass "--derive emits exactly the variable set up.sh consumes" \
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
 
-echo "── plugin-declared volumes (plugins/<name>/volumes: → generated overlay)"
-# The reserved sets in manifest.py exist to stop a plugin from colliding with a
-# STATIC compose volume/mount — compose merges by key, so a collision silently
-# remounts a real directory instead of erroring. Pin them against the compose
-# file: adding a volume there without updating manifest.py re-opens the hole.
-COMPOSE_VOLS=$(yq -r '.volumes | keys | .[]' compose/docker-compose.local.yml | LC_ALL=C sort | tr '\n' ' ')
-MANIFEST_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_VOLUME_NAMES)) + " ")')
-[ "$COMPOSE_VOLS" = "$MANIFEST_VOLS" ] \
-    && pass "manifest.py COMPOSE_VOLUME_NAMES matches the compose file" \
-    || fail "compose volumes '$COMPOSE_VOLS' != manifest.py reserved '$MANIFEST_VOLS'"
-# Mount targets: everything the service mounts, named volume or bind, INCLUDING
-# the :ro ones — a plugin remounting a read-only path (/agent-rules, the keys
-# dir) is the same silent breakage as remounting a writable one.
-COMPOSE_TARGETS=$(yq -r '.services.djinn.volumes[]' compose/docker-compose.local.yml \
+echo "── static compose volumes + descriptor-derived agent volumes"
+# Static compose stays lean (workspace + gh-auth). manifest.py reserves this
+# STATIC set; enabled agents' state_dirs arrive via AGENTS_COMPOSE_YAML.
+COMPOSE_STATIC_VOLS=$(yq -r '.volumes | keys | .[]' compose/docker-compose.local.yml | LC_ALL=C sort | tr '\n' ' ')
+MANIFEST_STATIC_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.STATIC_COMPOSE_VOLUME_NAMES)) + " ")')
+[ "$COMPOSE_STATIC_VOLS" = "$MANIFEST_STATIC_VOLS" ] \
+    && pass "manifest.py STATIC_COMPOSE_VOLUME_NAMES matches static compose volumes" \
+    || fail "compose static volumes '$COMPOSE_STATIC_VOLS' != manifest.py STATIC '$MANIFEST_STATIC_VOLS'"
+
+COMPOSE_STATIC_TARGETS=$(yq -r '.services.djinn.volumes[]' compose/docker-compose.local.yml \
     | awk -F: '{print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
-MANIFEST_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.COMPOSE_MOUNT_PATHS)) + " ")')
-[ "$COMPOSE_TARGETS" = "$MANIFEST_TARGETS" ] \
-    && pass "manifest.py COMPOSE_MOUNT_PATHS matches the compose file" \
-    || fail "compose targets '$COMPOSE_TARGETS' != manifest.py reserved '$MANIFEST_TARGETS'"
+MANIFEST_STATIC_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.STATIC_COMPOSE_MOUNT_PATHS)) + " ")')
+[ "$COMPOSE_STATIC_TARGETS" = "$MANIFEST_STATIC_TARGETS" ] \
+    && pass "manifest.py STATIC_COMPOSE_MOUNT_PATHS matches static compose targets" \
+    || fail "compose static targets '$COMPOSE_STATIC_TARGETS' != manifest.py STATIC '$MANIFEST_STATIC_TARGETS'"
+
+AGENT_DECLARED_VOLS=$(for af in agents/*/agent.yml; do yq -r '.state_dirs[]?.volume // ""' "$af"; done \
+    | awk 'NF' | LC_ALL=C sort -u | tr '\n' ' ')
+AGENT_DECLARED_TARGETS=$(for af in agents/*/agent.yml; do yq -r '.state_dirs[]?.path // ""' "$af"; done | awk 'NF' \
+    | sed 's#^#/home/coder/#' | LC_ALL=C sort -u | tr '\n' ' ')
+AGENTS_OVERLAY_VOLS=$(printf '%s\n' "$AGENTS_COMPOSE_YAML" | yq -r '.volumes | keys | .[]' \
+    | LC_ALL=C sort -u | tr '\n' ' ')
+AGENTS_OVERLAY_TARGETS=$(printf '%s\n' "$AGENTS_COMPOSE_YAML" | yq -r '.services.djinn.volumes[]' \
+    | awk -F: '{print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
+[ "$AGENT_DECLARED_VOLS" = "$AGENTS_OVERLAY_VOLS" ] \
+    && pass "AGENTS_COMPOSE_YAML volume names match agents/*/agent.yml state_dirs" \
+    || fail "agent state volume drift: declared '$AGENT_DECLARED_VOLS' overlay '$AGENTS_OVERLAY_VOLS'"
+[ "$AGENT_DECLARED_TARGETS" = "$AGENTS_OVERLAY_TARGETS" ] \
+    && pass "AGENTS_COMPOSE_YAML mount targets match agents/*/agent.yml state_dirs" \
+    || fail "agent state target drift: declared '$AGENT_DECLARED_TARGETS' overlay '$AGENTS_OVERLAY_TARGETS'"
 # The generated overlay must be real compose input, not just well-formed YAML:
 # render a shipped plugin's declaration and let compose itself validate it.
 VOL_DERIVED=$(
     {
         printf '{"plugins": ["codebase-memory"]}\n'
         printf 'codebase-memory\t'; yq -o=json -I=0 plugins/codebase-memory/plugin.yml
+        emit_agents_section
     } | python3 src/manifest.py --derive
 ) || fail "--derive exited non-zero on a volume-declaring plugin"
 eval "$VOL_DERIVED"
@@ -246,6 +270,7 @@ DERIVED=$(
         printf '{"plugins": ["serena", "gateway"], "common_secrets": ["MCP_GATEWAY_TOKEN"]}\n'
         printf 'serena\t'; yq -o=json -I=0 plugins/serena/plugin.yml
         printf 'gateway\t'; yq -o=json -I=0 plugins/gateway/plugin.yml
+        emit_agents_section
     } | PRESENT_SECRET_VARS="MCP_GATEWAY_TOKEN" python3 src/manifest.py --derive
 ) || fail "--derive exited non-zero on a serena+gateway manifest"
 eval "$DERIVED"
@@ -274,6 +299,7 @@ A_DERIVED=$(
     {
         printf '{"plugins": ["obsidian-annotated"], "agent_secrets": [{"agent":"claude","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_a_claude"},{"agent":"cursor-agent","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_b_cursor_agent"}]}\n'
         printf 'obsidian-annotated\t'; yq -o=json -I=0 plugins/obsidian-annotated/plugin.yml
+        emit_agents_section
     } | PRESENT_SECRET_VARS="OBSIDIAN_KEY_a_claude OBSIDIAN_KEY_b_cursor_agent" SECRETS_FILE=/sec/secrets.env python3 src/manifest.py --derive
 ) || fail "--derive exited non-zero on an agent_secrets manifest"
 eval "$A_DERIVED"
@@ -337,25 +363,31 @@ DOMAIN_BODY='([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+'
 grep -qF -- "$DOMAIN_BODY" bin/allow-egress.sh && grep -qF -- "$DOMAIN_BODY" src/manifest.py \
     && pass "hostname rule matches between manifest.py and allow-egress.sh" \
     || fail "hostname rule drifted between manifest.py and allow-egress.sh"
-# The shim-agent list lives in three places (the Dockerfile bakes the shims;
-# up.sh writes one <agent>.env per shim agent; update-agent-keys.sh fans 'common'
-# across them). Drift would strand an agent with no env file or no override.
-SHIM_LIST="claude pi gemini cursor-agent codex"
-grep -qF "for a in $SHIM_LIST; do" Dockerfile \
-    && grep -qF "SHIM_AGENTS=\"$SHIM_LIST\"" up.sh \
-    && grep -qF "SHIM_AGENTS=\"$SHIM_LIST\"" bin/update-agent-keys.sh \
-    && pass "shim-agent list matches across Dockerfile, up.sh, update-agent-keys.sh" \
-    || fail "shim-agent list drifted (Dockerfile ↔ up.sh ↔ update-agent-keys.sh)"
-# ...and it must set-equal manifest.py's AGENT_NAMES (the agents agent_secrets
-# may bind). If they drift, a bound agent could get a file with no shared block
-# — or a shim agent could be un-bindable.
-if command -v python3 >/dev/null; then
-    AGENT_NAMES_SORTED=$(python3 -c 'import sys; sys.path.insert(0,"src"); import manifest; print(" ".join(sorted(manifest.AGENT_NAMES)))')
-    SHIM_SORTED=$(printf '%s\n' $SHIM_LIST | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
-    [ "$AGENT_NAMES_SORTED" = "$SHIM_SORTED" ] \
-        && pass "manifest.py AGENT_NAMES set-equals the shim-agent list" \
-        || fail "AGENT_NAMES ($AGENT_NAMES_SORTED) != shim agents ($SHIM_SORTED)"
-fi
+# Shim agents come from agents/*/agent.yml (enabled + mcp-capable), not a
+# hardcoded Dockerfile loop. Pin the descriptor-driven contract end-to-end.
+EXPECTED_SHIMS=$(for f in agents/*/agent.yml; do
+    [ -e "$f" ] || continue
+    yq -e '.mcp' "$f" >/dev/null 2>&1 || continue
+    yq -r '.binary' "$f"
+done | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+DERIVED_SHIMS_SORTED=$(printf '%s\n' $SHIM_AGENTS | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+[ "$DERIVED_SHIMS_SORTED" = "$EXPECTED_SHIMS" ] \
+    && pass "manifest-derived SHIM_AGENTS matches mcp binaries in agents/*/agent.yml" \
+    || fail "SHIM_AGENTS ($DERIVED_SHIMS_SORTED) != descriptor mcp binaries ($EXPECTED_SHIMS)"
+grep -qF '/opt/agents/*/agent.yml' Dockerfile \
+    && grep -qF "yq -e '.mcp'" Dockerfile \
+    && grep -qF "binary=\"\$(yq -r '.binary' \"\$f\")\"" Dockerfile \
+    && pass "Dockerfile shim loop is descriptor-driven (agents glob + mcp + binary)" \
+    || fail "Dockerfile shim loop no longer follows agents/*/agent.yml descriptors"
+grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS"' up.sh \
+    && ! grep -qF "$EXPECTED_SHIMS" up.sh \
+    && pass "up.sh consumes derived SHIM_AGENTS (no hardcoded shim list)" \
+    || fail "up.sh shim wiring drifted (expected derived SHIM_AGENTS)"
+UPDATE_SHIMS=$(awk -F'"' '/^SHIM_AGENTS=/{print $2; exit}' bin/update-agent-keys.sh)
+UPDATE_SHIMS_SORTED=$(printf '%s\n' $UPDATE_SHIMS | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+[ "$UPDATE_SHIMS_SORTED" = "$EXPECTED_SHIMS" ] \
+    && pass "update-agent-keys.sh fan-out set matches descriptor mcp binaries" \
+    || fail "update-agent-keys.sh SHIM_AGENTS ($UPDATE_SHIMS_SORTED) != descriptor mcp binaries ($EXPECTED_SHIMS)"
 # common.env is retired: up.sh must no longer WRITE it (the shim keeps a
 # transitional [ -f ] guard, so the Dockerfile reference is expected).
 grep -qE 'common\.env" *$|>> "\$KEYS_PATH/common.env"|> "\$KEYS_PATH/common.env"' up.sh \

@@ -12,12 +12,7 @@ services:
         USERNAME: coder
         USER_UID: ${USER_UID:-1000}
         USER_GID: ${USER_GID:-1000}
-        INSTALL_CLAUDE: "${INSTALL_CLAUDE:-true}"
-        INSTALL_PI: "${INSTALL_PI:-true}"
-        INSTALL_GEMINI: "${INSTALL_GEMINI:-true}"
-        INSTALL_CURSOR: "${INSTALL_CURSOR:-true}"
-        INSTALL_AIDER: "${INSTALL_AIDER:-true}"
-        INSTALL_CODEX: "${INSTALL_CODEX:-true}"
+        AGENTS_ENABLED: "${AGENTS_ENABLED:-aider claude codex cursor gemini pi}"
     # Per-container tag: each container builds/uses its own image tag
     image: djinn:${IMAGE_TAG:-local}
 
@@ -80,16 +75,9 @@ services:
       # propose changes via PR to the rules repo (see AGENTS.md governance).
       - ${RULES_PATH}:/agent-rules:ro
 
-      # ── Per-container auth/state: scoped to THIS container, but survives
-      # its rebuilds/recreates (log in once per container, not per rebuild).
-      # Removed only by down.sh --purge.
-      - claude-auth:/home/coder/.claude
-      - codex-auth:/home/coder/.codex
-      - gemini-state:/home/coder/.gemini
-      - cursor-state:/home/coder/.cursor
-      # cursor-agent writes its login token (access/refresh) to ~/.config/cursor,
-      # NOT ~/.cursor — persist it too, or every rebuild forces a re-login.
-      - cursor-auth:/home/coder/.config/cursor
+      # Per-agent auth/state mounts are generated per container from
+      # agents/*/agent.yml state_dirs into $BASE_PATH/compose/$NAME.agents.yml.
+      # That descriptor-local source of truth includes cursor's two-dir nuance.
       - gh-auth:/home/coder/.config/gh
 
     # Memory cap comes from the capability profile (coding needs headroom
@@ -99,11 +87,6 @@ services:
 
 volumes:
   workspace:
-  claude-auth:
-  codex-auth:
-  gemini-state:
-  cursor-state:
-  cursor-auth:
   gh-auth:
 
 # Shared bridge (RFC 04): every djinn container joins ONE user-defined

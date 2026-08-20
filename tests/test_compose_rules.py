@@ -5,7 +5,9 @@ symlink-to-mount fan-out of the agent global rules files.
 Pins the load-bearing guarantees: byte-identical output when no enabled plugin
 ships a fragment, enabled-only + ordered fragment inclusion, empty/missing
 fragments skipped, and atomic writes that swap a pre-existing symlink for a
-regular file WITHOUT writing through it into the (read-only) base.
+regular file WITHOUT writing through it into the (read-only) base. Target files
+are index-driven from agents-index.tsv, including guard behavior when the index
+is absent or malformed.
 """
 
 import io
@@ -13,7 +15,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -65,6 +67,47 @@ class ReadEnabledTests(unittest.TestCase):
         f = self.d / "enabled"
         f.write_text("\n")
         self.assertEqual(compose_rules.read_enabled(f), [])
+
+
+class DefaultTargetsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name)
+        self.index = self.d / "agents-index.tsv"
+
+    def test_absent_file_is_none(self):
+        self.assertIsNone(compose_rules.default_targets(self.d / "home", self.index))
+
+    def test_rows_with_rules_file_become_home_targets_in_file_order(self):
+        self.index.write_text(
+            "claude\tclaude\t.claude/CLAUDE.md\tmcp:true\n"
+            "cursor\tcursor-agent\t\tmcp:true\n"
+            "codex\tcodex\t.codex/AGENTS.md\tmcp:true\n",
+            encoding="utf-8",
+        )
+        home = self.d / "home"
+        got = compose_rules.default_targets(home, self.index)
+        self.assertEqual(
+            got,
+            [home / ".claude/CLAUDE.md", home / ".codex/AGENTS.md"],
+        )
+
+    def test_malformed_row_is_skipped_with_warning(self):
+        self.index.write_text(
+            "claude\tclaude\t.claude/CLAUDE.md\tmcp:true\n"
+            "bad-row-without-tabs\n"
+            "gemini\tgemini\t.gemini/GEMINI.md\tmcp:true\n",
+            encoding="utf-8",
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            got = compose_rules.default_targets(self.d / "home", self.index)
+        self.assertIn("malformed agents-index row", err.getvalue())
+        self.assertEqual(
+            got,
+            [self.d / "home/.claude/CLAUDE.md", self.d / "home/.gemini/GEMINI.md"],
+        )
 
 
 class LoadFragmentsTests(unittest.TestCase):
@@ -122,13 +165,19 @@ class RunTests(unittest.TestCase):
         self.plugins = self.d / "plugins"
         self.plugins.mkdir()
         self.enabled = self.d / "enabled"
+        self.index = self.d / "agents-index.tsv"
+        self.index.write_text(
+            "claude\tclaude\t.claude/CLAUDE.md\tmcp:true\n"
+            "gemini\tgemini\t.gemini/GEMINI.md\tmcp:true\n",
+            encoding="utf-8",
+        )
         self.t1 = self.d / "home/.claude/CLAUDE.md"
         self.t2 = self.d / "home/.gemini/GEMINI.md"
 
     def _run(self, announce=False):
         with redirect_stdout(io.StringIO()):
             return compose_rules.run(self.base, self.plugins, self.enabled,
-                                     [self.t1, self.t2], announce=announce)
+                                     [self.t1, self.t2], index=self.index, announce=announce)
 
     def test_no_plugins_targets_byte_identical_to_base(self):
         self.enabled.write_text("")
@@ -188,6 +237,27 @@ class RunTests(unittest.TestCase):
             rc = compose_rules.run(self.base, self.plugins, self.enabled, [self.t1])
         self.assertEqual(rc, 1)
         self.assertEqual(self.t1.read_text(), good)
+
+    def test_absent_index_file_leaves_good_file_when_using_default_targets(self):
+        self.index.unlink()
+        self.enabled.write_text("")
+        self.t1.parent.mkdir(parents=True, exist_ok=True)
+        self.t1.write_text("OLD\n")
+        with redirect_stdout(io.StringIO()):
+            rc = compose_rules.run(self.base, self.plugins, self.enabled,
+                                   targets=None, index=self.index)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.t1.read_text(), "OLD\n")
+
+    def test_explicit_targets_bypass_absent_index(self):
+        self.index.unlink()
+        self.enabled.write_text("")
+        self.assertEqual(
+            compose_rules.run(self.base, self.plugins, self.enabled,
+                              targets=[self.t1], index=self.index),
+            0,
+        )
+        self.assertEqual(self.t1.read_text(), self.base.read_text())
 
     def test_announce_lists_fragments(self):
         (self.plugins / "serena").mkdir()

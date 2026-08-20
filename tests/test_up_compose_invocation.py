@@ -23,6 +23,7 @@ UP_SH = REPO_ROOT / "up.sh"
 # reach compose as blank strings and produce malformed mounts/ports.
 REQUIRED_PREFIXES = [
     "CONTAINER_NAME",
+    "AGENTS_ENABLED",
     "ARTIFACTS_PATH",
     "BROWSER_TMP_PATH",
     "KEYS_PATH",

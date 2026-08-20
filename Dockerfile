@@ -7,12 +7,7 @@ ENV TZ=America/Chicago
 ARG USERNAME=coder
 ARG USER_UID=1000
 ARG USER_GID=1000
-ARG INSTALL_CLAUDE="true"
-ARG INSTALL_PI="true"
-ARG INSTALL_GEMINI="true"
-ARG INSTALL_CURSOR="true"
-ARG INSTALL_AIDER="true"
-ARG INSTALL_CODEX="true"
+ARG AGENTS_ENABLED="aider claude codex cursor gemini pi"
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
@@ -86,35 +81,6 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm use lts-latest
 # ── uv (Python package manager) ──────────────────────────────────────────────
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# ── AI tools (toggled via build args) ────────────────────────────────────────
-RUN if [ "$INSTALL_CLAUDE" = "true" ]; then \
-        eval "$(fnm env)" && npm install -g @anthropic-ai/claude-code; \
-    fi
-
-# pi ships an interactive installer (pi.dev/install.sh) that just wraps this
-# npm package — install it directly for non-TTY builds
-RUN if [ "$INSTALL_PI" = "true" ]; then \
-        eval "$(fnm env)" && npm install -g @earendil-works/pi-coding-agent; \
-    fi
-
-RUN if [ "$INSTALL_GEMINI" = "true" ]; then \
-        eval "$(fnm env)" && npm install -g @google/gemini-cli; \
-    fi
-
-# Installs to ~/.local/share/cursor-agent, symlinks into ~/.local/bin (on PATH)
-RUN if [ "$INSTALL_CURSOR" = "true" ]; then \
-        curl -fsSL https://cursor.com/install | bash; \
-    fi
-
-RUN if [ "$INSTALL_AIDER" = "true" ]; then \
-        pip3 install aider-chat --break-system-packages; \
-    fi
-
-# OpenAI Codex CLI (ChatGPT command line)
-RUN if [ "$INSTALL_CODEX" = "true" ]; then \
-        eval "$(fnm env)" && npm install -g @openai/codex; \
-    fi
-
 # ── Plugins (drop-in local MCP tools) ────────────────────────────────────────
 # Each plugin is a directory: plugins/<name>/plugin.yml (+ optional host-only
 # run.sh). Every plugin.yml is baked into the shared image here. A LOCAL (stdio)
@@ -153,6 +119,26 @@ RUN set -e; \
     done; \
     rm -f /tmp/plugin-install.sh
 
+# ── Agents (descriptor-driven install + runtime index) ───────────────────────
+# The per-agent install blocks now live in agents/*/agent.yml. This single loop
+# layer is a deliberate cache trade-off: changing AGENTS_ENABLED reinstalls all
+# enabled agents, but adding/changing an agent only touches this late layer.
+COPY --chown=$USERNAME:$USERNAME agents /opt/agents
+RUN set -e; \
+    eval "$(fnm env)"; \
+    for f in /opt/agents/*/agent.yml; do \
+        [ -e "$f" ] || continue; \
+        name="$(basename "$(dirname "$f")")"; \
+        case " $AGENTS_ENABLED " in \
+            *" $name "*) ;; \
+            *) echo "── agent install (disabled): $name"; continue ;; \
+        esac; \
+        echo "── agent install: $name"; \
+        yq -e -r '.install' "$f" > /tmp/agent-install.sh; \
+        bash -e /tmp/agent-install.sh; \
+    done; \
+    rm -f /tmp/agent-install.sh
+
 # ── Agent-identity shims ──────────────────────────────────────────────────────
 # Each agent CLI is fronted by a shim that loads per-agent MCP credentials from
 # ~/.agent-keys/<agent>.env, OVERRIDING inherited env, then execs the real
@@ -164,11 +150,35 @@ RUN set -e; \
 # still sources common.env when present — a one-release transitional guard so an
 # older keys dir keeps working; a later release drops that line. The `set -a`
 # order (common first, then <agent>) means a fresh per-agent file wins.
-RUN mkdir -p /home/$USERNAME/.agent-shims && \
-    for a in claude pi gemini cursor-agent codex; do \
-        printf '#!/bin/bash\nAGENT=%s\nKEYS="$HOME/.agent-keys"\nset -a\n[ -f "$KEYS/common.env" ] && . "$KEYS/common.env"\n[ -f "$KEYS/$AGENT.env" ] && . "$KEYS/$AGENT.env"\nset +a\nREAL=$(type -aP %s | grep -v ".agent-shims" | head -1)\n[ -n "$REAL" ] || { echo "%s is not installed in this container" >&2; exit 127; }\nexec "$REAL" "$@"\n' "$a" "$a" "$a" > /home/$USERNAME/.agent-shims/$a && \
-        chmod +x /home/$USERNAME/.agent-shims/$a; \
-    done
+# This same loop also renders /usr/local/lib/djinn/agents-index.tsv: stdlib
+# runtime consumers (compose_rules.py) cannot parse YAML, so build flattens the
+# enabled agent descriptors to TSV once.
+RUN set -e; \
+    mkdir -p /home/$USERNAME/.agent-shims; \
+    sudo mkdir -p /usr/local/lib/djinn; \
+    : > /tmp/agents-index.tsv; \
+    for f in /opt/agents/*/agent.yml; do \
+        [ -e "$f" ] || continue; \
+        name="$(basename "$(dirname "$f")")"; \
+        case " $AGENTS_ENABLED " in \
+            *" $name "*) ;; \
+            *) continue ;; \
+        esac; \
+        binary="$(yq -r '.binary' "$f")"; \
+        rules_file="$(yq -r '.rules_file // ""' "$f")"; \
+        if yq -e '.mcp' "$f" >/dev/null 2>&1; then \
+            mcp_flag=true; \
+            printf '#!/bin/bash\nAGENT=%s\nKEYS="$HOME/.agent-keys"\nset -a\n[ -f "$KEYS/common.env" ] && . "$KEYS/common.env"\n[ -f "$KEYS/$AGENT.env" ] && . "$KEYS/$AGENT.env"\nset +a\nREAL=$(type -aP %s | grep -v ".agent-shims" | head -1)\n[ -n "$REAL" ] || { echo "%s is not installed in this container" >&2; exit 127; }\nexec "$REAL" "$@"\n' "$binary" "$binary" "$binary" > "/home/$USERNAME/.agent-shims/$binary"; \
+            chmod +x "/home/$USERNAME/.agent-shims/$binary"; \
+        else \
+            mcp_flag=false; \
+        fi; \
+        printf '%s\t%s\t%s\tmcp:%s\n' "$name" "$binary" "$rules_file" "$mcp_flag" >> /tmp/agents-index.tsv; \
+    done; \
+    LC_ALL=C sort -t "$(printf '\t')" -k1,1 /tmp/agents-index.tsv \
+        | sudo tee /usr/local/lib/djinn/agents-index.tsv >/dev/null; \
+    sudo chmod 644 /usr/local/lib/djinn/agents-index.tsv; \
+    rm -f /tmp/agents-index.tsv
 
 # Shims must win over the real binaries in EVERY shell — interactive,
 # non-interactive (`docker exec ... claude`, `ssh host 'claude -p'`, VS Code
@@ -185,11 +195,22 @@ ENV PATH="/home/$USERNAME/.agent-shims:/home/$USERNAME/.local/bin:/home/$USERNAM
 # every SSH session type. $PATH here is the resolved ENV value set above.
 RUN echo "PATH=$PATH" | sudo tee /etc/environment >/dev/null
 
-# Auth/state dirs pre-created as coder so their per-container named volumes
-# initialize with the right ownership on first mount
-RUN mkdir -p /home/$USERNAME/.claude /home/$USERNAME/.codex \
-    /home/$USERNAME/.gemini /home/$USERNAME/.cursor /home/$USERNAME/.config/gh \
-    /home/$USERNAME/.config/cursor
+# Auth/state mountpoints are pre-created from enabled agents' state_dirs so the
+# first mount of those named volumes inherits coder ownership.
+RUN set -e; \
+    mkdir -p /home/$USERNAME/.config/gh; \
+    for f in /opt/agents/*/agent.yml; do \
+        [ -e "$f" ] || continue; \
+        name="$(basename "$(dirname "$f")")"; \
+        case " $AGENTS_ENABLED " in \
+            *" $name "*) ;; \
+            *) continue ;; \
+        esac; \
+        yq -r '.state_dirs[]?.path // ""' "$f" | while IFS= read -r rel; do \
+            [ -n "$rel" ] || continue; \
+            mkdir -p "/home/$USERNAME/$rel"; \
+        done; \
+    done
 
 # ── Workspace ─────────────────────────────────────────────────────────────────
 RUN sudo mkdir -p /workspace && sudo chown $USERNAME:$USERNAME /workspace
