@@ -9,8 +9,8 @@ brassbottle — the vessel; `djinn` — the word that calls them.
 
 ```
 bottles/<name>.yml  ──./djinn up <name>──►  djinn-<name>
-        │                                      ├── agents: claude, codex, pi,
-.djinn/secrets.env                             │   gemini, cursor-agent, aider
+        │                                      ├── agents from agents/*/agent.yml
+.djinn/secrets.env                             │   (e.g. claude, codex, cursor-agent, gemini, pi, aider, kimi)
   (all secret values, gitignored;              ├── egress firewall (zone allowlist)
    move via DJINN_HOME)                        ├── /workspace (volume): repos/<name> + worktrees/
                                                ├── /agent-rules (ro): global rules + skills
