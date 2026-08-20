@@ -8,7 +8,7 @@ brassbottle — the vessel; `djinn` — the word that calls them.
 *(“Genie” traces back to Latin* genius loci *— a spirit bound to a place.)*
 
 ```
-containers/<name>.yml  ──./djinn up <name>──►  djinn-<name>
+bottles/<name>.yml  ──./djinn up <name>──►  djinn-<name>
         │                                      ├── agents: claude, codex, pi,
 .djinn/secrets.env                             │   gemini, cursor-agent, aider
   (all secret values, gitignored;              ├── egress firewall (zone allowlist)
@@ -28,9 +28,9 @@ Runtime state (`secrets.env`, keys, artifacts) defaults to a gitignored
 
 ## The two files you author
 
-1. **`containers/<name>.yml`** — one manifest = one container: repos, memory,
+1. **`bottles/<name>.yml`** — one bottle = one container: repos, memory,
    tools, capability grants, per-agent identities. Secret-free, committable.
-   Copy `containers/TEMPLATE.yml` and edit.
+   Copy `bottles/TEMPLATE.yml` and edit.
 2. **`secrets.env`** — every secret value, one file, mode 600, never mounted
    (default `./.djinn/secrets.env`, gitignored). Copy `secrets.env.example`
    and fill in what your manifests reference.
@@ -57,26 +57,32 @@ bundled `rules/`. To point at your own locations instead, drop a gitignored
 ```bash
 DJINN_HOME="$HOME/djinn"                   # move the runtime home (secrets/keys/artifacts)
 RULES_PATH="$HOME/git/agent-conf/rules"    # use your own rules repo instead of bundled rules/
-CONTAINERS_PATH="$HOME/djinn/containers"   # read manifests from your own (private) dir
+BOTTLES_PATH="$HOME/git/djinn-bottles"     # read bottles from your own (private) repo
 BRAVE_APP="$HOME/Applications/Brave Browser.app"   # browser plugin: app locations
 CHROME_APP="/Applications/Chromium.app"            # (defaults are /Applications/…)
 ```
 
 (When `DJINN_HOME` is set and `$DJINN_HOME/rules` exists, it's used as
 the rules dir automatically — no need to set `RULES_PATH` too. The same applies
-to manifests: if `$DJINN_HOME/containers` exists it's used automatically, so
-you don't need to set `CONTAINERS_PATH` either.)
+to bottles: if `$DJINN_HOME/bottles` exists it's used automatically, so
+you don't need to set `BOTTLES_PATH` either.)
 
-When your manifests are their own git repo, `djinn up` fast-forwards that
-checkout before reading the manifest, so a merged manifest PR takes effect on
+**A bottle is the manifest; a container is the running thing.** The two used to
+share the word "container", which read badly next to the container the manifest
+produces. The old spellings still work: `CONTAINERS_PATH` and
+`$DJINN_HOME/containers` are honored, each printing a one-line deprecation
+notice naming the path it used. Rename yours and they go quiet.
+
+When your bottles are their own git repo, `djinn up` fast-forwards that
+checkout before reading the bottle, so a merged bottle PR takes effect on
 the next run rather than waiting for you to remember `git pull`. It never
-touches the bundled `containers/` (that would pull brassbottle), never fails
-the run — offline, no upstream, or a manifest you're mid-edit all just carry
+touches the bundled `bottles/` (that would pull brassbottle), never fails
+the run — offline, no upstream, or a bottle you're mid-edit all just carry
 on — and prints which case it took.
 
-**Keep your manifests out of this repo.** Your real `containers/*.yml` carry
+**Keep your bottles out of this repo.** Your real `bottles/*.yml` carry
 semi-private data (private repo URLs, LAN subnets, identity naming), so this
-repo ships only `containers/TEMPLATE.yml`. Point manifests at a directory of
+repo ships only `bottles/TEMPLATE.yml`. Point bottles at a directory of
 your own — e.g. `~/djinn/containers` (auto-detected) — and make *that* its
 own private git repo. The tool stays public; your configs stay private and
 versioned, with no second copy of the project to maintain.
@@ -84,7 +90,7 @@ versioned, with no second copy of the project to maintain.
 ## Quick start
 
 ```bash
-cp containers/TEMPLATE.yml containers/my-app.yml
+cp bottles/TEMPLATE.yml bottles/my-app.yml
 ./djinn up my-app
 ```
 
@@ -128,9 +134,9 @@ Tab-completion for container names (`djup`/`djdown`) and host services (`djsvc`)
 
 ```bash
 _dj_ctr_dir() {   # delegates to common.sh (the single source of truth for
-                   # CONTAINERS_PATH resolution) instead of duplicating its
+                   # BOTTLES_PATH resolution) instead of duplicating its
                    # override/compat logic here; stderr note suppressed.
-  bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$CONTAINERS_PATH"'
+  bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$BOTTLES_PATH"'
 }
 _dj_names() {
   local d f names=""; d="$(_dj_ctr_dir)"
@@ -155,7 +161,7 @@ _dj_names_zsh() {   # container short-names; delegates to common.sh (single
                      # source of truth) instead of duplicating its
                      # override/compat logic here; stderr note suppressed.
   local dir
-  dir=$(bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$CONTAINERS_PATH"')
+  dir=$(bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$BOTTLES_PATH"')
   local -a names=(${dir}/*.yml(N:t:r)); names=(${names:#TEMPLATE})
   compadd -a names
 }
@@ -294,7 +300,7 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
   dispatches to (still runnable directly): `up.sh` / `down.sh` are container
   lifecycle from manifests; `service.sh <name>` starts a plugin's Mac-side
   host service (see `plugins/`)
-- `containers/` — manifests (`TEMPLATE.yml` to copy; your own are gitignored)
+- `bottles/` — bottles (`TEMPLATE.yml` to copy; your own are gitignored)
 - `plugins/` — drop-in MCP tools, one directory each (`<name>/plugin.yml` +
   optional host-only `<name>/run.sh`, started via `./djinn service <name>`). See
   [`plugins/README.md`](plugins/README.md) for the schema and how to add one
@@ -388,7 +394,7 @@ reachable at its bridge IP from any enrolled device — `djinn up` prints the
 IP in its summary. sshd and the mosh range stay loopback/tunnel-only; nothing
 listens publicly.
 
-**Manifest filename = container identity.** A `containers/<name>.yml` under
+**Bottle filename = container identity.** A `bottles/<name>.yml` under
 your own (untracked) manifests directory names the container it produces, so
 renaming the file is the same as renaming the container.
 

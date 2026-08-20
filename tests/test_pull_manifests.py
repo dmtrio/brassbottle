@@ -75,11 +75,11 @@ class Decide(Base):
         should, _ = pm.decide(self.path("absent"), None, bundled=False)
         self.assertFalse(should)
 
-    def test_containers_inside_brassbottle_is_not_pulled(self):
-        # The exact hazard: CONTAINERS_PATH pointed at this repo's own
-        # containers/, where a pull would pull brassbottle.
+    def test_bottles_dir_inside_brassbottle_is_not_pulled(self):
+        # The exact hazard: BOTTLES_PATH pointed at this repo's own
+        # bottles/, where a pull would pull brassbottle.
         repo = init_repo(self.path("brassbottle"))
-        inside = os.path.join(repo, "containers")
+        inside = os.path.join(repo, "bottles")
         os.makedirs(inside)
         should, reason = pm.decide(inside, repo, bundled=False)
         self.assertFalse(should)
@@ -90,7 +90,7 @@ class Decide(Base):
         repo = init_repo(self.path("brassbottle"))
         link = self.path("link-to-brassbottle")
         os.symlink(repo, link)
-        should, _ = pm.decide(os.path.join(link, "containers"), repo,
+        should, _ = pm.decide(os.path.join(link, "bottles"), repo,
                               bundled=False)
         self.assertFalse(should)
 
@@ -122,11 +122,11 @@ class RepoIdentity(Base):
         self.assertFalse(should)
         self.assertIn("would pull brassbottle", reason)
 
-    def test_containers_dir_inside_a_worktree_is_also_refused(self):
+    def test_bottles_dir_inside_a_worktree_is_also_refused(self):
         repo = init_repo(self.path("brassbottle"))
         wt = self.path("worktrees", "feature")
         git("worktree", "add", "-q", "-b", "feature", wt, cwd=repo)
-        inside = os.path.join(wt, "containers")
+        inside = os.path.join(wt, "bottles")
         os.makedirs(inside)
         should, _ = pm.decide(inside, repo, bundled=False)
         self.assertFalse(should)

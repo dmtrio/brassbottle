@@ -7,10 +7,10 @@
 # keep it ignored so `git add -A` there can never commit them.
 .dev-agent/
 secrets.env
-# personal container manifests carry semi-private data (private repo URLs, LAN
-# subnets, identity-ref naming) — keep only the generic TEMPLATE.yml
-containers/*.yml
-!containers/TEMPLATE.yml
+# personal bottles carry semi-private data (private repo URLs, LAN subnets,
+# identity-ref naming) — keep only the generic TEMPLATE.yml
+bottles/*.yml
+!bottles/TEMPLATE.yml
 # generated into each container's workspace at up time (and symlinked into
 # worktrees) — only visible to git when the workspace repo is this one
 .mcp.json

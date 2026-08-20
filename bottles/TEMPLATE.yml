@@ -1,7 +1,7 @@
-# containers/<name>.yml — one manifest = one container. The assembly is a config.
+# bottles/<name>.yml — one bottle = one container. The assembly is a config.
 #
-#   cp containers/TEMPLATE.yml containers/personal-site.yml   # filename = container name
-#   vim containers/personal-site.yml
+#   cp bottles/TEMPLATE.yml bottles/personal-site.yml   # filename = container name
+#   vim bottles/personal-site.yml
 #   ./up.sh personal-site                                     # idempotent — rerun after edits
 #
 # Everything here is secret-free and committable. Secret VALUES live in

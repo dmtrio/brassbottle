@@ -15,10 +15,10 @@ credentials from it according to each manifest.
 All the scripts below source `src/common.sh` (not run directly), which resolves the
 "djinn home" — where secrets/keys/artifacts live. It defaults to a
 gitignored `./.djinn/`; override via `DJINN_HOME` / `RULES_PATH` /
-`CONTAINERS_PATH` in a gitignored `./.env` at the repo root (keeps your own
-setup working). `CONTAINERS_PATH`
-is where `containers/<name>.yml` manifests are read from — it defaults to
-`$DJINN_HOME/containers` when that exists, so your real manifests can live
+`BOTTLES_PATH` in a gitignored `./.env` at the repo root (keeps your own
+setup working). `BOTTLES_PATH`
+is where `bottles/<name>.yml` are read from — it defaults to
+`$DJINN_HOME/bottles` when that exists, so your real manifests can live
 outside this repo.
 
 ---
@@ -46,7 +46,7 @@ the token each uses, are documented in `plugins/<name>/README.md`.
 and idempotent: edit the manifest, rerun, done.
 
 - **`./djinn up <name>`** — create or update `djinn-<name>` from
-  `containers/<name>.yml`. Composes `$DJINN_HOME/keys/<name>/` from `secrets.env`,
+  `bottles/<name>.yml`. Composes `$DJINN_HOME/keys/<name>/` from `secrets.env`,
   builds the per-container image, waits for the firewall to come up, clones/inits
   the workspace, and generates each agent's MCP config. Re-run any time after
   editing the manifest or rotating a secret.

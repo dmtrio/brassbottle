@@ -75,11 +75,11 @@ fi
 
 # Resolve the djinn home here and hand it down — the launcher takes it from
 # the environment rather than computing a path to common.sh itself.
-# CONTAINERS_PATH rides along for the same reason: common.sh resolves it (from
+# BOTTLES_PATH rides along for the same reason: common.sh resolves it (from
 # ./.env, the env, or the per-setup default), and a launcher that reads a
 # container manifest must see the SAME directory up.sh does. Without the export
 # it is only a shell variable here, and a ./.env override would be silently
 # ignored one process down.
-. "$SCRIPT_DIR/src/common.sh"   # sets BASE_PATH, CONTAINERS_PATH
-export BASE_PATH CONTAINERS_PATH
+. "$SCRIPT_DIR/src/common.sh"   # sets BASE_PATH, BOTTLES_PATH
+export BASE_PATH BOTTLES_PATH
 exec bash "$RUN" "$@"

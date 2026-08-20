@@ -30,25 +30,40 @@ else
     BASE_PATH="$CDD_ROOT/.djinn"
 fi
 
-# Where container manifests are read from (up.sh, allow-egress.sh). Same
-# override philosophy as RULES_PATH: an explicit CONTAINERS_PATH (env or ./.env)
-# wins; otherwise prefer a per-setup $BASE_PATH/containers when it exists — so
-# your real, semi-private manifests (private repo URLs, LAN subnets, identity
-# naming) live OUTSIDE this repo, e.g. as their own private git repo at
-# ~/djinn/containers — and fall back to the repo's containers/ (which ships
+# Where bottles are read from (up.sh, allow-egress.sh). A BOTTLE is the
+# manifest — the YAML that declares a container. The container is the running
+# thing (DJINN_CTR_PREFIX below); one word for both is what this naming fixes.
+#
+# Same override philosophy as RULES_PATH: an explicit BOTTLES_PATH (env or
+# ./.env) wins; otherwise prefer a per-setup $BASE_PATH/bottles when it exists
+# — so your real, semi-private bottles (private repo URLs, LAN subnets,
+# identity naming) live OUTSIDE this repo, e.g. as their own private git repo
+# at ~/git/djinn-bottles — and fall back to the repo's bottles/ (which ships
 # only TEMPLATE.yml). A [ -d ] read only; still no filesystem side effects.
-# CONTAINERS_BUNDLED marks the last case — the fallback lives INSIDE this repo,
-# so up.sh must never `git pull` it (that would pull brassbottle). The flag is
-# set where the fallback is chosen, the same way RULES_BUNDLED is, because a
+#
+# CONTAINERS_PATH / $BASE_PATH/containers are the pre-rename spellings, still
+# honored so a live ./.env keeps working. Each warns once, naming the path it
+# actually used — silently accepting the old name is how a stale directory gets
+# read for months. Retire both branches when this prints nothing:
+#     grep -n 'CONTAINERS_PATH' ~/git/brassbottle/.env
+# BOTTLES_BUNDLED marks the in-repo fallback — it lives INSIDE brassbottle, so
+# up.sh must never `git pull` it (that would pull brassbottle). The flag is set
+# where the fallback is chosen, the same way RULES_BUNDLED is, because a
 # post-hoc path comparison misfires through a symlink.
-CONTAINERS_BUNDLED=0
-if [ -z "${CONTAINERS_PATH:-}" ]; then
-    if [ -d "$BASE_PATH/containers" ]; then
-        CONTAINERS_PATH="$BASE_PATH/containers"
-    else
-        CONTAINERS_PATH="$CDD_ROOT/containers"
-        CONTAINERS_BUNDLED=1
-    fi
+BOTTLES_BUNDLED=0
+if [ -n "${BOTTLES_PATH:-}" ]; then
+    :
+elif [ -n "${CONTAINERS_PATH:-}" ]; then
+    BOTTLES_PATH="$CONTAINERS_PATH"
+    echo "common.sh: CONTAINERS_PATH is deprecated — rename it to BOTTLES_PATH in ./.env (using $BOTTLES_PATH)" >&2
+elif [ -d "$BASE_PATH/bottles" ]; then
+    BOTTLES_PATH="$BASE_PATH/bottles"
+elif [ -d "$BASE_PATH/containers" ]; then
+    BOTTLES_PATH="$BASE_PATH/containers"
+    echo "common.sh: $BASE_PATH/containers is deprecated — rename it to $BASE_PATH/bottles (using $BOTTLES_PATH)" >&2
+else
+    BOTTLES_PATH="$CDD_ROOT/bottles"
+    BOTTLES_BUNDLED=1
 fi
 
 # Container naming: the single source of truth for the prefix, so

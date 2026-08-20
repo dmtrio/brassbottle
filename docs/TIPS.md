@@ -2,7 +2,7 @@
 
 ## Update container memory
 
-The durable way: set `memory:` in `containers/<name>.yml` and rerun
+The durable way: set `memory:` in `bottles/<name>.yml` and rerun
 `./djinn up <name>` — the manifest is the source of truth, and anything set
 another way is overwritten on the next up.
 

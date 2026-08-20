@@ -237,23 +237,41 @@ assert_rc "broken ./.env aborts with exit 1" 1 "$rc"
 assert_contains "broken ./.env reports the failure" "$out" "./.env exited non-zero"
 rm -f "$cfg/.env"
 
-# CONTAINERS_PATH resolution (mirrors RULES_PATH: override → $BASE_PATH/containers → repo)
-cpath() { env -i DJINN_HOME="${1-}" CONTAINERS_PATH="${2-}" bash -c '. "$1"; echo "$CONTAINERS_PATH"' _ "$cfg/src/common.sh"; }
-assert_eq "default CONTAINERS_PATH is the repo's containers/" "$cfg/containers" "$(cpath '' '')"
-dah="$WORK/dah-cp"; mkdir -p "$dah/containers"
-assert_eq "\$BASE_PATH/containers wins when it exists" "$dah/containers" "$(cpath "$dah" '')"
-assert_eq "CONTAINERS_PATH env override wins over everything" "/my/private/manifests" "$(cpath "$dah" /my/private/manifests)"
-# CONTAINERS_BUNDLED gates whether up.sh may `git pull` the manifests dir. It
+# BOTTLES_PATH resolution, in order: BOTTLES_PATH → CONTAINERS_PATH (deprecated)
+# → $BASE_PATH/bottles → $BASE_PATH/containers (deprecated) → the repo's bottles/.
+# All five branches are pinned: a wrong pick here reads someone's stale manifest
+# directory and applies it, which looks like a successful run.
+cpath() { env -i DJINN_HOME="${1-}" BOTTLES_PATH="${2-}" CONTAINERS_PATH="${3-}" bash -c '. "$1"; echo "$BOTTLES_PATH"' _ "$cfg/src/common.sh" 2>/dev/null; }
+cerr()  { env -i DJINN_HOME="${1-}" BOTTLES_PATH="${2-}" CONTAINERS_PATH="${3-}" bash -c '. "$1"; echo "$BOTTLES_PATH" >/dev/null' _ "$cfg/src/common.sh" 2>&1; }
+assert_eq "default BOTTLES_PATH is the repo's bottles/" "$cfg/bottles" "$(cpath '' '')"
+dah="$WORK/dah-cp"; mkdir -p "$dah/bottles"
+assert_eq "\$BASE_PATH/bottles wins when it exists" "$dah/bottles" "$(cpath "$dah" '')"
+assert_eq "BOTTLES_PATH env override wins over everything" "/my/private/bottles" "$(cpath "$dah" /my/private/bottles)"
+
+# Deprecated spellings stay honored so a live ./.env keeps working — each warns.
+assert_eq "CONTAINERS_PATH is still honored" "/legacy/manifests" "$(cpath '' '' /legacy/manifests)"
+assert_contains "CONTAINERS_PATH warns" "$(cerr '' '' /legacy/manifests)" "CONTAINERS_PATH is deprecated"
+assert_eq "BOTTLES_PATH wins over CONTAINERS_PATH" "/new/bottles" "$(cpath '' /new/bottles /legacy/manifests)"
+assert_eq "no warning when only BOTTLES_PATH is set" "" "$(cerr '' /new/bottles '')"
+dac="$WORK/dac-cp"; mkdir -p "$dac/containers"
+assert_eq "\$BASE_PATH/containers is still honored" "$dac/containers" "$(cpath "$dac" '')"
+assert_contains "\$BASE_PATH/containers warns" "$(cerr "$dac" '')" "is deprecated"
+both="$WORK/both-cp"; mkdir -p "$both/bottles" "$both/containers"
+assert_eq "\$BASE_PATH/bottles wins over the legacy containers/" "$both/bottles" "$(cpath "$both" '')"
+assert_eq "no warning when bottles/ wins" "" "$(cerr "$both" '')"
+
+# BOTTLES_BUNDLED gates whether up.sh may `git pull` the bottles dir. It
 # must be 1 for exactly the in-repo fallback: reporting 0 there would have a
 # fresh clone try to pull its own checkout (i.e. pull brassbottle).
-cbundled() { env -i DJINN_HOME="${1-}" CONTAINERS_PATH="${2-}" bash -c '. "$1"; echo "$CONTAINERS_BUNDLED"' _ "$cfg/src/common.sh"; }
-assert_eq "bundled flag set for the repo's own containers/" "1" "$(cbundled '' '')"
-assert_eq "bundled flag clear for \$BASE_PATH/containers" "0" "$(cbundled "$dah" '')"
-assert_eq "bundled flag clear for a CONTAINERS_PATH override" "0" "$(cbundled "$dah" /my/private/manifests)"
+cbundled() { env -i DJINN_HOME="${1-}" BOTTLES_PATH="${2-}" CONTAINERS_PATH="${3-}" bash -c '. "$1"; echo "$BOTTLES_BUNDLED"' _ "$cfg/src/common.sh" 2>/dev/null; }
+assert_eq "bundled flag set for the repo's own bottles/" "1" "$(cbundled '' '')"
+assert_eq "bundled flag clear for \$BASE_PATH/bottles" "0" "$(cbundled "$dah" '')"
+assert_eq "bundled flag clear for a BOTTLES_PATH override" "0" "$(cbundled "$dah" /my/private/bottles)"
+assert_eq "bundled flag clear for a deprecated CONTAINERS_PATH" "0" "$(cbundled '' '' /legacy/manifests)"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── allow-egress.sh ──"
-run_ae() { ( cd "$SBOX" && env CONTAINERS_PATH="$WORK/no-such-manifests" \
+run_ae() { ( cd "$SBOX" && env BOTTLES_PATH="$WORK/no-such-manifests" \
     MOCK_EXISTING_CONTAINERS="${MOCK_EXISTING_CONTAINERS-djinn-mycontainer}" \
     PATH="$WORK/aebin:$PATH" bash bin/allow-egress.sh "$@" ) 2>&1; }
 # docker mock: `inspect [-f fmt] <name>` only "succeeds" (State.Running=false,
@@ -381,7 +399,7 @@ SVC="$WORK/svc"; mkdir -p "$SVC/src" "$SVC/plugins/withsvc" "$SVC/plugins/nosvc"
 cp "$REPO/service.sh" "$SVC/service.sh"; cp "$REPO/src/common.sh" "$SVC/src/"
 cat > "$SVC/plugins/withsvc/run.sh" <<'MOCK'
 #!/bin/bash
-echo "ran withsvc args=[$*] base=${BASE_PATH:+set} containers=${CONTAINERS_PATH:+set}"
+echo "ran withsvc args=[$*] base=${BASE_PATH:+set} bottles=${BOTTLES_PATH:+set}"
 MOCK
 chmod +x "$SVC/plugins/withsvc/run.sh"
 : > "$SVC/plugins/nosvc/plugin.yml"
@@ -408,9 +426,9 @@ out=$(svc withsvc chrome --flag 2>&1); rc=$?
 assert_rc "valid service execs run.sh (rc 0)" 0 "$rc"
 assert_contains "dispatcher forwards extra args verbatim" "$out" "ran withsvc args=[chrome --flag]"
 assert_contains "dispatcher exports BASE_PATH to the launcher" "$out" "base=set"
-# A launcher that reads a container manifest (browser) must see the SAME
-# CONTAINERS_PATH up.sh does; unexported it would silently ignore ./.env.
-assert_contains "dispatcher exports CONTAINERS_PATH to the launcher" "$out" "containers=set"
+# A launcher that reads a bottle (browser) must see the SAME
+# BOTTLES_PATH up.sh does; unexported it would silently ignore ./.env.
+assert_contains "dispatcher exports BOTTLES_PATH to the launcher" "$out" "bottles=set"
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then echo "FAILED: $FAILURES bash test(s)"; exit 1; fi
