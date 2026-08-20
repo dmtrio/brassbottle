@@ -1400,7 +1400,7 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
                 capture_output=True, text=True, check=True).stdout)
             agent_docs[f.parent.name] = doc
         derived = manifest.derive(
-            {"tools": ["claude", "codex", "cursor", "gemini", "pi"]},
+            {"agents": ["claude", "codex", "cursor", "gemini", "pi"]},
             {}, agent_docs, {"PRESENT_SECRET_VARS": "", "SECRETS_FILE": "/sec/secrets.env"},
         )
         env = {

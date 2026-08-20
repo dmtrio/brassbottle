@@ -829,7 +829,7 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
     def test_literal_key_agents_emission(self):
         d = derive({})
         self.assertEqual(d["LITERAL_KEY_AGENTS"], "cursor-agent gemini pi")
-        d = derive({"tools": ["claude", "aider"]})
+        d = derive({"agents": ["claude", "aider"]})
         self.assertEqual(d["LITERAL_KEY_AGENTS"], "")
 
     def test_absolute_agent_state_path_is_rejected(self):
