@@ -5,11 +5,12 @@ be installed into the shared image and (optionally) wired for MCP + per-agent
 secrets. A manifest opts in by directory name:
 
 ```yaml
-tools: [claude, kimi]
+agents: [claude, kimi]
 ```
 
-`tools` matching is exact string equality against `agents/<name>/`. The
-directory name is the tool name.
+`agents:` matching is exact string equality against `agents/<name>/` — the
+directory name is the agent name. (`tools:` is accepted as a deprecated alias
+for one release.)
 
 **What belongs here — and what doesn't.** An agent is an AI CLI a human talks
 to, with its own identity: its own shim, its own key file, optionally its own
@@ -72,8 +73,8 @@ with `src/wire_plugins.py` dispatch):
 
 - `djinn up` globs `agents/*/agent.yml` and feeds all descriptors into
   `src/manifest.py --derive`.
-- `tools:` in the manifest is matched **exactly** to agent directory names;
-  matched entries become `AGENTS_ENABLED`.
+- `agents:` in the manifest (or the deprecated `tools:` alias) is matched
+  **exactly** to agent directory names; matched entries become `AGENTS_ENABLED`.
 - `SHIM_AGENTS` and `AGENTS_MCP_JSON` are derived from enabled descriptors with
   an `mcp` block.
 - `Dockerfile` and `up.sh` do not carry a hardcoded list of agents; the
