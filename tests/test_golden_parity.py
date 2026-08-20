@@ -27,6 +27,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "golden"
 MANIFEST_PY = REPO_ROOT / "src" / "manifest.py"
 WIRE_PLUGINS = REPO_ROOT / "src" / "wire_plugins.py"
 PLUGINS_DIR = REPO_ROOT / "plugins"
+AGENTS_DIR = REPO_ROOT / "agents"
 SECRETS_FILE = FIXTURES / "secrets.env"
 
 GIT_NAME_DEFAULT = "Golden Tester"
@@ -89,6 +90,16 @@ def plugin_yq_doc(plugin_yml):
     return doc.rstrip("\n")
 
 
+def agent_yq_doc(agent_yml):
+    """Agent docs are required; unreadable descriptors are always fatal."""
+    doc = yq_json(agent_yml)
+    if doc is None:
+        raise RuntimeError(f"yq failed on {agent_yml}")
+    if len((doc if doc.endswith("\n") else doc + "\n").splitlines()) != 1:
+        raise RuntimeError(f"agent descriptor is not single-line JSON: {agent_yml}")
+    return doc.rstrip("\n")
+
+
 def build_derive_stdin(manifest_path):
     """Build the stdin stream up.sh pipes to manifest.py --derive."""
     man_doc = yq_json(manifest_path)
@@ -98,6 +109,10 @@ def build_derive_stdin(manifest_path):
     for plugin_yml in sorted(PLUGINS_DIR.glob("*/plugin.yml")):
         name = plugin_yml.parent.name
         lines.append(f"{name}\t{plugin_yq_doc(plugin_yml)}")
+    lines.append("---agents---")
+    for agent_yml in sorted(AGENTS_DIR.glob("*/agent.yml")):
+        name = agent_yml.parent.name
+        lines.append(f"{name}\t{agent_yq_doc(agent_yml)}")
     return "\n".join(lines) + "\n"
 
 
