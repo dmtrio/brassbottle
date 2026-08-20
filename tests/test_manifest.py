@@ -314,7 +314,7 @@ class TestYqSemanticsPins(unittest.TestCase):
 
     def test_agents_false_defaults_to_default_tool_set(self):
         d = derive({"agents": False})
-        self.assertEqual(d["INSTALL_AIDER"], "true")
+        self.assertIn("aider", d["AGENTS_ENABLED"].split())
 
     def test_capabilities_sugar_only_literal_true_maps_to_plugin(self):
         # capabilities: gateway/proxyman/browser are deprecated sugar now; only
