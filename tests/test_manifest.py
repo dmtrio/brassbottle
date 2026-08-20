@@ -4,7 +4,7 @@
 Table-driven: every validation rule the old up.sh bash enforced is a row
 here, with the EXACT error message the bash produced (parity was verified
 against the extracted old code before the port landed). The yq/jq semantic
-quirks (`//` on false, contains() substring matching, agent-suffix case
+quirks (`//` on false, exact tools matching, agent-suffix case
 order) get dedicated pins so a future "cleanup" can't change them silently.
 """
 
@@ -63,11 +63,96 @@ PLUGIN_FILES = {"serena": SERENA, "other": OTHER,
                 "axiom": AXIOM}
 ENV = {"PRESENT_SECRET_VARS": "OBSIDIAN_KEY_me_claude OBSIDIAN_WATCH_KEY_w_pi",
        "SECRETS_FILE": "/sec/secrets.env"}
+AGENT_FILES = {
+    "aider": {
+        "binary": "aider",
+        "install": "pip3 install aider-chat --break-system-packages",
+    },
+    "claude": {
+        "binary": "claude",
+        "install": "npm install -g @anthropic-ai/claude-code",
+        "state_dirs": [{"path": ".claude", "volume": "claude-auth"}],
+        "rules_file": ".claude/CLAUDE.md",
+        "mcp": {
+            "config_path": ".mcp.json",
+            "format": "json",
+            "dialect": "mcpServers",
+            "env_refs": True,
+            "strategy": "claude_preapprove",
+        },
+    },
+    "codex": {
+        "binary": "codex",
+        "install": "npm install -g @openai/codex",
+        "state_dirs": [{"path": ".codex", "volume": "codex-auth"}],
+        "rules_file": ".codex/AGENTS.md",
+        "mcp": {
+            "config_path": ".codex/config.toml",
+            "format": "toml",
+            "env_refs": False,
+            "strategy": "codex_managed_block",
+        },
+    },
+    "cursor": {
+        "binary": "cursor-agent",
+        "install": "curl -fsSL https://cursor.com/install | bash",
+        "state_dirs": [
+            {"path": ".cursor", "volume": "cursor-state"},
+            {"path": ".config/cursor", "volume": "cursor-auth"},
+        ],
+        "mcp": {
+            "config_path": ".cursor/mcp.json",
+            "format": "json",
+            "dialect": "url",
+            "env_refs": False,
+        },
+    },
+    "gemini": {
+        "binary": "gemini",
+        "install": "npm install -g @google/gemini-cli",
+        "state_dirs": [{"path": ".gemini", "volume": "gemini-state"},
+                       ],
+        "rules_file": ".gemini/GEMINI.md",
+        "mcp": {
+            "config_path": ".gemini/settings.json",
+            "format": "json",
+            "dialect": "httpUrl",
+            "env_refs": False,
+        },
+    },
+    "pi": {
+        "binary": "pi",
+        "install": "npm install -g @earendil-works/pi-coding-agent",
+        "mcp": {
+            "config_path": ".pi/agent/mcp.json",
+            "format": "json",
+            "dialect": "type-http",
+            "env_refs": False,
+        },
+    },
+}
 
 
-def derive(man, plugin_files=None, env=None):
+def derive(man, plugin_files=None, env=None, agent_files=None):
     return m.derive(man, PLUGIN_FILES if plugin_files is None else plugin_files,
+                    AGENT_FILES if agent_files is None else agent_files,
                     ENV if env is None else env)
+
+
+def derive_stdin(manifest, plugin_files=None, agent_files=None):
+    plugin_files = PLUGIN_FILES if plugin_files is None else plugin_files
+    agent_files = AGENT_FILES if agent_files is None else agent_files
+    lines = [json.dumps(manifest, separators=(",", ":"))]
+    for name in sorted(plugin_files):
+        doc = plugin_files[name]
+        payload = "!" if doc is m.UNREADABLE else json.dumps(doc, separators=(",", ":"))
+        lines.append(f"{name}\t{payload}")
+    lines.append("---agents---")
+    for name in sorted(agent_files):
+        doc = agent_files[name]
+        payload = "!" if doc is m.UNREADABLE else json.dumps(doc, separators=(",", ":"))
+        lines.append(f"{name}\t{payload}")
+    return "\n".join(lines) + "\n"
 
 
 class TestErrorTable(unittest.TestCase):
@@ -111,7 +196,7 @@ class TestErrorTable(unittest.TestCase):
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)"),
         ("unknown agent suffix", {"identities": {"obsidian": ["me_nobody"]}}, None,
          "manifest identity references failed validation:\n"
-         "  obsidian ref 'me_nobody': suffix is not a known agent (_claude/_codex/_pi/_gemini/_cursor_agent)"),
+         "  obsidian ref 'me_nobody': suffix is not a known agent (_cursor_agent/_claude/_gemini/_codex/_pi)"),
         ("secret missing", {"identities": {"obsidian": ["gone_claude"]}}, None,
          "manifest identity references failed validation:\n"
          "  obsidian ref 'gone_claude': OBSIDIAN_KEY_gone_claude not found in /sec/secrets.env"),
@@ -119,7 +204,7 @@ class TestErrorTable(unittest.TestCase):
          {"identities": {"obsidian": ["bad-dash_claude"], "watch": ["w_nobody"]}}, None,
          "manifest identity references failed validation:\n"
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)\n"
-         "  watch ref 'w_nobody': suffix is not a known agent (_claude/_codex/_pi/_gemini/_cursor_agent)"),
+        "  watch ref 'w_nobody': suffix is not a known agent (_cursor_agent/_claude/_gemini/_codex/_pi)"),
         ("ntfy url missing",
          {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}}, ENV,
          "manifest has remote.notify: ntfy but NTFY_URL is missing from /sec/secrets.env"),
@@ -212,9 +297,9 @@ class TestYqSemanticsPins(unittest.TestCase):
                     "manifest repo: is gone — declare repos: [<url>, ...] instead "
                     "(layout v2: each repo clones to /workspace/repos/<name>)")
 
-    def test_tools_contains_is_substring_match(self):
+    def test_tools_match_is_exact_string_equality(self):
         d = derive({"tools": ["claude-code"]})
-        self.assertEqual(d["INSTALL_CLAUDE"], "true")   # jq contains() quirk
+        self.assertEqual(d["INSTALL_CLAUDE"], "false")
         self.assertEqual(d["INSTALL_CODEX"], "false")
 
     def test_agents_contains_is_substring_match(self):
@@ -258,11 +343,19 @@ class TestYqSemanticsPins(unittest.TestCase):
         self.assertNotIn("CAP_BROWSER", d)
 
     def test_agent_suffix_case_order(self):
-        self.assertEqual(m.agent_for_ref("x_cursor_agent"), "cursor-agent")
-        self.assertEqual(m.agent_for_ref("weird_claude_cursor_agent"), "cursor-agent")
-        self.assertEqual(m.agent_for_ref("cursor_agent"), "")  # no leading _
-        self.assertEqual(m.agent_for_ref("a_pi"), "pi")
-        self.assertEqual(m.agent_for_ref("nope"), "")
+        env = dict(
+            ENV,
+            PRESENT_SECRET_VARS="OBSIDIAN_KEY_weird_claude_cursor_agent OBSIDIAN_KEY_a_pi",
+        )
+        d = derive({"identities": {"obsidian": ["weird_claude_cursor_agent"]}}, env=env)
+        self.assertEqual(
+            d["AGENT_SECRETS"],
+            "cursor-agent\tOBSIDIAN_ANNOTATED_KEY\tOBSIDIAN_KEY_weird_claude_cursor_agent\n")
+        d = derive({"identities": {"obsidian": ["a_pi"]}}, env=env)
+        self.assertEqual(d["AGENT_SECRETS"], "pi\tOBSIDIAN_ANNOTATED_KEY\tOBSIDIAN_KEY_a_pi\n")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"identities": {"obsidian": ["cursor_agent"]}}, env=env)
+        self.assertIn("suffix is not a known agent", str(cm.exception))
 
 
 class TestRepos(unittest.TestCase):
@@ -580,14 +673,25 @@ class TestRenderAndStdin(unittest.TestCase):
         self.assertEqual(out.stdout, "plain|has space|it's; $HOME `x`")
 
     def test_read_stdin_docs(self):
-        stream = io.StringIO('{"plugins": ["p"]}\np\t{"mcp": {}}\n')
-        man, files = m.read_stdin_docs(stream)
+        stream = io.StringIO(
+            derive_stdin(
+                {"plugins": ["p"]},
+                plugin_files={"p": {"mcp": {}}},
+                agent_files={"aider": AGENT_FILES["aider"]},
+            )
+        )
+        man, files, agents = m.read_stdin_docs(stream)
         self.assertEqual(man, {"plugins": ["p"]})
         self.assertEqual(files, {"p": {"mcp": {}}})
+        self.assertEqual(agents, {"aider": AGENT_FILES["aider"]})
 
     def test_read_stdin_null_manifest_is_empty(self):
-        man, files = m.read_stdin_docs(io.StringIO("null\n"))
+        man, files, agents = m.read_stdin_docs(
+            io.StringIO(derive_stdin(None, plugin_files={}, agent_files={"aider": AGENT_FILES["aider"]}))
+        )
         self.assertEqual(man, {})
+        self.assertEqual(files, {})
+        self.assertEqual(agents, {"aider": AGENT_FILES["aider"]})
 
     def test_read_stdin_errors(self):
         with self.assertRaises(m.ManifestError):
@@ -596,11 +700,20 @@ class TestRenderAndStdin(unittest.TestCase):
             m.read_stdin_docs(io.StringIO("{bad\n"))
         with self.assertRaises(m.ManifestError):
             m.read_stdin_docs(io.StringIO('{}\nno-tab-here\n'))
+        with self.assertRaises(m.ManifestError) as cm:
+            m.read_stdin_docs(io.StringIO('{}\na\t{}\n'))
+        self.assertIn("agents section missing", str(cm.exception))
+        with self.assertRaises(m.ManifestError) as cm:
+            m.read_stdin_docs(io.StringIO('{}\n---agents---\n'))
+        self.assertIn("agents section is empty", str(cm.exception))
+        with self.assertRaises(m.ManifestError) as cm:
+            m.read_stdin_docs(io.StringIO('{}\n---agents---\naider\t!\n'))
+        self.assertIn("agent file 'aider' is unreadable", str(cm.exception))
 
     def test_main_derive_end_to_end(self):
         out = subprocess.run(
             [sys.executable, str(MODULE), "--derive"],
-            input='{"memory": "3g"}\n', capture_output=True, text=True,
+            input=derive_stdin({"memory": "3g"}), capture_output=True, text=True,
             env={"SECRETS_FILE": "/s", "PATH": "/usr/bin:/bin"})
         self.assertEqual(out.returncode, 0)
         self.assertIn("MEM_LIMIT=3g\n", out.stdout)
@@ -608,11 +721,89 @@ class TestRenderAndStdin(unittest.TestCase):
     def test_main_error_goes_to_stderr_exit_1(self):
         out = subprocess.run(
             [sys.executable, str(MODULE), "--derive"],
-            input='{"forge": "bad"}\n', capture_output=True, text=True,
+            input=derive_stdin({"forge": "bad"}), capture_output=True, text=True,
             env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(out.returncode, 1)
         self.assertEqual(out.stdout, "")
         self.assertIn("Error: forge must be github or gitea", out.stderr)
+
+
+class TestAgentDescriptorDerivation(unittest.TestCase):
+    def test_unknown_agent_descriptor_key_errors(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"], nope=True)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("agent 'claude': unsupported field(s): nope", str(cm.exception))
+
+    def test_unknown_agent_mcp_key_errors(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"])
+        agents["claude"]["mcp"] = dict(AGENT_FILES["claude"]["mcp"], nope=True)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("agent 'claude' mcp: unsupported field(s): nope", str(cm.exception))
+
+    def test_absolute_agent_state_path_is_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"])
+        agents["claude"]["state_dirs"] = [{"path": "/.claude", "volume": "claude-auth"}]
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("must be home-relative (no leading /)", str(cm.exception))
+
+    def test_duplicate_agent_state_volume_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(AGENT_FILES["codex"])
+        agents["codex"]["state_dirs"] = [{"path": ".codex", "volume": "claude-auth"}]
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("already declared by agent 'claude'", str(cm.exception))
+
+    def test_agents_enabled_and_shim_agents_subset(self):
+        d = derive({"tools": ["claude", "aider"]})
+        self.assertEqual(d["AGENTS_ENABLED"], "aider claude")
+        self.assertEqual(d["SHIM_AGENTS"], "claude")
+
+    def test_agents_compose_yaml_full_rendering(self):
+        d = derive({})
+        self.assertEqual(
+            d["AGENTS_COMPOSE_YAML"],
+            "\n".join([
+                "# GENERATED by src/manifest.py — do not edit; ./up.sh rewrites it.",
+                "# Named volumes for enabled agents' auth/state directories",
+                "services:",
+                "  djinn:",
+                "    volumes:",
+                "      - claude-auth:/home/coder/.claude",
+                "      - codex-auth:/home/coder/.codex",
+                "      - cursor-auth:/home/coder/.config/cursor",
+                "      - cursor-state:/home/coder/.cursor",
+                "      - gemini-state:/home/coder/.gemini",
+                "volumes:",
+                "  claude-auth:",
+                "  codex-auth:",
+                "  cursor-auth:",
+                "  cursor-state:",
+                "  gemini-state:",
+            ])
+        )
+
+    def test_agents_compose_yaml_empty_when_no_state_dirs_enabled(self):
+        d = derive({"tools": ["aider", "pi"]})
+        self.assertEqual(d["AGENTS_COMPOSE_YAML"], "")
+
+    def test_agent_plugin_volume_name_collision(self):
+        files = {"p": {"volumes": {"claude-auth": "/home/coder/cache"}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertIn("that name is already a compose volume", str(cm.exception))
+
+    def test_agent_plugin_path_overlap_collision(self):
+        files = {"p": {"volumes": {"p-cache": "/home/coder/.cursor/cache"}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertIn("collides with the compose mount '/home/coder/.cursor'", str(cm.exception))
 
 
 class TestReviewFixes(unittest.TestCase):
@@ -689,8 +880,9 @@ class TestReviewFixes(unittest.TestCase):
                                  files["p"]["mcp"])
 
     def test_stdin_unreadable_sentinel_and_multidoc_hint(self):
-        man, files = m.read_stdin_docs(io.StringIO('{}\nbroken\t!\n'))
+        man, files, agents = m.read_stdin_docs(io.StringIO(derive_stdin({}, plugin_files={"broken": m.UNREADABLE})))
         self.assertIs(files["broken"], m.UNREADABLE)
+        self.assertEqual(agents["aider"]["binary"], "aider")
         with self.assertRaises(m.ManifestError) as cm:
             m.read_stdin_docs(io.StringIO('{}\n{"second": "doc"}\n'))
         self.assertIn("stray '---'", str(cm.exception))
@@ -703,7 +895,7 @@ class TestHybridSchemaRules(unittest.TestCase):
     slots, agent_secrets validation, inert warnings, capabilities: sugar)."""
 
     def _d(self, man, files=PLUGIN_FILES, env=None):
-        return m.derive(man, files, ENV if env is None else env)
+        return m.derive(man, files, AGENT_FILES, ENV if env is None else env)
 
     # ── plugin shape: install-iff-local, host_port ───────────────────────
     def test_install_required_only_for_local_servers(self):
@@ -856,6 +1048,7 @@ class TestUniversalHybridSecrets(unittest.TestCase):
 
     def derive(self, manifest, present=""):
         return m.derive(manifest, self.FILES,
+                        AGENT_FILES,
                         {"PRESENT_SECRET_VARS": present, "SECRETS_FILE": "/sec/secrets.env"})
 
     def test_common_default_binds_every_enabled_agent(self):
@@ -879,8 +1072,9 @@ class TestUniversalHybridSecrets(unittest.TestCase):
                              "http": {"url": "https://x.test/mcp", "requires": ["REMOTE_TOK"]},
                          }}}
         d = m.derive({"plugins": ["mix"], "common_secrets": ["LOCAL_TOK", "REMOTE_TOK"]},
-                     files, {"PRESENT_SECRET_VARS": "LOCAL_TOK REMOTE_TOK",
-                             "SECRETS_FILE": "/sec/secrets.env"})
+                     files, AGENT_FILES,
+                     {"PRESENT_SECRET_VARS": "LOCAL_TOK REMOTE_TOK",
+                      "SECRETS_FILE": "/sec/secrets.env"})
         self.assertEqual(set(d["AGENT_SERVER_SLOTS"].split()), {"LOCAL_TOK", "REMOTE_TOK"})
         self.assertEqual(d["AGENT_SERVER_REMOTE_SLOTS"], "REMOTE_TOK")
 
@@ -910,7 +1104,7 @@ class TestUniversalHybridSecrets(unittest.TestCase):
         files = {"p": {"install": "x", "secrets": {"TOKEN": {}},
                        "mcp": {"one": {"command": "server", "requires": ["MISSING"]}}}}
         with self.assertRaises(m.ManifestError) as cm:
-            m.derive({"plugins": ["p"]}, files, {"PRESENT_SECRET_VARS": ""})
+            m.derive({"plugins": ["p"]}, files, AGENT_FILES, {"PRESENT_SECRET_VARS": ""})
         self.assertIn("requires unknown secret slot(s): MISSING", str(cm.exception))
 
     def test_disabled_and_secret_are_mutually_exclusive(self):
