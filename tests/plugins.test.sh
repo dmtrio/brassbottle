@@ -66,12 +66,12 @@ done
 [ "$found" = 1 ] || fail "no plugin files found under plugins/"
 
 echo "── template"
-[ "$(yq '.plugins | tag' containers/TEMPLATE.yml)" = "!!seq" ] \
+[ "$(yq '.plugins | tag' bottles/TEMPLATE.yml)" = "!!seq" ] \
     && pass "TEMPLATE.yml has a plugins: list" \
     || fail "TEMPLATE.yml is missing the plugins: [] key"
 # TEMPLATE must pass the real validator end-to-end
 {
-    yq -o=json -I=0 containers/TEMPLATE.yml
+    yq -o=json -I=0 bottles/TEMPLATE.yml
     for f in plugins/*/plugin.yml; do
         [ -e "$f" ] || continue
         printf '%s\t' "$(basename "$(dirname "$f")")"
@@ -323,7 +323,7 @@ yq -o=json -I=0 "$MANIFEST"
 src/manifest.py" --derive
 --build-payload
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
-src/pull_manifests.py" "$CONTAINERS_PATH"
+src/pull_manifests.py" "$BOTTLES_PATH"
 python3 /usr/local/lib/djinn/wire_plugins.py
 PRESENT_SECRET_VARS
 DRIFT

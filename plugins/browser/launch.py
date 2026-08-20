@@ -28,7 +28,7 @@ SLOT = "RESEARCH_BROWSER_KEY"
 
 # Default install locations. Override per setup with BRAVE_APP / CHROME_APP in
 # ./.env (the repo's existing host-side override channel, alongside
-# DJINN_HOME / RULES_PATH / CONTAINERS_PATH) — for a browser in
+# DJINN_HOME / RULES_PATH / BOTTLES_PATH) — for a browser in
 # ~/Applications, a renamed app bundle, or a Chromium variant. A one-off can
 # also pass an absolute path in place of brave|chrome.
 BRAVE_APP_DEFAULT = "/Applications/Brave Browser.app"
@@ -51,14 +51,14 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
-def containers_dir(base_path: str, env_override: str | None = None) -> Path:
-    """Mirror src/common.sh CONTAINERS_PATH resolution."""
+def bottles_dir(base_path: str, env_override: str | None = None) -> Path:
+    """Mirror src/common.sh BOTTLES_PATH resolution."""
     if env_override:
         return Path(env_override)
-    custom = Path(base_path) / "containers"
+    custom = Path(base_path) / "bottles"
     if custom.is_dir():
         return custom
-    return repo_root() / "containers"
+    return repo_root() / "bottles"
 
 
 def resolve_bridge_port(manifest: dict, plugin_host_port: int = BRIDGE_PORT_DEFAULT) -> int:
@@ -291,8 +291,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(
             "ERROR: BASE_PATH not set — run via ./service.sh browser <container>")
 
-    manifest_path = containers_dir(
-        base_path, os.environ.get("CONTAINERS_PATH")) / f"{container}.yml"
+    manifest_path = bottles_dir(
+        base_path, os.environ.get("BOTTLES_PATH")) / f"{container}.yml"
     manifest = load_yaml(manifest_path)
     bridge_port = validate_bridge_port(
         resolve_bridge_port(manifest, plugin_default_bridge_port()))

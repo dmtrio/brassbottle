@@ -1,8 +1,8 @@
 #!/bin/bash
 # up.sh <name> — declaratively create or update an agent dev container from
-# containers/<name>.yml. Idempotent: edit the manifest, rerun, done.
+# bottles/<name>.yml. Idempotent: edit the manifest, rerun, done.
 #
-# Kept:     the manifest (containers/*.yml) and ~/djinn/secrets.env
+# Kept:     the bottle (bottles/*.yml) and ~/djinn/secrets.env
 # Derived:  ~/djinn/keys/<name>/ (recomposed every run), the container,
 #           generated .mcp.json / dev.code-workspace / workspace CLAUDE.md
 # Survives: workspace volume (code), ~/djinn/artifacts/<name>/
@@ -19,9 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 NAME="$1"
 if [ -z "$NAME" ]; then
-    echo "Usage: ./up.sh <name>    (reads $CONTAINERS_PATH/<name>.yml)"
+    echo "Usage: ./up.sh <name>    (reads $BOTTLES_PATH/<name>.yml)"
     echo "Manifests:"
-    for f in "$CONTAINERS_PATH"/*.yml; do
+    for f in "$BOTTLES_PATH"/*.yml; do
         [ -f "$f" ] || continue
         n=$(basename "$f" .yml)
         [ "$n" = "TEMPLATE" ] && continue
@@ -48,29 +48,29 @@ fi
 [ -n "${PYTHON3:-}" ] && "$PYTHON3" -c '' 2>/dev/null \
     || { echo "Error: no working python3 (tried /usr/bin/python3 and PATH — broken pyenv/brew shim? Install Xcode CLT on macOS, or set PYTHON3=/path/to/python3)"; exit 1; }
 
-# CONTAINERS_PATH (resolved in common.sh) is where manifests live: the repo's
-# containers/ by default, or $BASE_PATH/containers / a CONTAINERS_PATH override
+# BOTTLES_PATH (resolved in common.sh) is where manifests live: the repo's
+# bottles/ by default, or $BASE_PATH/bottles / a BOTTLES_PATH override
 # when you keep them in a private repo outside this one.
 #
 # Fast-forward that checkout first, the way RULES_PATH is pulled below: once
 # manifests live in their own repo, a merged bottle PR is invisible here until
 # someone pulls by hand, and up.sh would apply the stale file without a word.
-# Never fatal, and never pulls the bundled containers/ (that would pull
+# Never fatal, and never pulls the bundled bottles/ (that would pull
 # brassbottle) — src/pull_manifests.py owns those rules and prints which case
 # it took.
-# NB: an if, not ${CONTAINERS_BUNDLED:+…} — the flag is the string "0" when
+# NB: an if, not ${BOTTLES_BUNDLED:+…} — the flag is the string "0" when
 # unset-by-value, which :+ treats as set and would disable the pull outright.
 BUNDLED_FLAG=""
-if [ "${CONTAINERS_BUNDLED:-0}" = 1 ]; then BUNDLED_FLAG="--bundled"; fi
+if [ "${BOTTLES_BUNDLED:-0}" = 1 ]; then BUNDLED_FLAG="--bundled"; fi
 # `|| true`, like the RULES_PATH pull below: main() returning 0 only covers
 # failures INSIDE the module. A missing or unreadable src/pull_manifests.py, or
 # any unhandled traceback, would exit non-zero and abort bring-up under set -e
 # — the one thing this feature promises it can never do.
-"$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$CONTAINERS_PATH" \
+"$PYTHON3" "$SCRIPT_DIR/src/pull_manifests.py" "$BOTTLES_PATH" \
     --self "$SCRIPT_DIR" $BUNDLED_FLAG || true
 
-MANIFEST="$CONTAINERS_PATH/$NAME.yml"
-[ -f "$MANIFEST" ] || { echo "Error: no manifest at $MANIFEST (cp $SCRIPT_DIR/containers/TEMPLATE.yml $MANIFEST)"; exit 1; }
+MANIFEST="$BOTTLES_PATH/$NAME.yml"
+[ -f "$MANIFEST" ] || { echo "Error: no manifest at $MANIFEST (cp $SCRIPT_DIR/bottles/TEMPLATE.yml $MANIFEST)"; exit 1; }
 command -v yq >/dev/null || { echo "Error: yq required (brew install yq)"; exit 1; }
 
 mkdir -p "$BASE_PATH"   # create the djinn home now that we're proceeding

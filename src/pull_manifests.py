@@ -3,19 +3,19 @@
 
 up.sh already keeps an EXTERNAL rules repo current (`git -C "$RULES_PATH" pull
 --ff-only`), because merged rule PRs have to reach the container somehow. Once
-manifests moved out of this repo into their own — the CONTAINERS_PATH override
+manifests moved out of this repo into their own — the BOTTLES_PATH override
 in ./.env, e.g. ~/git/djinn-bottles — they acquired exactly the same problem
 and none of the same treatment: a merged manifest PR sat unread until someone
 remembered to pull by hand, and `./djinn up` cheerfully applied the stale file.
 
 Two things must never be pulled:
 
-  * The BUNDLED containers/ dir, which lives inside brassbottle itself — a pull
+  * The BUNDLED bottles/ dir, which lives inside brassbottle itself — a pull
     there pulls brassbottle. up.sh's rules code guards this with a flag set
     where the fallback is chosen rather than a path comparison, because a
-    symlinked path makes comparison misfire; CONTAINERS_BUNDLED is the same
+    symlinked path makes comparison misfire; BOTTLES_BUNDLED is the same
     idea. The repo-identity check below additionally catches an explicit
-    CONTAINERS_PATH aimed back at this repo's own containers/ — including
+    BOTTLES_PATH aimed back at this repo's own bottles/ — including
     from one of its linked worktrees, which this project's own layout makes
     routine.
   * Anything that isn't a git checkout at all — the plain-directory setup stays
@@ -92,14 +92,14 @@ def head(path):
     return out or None if rc == 0 else None
 
 
-def decide(containers_path, self_root, bundled):
+def decide(bottles_path, self_root, bundled):
     """(should_pull, reason). Pure: no git writes, so it is cheap to test."""
     if bundled:
-        return False, "bundled containers/ (inside this repo) — never pulled"
-    top = toplevel(containers_path)
+        return False, "bundled bottles/ (inside this repo) — never pulled"
+    top = toplevel(bottles_path)
     if top is None:
         return False, "not a git checkout — nothing to pull"
-    mine = repo_identity(containers_path)
+    mine = repo_identity(bottles_path)
     theirs = repo_identity(self_root) if self_root else None
     if mine and theirs and mine == theirs:
         return False, ("same repository as brassbottle (or one of its "
@@ -107,17 +107,17 @@ def decide(containers_path, self_root, bundled):
     return True, top
 
 
-def pull(containers_path, self_root=None, bundled=False, out=sys.stdout):
+def pull(bottles_path, self_root=None, bundled=False, out=sys.stdout):
     """Fast-forward when it is safe to. Returns True when a pull ran and won."""
-    should, reason = decide(containers_path, self_root, bundled)
+    should, reason = decide(bottles_path, self_root, bundled)
     if not should:
         print("  manifests: %s" % reason, file=out)
         return False
-    before = head(containers_path)
-    rc, _, err = git(["pull", "--ff-only", "-q"], cwd=containers_path,
+    before = head(bottles_path)
+    rc, _, err = git(["pull", "--ff-only", "-q"], cwd=bottles_path,
                      timeout=PULL_TIMEOUT_SECONDS)
     if rc == 0:
-        after = head(containers_path)
+        after = head(bottles_path)
         if before and after and before == after:
             # "Already up to date" and "a merged bottle just landed" must not
             # read identically — the point of this line is to tell them apart.
@@ -138,13 +138,13 @@ def pull(containers_path, self_root=None, bundled=False, out=sys.stdout):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("containers_path")
+    ap.add_argument("bottles_path")
     ap.add_argument("--self", dest="self_root", default=None,
                     help="brassbottle checkout, so we never pull ourselves")
     ap.add_argument("--bundled", action="store_true",
-                    help="CONTAINERS_PATH is this repo's own containers/")
+                    help="BOTTLES_PATH is this repo's own bottles/")
     args = ap.parse_args(argv)
-    pull(args.containers_path, args.self_root, args.bundled)
+    pull(args.bottles_path, args.self_root, args.bundled)
     return 0        # never block bring-up
 
 

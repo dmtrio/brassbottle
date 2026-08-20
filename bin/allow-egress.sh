@@ -11,7 +11,7 @@
 # The live change is EPHEMERAL (lost when the container is recreated). At the
 # end you're asked where to persist it:
 #   yml       → the container's manifest, capabilities.egress (this container,
-#               next ./up.sh) — resolved via CONTAINERS_PATH, so not necessarily
+#               next ./up.sh) — resolved via BOTTLES_PATH, so not necessarily
 #               inside this repo
 #   firewall  → src/init-firewall.sh base ALLOWED_ZONES (ALL containers, next build)
 #   none      → live only
@@ -53,11 +53,11 @@ case "${SAVE:-}" in yml|firewall|none|"") ;; *) echo "Error: --save must be yml,
 # Accept the short manifest name (coding-personal-site) or the full container
 # name (djinn-coding-personal-site); normalise to both. Sourced here (not at
 # the top) so --help / usage / bad-flag paths don't depend on ./.env; only the
-# resolution below needs CONTAINERS_PATH / DJINN_CTR_PREFIX.
-. "$SCRIPT_DIR/../src/common.sh"   # sets CDD_ROOT (repo root) + CONTAINERS_PATH + DJINN_CTR_PREFIX
+# resolution below needs BOTTLES_PATH / DJINN_CTR_PREFIX.
+. "$SCRIPT_DIR/../src/common.sh"   # sets CDD_ROOT (repo root) + BOTTLES_PATH + DJINN_CTR_PREFIX
 SHORT="${RAW#$DJINN_CTR_PREFIX}"
 CONTAINER="$DJINN_CTR_PREFIX$SHORT"
-MANIFEST="$CONTAINERS_PATH/$SHORT.yml"
+MANIFEST="$BOTTLES_PATH/$SHORT.yml"
 
 command -v docker >/dev/null || { echo "Error: docker not found"; exit 1; }
 

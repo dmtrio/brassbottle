@@ -226,22 +226,22 @@ class TestBrowserAppOverrides(unittest.TestCase):
 class TestContainersDir(unittest.TestCase):
     def test_env_override_wins(self):
         self.assertEqual(
-            bl.containers_dir("/base", env_override="/custom/manifests"),
+            bl.bottles_dir("/base", env_override="/custom/manifests"),
             Path("/custom/manifests"),
         )
 
-    def test_base_path_containers_when_present(self):
+    def test_base_path_bottles_when_present(self):
         with tempfile.TemporaryDirectory() as td:
             base_path = Path(td)
-            (base_path / "containers").mkdir()
-            self.assertEqual(bl.containers_dir(str(base_path)), base_path / "containers")
+            (base_path / "bottles").mkdir()
+            self.assertEqual(bl.bottles_dir(str(base_path)), base_path / "bottles")
 
-    def test_repo_containers_fallback(self):
-        # No $BASE_PATH/containers → fall back to the repo checkout's dir.
+    def test_repo_bottles_fallback(self):
+        # No $BASE_PATH/bottles → fall back to the repo checkout's dir.
         root = Path(__file__).parent.parent
         with unittest.mock.patch.object(bl, "repo_root", return_value=root):
             with tempfile.TemporaryDirectory() as td:
-                self.assertEqual(bl.containers_dir(td), root / "containers")
+                self.assertEqual(bl.bottles_dir(td), root / "bottles")
 
 
 if __name__ == "__main__":
