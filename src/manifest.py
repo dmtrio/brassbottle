@@ -319,11 +319,26 @@ def _agent_string(agent, field, value):
     return value
 
 
+# One path component of a descriptor's home-relative path. Deliberately boring:
+# beyond blocking traversal, this keeps tabs/newlines/spaces out of fields that
+# get flattened into the build-time agents-index.tsv (a permissive charset here
+# would let one descriptor corrupt the whole runtime index).
+AGENT_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
+# An agent binary is a bare command name (shim filename + `type -aP` lookup):
+# no separators, no whitespace, nothing the shim's printf could mangle.
+AGENT_BINARY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
 def _agent_home_path(agent, field, path):
     path = _agent_string(agent, field, path)
     if path.startswith("/"):
         raise ManifestError(
             f"agent '{agent}' {field}: path '{path}' must be home-relative (no leading /)")
+    for part in path.split("/"):
+        if part in (".", "..") or not AGENT_PATH_COMPONENT_RE.match(part):
+            raise ManifestError(
+                f"agent '{agent}' {field}: path '{path}' has an illegal component "
+                f"'{part}' (no traversal; letters, digits, . _ - only)")
     return path
 
 
@@ -335,6 +350,7 @@ def _normalize_agent_docs(agent_files):
 
     normalized = {}
     volume_owner = {}
+    mount_owner = {}   # container mount path -> agent, for overlap messages
     for agent in sorted(agent_files):
         doc = agent_files[agent]
         if not NAME_RE.match(agent):
@@ -352,6 +368,11 @@ def _normalize_agent_docs(agent_files):
         if "binary" not in doc:
             raise ManifestError(f"agent '{agent}': binary is required")
         binary = _agent_string(agent, "binary", doc.get("binary"))
+        if not AGENT_BINARY_RE.match(binary):
+            raise ManifestError(
+                f"agent '{agent}' binary: '{binary}' is not a bare command name "
+                "(no path separators or whitespace — it names the shim file and the "
+                "type -aP lookup)")
         if "install" not in doc:
             raise ManifestError(f"agent '{agent}': install is required")
         install = _agent_string(agent, "install", doc.get("install"))
@@ -372,11 +393,26 @@ def _normalize_agent_docs(agent_files):
                     "(only path, volume)")
             path = _agent_home_path(agent, f"state_dirs entry {i} path", entry.get("path"))
             volume = _agent_string(agent, f"state_dirs entry {i} volume", entry.get("volume"))
+            if not VOLUME_NAME_RE.match(volume):
+                raise ManifestError(
+                    f"agent '{agent}' state_dirs volume '{volume}': illegal volume name "
+                    "(start with letter/digit; letters, digits, _ - thereafter)")
             owner = volume_owner.get(volume)
             if owner is not None and owner != agent:
                 raise ManifestError(
                     f"agent '{agent}' state_dirs volume '{volume}': already declared by agent '{owner}'")
             volume_owner[volume] = agent
+            # Two descriptors (or two entries of one) mounting the same or a
+            # nested path would make compose reject the merged file — or worse,
+            # silently mask one volume with the other. Component-wise, like the
+            # plugin checks (_path_overlaps).
+            mount = f"{VOLUME_ROOT}/{path}"
+            clash = next((q for q in sorted(mount_owner) if _path_overlaps(mount, q)), None)
+            if clash is not None:
+                raise ManifestError(
+                    f"agent '{agent}' state_dirs path '{path}': mount '{mount}' overlaps "
+                    f"'{clash}' declared by agent '{mount_owner[clash]}'")
+            mount_owner[mount] = agent
             parsed_state_dirs.append({"path": path, "volume": volume})
 
         rules_file = ""

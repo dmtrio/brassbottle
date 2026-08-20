@@ -793,6 +793,55 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         d = derive({"tools": ["aider", "pi"]})
         self.assertEqual(d["AGENTS_COMPOSE_YAML"], "")
 
+    def test_traversal_rules_file_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"], rules_file="../../tmp/owned")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("illegal component '..'", str(cm.exception))
+
+    def test_traversal_state_path_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"])
+        agents["claude"]["state_dirs"] = [{"path": "../etc", "volume": "claude-auth"}]
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("illegal component '..'", str(cm.exception))
+
+    def test_tab_in_rules_file_rejected(self):
+        # These fields are flattened into the build-time agents-index.tsv — a
+        # tab or newline in one would corrupt every downstream runtime parse.
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"], rules_file=".claude/CLAUDE.md\tx")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("illegal component", str(cm.exception))
+
+    def test_agent_agent_mount_overlap_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["foo"] = {"binary": "foo", "install": "true",
+                         "state_dirs": [{"path": ".claude", "volume": "foo-auth"}]}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("overlaps", str(cm.exception))
+        self.assertIn("/home/coder/.claude", str(cm.exception))
+
+    def test_illegal_agent_volume_name_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"])
+        agents["claude"]["state_dirs"] = [{"path": ".claude", "volume": "bad\tvol"}]
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("illegal volume name", str(cm.exception))
+
+    def test_illegal_agent_binary_rejected(self):
+        for bad in ("../evil", "a b", "/usr/bin/x"):
+            agents = dict(AGENT_FILES)
+            agents["claude"] = dict(AGENT_FILES["claude"], binary=bad)
+            with self.assertRaises(m.ManifestError) as cm:
+                derive({}, agent_files=agents)
+            self.assertIn("not a bare command name", str(cm.exception))
+
     def test_agent_egress_folds_into_egress_for_enabled_agents_only(self):
         agents = dict(AGENT_FILES)
         agents["claude"] = dict(AGENT_FILES["claude"], egress=["api.anthropic.com"])
