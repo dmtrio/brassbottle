@@ -793,6 +793,21 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         d = derive({"tools": ["aider", "pi"]})
         self.assertEqual(d["AGENTS_COMPOSE_YAML"], "")
 
+    def test_agent_egress_folds_into_egress_for_enabled_agents_only(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"], egress=["api.anthropic.com"])
+        d = derive({}, agent_files=agents)
+        self.assertIn("api.anthropic.com", d["EGRESS"].split(","))
+        d = derive({"tools": ["aider"]}, agent_files=agents)
+        self.assertNotIn("api.anthropic.com", d["EGRESS"].split(","))
+
+    def test_agent_egress_rejects_non_hostname(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"], egress=["https://api.anthropic.com"])
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("agent 'claude' egress entry", str(cm.exception))
+
     def test_agent_plugin_volume_name_collision(self):
         files = {"p": {"volumes": {"claude-auth": "/home/coder/cache"}}}
         with self.assertRaises(m.ManifestError) as cm:

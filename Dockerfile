@@ -121,8 +121,11 @@ RUN set -e; \
 
 # ── Agents (descriptor-driven install + runtime index) ───────────────────────
 # The per-agent install blocks now live in agents/*/agent.yml. This single loop
-# layer is a deliberate cache trade-off: changing AGENTS_ENABLED reinstalls all
-# enabled agents, but adding/changing an agent only touches this late layer.
+# layer is a deliberate cache trade-off: ANY edit under agents/ (a comment fix
+# included) or a changed AGENTS_ENABLED invalidates the COPY below and re-runs
+# every enabled agent's install (~minutes, network-bound). Accepted per the PLN
+# — the loop sits late so the expensive toolchain layers above stay cached; an
+# npm cache mount is the documented mitigation if this proves annoying.
 COPY --chown=$USERNAME:$USERNAME agents /opt/agents
 RUN set -e; \
     eval "$(fnm env)"; \
@@ -153,6 +156,11 @@ RUN set -e; \
 # This same loop also renders /usr/local/lib/djinn/agents-index.tsv: stdlib
 # runtime consumers (compose_rules.py) cannot parse YAML, so build flattens the
 # enabled agent descriptors to TSV once.
+# Deliberate UX change vs the old unconditional shim list: a DISABLED agent now
+# has no shim at all, so invoking it gets bash's "command not found" instead of
+# the shim's "X is not installed in this container" (that branch still guards
+# the enabled-but-install-failed case). The manifest's tools: list is the
+# pointer for what exists here.
 RUN set -e; \
     mkdir -p /home/$USERNAME/.agent-shims; \
     sudo mkdir -p /usr/local/lib/djinn; \

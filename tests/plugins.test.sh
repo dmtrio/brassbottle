@@ -383,11 +383,13 @@ grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS"' up.sh \
     && ! grep -qF "$EXPECTED_SHIMS" up.sh \
     && pass "up.sh consumes derived SHIM_AGENTS (no hardcoded shim list)" \
     || fail "up.sh shim wiring drifted (expected derived SHIM_AGENTS)"
-UPDATE_SHIMS=$(awk -F'"' '/^SHIM_AGENTS=/{print $2; exit}' bin/update-agent-keys.sh)
-UPDATE_SHIMS_SORTED=$(printf '%s\n' $UPDATE_SHIMS | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
-[ "$UPDATE_SHIMS_SORTED" = "$EXPECTED_SHIMS" ] \
-    && pass "update-agent-keys.sh fan-out set matches descriptor mcp binaries" \
-    || fail "update-agent-keys.sh SHIM_AGENTS ($UPDATE_SHIMS_SORTED) != descriptor mcp binaries ($EXPECTED_SHIMS)"
+# update-agent-keys.sh derives its valid-agent set at runtime from the
+# container's keys/<name>/*.env files (behavioral coverage in tests/bash.test.sh,
+# seeded from the descriptors) — the only drift to pin here is a REINTRODUCED
+# hardcoded list.
+awk '/^SHIM_AGENTS=/{found=1} END{exit found}' bin/update-agent-keys.sh \
+    && pass "update-agent-keys.sh has no hardcoded SHIM_AGENTS list (derives from keys dir)" \
+    || fail "update-agent-keys.sh reintroduced a static SHIM_AGENTS list — derive from keys/<name>/*.env instead"
 # common.env is retired: up.sh must no longer WRITE it (the shim keeps a
 # transitional [ -f ] guard, so the Dockerfile reference is expected).
 grep -qE 'common\.env" *$|>> "\$KEYS_PATH/common.env"|> "\$KEYS_PATH/common.env"' up.sh \
