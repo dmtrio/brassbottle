@@ -32,8 +32,9 @@ assignments it prints:
 Behavioral fidelity notes (each is pinned by tests/test_manifest.py):
 - yq/jq `//` treats false AND null as empty: `plugins: false` means "no
   plugins", `repos: false` means no repos, `agents: false` gets the default
-  set (`tools: false` still aliases it, deprecated for one release). The old
-  scalar `repo:` key is rejected outright (layout v2).
+  set. A manifest with `tools:` is rejected by name so old manifests fail
+  loud instead of silently enabling defaults. The old scalar `repo:` key is
+  rejected outright (layout v2).
 - agents: matching is exact string equality (agents: [claude-code] no longer
   enables claude).
 - null entries inside word-split lists (plugins, identity refs) vanish, the
@@ -717,23 +718,15 @@ def derive(manifest, plugin_files, agent_files, env):
     out.update(_git_identity(git, env, secrets_file))
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
-    # ── Tools (agents: preferred; tools: deprecated alias) ─────────────
-    has_agents = "agents" in manifest
-    has_tools = "tools" in manifest
-    if has_agents and has_tools:
+    # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────
+    if "tools" in manifest:
         raise ManifestError(
-            "manifest sets both agents: and tools: — use agents: (tools: is a deprecated alias)")
-    tools_key = "agents"
+            "manifest tools: was renamed to agents: — update the manifest (same values)")
     tools = manifest.get("agents")
-    if has_tools:
-        tools_key = "tools"
-        tools = manifest.get("tools")
-        print("  ⚠ tools: is deprecated — rename the key to agents: (same values; tools: will be removed)",
-              file=sys.stderr)
     if _falsy(tools):
         tools = default_tools
     if not isinstance(tools, list):
-        raise ManifestError(f"manifest {tools_key}: must be a list")
+        raise ManifestError("manifest agents: must be a list")
     for name in agent_dir_names:
         var = "INSTALL_" + name.upper().replace("-", "_")
         out[var] = "true" if _tool_installed(tools, name) else "false"
