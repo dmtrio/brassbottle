@@ -9,8 +9,7 @@ agents: [claude, kimi]
 ```
 
 `agents:` matching is exact string equality against `agents/<name>/` — the
-directory name is the agent name. (`tools:` is accepted as a deprecated alias
-for one release.)
+directory name is the agent name. (a manifest still using tools: fails with a pointed rename error)
 
 **What belongs here — and what doesn't.** An agent is an AI CLI a human talks
 to, with its own identity: its own shim, its own key file, optionally its own
@@ -73,7 +72,7 @@ with `src/wire_plugins.py` dispatch):
 
 - `djinn up` globs `agents/*/agent.yml` and feeds all descriptors into
   `src/manifest.py --derive`.
-- `agents:` in the manifest (or the deprecated `tools:` alias) is matched
+- `agents:` in the manifest is matched
   **exactly** to agent directory names; matched entries become `AGENTS_ENABLED`.
 - `SHIM_AGENTS` and `AGENTS_MCP_JSON` are derived from enabled descriptors with
   an `mcp` block.
