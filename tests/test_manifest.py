@@ -302,9 +302,11 @@ class TestYqSemanticsPins(unittest.TestCase):
         self.assertEqual(d["INSTALL_CLAUDE"], "false")
         self.assertEqual(d["INSTALL_CODEX"], "false")
 
-    def test_agents_contains_is_substring_match(self):
+    def test_agents_match_is_exact_string_equality(self):
+        # The rename PR pinned the old jq-substring quirk here; Phase 1's
+        # deliberate tightening applies to the agents: key identically.
         d = derive({"agents": ["claude-code"]})
-        self.assertEqual(d["INSTALL_CLAUDE"], "true")   # jq contains() quirk
+        self.assertEqual(d["INSTALL_CLAUDE"], "false")
         self.assertEqual(d["INSTALL_CODEX"], "false")
 
     def test_agents_and_tools_together_is_error_even_when_false(self):
