@@ -87,7 +87,9 @@ with `src/wire_plugins.py` dispatch):
 4. If MCP-capable, choose the correct descriptor role (strategy, literal, or
    generic `mcpServers`) and validate the combo.
 5. Add `agents/<name>/README.md` with install/layout/source notes.
-6. Run the suite and regenerate expected goldens when descriptor-driven fixtures
+6. Ship `agents/<name>/test_wiring.py` (see any existing agent; use
+   `tests/agent_test_kit`) — the adjacent tests passing is the install contract.
+7. Run the suite and regenerate expected goldens when descriptor-driven fixtures
    change.
-7. No `up.sh` / `Dockerfile` / `src` edits — loaders glob this directory; `kimi`
+8. No `up.sh` / `Dockerfile` / `src` edits — loaders glob this directory; `kimi`
    (this PR) is the reference example.
