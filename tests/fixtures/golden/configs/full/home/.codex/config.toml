@@ -1,0 +1,9 @@
+# >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>
+[mcp_servers.codebase-memory]
+command = "codebase-memory-mcp"
+args = []
+
+[mcp_servers.axiom]
+command = "mcp-remote"
+args = ["https://mcp.axiom.co/mcp","--header","Authorization: Bearer ${AXIOM_TOKEN}"]
+# <<< djinn plugin MCP <<<

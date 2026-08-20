@@ -1,0 +1,7 @@
+home/.codex/config.toml 0600
+home/.cursor/mcp.json 0600
+home/.cursor/mcp.json.djinn-plugins 0600
+home/.gemini/settings.json 0600
+home/.gemini/settings.json.djinn-plugins 0600
+home/.pi/agent/mcp.json 0600
+home/.pi/agent/mcp.json.djinn-plugins 0600

@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "/tmp/agents-as-plugins-golden/minimal/workspace/repos": {
+      "enabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": true
+    },
+    "/tmp/agents-as-plugins-golden/minimal/workspace/repos/alpha": {
+      "enabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": true
+    }
+  }
+}

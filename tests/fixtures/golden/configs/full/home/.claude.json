@@ -1,0 +1,20 @@
+{
+  "projects": {
+    "/tmp/agents-as-plugins-golden/full/workspace/repos": {
+      "enabledMcpjsonServers": [
+        "axiom",
+        "codebase-memory",
+        "obsidian-annotated"
+      ],
+      "hasTrustDialogAccepted": true
+    },
+    "/tmp/agents-as-plugins-golden/full/workspace/repos/alpha": {
+      "enabledMcpjsonServers": [
+        "axiom",
+        "codebase-memory",
+        "obsidian-annotated"
+      ],
+      "hasTrustDialogAccepted": true
+    }
+  }
+}
