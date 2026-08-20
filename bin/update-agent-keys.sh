@@ -17,9 +17,11 @@
 #   ./bin/update-agent-keys.sh mysite pi OBSIDIAN_ANNOTATED_KEY      # pi's own key
 #   ./bin/update-agent-keys.sh mysite common MCP_GATEWAY_TOKEN       # all agents
 #
-# Agents: claude, pi, gemini, cursor-agent, codex (or 'common' to set the var
-# in EVERY agent's file at once — common.env was retired in Phase 3, so each
-# agent now carries one complete env file).
+# Agents: any shim agent enabled in that container (the <agent>.env files
+# up.sh wrote under keys/<container>/ are the authoritative list — descriptor-
+# driven, so it needs no update when agents/ gains a new agent), or 'common'
+# to set the var in EVERY agent's file at once — common.env was retired in
+# Phase 3, so each agent now carries one complete env file.
 
 set -e
 
@@ -51,10 +53,20 @@ if [ -z "$AGENT" ]; then
     exit 0
 fi
 
-case "$AGENT" in
-    claude|pi|gemini|cursor-agent|codex|common) ;;
-    *) echo "Error: agent must be one of: claude, pi, gemini, cursor-agent, codex, common"; exit 1 ;;
-esac
+# The valid agents for THIS container are exactly the <agent>.env files up.sh
+# composed into its keys dir (derived from the manifest's enabled, MCP-capable
+# agents) — not a hardcoded list that would drift when agents/ gains an agent.
+KNOWN_AGENTS=""
+for f in "$KEYS_PATH"/*.env; do
+    [ -f "$f" ] || continue
+    KNOWN_AGENTS="${KNOWN_AGENTS:+$KNOWN_AGENTS }$(basename "$f" .env)"
+done
+if [ "$AGENT" != common ]; then
+    case " $KNOWN_AGENTS " in
+        *" $AGENT "*) ;;
+        *) echo "Error: agent must be one of: ${KNOWN_AGENTS// /, }, common"; exit 1 ;;
+    esac
+fi
 
 if [ -z "$VAR" ]; then
     echo "Error: VAR required (e.g. OBSIDIAN_ANNOTATED_KEY)"
@@ -78,12 +90,11 @@ set_var_in() {
 }
 
 # common.env is retired (Plugins v2 Phase 3): each agent has one complete env
-# file, so 'common' now means "every shim agent" — a per-agent override of a
-# shared token, applied across all of them at once. SHIM_AGENTS must match the
-# Dockerfile shim loop and up.sh.
-SHIM_AGENTS="claude pi gemini cursor-agent codex"
+# file, so 'common' now means "every shim agent this container enables" — a
+# per-agent override of a shared token, applied across all of them at once.
 if [ "$AGENT" = common ]; then
-    for a in $SHIM_AGENTS; do set_var_in "$KEYS_PATH/$a.env"; done
+    [ -n "$KNOWN_AGENTS" ] || { echo "Error: no agent env files under $KEYS_PATH"; exit 1; }
+    for a in $KNOWN_AGENTS; do set_var_in "$KEYS_PATH/$a.env"; done
     TARGET="all agents"
 else
     set_var_in "$KEYS_PATH/$AGENT.env"

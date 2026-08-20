@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compose each agent's global rules file from the read-only base rules
+"""Compose each enabled agent's global rules file from the read-only base rules
 (/agent-rules/AGENTS.md) plus the AGENTS.md fragments of the plugins ENABLED in
 this container.
 
@@ -21,7 +21,9 @@ a plugins/<name>/AGENTS.md actually exists.
 Stdlib only (matches wire_plugins.py). Writes are atomic (tmp + rename), which
 also swaps a pre-existing symlink target for a regular file WITHOUT ever writing
 through it into the read-only mount — os.replace re-points the directory entry,
-never the link's target.
+never the link's target. Runtime code here cannot parse agents/*/agent.yml, so
+the build renders enabled agent descriptors to /usr/local/lib/djinn/agents-index.tsv
+once and this module reads target rules files from that index.
 """
 
 import argparse
@@ -34,14 +36,7 @@ from pathlib import Path
 DEFAULT_BASE = "/agent-rules/AGENTS.md"
 DEFAULT_PLUGINS_ROOT = "/opt/plugins"
 DEFAULT_ENABLED_FILE = "/home/coder/.config/djinn/enabled-plugins"
-
-# Per-agent global rules filenames, relative to the exec user's home. Same set
-# up.sh used to symlink (skills stays a symlink — a directory, not composed).
-TARGET_RELPATHS = (
-    ".claude/CLAUDE.md",
-    ".codex/AGENTS.md",
-    ".gemini/GEMINI.md",
-)
+DEFAULT_INDEX = "/usr/local/lib/djinn/agents-index.tsv"
 
 FRAGMENT_NAME = "AGENTS.md"
 GEN_NOTICE = (
@@ -123,22 +118,48 @@ def compose(base_text, fragments):
     return "\n".join(parts).rstrip("\n") + "\n"
 
 
-def default_targets(home):
-    return [Path(home) / rel for rel in TARGET_RELPATHS]
+def default_targets(home, index):
+    path = Path(index)
+    if not path.is_file():
+        return None
+    targets = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        cols = raw.split("\t")
+        if len(cols) < 3:
+            print(
+                f"  ⚠ malformed agents-index row (expected at least 3 tab fields): {raw}",
+                file=sys.stderr,
+            )
+            continue
+        rules_file = cols[2].strip()
+        if not rules_file:
+            continue
+        targets.append(Path(home) / rules_file)
+    return targets
 
 
-def run(base, plugins_root, enabled_file, targets, announce=False):
-    """Compose the file and write every target. Returns 0 on success. Two
+def run(base, plugins_root, enabled_file, targets=None, index=DEFAULT_INDEX, announce=False):
+    """Compose the file and write every target. Returns 0 on success. Three
     warn-and-skip guards (return 1) keep the shell hook from clobbering a
     previously-good file with a downgrade: a missing base (mount briefly gone),
-    and an ABSENT enabled-file (unknown plugin set — empty would be authoritative
-    'no plugins', but absent must not become a base-only guess). up.sh writes
-    both before its own compose, so neither guard fires on the normal path."""
+    an ABSENT enabled-file (unknown plugin set — empty would be authoritative
+    'no plugins', but absent must not become a base-only guess), and an ABSENT
+    agents index when default targets are in use (unknown target set, same
+    downgrade risk). up.sh/image setup writes all three on the normal path."""
     base_path = Path(base)
     if not base_path.is_file():
         print(f"  ⚠ base rules {base_path} not found — leaving agent rules files as-is",
               file=sys.stderr)
         return 1
+
+    if targets is None:
+        targets = default_targets(_home(), index)
+        if targets is None:
+            print(f"  ⚠ agents index {index} absent — leaving agent rules files as-is",
+                  file=sys.stderr)
+            return 1
 
     names = read_enabled(enabled_file)
     if names is None:
@@ -177,13 +198,16 @@ def main(argv):
     ap.add_argument("--base", default=DEFAULT_BASE)
     ap.add_argument("--plugins-root", default=DEFAULT_PLUGINS_ROOT)
     ap.add_argument("--enabled-file", default=DEFAULT_ENABLED_FILE)
+    ap.add_argument("--index", default=DEFAULT_INDEX,
+                    help="Agent descriptor index TSV. Used only when --target is not passed.")
     ap.add_argument("--target", action="append", dest="targets",
-                    help="Output file (repeatable). Default: the three agent global files under $HOME.")
+                    help="Output file (repeatable). Defaults to <home>/<rules_file> from --index.")
     ap.add_argument("--announce", action="store_true", help="Print a ✓ summary line (up.sh uses this; the shell hook does not).")
     args = ap.parse_args(argv)
 
-    targets = args.targets if args.targets else default_targets(_home())
-    return run(args.base, args.plugins_root, args.enabled_file, targets, announce=args.announce)
+    targets = args.targets if args.targets else None
+    return run(args.base, args.plugins_root, args.enabled_file, targets=targets,
+               index=args.index, announce=args.announce)
 
 
 if __name__ == "__main__":

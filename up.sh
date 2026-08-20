@@ -121,6 +121,13 @@ DERIVED=$(
                 && [ "$(printf '%s\n' "$DOC" | wc -l)" -eq 1 ] || DOC='!'
             printf '%s\t%s\n' "$(basename "$(dirname "$f")")" "$DOC"
         done
+        echo "---agents---"
+        for f in "$SCRIPT_DIR/agents"/*/agent.yml; do
+            [ -e "$f" ] || continue
+            DOC=$(yq -o=json -I=0 "$f" 2>/dev/null) \
+                && [ "$(printf '%s\n' "$DOC" | wc -l)" -eq 1 ] || DOC='!'
+            printf '%s\t%s\n' "$(basename "$(dirname "$f")")" "$DOC"
+        done
     } | PRESENT_SECRET_VARS="$PRESENT_SECRET_VARS" GH_TOKEN_VARS="$GH_TOKEN_VARS" \
         SECRETS_FILE="$SECRETS_FILE" \
         GIT_NAME_DEFAULT="$(git config --global user.name 2>/dev/null || true)" \
@@ -157,6 +164,18 @@ else
     rm -f "$PLUGIN_COMPOSE_FILE"
 fi
 
+# Agent auth/state volumes (agents/*/agent.yml state_dirs:) are also derived
+# per container and mounted as a compose overlay under BASE_PATH, for the same
+# reasons as plugin volumes above.
+AGENTS_COMPOSE_FILE="$BASE_PATH/compose/$NAME.agents.yml"
+if [ -n "$AGENTS_COMPOSE_YAML" ]; then
+    mkdir -p "$BASE_PATH/compose"
+    printf '%s\n' "$AGENTS_COMPOSE_YAML" > "$AGENTS_COMPOSE_FILE"
+    COMPOSE_FILES="$COMPOSE_FILES -f $AGENTS_COMPOSE_FILE"
+else
+    rm -f "$AGENTS_COMPOSE_FILE"
+fi
+
 # ── Compose derived credentials (keys/<name>/ is rebuilt from scratch) ───────
 KEYS_PATH="$BASE_PATH/keys/$NAME"
 mkdir -p "$KEYS_PATH"; chmod 700 "$KEYS_PATH"
@@ -169,7 +188,6 @@ rm -f "$KEYS_PATH"/*.env
 # unit-tested by tests/bash.test.sh) so the real code is exercised in tests, not
 # mirrored; up.sh only routes the derived vars (NAMES) into it — the ${!source}
 # value lookups happen against the secrets.env this shell already sourced.
-SHIM_AGENTS="claude pi gemini cursor-agent codex"
 . "$SCRIPT_DIR/src/keyfiles.sh"
 write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS"
 
@@ -237,9 +255,7 @@ CONTAINER_NAME="$NAME" \
 USER_UID="$USER_UID" USER_GID="$USER_GID" \
 RULES_PATH="$RULES_PATH" \
 GIT_USER_NAME="$GIT_USER_NAME" GIT_USER_EMAIL="$GIT_USER_EMAIL" \
-INSTALL_CLAUDE="$INSTALL_CLAUDE" INSTALL_CODEX="$INSTALL_CODEX" \
-INSTALL_PI="$INSTALL_PI" INSTALL_GEMINI="$INSTALL_GEMINI" \
-INSTALL_CURSOR="$INSTALL_CURSOR" INSTALL_AIDER="$INSTALL_AIDER" \
+AGENTS_ENABLED="$AGENTS_ENABLED" \
 HOST_MCP_PORTS="$HOST_MCP_PORTS" EXTRA_ALLOWED_DOMAINS="$EGRESS" \
 ALLOWED_CIDRS="$EGRESS_CIDRS" \
 KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWSER_TMP_PATH" MEM_LIMIT="$MEM_LIMIT" \
