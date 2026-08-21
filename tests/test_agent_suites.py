@@ -13,7 +13,7 @@ Why load by path instead of ``loader.discover()``: discover() requires its
 ``top_level_dir`` to sit inside the tree being scanned, so pointing it at a
 sibling directory raises "Path must be within the project" on 3.9. Each agent
 directory goes on ``sys.path`` before its modules execute, and the repo's
-``src/`` + ``tests/`` dirs are on ``sys.path`` first so ``import agent_test_kit``
+``src/`` + ``tests/`` + ``agents/`` dirs are on ``sys.path`` first so ``import agent_test_kit``
 and the machinery under test resolve. Modules are registered under a unique
 name so two agents can both ship a ``test_wiring.py``.
 """
@@ -25,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).parent.parent
 AGENTS = REPO / "agents"
 
-for path in (REPO / "src", REPO / "tests"):
+for path in (REPO / "src", REPO / "tests", REPO / "agents"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

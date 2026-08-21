@@ -1,0 +1,3 @@
+home/.pi/agent/mcp.json 0600
+home/.pi/agent/mcp.json.djinn-plugins 0600
+home/.pi/agent/mcp.json.djinn-servers 0600

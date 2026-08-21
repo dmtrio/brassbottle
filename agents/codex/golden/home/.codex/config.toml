@@ -1,0 +1,9 @@
+# >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>
+[mcp_servers.plugin-local]
+command = "stdio-bridge"
+args = []
+
+[mcp_servers.local-srv]
+command = "bridge"
+args = ["--stdio"]
+# <<< djinn plugin MCP <<<

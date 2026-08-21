@@ -1,2 +1,4 @@
+# System goldens pin composition, not the roster; adding an agent must not touch tests/fixtures/.
+agents: [claude, aider]
 repos:
   - https://github.com/example/scratch.git

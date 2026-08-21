@@ -12,3 +12,5 @@ plugins/*/test_*.py
 # Agent wiring contract tests live beside descriptors but are host-only; the
 # image does not need them (the repo suite loads them via tests/).
 agents/*/test_*.py
+agents/agent_test_kit.py
+agents/*/golden/

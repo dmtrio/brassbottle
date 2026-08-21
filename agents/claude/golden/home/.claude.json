@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "/tmp/agent-test-kit/claude/workspace/repos": {
+      "enabledMcpjsonServers": [
+        "local-srv",
+        "plugin-local",
+        "remote-srv"
+      ],
+      "hasTrustDialogAccepted": true
+    }
+  }
+}
