@@ -1,3 +1,0 @@
-home/.claude.json 0644
-workspace/.mcp.generated 0644
-workspace/repos/.mcp.json 0644

@@ -46,7 +46,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import unittest
 from pathlib import Path
 from typing import Callable
 
@@ -76,10 +75,11 @@ DERIVE_ENV = {
     "SECRETS_FILE": "/sec/secrets.env",
 }
 
-# Per-agent scratch roots under $TMPDIR/agent-test-kit/<name>/ (variant suffixes
-# become sibling dirs like claude-no-remote). Fixed paths keep .claude.json
-# path-embedding deterministic. Each agent owns its tree; wire() never deletes
-# another agent's directory. Not parallel-safe within one agent.
+# Per-agent scratch roots under $TMPDIR/agent-test-kit/<agent>/<variant>/.
+# Variant path segments (default, no-remote, with/<extra>, key-NAME=val) avoid
+# hyphen-joined names colliding with real agent dirs (e.g. wire('claude', extra_agents=['x'])
+# vs agents/claude-x/). Fixed paths keep .claude.json path-embedding deterministic.
+# wire() rmtree's only its own leaf directory. Not parallel-safe within one agent.
 AGENT_SCRATCH_ROOT = Path(tempfile.gettempdir()) / "agent-test-kit"
 
 AGENT_BOUND_PLUGIN = "test-agent-bound"
@@ -113,11 +113,18 @@ def _agent_bound_plugin(*, remote=True, local=True):
     return {"install": "x", "secrets": {"TEST_TOKEN": {}}, "mcp": mcp}
 
 
+def _require_yq() -> None:
+    if shutil.which("yq") is None:
+        raise RuntimeError(
+            "yq is required to run agent wiring contracts — install yq; "
+            "a skip here would report green while testing nothing"
+        )
+
+
 def load_descriptor(agent_dir_name: str) -> dict:
     """Return the parsed agent.yml for agents/<agent_dir_name>/ via yq."""
     path = AGENTS / agent_dir_name / "agent.yml"
-    if shutil.which("yq") is None:
-        raise unittest.SkipTest("yq not available")
+    _require_yq()
     proc = subprocess.run(
         ["yq", "-o=json", str(path)],
         capture_output=True,
@@ -130,8 +137,6 @@ def load_descriptor(agent_dir_name: str) -> dict:
 
 
 def _load_all_agent_files() -> dict[str, dict]:
-    if shutil.which("yq") is None:
-        raise unittest.SkipTest("yq not available")
     return {name: load_descriptor(name)
             for name in sorted(p.name for p in AGENTS.iterdir() if p.is_dir())
             if (AGENTS / name / "agent.yml").is_file()}
@@ -164,18 +169,19 @@ def _identity_secrets(agent_secrets: str, remote_slots: str, literal_key_agents:
 def _scratch_path(agent_dir_name: str, *, remote_server, local_server,
                   extra_agents, key_env_values) -> Path:
     """Return the deterministic scratch dir for one wire() invocation."""
-    suffix_parts = []
+    segments: list[str] = []
     if remote_server is False:
-        suffix_parts.append("no-remote")
+        segments.append("no-remote")
     if local_server is False:
-        suffix_parts.append("no-local")
-    if extra_agents:
-        suffix_parts.extend(extra_agents)
+        segments.append("no-local")
+    for agent in sorted(extra_agents):
+        segments.extend(["with", agent])
     if key_env_values:
-        suffix_parts.extend(sorted(key_env_values))
-    if suffix_parts:
-        return AGENT_SCRATCH_ROOT / f"{agent_dir_name}-{'-'.join(suffix_parts)}"
-    return AGENT_SCRATCH_ROOT / agent_dir_name
+        for key in sorted(key_env_values):
+            segments.append(f"key-{key}={key_env_values[key]}")
+    if not segments:
+        segments = ["default"]
+    return AGENT_SCRATCH_ROOT.joinpath(agent_dir_name, *segments)
 
 
 def _build_run_env(derived: dict, ident: str, count: int,

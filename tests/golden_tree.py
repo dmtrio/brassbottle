@@ -6,6 +6,22 @@ import os
 from pathlib import Path
 
 
+def _wiring_pins_mode(rel_path: str) -> bool:
+    """True when wire_plugins._write_atomic(..., mode=0o600) set the mode.
+
+    Do not stat-filter by 0o600: umask 077 also yields 0600 for files written
+    without an explicit chmod (bare open, touch, mode=None atomic writes).
+    """
+    name = Path(rel_path).name
+    if name.endswith(".djinn-plugins") or name.endswith(".djinn-servers"):
+        return True
+    if name in ("config.toml", "settings.json"):
+        return True
+    if name == "mcp.json" and not rel_path.startswith("workspace/repos/"):
+        return True
+    return False
+
+
 def capture_tree(root: Path, prefix: str) -> tuple[dict[str, bytes], dict[str, str], dict[str, str]]:
     """Walk *root*, returning (files, symlinks, modes) keyed by posix relpaths under *prefix*."""
     files: dict[str, bytes] = {}
@@ -33,8 +49,12 @@ def capture_tree(root: Path, prefix: str) -> tuple[dict[str, bytes], dict[str, s
             if not child.is_file():
                 continue
             files[rel_s] = child.read_bytes()
-            mode = os.stat(child, follow_symlinks=False).st_mode & 0o777
-            modes[rel_s] = format(mode, "04o")
+            # Only pin modes wire_plugins sets via _write_atomic(..., mode=0o600).
+            # Un-chmodded files inherit the process umask (0644 vs 0600 vs 0700);
+            # stat-filtering by 0o600 would also pin umask-0600 files under umask 077.
+            if _wiring_pins_mode(rel_s):
+                mode = os.stat(child, follow_symlinks=False).st_mode & 0o777
+                modes[rel_s] = format(mode, "04o")
 
     return files, symlinks, modes
 

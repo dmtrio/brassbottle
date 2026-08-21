@@ -1,6 +1,6 @@
 {
   "projects": {
-    "/tmp/agent-test-kit/claude/workspace/repos": {
+    "/tmp/agent-test-kit/claude/default/workspace/repos": {
       "enabledMcpjsonServers": [
         "local-srv",
         "plugin-local",
