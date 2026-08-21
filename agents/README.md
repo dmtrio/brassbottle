@@ -1,5 +1,9 @@
 # Agents
 
+> **Ownership rule:** Everything that knows about one agent lives in
+> `agents/<name>/`. Nothing in `tests/` names a specific agent (fixture manifests
+> excepted, see system goldens). An agent dir never references another agent.
+
 An **agent** is one directory — `agents/<name>/` — describing one CLI that can
 be installed into the shared image and (optionally) wired for MCP + per-agent
 secrets. A manifest opts in by directory name:
@@ -25,7 +29,21 @@ directory quietly becomes a second package manager.
 agents/<name>/
   agent.yml      required — descriptor consumed by derive + wiring
   README.md      optional — human docs for this agent
+  test_wiring.py optional — wiring contract (invariants + golden/)
+  golden/        captured rendered bytes (see SCENARIO_VERSION below)
 ```
+
+## Adjacent golden contract
+
+`agents/agent_test_kit.py` defines the canonical `wire()` scenario and
+`SCENARIO_VERSION` (currently `1`). That integer is API for every adjacent
+golden under `agents/*/golden/`: changing any fixture detail (server names,
+urls, slots, plugin spec, scratch layout) requires bumping `SCENARIO_VERSION`
+and regenerating every `agents/*/golden/` in the same commit
+(`GOLDEN_REGEN=1` through the suite or a direct test run).
+
+Capture writes `golden/scenario` (single line, the integer). Verification reads
+the stamp first; mismatch or a missing stamp fails with a regen hint.
 
 ## Shipped agents
 
@@ -87,9 +105,11 @@ with `src/wire_plugins.py` dispatch):
 4. If MCP-capable, choose the correct descriptor role (strategy, literal, or
    generic `mcpServers`) and validate the combo.
 5. Add `agents/<name>/README.md` with install/layout/source notes.
-6. Ship `agents/<name>/test_wiring.py` (see any existing agent; use
-   `tests/agent_test_kit`) — the adjacent tests passing is the install contract.
-7. Run the suite and regenerate expected goldens when descriptor-driven fixtures
-   change.
+6. Ship `agents/<name>/test_wiring.py` + `golden/` (captured via
+   `GOLDEN_REGEN=1`; see any existing agent and `agents/agent_test_kit.py`) —
+   invariants hand-written, rendered shapes pinned in bytes beside the
+   descriptor. Adjacent tests passing is the install contract.
+7. Run the suite when changing descriptors; bump `SCENARIO_VERSION` and regen all
+   adjacent goldens when the canonical scenario changes.
 8. No `up.sh` / `Dockerfile` / `src` edits — loaders glob this directory; `kimi`
-   (this PR) is the reference example.
+   is the reference example.
