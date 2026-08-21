@@ -1,5 +1,17 @@
 # brassbottle
 
+**Give every AI coding agent its own firewalled Docker container — full
+permissions inside, an egress allowlist outside, one manifest per project.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)](#prerequisites)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/dmtrio/brassbottle/pulls)
+<!-- CI badge — uncomment once ci-staged/ci.yml is applied as .github/workflows/ci.yml:
+[![CI](https://github.com/dmtrio/brassbottle/actions/workflows/ci.yml/badge.svg)](https://github.com/dmtrio/brassbottle/actions/workflows/ci.yml)
+-->
+
+![Animated terminal demo of ./djinn up my-app](docs/demo.svg)
+
 Isolated, firewalled Docker environments where AI coding agents work with
 full permissions — locally on your Mac (or any Docker host). One container
 per project, declared by a manifest. The assembly is a config.
@@ -10,10 +22,10 @@ brassbottle — the vessel; `djinn` — the word that calls them.
 ```
 bottles/<name>.yml  ──./djinn up <name>──►  djinn-<name>
         │                                      ├── agents from agents/*/agent.yml
-.djinn/secrets.env                             │   (e.g. claude, codex, cursor-agent, gemini, pi, aider, kimi)
+.djinn/secrets.env                             │   (e.g. claude, codex, cursor, gemini, pi, aider, kimi)
   (all secret values, gitignored;              ├── egress firewall (zone allowlist)
    move via DJINN_HOME)                        ├── /workspace (volume): repos/<name> + worktrees/
-                                               ├── /agent-rules (ro): global rules + skills
+                                               ├── /agent-rules (ro): global rules + optional skills
 rules/  (bundled default;                       ├── /artifacts → Mac-visible outbox
   override via RULES_PATH)                      └── per-agent identity via shims
 ```
@@ -92,6 +104,7 @@ versioned, with no second copy of the project to maintain.
 ```bash
 cp bottles/TEMPLATE.yml bottles/my-app.yml
 ./djinn up my-app
+docker ps --filter name=djinn-my-app   # STATUS "Up …" → it worked
 ```
 
 `TEMPLATE.yml` runs unedited (omit/empty `repos:` → git-inits
