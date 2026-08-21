@@ -1,0 +1,3 @@
+home/.gemini/settings.json 0600
+home/.gemini/settings.json.djinn-plugins 0600
+home/.gemini/settings.json.djinn-servers 0600

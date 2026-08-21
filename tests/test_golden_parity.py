@@ -41,9 +41,16 @@ MANIFESTS = ("full", "minimal")
 
 _ASSIGN_RE = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=")
 
-# Add src/ to path for import, mirroring tests/test_wire_plugins.py.
+# Add src/ and tests/ to path for imports, mirroring tests/test_wire_plugins.py.
 sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(REPO_ROOT / "tests"))
 import wire_plugins
+from golden_tree import (
+    assert_snapshot_equal,
+    capture_tree,
+    read_tree_golden,
+    write_tree_golden,
+)
 
 
 def load_secrets_env(path):
@@ -220,40 +227,6 @@ def run_pipeline(manifest_name, env):
     return dr.stdout, pr.stdout
 
 
-def _capture_tree(root, prefix):
-    files = {}
-    symlinks = {}
-    modes = {}
-
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
-        dirnames.sort()
-        filenames.sort()
-        here = Path(dirpath)
-
-        # Snapshot symlinked directories as links, never as traversed trees.
-        for dirname in list(dirnames):
-            child = here / dirname
-            if child.is_symlink():
-                rel = (Path(prefix) / child.relative_to(root)).as_posix()
-                symlinks[rel] = os.readlink(child)
-                dirnames.remove(dirname)
-
-        for filename in filenames:
-            child = here / filename
-            rel_s = (Path(prefix) / child.relative_to(root)).as_posix()
-            if child.is_symlink():
-                symlinks[rel_s] = os.readlink(child)
-                continue
-            if not child.is_file():
-                continue
-            files[rel_s] = child.read_bytes()
-            mode = os.stat(child, follow_symlinks=False).st_mode & 0o777
-            if mode == 0o600:
-                modes[rel_s] = format(mode, "04o")
-
-    return files, symlinks, modes
-
-
 def _capture_config_snapshot(manifest_name, payload):
     # Keep scratch paths deterministic because ~/.claude.json stores absolute
     # project paths and we compare bytes exactly.
@@ -278,8 +251,8 @@ def _capture_config_snapshot(manifest_name, payload):
         with contextlib.redirect_stdout(io.StringIO()):
             wire_plugins.run(payload, home, workspace, env)
 
-        home_files, home_symlinks, home_modes = _capture_tree(home, "home")
-        ws_files, ws_symlinks, ws_modes = _capture_tree(workspace, "workspace")
+        home_files, home_symlinks, home_modes = capture_tree(home, "home")
+        ws_files, ws_symlinks, ws_modes = capture_tree(workspace, "workspace")
         files = {**home_files, **ws_files}
         symlinks = {**home_symlinks, **ws_symlinks}
         modes = {**home_modes, **ws_modes}
@@ -289,59 +262,17 @@ def _capture_config_snapshot(manifest_name, payload):
             shutil.rmtree(scratch)
 
 
-def _parse_map_file(path, splitter):
-    if not path.exists():
-        return {}
-    out = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        key, value = splitter(line)
-        out[key] = value
-    return out
-
-
 def _read_config_golden(manifest_name):
     base = CONFIG_FIXTURES / manifest_name
     if not base.exists():
         raise AssertionError(
             f"{manifest_name}: missing config goldens at {base} "
             "(run with GOLDEN_REGEN=1)")
-
-    files = {}
-    for path in sorted(base.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(base).as_posix()
-        if rel in ("modes.txt", "symlinks.txt"):
-            continue
-        files[rel] = path.read_bytes()
-
-    modes = _parse_map_file(
-        base / "modes.txt", lambda line: line.rsplit(" ", 1))
-    symlinks = _parse_map_file(
-        base / "symlinks.txt", lambda line: line.split("\t", 1))
-    return {"files": files, "symlinks": symlinks, "modes": modes}
+    return read_tree_golden(base)
 
 
 def _write_config_golden(manifest_name, snapshot):
-    base = CONFIG_FIXTURES / manifest_name
-    if base.exists():
-        shutil.rmtree(base)
-    base.mkdir(parents=True, exist_ok=True)
-
-    for rel, blob in sorted(snapshot["files"].items()):
-        dest = base / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(blob)
-
-    modes_text = "\n".join(
-        f"{rel} {mode}" for rel, mode in sorted(snapshot["modes"].items()))
-    symlink_text = "\n".join(
-        f"{rel}\t{target}" for rel, target in sorted(snapshot["symlinks"].items()))
-    (base / "modes.txt").write_text(modes_text + ("\n" if modes_text else ""))
-    (base / "symlinks.txt").write_text(symlink_text + ("\n" if symlink_text else ""))
+    write_tree_golden(CONFIG_FIXTURES / manifest_name, snapshot)
 
 
 class TestGoldenParity(unittest.TestCase):
@@ -358,27 +289,6 @@ class TestGoldenParity(unittest.TestCase):
             FIXTURES / f"{name}.derived.txt",
             FIXTURES / f"{name}.payload.json",
         )
-
-    def _assert_snapshot_equal(self, name, golden, live):
-        golden_files = set(golden["files"])
-        live_files = set(live["files"])
-        if golden_files != live_files:
-            missing = sorted(golden_files - live_files)
-            extra = sorted(live_files - golden_files)
-            self.fail(
-                f"{name}: generated file set changed; "
-                f"missing={missing or '[]'} extra={extra or '[]'}")
-        for rel in sorted(golden_files):
-            self.assertEqual(
-                live["files"][rel], golden["files"][rel],
-                f"{name}: file bytes changed: {rel}")
-
-        self.assertEqual(
-            live["modes"], golden["modes"],
-            f"{name}: file mode map changed")
-        self.assertEqual(
-            live["symlinks"], golden["symlinks"],
-            f"{name}: symlink targets changed")
 
     def test_golden_parity(self):
         for name in MANIFESTS:
@@ -416,7 +326,7 @@ class TestGoldenParity(unittest.TestCase):
                 if self.regen:
                     first = _capture_config_snapshot(name, payload)
                     second = _capture_config_snapshot(name, payload)
-                    self._assert_snapshot_equal(name, first, second)
+                    assert_snapshot_equal(name, first, second)
                     _write_config_golden(name, first)
                     continue
 
@@ -428,7 +338,7 @@ class TestGoldenParity(unittest.TestCase):
                     "(a missing fixture usually means a .gitignore regression)",
                 )
                 live = _capture_config_snapshot(name, payload)
-                self._assert_snapshot_equal(name, golden, live)
+                assert_snapshot_equal(name, golden, live)
 
     def test_golden_fixtures_are_non_trivial(self):
         if os.environ.get("GOLDEN_REGEN") == "1":

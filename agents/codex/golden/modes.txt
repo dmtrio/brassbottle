@@ -1,0 +1,1 @@
+home/.codex/config.toml 0600

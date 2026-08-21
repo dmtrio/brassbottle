@@ -29,3 +29,4 @@ __pycache__/
 # Golden config snapshots intentionally include workspace/repos/.mcp.json — keep
 # those fixture files tracked despite the top-level .mcp.json ignore.
 !tests/fixtures/golden/configs/**/.mcp.json
+!agents/*/golden/**/.mcp.json

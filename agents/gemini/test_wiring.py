@@ -1,5 +1,4 @@
 """Wiring contract for agents/gemini/agent.yml — run via agent_test_kit.wire()."""
-import json
 import os
 import sys
 import unittest
@@ -11,15 +10,15 @@ import agent_test_kit as kit
 
 class GeminiWiring(unittest.TestCase):
     def test_literal_remote_httpurl_dialect(self):
-        r = kit.wire("gemini", key_env_values={"IDENTITY_KEY_0": "GEMINI_KEY"})
+        golden = Path(__file__).parent / "golden"
+
+        def do_wire():
+            return kit.wire("gemini", key_env_values={"IDENTITY_KEY_0": "GEMINI_KEY"})
+
+        r = do_wire()
         path = r.home / ".gemini" / "settings.json"
-        mcp = json.loads(path.read_text())
-        entry = mcp["mcpServers"]["remote-srv"]
-        self.assertIn("httpUrl", entry)
-        self.assertNotIn("url", entry)
-        self.assertEqual(entry["httpUrl"], "https://example.test/mcp")
-        self.assertEqual(entry["headers"]["Authorization"], "Bearer GEMINI_KEY")
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        kit.assert_matches_golden(r, golden, wire_fn=do_wire)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "remote-srv": {
+      "httpUrl": "https://example.test/mcp",
+      "headers": {
+        "Authorization": "Bearer GEMINI_KEY"
+      }
+    },
+    "plugin-local": {
+      "command": "stdio-bridge",
+      "args": []
+    },
+    "local-srv": {
+      "command": "bridge",
+      "args": [
+        "--stdio"
+      ]
+    }
+  }
+}

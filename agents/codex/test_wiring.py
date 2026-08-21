@@ -9,13 +9,17 @@ import agent_test_kit as kit
 
 class CodexWiring(unittest.TestCase):
     def test_local_in_managed_block_remote_not_baked(self):
-        r = kit.wire("codex")
+        golden = Path(__file__).parent / "golden"
+
+        def do_wire():
+            return kit.wire("codex")
+
+        r = do_wire()
         toml = r.read(".codex/config.toml")
-        self.assertIn("[mcp_servers.local-srv]", toml)
-        self.assertIn("[mcp_servers.plugin-local]", toml)
         self.assertNotIn("remote-srv", toml)
         self.assertNotIn("TEST_SECRET", toml)
         self.assertNotIn("Bearer", toml)
+        kit.assert_matches_golden(r, golden, wire_fn=do_wire)
 
 
 if __name__ == "__main__":
