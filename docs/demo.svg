@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 330" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">
+  <!-- Animated (SMIL) replay of a real `djinn up` session; loops every 14s.
+       Output lines mirror up.sh's actual echo strings. -->
+  <rect width="720" height="330" rx="10" fill="#0d1117"/>
+  <rect width="720" height="30" rx="10" fill="#161b22"/>
+  <rect y="15" width="720" height="15" fill="#161b22"/>
+  <circle cx="22" cy="15" r="5" fill="#ff5f56"/>
+  <circle cx="42" cy="15" r="5" fill="#ffbd2e"/>
+  <circle cx="62" cy="15" r="5" fill="#27c93f"/>
+  <text x="360" y="19" fill="#8b949e" text-anchor="middle" font-size="11">djinn — terminal</text>
+
+  <defs>
+    <clipPath id="type">
+      <rect x="40" y="46" width="0" height="20">
+        <animate attributeName="width" dur="14s" repeatCount="indefinite"
+          values="0;0;150;150;0" keyTimes="0;0.02;0.11;0.97;1"/>
+      </rect>
+    </clipPath>
+  </defs>
+
+  <g fill="#c9d1d9">
+    <text x="24" y="60" fill="#7ee787">$</text>
+    <text x="40" y="60" clip-path="url(#type)">./djinn up my-app</text>
+
+    <text x="24" y="88" opacity="0">Applying bottles/my-app.yml → djinn-my-app
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.14;0.16;0.96;1"/></text>
+    <text x="24" y="108" fill="#8b949e" opacity="0">  ports='none' egress='none' plugins='none' remote='none' mem=10g
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.19;0.21;0.96;1"/></text>
+    <text x="24" y="132" opacity="0">[+] Running 1/1  <tspan fill="#27c93f">✔</tspan> Container djinn-my-app  Started
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.25;0.27;0.96;1"/></text>
+    <text x="24" y="152" opacity="0"><tspan fill="#27c93f">  ✓</tspan> skills linked (read-only; rules changes go via PR to the rules repo)
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.31;0.33;0.96;1"/></text>
+
+    <g opacity="0">
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.38;0.40;0.96;1"/>
+      <text x="24" y="180" fill="#79c0ff">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</text>
+      <text x="24" y="204" fill="#e6edf3" font-weight="bold">  djinn-my-app is up (manifest: bottles/my-app.yml)</text>
+    </g>
+    <text x="24" y="228" opacity="0">  VS Code / Cursor:  Dev Containers: Attach to Running Container
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.44;0.46;0.96;1"/></text>
+    <text x="24" y="248" opacity="0">  Terminal:          docker exec -it -u coder djinn-my-app bash
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.47;0.49;0.96;1"/></text>
+    <text x="24" y="268" opacity="0">  Claude:            cd /workspace/repos &amp;&amp; claude   (one session over every repo)
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.50;0.52;0.96;1"/></text>
+    <g opacity="0">
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;1;0" keyTimes="0;0.53;0.55;0.96;1"/>
+      <text x="24" y="292" fill="#79c0ff">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</text>
+    </g>
+    <rect x="24" y="300" width="8" height="15" fill="#7ee787" opacity="0">
+      <animate attributeName="opacity" dur="14s" repeatCount="indefinite"
+        values="0;0;1;0;1;0;1;0;1;0" keyTimes="0;0.56;0.60;0.64;0.68;0.72;0.76;0.80;0.90;1"/>
+    </rect>
+  </g>
+</svg>
