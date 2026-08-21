@@ -67,10 +67,7 @@ the rules dir automatically — no need to set `RULES_PATH` too. The same applie
 to bottles: if `$DJINN_HOME/bottles` exists it's used automatically, so
 you don't need to set `BOTTLES_PATH` either.)
 
-**A bottle is the manifest; a container is the running thing.** The deprecated
-spellings `CONTAINERS_PATH` and `$DJINN_HOME/containers` are still honored,
-each printing a one-line deprecation notice naming the path it used. Rename
-yours and they go quiet.
+**A bottle is the manifest; a container is the running thing.**
 
 When your bottles are their own git repo, `djinn up` fast-forwards that
 checkout before reading the bottle, so a merged bottle PR takes effect on
@@ -183,10 +180,6 @@ compdef _dj_services_zsh djsvc
 A container without a grant cannot reach the zone — enforced by the
 in-container firewall (dnsmasq resolver-driven ipset; rotating CDN DNS can't
 outrun it).
-
-> Deprecated: `capabilities: {gateway: true}` (likewise `proxyman` / `browser`)
-> works for one release but prints a deprecation warning — use
-> `plugins: [gateway]` instead (see below).
 
 ## Plugins (every MCP server is a file)
 
