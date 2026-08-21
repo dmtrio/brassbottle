@@ -95,7 +95,7 @@ on — and prints which case it took.
 **Keep your bottles out of this repo.** Your real `bottles/*.yml` carry
 semi-private data (private repo URLs, LAN subnets, identity naming), so this
 repo ships only `bottles/TEMPLATE.yml`. Point bottles at a directory of
-your own — e.g. `~/djinn/containers` (auto-detected) — and make *that* its
+your own — e.g. `~/djinn/bottles` (auto-detected) — and make *that* its
 own private git repo. The tool stays public; your configs stay private and
 versioned, with no second copy of the project to maintain.
 
@@ -288,11 +288,13 @@ a separate container.
 ## Rules & skills (shared knowledge, never shared identity)
 
 The rules dir mounts read-only at `/agent-rules` in every container:
-`AGENTS.md` fans out as every agent's global rules file, `skills/` as
-Claude's skills. By default this is the repo's bundled `rules/`; set
-`RULES_PATH` (in `./.env`) to your own rules repo — e.g. `~/git/agent-conf/rules`
-— to override. Rule layers: global → `/workspace/rules.local.md`
-(container-local, uncommitted) → the project repo's own CLAUDE.md.
+`AGENTS.md` is composed into each enabled agent's rules file, and `skills/`
+is exposed to Claude when the rules dir provides it. By default this repo's
+bundled `rules/` ships only `AGENTS.md`; set `RULES_PATH` (in `./.env`) to
+your own rules repo — e.g. `~/git/agent-conf/rules` — to add skills or override
+the bundled rules. Rule layers, weakest to strongest: global →
+`/workspace/rules.local.md` (container-local, uncommitted) → the project repo's
+own CLAUDE.md / AGENTS.md.
 Agents propose rule changes via PR; for an external rules repo, `djinn up`
 `git pull`s it each run so merged changes land in every container.
 
@@ -317,7 +319,8 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
 - `plugins/` — drop-in MCP tools, one directory each (`<name>/plugin.yml` +
   optional host-only `<name>/run.sh`, started via `./djinn service <name>`). See
   [`plugins/README.md`](plugins/README.md) for the schema and how to add one
-- `rules/` — bundled default agent rules & skills (override via `RULES_PATH`)
+- `rules/` — bundled default agent rules; `skills/` is optional in custom
+  `RULES_PATH` repos
 - `bin/` — host commands `djinn allow` / `djinn keys` dispatch to (still
   runnable directly as `bin/<name>.sh`):
   - `allow-egress.sh` — add egress domains to a running container (no restart)
@@ -333,8 +336,9 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
   - `freshness.py` + `freshness-landing.bashrc` — the no-network landing
     readout of container config age (last `up` + image build date); `up.sh`
     stamps the two timestamps into `/etc/environment` after boot
-- `compose/` — `docker-compose.local.yml` (base) plus the `ssh.yml` / `mosh.yml`
-  overlays `up.sh` applies for a manifest's `ssh:` / `remote.mosh` settings
+- `compose/` — `docker-compose.local.yml` (base) plus the
+  `docker-compose.ssh.yml` / `docker-compose.mosh.yml` overlays `up.sh` applies
+  for a manifest's `ssh:` / `remote.mosh` settings
 - `docs/` — `script.md` (every script, grouped by lifecycle), `TIPS.md`,
   `workspace.CLAUDE.md` (copied into each container as `/workspace/CLAUDE.md`)
 - `tests/` — host-runnable checks. `plugins.test.sh` is the entry point (yq +
