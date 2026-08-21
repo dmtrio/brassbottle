@@ -1,4 +1,5 @@
-# System goldens pin composition, not the roster; adding an agent must not touch tests/fixtures/.
-agents: [claude, aider]
+# minimal pins the empty-plugin composition across every wiring dialect; the
+# list is EXPLICIT so adding a new agent never churns these goldens.
+agents: [aider, claude, codex, cursor, gemini, pi]
 repos:
   - https://github.com/example/scratch.git
