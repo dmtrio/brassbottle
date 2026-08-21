@@ -34,8 +34,7 @@ def capture_tree(root: Path, prefix: str) -> tuple[dict[str, bytes], dict[str, s
                 continue
             files[rel_s] = child.read_bytes()
             mode = os.stat(child, follow_symlinks=False).st_mode & 0o777
-            if mode == 0o600:
-                modes[rel_s] = format(mode, "04o")
+            modes[rel_s] = format(mode, "04o")
 
     return files, symlinks, modes
 

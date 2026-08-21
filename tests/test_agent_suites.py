@@ -12,18 +12,22 @@ kept out of the image by ``agents/*/test_*.py`` in .dockerignore.
 Why load by path instead of ``loader.discover()``: discover() requires its
 ``top_level_dir`` to sit inside the tree being scanned, so pointing it at a
 sibling directory raises "Path must be within the project" on 3.9. Each agent
-directory goes on ``sys.path`` before its modules execute, and the repo's
-``src/`` + ``tests/`` + ``agents/`` dirs are on ``sys.path`` first so ``import agent_test_kit``
-and the machinery under test resolve. Modules are registered under a unique
-name so two agents can both ship a ``test_wiring.py``.
+directory is appended to ``sys.path`` before its modules execute, and the repo's
+``src/`` + ``tests/`` + ``agents/`` dirs are prepended first so ``import agent_test_kit``
+and ``import manifest`` resolve to the repo modules before any agent-local
+``manifest.py`` decoy. Modules are registered under an enumerated name so two
+agents can both ship a ``test_wiring.py``.
 """
 import importlib.util
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
 AGENTS = REPO / "agents"
+SRC_MANIFEST = REPO / "src" / "manifest.py"
 
 for path in (REPO / "src", REPO / "tests", REPO / "agents"):
     if str(path) not in sys.path:
@@ -34,12 +38,20 @@ def agent_test_files():
     return sorted(AGENTS.glob("*/test_*.py"))
 
 
-def _load(path: Path):
-    """Import one agent test module under a collision-proof name."""
-    agent = path.parent.name
-    if str(path.parent) not in sys.path:
-        sys.path.insert(0, str(path.parent))
-    name = f"agenttests_{agent}_{path.stem}"
+def agent_dirs_with_descriptor():
+    return sorted(
+        p.parent.name
+        for p in AGENTS.glob("*/agent.yml")
+        if p.is_file()
+    )
+
+
+def _load(path: Path, *, index: int):
+    """Import one agent test module under a collision-proof enumerated name."""
+    agent_dir = str(path.parent)
+    if agent_dir not in sys.path:
+        sys.path.append(agent_dir)
+    name = f"agenttests_{index}_{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -55,6 +67,47 @@ class AgentTestDiscovery(unittest.TestCase):
     discovery found files and that each one actually contributed test cases.
     """
 
+    def test_yq_is_available(self):
+        if shutil.which("yq") is not None:
+            return
+        self.fail(
+            "yq not installed — agent wiring contract tests did NOT run "
+            "(up.sh requires yq; a green suite must not mean contracts went untested)"
+        )
+
+    def test_every_agent_with_descriptor_ships_wiring_contract(self):
+        missing = []
+        for name in agent_dirs_with_descriptor():
+            agent_dir = AGENTS / name
+            if not (agent_dir / "test_wiring.py").is_file():
+                missing.append(f"{name}: missing test_wiring.py")
+            elif not (agent_dir / "golden" / "scenario").is_file():
+                missing.append(f"{name}: missing golden/scenario")
+        if missing:
+            self.fail(
+                "agents with agent.yml must ship test_wiring.py and golden/scenario "
+                f"(see agents/README.md): {'; '.join(missing)}"
+            )
+
+    def test_agent_dir_does_not_shadow_src_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decoy_dir = Path(tmp) / "decoy-agent"
+            decoy_dir.mkdir()
+            (decoy_dir / "manifest.py").write_text("SHADOW = True\n")
+            saved_path = list(sys.path)
+            saved_modules = dict(sys.modules)
+            try:
+                sys.path[:] = [str(REPO / "src"), str(REPO / "tests"), str(REPO / "agents")]
+                sys.path.append(str(decoy_dir))
+                for name in ("manifest", "wire_plugins"):
+                    sys.modules.pop(name, None)
+                import manifest  # noqa: F401
+                self.assertEqual(manifest.__file__, str(SRC_MANIFEST.resolve()))
+            finally:
+                sys.path[:] = saved_path
+                sys.modules.clear()
+                sys.modules.update(saved_modules)
+
     def test_discovery_finds_agent_test_files(self):
         agents_with_tests = {p.parent.name for p in agent_test_files()}
         self.assertTrue(
@@ -65,15 +118,15 @@ class AgentTestDiscovery(unittest.TestCase):
 
     def test_every_agent_test_file_yields_test_cases(self):
         loader = unittest.TestLoader()
-        for path in agent_test_files():
+        for index, path in enumerate(agent_test_files()):
             with self.subTest(agent=path.parent.name, file=path.name):
-                count = loader.loadTestsFromModule(_load(path)).countTestCases()
+                count = loader.loadTestsFromModule(_load(path, index=index)).countTestCases()
                 self.assertGreater(count, 0, f"{path} defines no test cases")
 
 
 def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(AgentTestDiscovery))
-    for path in agent_test_files():
-        suite.addTests(loader.loadTestsFromModule(_load(path)))
+    for index, path in enumerate(agent_test_files()):
+        suite.addTests(loader.loadTestsFromModule(_load(path, index=index)))
     return suite

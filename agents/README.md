@@ -29,8 +29,8 @@ directory quietly becomes a second package manager.
 agents/<name>/
   agent.yml      required — descriptor consumed by derive + wiring
   README.md      optional — human docs for this agent
-  test_wiring.py optional — wiring contract (invariants + golden/)
-  golden/        captured rendered bytes (see SCENARIO_VERSION below)
+  test_wiring.py required — wiring contract (invariants + golden/)
+  golden/        required — captured rendered bytes (see SCENARIO_VERSION below)
 ```
 
 ## Adjacent golden contract

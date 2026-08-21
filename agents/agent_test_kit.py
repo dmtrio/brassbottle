@@ -32,7 +32,8 @@ SCENARIO_VERSION contract:
 Surface:
 - ``wire(name, ...)`` → ``WireResult`` with ``home``, ``workspace``, ``read()``.
 - ``assert_matches_golden(result, golden_dir, wire_fn=...)`` — byte-level tree
-  parity for everything wiring produced under scratch dirs.
+  parity for everything wiring produced under scratch dirs. ``GOLDEN_REGEN=1``
+  requires ``wire_fn`` so regen always double-runs for determinism.
 """
 
 from __future__ import annotations
@@ -74,6 +75,12 @@ DERIVE_ENV = {
     "PRESENT_SECRET_VARS": "TEST_SECRET",
     "SECRETS_FILE": "/sec/secrets.env",
 }
+
+# Per-agent scratch roots under $TMPDIR/agent-test-kit/<name>/ (variant suffixes
+# become sibling dirs like claude-no-remote). Fixed paths keep .claude.json
+# path-embedding deterministic. Each agent owns its tree; wire() never deletes
+# another agent's directory. Not parallel-safe within one agent.
+AGENT_SCRATCH_ROOT = Path(tempfile.gettempdir()) / "agent-test-kit"
 
 AGENT_BOUND_PLUGIN = "test-agent-bound"
 LOCAL_PLUGIN = "test-local"
@@ -154,6 +161,41 @@ def _identity_secrets(agent_secrets: str, remote_slots: str, literal_key_agents:
     return " ".join(entries), i
 
 
+def _scratch_path(agent_dir_name: str, *, remote_server, local_server,
+                  extra_agents, key_env_values) -> Path:
+    """Return the deterministic scratch dir for one wire() invocation."""
+    suffix_parts = []
+    if remote_server is False:
+        suffix_parts.append("no-remote")
+    if local_server is False:
+        suffix_parts.append("no-local")
+    if extra_agents:
+        suffix_parts.extend(extra_agents)
+    if key_env_values:
+        suffix_parts.extend(sorted(key_env_values))
+    if suffix_parts:
+        return AGENT_SCRATCH_ROOT / f"{agent_dir_name}-{'-'.join(suffix_parts)}"
+    return AGENT_SCRATCH_ROOT / agent_dir_name
+
+
+def _build_run_env(derived: dict, ident: str, count: int,
+                   key_env_values: dict | None) -> dict:
+    """Build the container-side env for wire_plugins.run from test values only."""
+    run_env = {
+        "AGENTS_MCP_JSON": derived.get("AGENTS_MCP_JSON", ""),
+        "PLUGIN_MCP_ENTRIES": derived.get("PLUGIN_MCP_ENTRIES", ""),
+        "AGENT_SERVERS_JSON": derived.get("AGENT_SERVERS_JSON", ""),
+        "AGENT_SECRETS": derived.get("AGENT_SECRETS", ""),
+        "IDENTITY_SECRETS": ident,
+    }
+    if key_env_values:
+        run_env.update(key_env_values)
+    else:
+        for i in range(count):
+            run_env[f"IDENTITY_KEY_{i}"] = "TEST_SECRET"
+    return run_env
+
+
 class WireResult:
     """Outcome of wire(): temp home/workspace dirs plus derive/payload artifacts."""
 
@@ -220,33 +262,17 @@ def wire(agent_dir_name: str, *, remote_server=True, local_server=True,
         derived.get("LITERAL_KEY_AGENTS", ""),
     )
 
-    run_env = dict(os.environ)
-    run_env.update({
-        "AGENTS_MCP_JSON": derived.get("AGENTS_MCP_JSON", ""),
-        "PLUGIN_MCP_ENTRIES": derived.get("PLUGIN_MCP_ENTRIES", ""),
-        "AGENT_SERVERS_JSON": derived.get("AGENT_SERVERS_JSON", ""),
-        "AGENT_SECRETS": derived.get("AGENT_SECRETS", ""),
-        "IDENTITY_SECRETS": ident,
-    })
-    if key_env_values:
-        run_env.update(key_env_values)
-    else:
-        for i in range(count):
-            run_env.setdefault(f"IDENTITY_KEY_{i}", "TEST_SECRET")
+    run_env = _build_run_env(derived, ident, count, key_env_values)
 
     payload = wire_plugins.build_payload(run_env)
 
-    scratch_id = agent_dir_name
-    if remote_server is False:
-        scratch_id += "-no-remote"
-    if local_server is False:
-        scratch_id += "-no-local"
-    if extra_agents:
-        scratch_id += "-" + "-".join(extra_agents)
-    if key_env_values:
-        scratch_id += "-" + "-".join(sorted(key_env_values))
-
-    scratch = Path(tempfile.gettempdir()) / "agent-test-kit" / scratch_id
+    scratch = _scratch_path(
+        agent_dir_name,
+        remote_server=remote_server,
+        local_server=local_server,
+        extra_agents=extra_agents,
+        key_env_values=key_env_values,
+    )
     if scratch.exists():
         shutil.rmtree(scratch)
     home = scratch / "home"
@@ -305,13 +331,15 @@ def assert_matches_golden(
     regen = os.environ.get("GOLDEN_REGEN") == "1"
 
     if regen:
-        if wire_fn is not None:
-            first = _capture_wire_snapshot(wire_fn())
-            second = _capture_wire_snapshot(wire_fn())
-            assert_snapshot_equal(str(golden_dir), first, second)
-            snapshot = first
-        else:
-            snapshot = _capture_wire_snapshot(result)
+        if wire_fn is None:
+            raise RuntimeError(
+                "GOLDEN_REGEN=1 requires wire_fn=... so golden capture double-runs "
+                "for determinism; pass the same callable used to produce result"
+            )
+        first = _capture_wire_snapshot(wire_fn())
+        second = _capture_wire_snapshot(wire_fn())
+        assert_snapshot_equal(str(golden_dir), first, second)
+        snapshot = first
         write_tree_golden(golden_dir, snapshot)
         (golden_dir / "scenario").write_text(f"{SCENARIO_VERSION}\n")
         return
