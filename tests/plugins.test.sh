@@ -337,6 +337,17 @@ UNIT_OUT=$(python3 -m unittest discover -s tests 2>&1) \
     && pass "python3 -m unittest discover -s tests" \
     || { fail "unit tests failed:"; printf '%s\n' "$UNIT_OUT" | tail -30; }
 
+echo "── bundled skill: djinn-bottle checker"
+# The skill's checker streams manifest.py --derive the same payload up.sh
+# builds; its tests pin that contract, and TEMPLATE.yml must pass the checker
+# end-to-end (warnings allowed, errors not).
+SKILL_OUT=$(cd rules/skills/djinn-bottle && python3 -m unittest test_check_manifest 2>&1) \
+    && pass "rules/skills/djinn-bottle unit tests" \
+    || { fail "skill unit tests failed:"; printf '%s\n' "$SKILL_OUT" | tail -20; }
+TPL_OUT=$(python3 rules/skills/djinn-bottle/check_manifest.py bottles/TEMPLATE.yml --brassbottle . 2>&1) \
+    && pass "check_manifest.py accepts bottles/TEMPLATE.yml" \
+    || { fail "TEMPLATE.yml fails the skill checker:"; printf '%s\n' "$TPL_OUT" | tail -10; }
+
 fi  # command -v python3
 
 echo "── up.sh ↔ module contract pins"
