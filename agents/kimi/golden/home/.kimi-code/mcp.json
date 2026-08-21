@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "remote-srv": {
+      "url": "https://example.test/mcp",
+      "headers": {},
+      "bearerTokenEnvVar": "TEST_TOKEN"
+    },
+    "local-srv": {
+      "command": "bridge",
+      "args": [
+        "--stdio"
+      ]
+    },
+    "plugin-local": {
+      "command": "stdio-bridge",
+      "args": []
+    }
+  }
+}

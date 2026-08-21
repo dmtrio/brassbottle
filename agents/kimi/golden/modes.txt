@@ -1,0 +1,3 @@
+home/.kimi-code/mcp.json 0600
+home/.kimi-code/mcp.json.djinn-plugins 0600
+home/.kimi-code/mcp.json.djinn-servers 0600
