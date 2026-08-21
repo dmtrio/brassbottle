@@ -28,3 +28,8 @@ jobs:
         # "If it ships, CI builds it": the shared image is the artifact
         # every container runs, so a PR that breaks the Dockerfile must fail.
         run: docker build -t djinn-ci-smoke .
+      - name: Entry point exists
+        # A green build with a missing/renamed entrypoint is still a broken
+        # container — assert the declared ENTRYPOINT file is present and
+        # executable inside the built image.
+        run: docker run --rm --entrypoint test djinn-ci-smoke -x /home/coder/entrypoint.sh
