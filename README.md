@@ -316,6 +316,9 @@ Agents propose rule changes via PR; for an external rules repo, `djinn up`
   overlays `up.sh` applies for a manifest's `ssh:` / `remote.mosh` settings
 - `docs/` — `script.md` (every script, grouped by lifecycle), `TIPS.md`,
   `workspace.CLAUDE.md` (copied into each container as `/workspace/CLAUDE.md`)
+- `AGENTS.log.md` — dated history and rationale (renames, deprecations and
+  their compat windows). User-facing docs state only current behavior; when a
+  change deserves a "why", it goes here, not in README
 - `tests/` — host-runnable checks. `plugins.test.sh` is the entry point (yq +
   jq + python3); it runs the Python unit tests (`test_manifest.py` /
   `test_wire_plugins.py` — manifest validation + wiring logic) and the
