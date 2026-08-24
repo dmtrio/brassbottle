@@ -85,6 +85,14 @@ services:
       # That descriptor-local source of truth includes cursor's two-dir nuance.
       - gh-auth:/home/coder/.config/gh
 
+    # PID 1 must reap. The entrypoint is not an init: children that outlive
+    # their parent (Xvfb/Electron helpers from print harnesses, language
+    # servers from dead agent sessions) get reparented to PID 1 and, unreaped,
+    # sit as <defunct> zombies until the container is recreated. `init: true`
+    # injects tini as PID 1 (signal forwarding + orphan reaping); the
+    # entrypoint is unchanged.
+    init: true
+
     # Memory cap comes from the capability profile (coding needs headroom
     # for builds/tests; default stays lean)
     mem_limit: ${MEM_LIMIT:-2g}
