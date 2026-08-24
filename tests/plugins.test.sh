@@ -281,9 +281,16 @@ printf '%s' "$AGENT_SECRETS" \
     | grep -qF "$(printf 'cursor-agent\tMCP_GATEWAY_TOKEN\tMCP_GATEWAY_TOKEN')" \
     && pass "gateway common default resolves into agent credentials" \
     || fail "AGENT_SECRETS missing gateway default: '$AGENT_SECRETS'"
+# Literal-key agents (a literal dialect with env_refs false) are the ones whose
+# keys travel as IDENTITY_KEY_n on the exec env. Derived from the descriptors so
+# adding or retiring an agent needs no edit here.
+LITERAL_IDENTITY_SECRETS=$(i=0; for af in agents/*/agent.yml; do
+    yq -e '.mcp | select(.env_refs == false and (.dialect | test("^(url|httpUrl|type-http|serverUrl)$")))' "$af" >/dev/null 2>&1 || continue
+    printf '%s:IDENTITY_KEY_%d:MCP_GATEWAY_TOKEN ' "$(yq -r .binary "$af")" "$i"; i=$((i + 1))
+done)
 PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
     AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
-    IDENTITY_SECRETS="cursor-agent:IDENTITY_KEY_0:MCP_GATEWAY_TOKEN pi:IDENTITY_KEY_1:MCP_GATEWAY_TOKEN" \
+    IDENTITY_SECRETS="$LITERAL_IDENTITY_SECRETS" \
     python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero"
 # AGENTS_MCP_JSON is manifest.py's own mcp-capable projection, so this checks

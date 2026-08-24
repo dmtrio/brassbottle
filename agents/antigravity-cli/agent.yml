@@ -1,0 +1,28 @@
+# antigravity-cli — Google's Antigravity CLI. The tool is `antigravity-cli`;
+# the BINARY is `agy` (the installer drops it in ~/.local/bin, already on PATH).
+# It supersedes Gemini CLI and reuses that CLI's home directory: settings in
+# ~/.gemini/antigravity-cli/settings.json, global rules ~/.gemini/GEMINI.md,
+# MCP in ~/.gemini/config/mcp_config.json — so ~/.gemini is agy's state volume
+# now (no two agents may own the same mount).
+# Remote servers render as {serverUrl, headers}; agy rejects url and httpUrl by
+# name, and cannot expand ${VAR} refs, so agent-scoped remotes get LITERAL keys
+# baked into the (volume-persisted, chmod-guarded) config.
+
+binary: agy
+
+install: |
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+
+state_dirs:
+  - {path: .gemini, volume: antigravity-state}
+
+rules_file: .gemini/GEMINI.md
+
+egress:
+  - antigravity.google
+
+mcp:
+  config_path: .gemini/config/mcp_config.json
+  format: json
+  dialect: serverUrl
+  env_refs: false

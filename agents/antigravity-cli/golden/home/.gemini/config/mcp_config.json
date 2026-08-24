@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "remote-srv": {
+      "serverUrl": "https://example.test/mcp",
+      "headers": {
+        "Authorization": "Bearer LITERAL_SECRET"
+      }
+    },
+    "plugin-local": {
+      "command": "stdio-bridge",
+      "args": []
+    },
+    "local-srv": {
+      "command": "bridge",
+      "args": [
+        "--stdio"
+      ]
+    }
+  }
+}
