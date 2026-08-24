@@ -284,8 +284,11 @@ printf '%s' "$AGENT_SECRETS" \
 # Literal-key agents (a literal dialect with env_refs false) are the ones whose
 # keys travel as IDENTITY_KEY_n on the exec env. Derived from the descriptors so
 # adding or retiring an agent needs no edit here.
+LITERAL_DIALECT_RE=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest;
+print("^(" + "|".join(sorted(manifest.AGENT_MCP_LITERAL_DIALECTS)) + ")$")') \
+    || fail "could not read AGENT_MCP_LITERAL_DIALECTS from src/manifest.py"
 LITERAL_IDENTITY_SECRETS=$(i=0; for af in agents/*/agent.yml; do
-    yq -e '.mcp | select(.env_refs == false and (.dialect | test("^(url|httpUrl|type-http|serverUrl)$")))' "$af" >/dev/null 2>&1 || continue
+    yq -e ".mcp | select(.env_refs == false and (.dialect | test(\"$LITERAL_DIALECT_RE\")))" "$af" >/dev/null 2>&1 || continue
     printf '%s:IDENTITY_KEY_%d:MCP_GATEWAY_TOKEN ' "$(yq -r .binary "$af")" "$i"; i=$((i + 1))
 done)
 PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
