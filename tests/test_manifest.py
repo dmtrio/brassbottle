@@ -8,6 +8,7 @@ quirks (`//` on false, exact tools matching, agent-suffix case
 order) get dedicated pins so a future "cleanup" can't change them silently.
 """
 
+import contextlib
 import io
 import json
 import subprocess
@@ -740,6 +741,16 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         with self.assertRaises(m.ManifestError) as cm:
             derive({}, agent_files=agents)
         self.assertIn("literal-key rendering", str(cm.exception))
+
+    def test_unknown_agent_name_warns_and_is_dropped(self):
+        """A manifest naming a retired agent still derives — with a warning, so
+        the missing CLI is self-diagnosing rather than silent."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"agents": ["claude", "retired-agent"]}, agent_files=AGENT_FILES)
+        self.assertEqual(d["AGENTS_ENABLED"], "claude")
+        self.assertIn("agents: 'retired-agent' has no agents/retired-agent/ directory",
+                      err.getvalue())
 
     def test_non_strategy_toml_rejected(self):
         agents = dict(AGENT_FILES)

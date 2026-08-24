@@ -21,3 +21,4 @@ common_secrets:
 agent_secrets:
   - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}
   - {agent: claude, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_claude}
+  - {agent: cursor-agent, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_cursor}

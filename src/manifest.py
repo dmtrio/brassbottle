@@ -783,6 +783,13 @@ def derive(manifest, plugin_files, agent_files, env):
     if not isinstance(tools, list):
         raise ManifestError("manifest agents: must be a list")
     enabled_agent_dirs = sorted(name for name in agent_dir_names if _tool_installed(tools, name))
+    # A name with no agents/<name>/ directory is dropped, not fatal — a manifest
+    # may outlive a retired agent, and failing every container over a stale list
+    # would be worse. Say so, or the CLI just goes missing with no explanation.
+    for name in tools:
+        if isinstance(name, str) and name not in agent_dir_names:
+            print(f"  ⚠ agents: '{name}' has no agents/{name}/ directory — not installed "
+                  f"(known: {', '.join(sorted(agent_dir_names))})", file=sys.stderr)
     out["AGENTS_ENABLED"] = " ".join(enabled_agent_dirs)
     out["SHIM_AGENTS"] = " ".join(
         sorted(agents[name]["binary"] for name in enabled_agent_dirs
