@@ -77,7 +77,7 @@ REF_RE = re.compile(r"^[A-Za-z0-9_]+\Z")
 # local bridge's command/args when the bridge dials the host (rhinomcp) — so
 # the port lives once in plugin.yml (host_port:) and a manifest plugin_ports:
 # override re-points the dial target and the firewall grant together. Expanded
-# host-side at derive time — cursor/gemini can't expand ${VAR} refs in remote
+# host-side at derive time — cursor/pi can't expand ${VAR} refs in remote
 # specs.
 HOST_PORT_REF = "${HOST_PORT}"
 
@@ -1156,7 +1156,7 @@ def derive(manifest, plugin_files, agent_files, env):
         # ${HOST_PORT} in a remote url OR a local server's command/args → the
         # resolved port. Substituted here, host-side at derive time, NOT left
         # as a ${VAR} ref for the agent: only Claude expands those reliably
-        # (cursor/gemini can't), and this has to work for every agent. The
+        # (cursor/pi can't), and this has to work for every agent. The
         # command/args fields cover the local-bridge-dials-host case
         # (rhinomcp), so a plugin_ports: override re-points the dial target
         # and the firewall grant together for locals exactly as it re-points

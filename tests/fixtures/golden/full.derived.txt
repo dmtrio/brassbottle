@@ -8,10 +8,10 @@ GIT_TOKEN_SOURCE=''
 GIT_ORG_TOKENS=''
 GIT_ORG_IDENTITIES=''
 MEM_LIMIT=4g
-AGENTS_ENABLED='aider claude codex cursor gemini pi'
-SHIM_AGENTS='claude codex cursor-agent gemini pi'
-LITERAL_KEY_AGENTS='cursor-agent gemini pi'
-AGENTS_MCP_JSON='[{"binary":"claude","config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove"},{"binary":"codex","config_path":".codex/config.toml","format":"toml","dialect":"","env_refs":false,"strategy":"codex_managed_block"},{"binary":"cursor-agent","config_path":".cursor/mcp.json","format":"json","dialect":"url","env_refs":false,"strategy":""},{"binary":"gemini","config_path":".gemini/settings.json","format":"json","dialect":"httpUrl","env_refs":false,"strategy":""},{"binary":"pi","config_path":".pi/agent/mcp.json","format":"json","dialect":"type-http","env_refs":false,"strategy":""}]'
+AGENTS_ENABLED='aider claude codex cursor pi'
+SHIM_AGENTS='claude codex cursor-agent pi'
+LITERAL_KEY_AGENTS='cursor-agent pi'
+AGENTS_MCP_JSON='[{"binary":"claude","config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove"},{"binary":"codex","config_path":".codex/config.toml","format":"toml","dialect":"","env_refs":false,"strategy":"codex_managed_block"},{"binary":"cursor-agent","config_path":".cursor/mcp.json","format":"json","dialect":"url","env_refs":false,"strategy":""},{"binary":"pi","config_path":".pi/agent/mcp.json","format":"json","dialect":"type-http","env_refs":false,"strategy":""}]'
 PLUGINS='axiom obsidian-annotated codebase-memory'
 SSH_PORT=''
 SSH_BIND=127.0.0.1
@@ -48,24 +48,20 @@ services:
       - codex-auth:/home/coder/.codex
       - cursor-auth:/home/coder/.config/cursor
       - cursor-state:/home/coder/.cursor
-      - gemini-state:/home/coder/.gemini
 volumes:
   claude-auth:
   codex-auth:
   cursor-auth:
-  cursor-state:
-  gemini-state:'
+  cursor-state:'
 HOST_MCP_PORTS=''
 AGENT_SERVERS_JSON='{"axiom":{"spec":{"command":"mcp-remote","args":["https://mcp.axiom.co/mcp","--header","Authorization: Bearer ${AXIOM_TOKEN}"]},"requires":["AXIOM_TOKEN"]},"obsidian-annotated":{"spec":{"url":"https://mcp-obsidian.dmetr.io/mcp","headers":{"Authorization":"Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},"requires":["OBSIDIAN_ANNOTATED_KEY"]}}'
 AGENT_SERVER_SLOTS='AXIOM_TOKEN OBSIDIAN_ANNOTATED_KEY'
 AGENT_SERVER_REMOTE_SLOTS=OBSIDIAN_ANNOTATED_KEY
 AGENT_SECRETS='cursor-agent	AXIOM_TOKEN	AXIOM_KEY_cursor
 claude	OBSIDIAN_ANNOTATED_KEY	OBSIDIAN_KEY_claude
-gemini	OBSIDIAN_ANNOTATED_KEY	OBSIDIAN_KEY_gemini
 claude	AXIOM_TOKEN	AXIOM_TOKEN
 codex	AXIOM_TOKEN	AXIOM_TOKEN
 pi	AXIOM_TOKEN	AXIOM_TOKEN
-gemini	AXIOM_TOKEN	AXIOM_TOKEN
 '
 PLUGIN_ENV_SECRETS=''
 CONTAINER_NTFY_URL=''

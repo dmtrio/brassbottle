@@ -18,7 +18,7 @@ agent_secrets:
 server per agent:
 
 - **claude** — `.mcp.json` keeps the `${VAR}` ref (the shim expands it).
-- **cursor-agent / gemini / pi** — the literal key is baked into their config
+- **cursor-agent / pi** — the literal key is baked into their config
   (they can't expand env refs in remote headers).
 - **codex** — key reaches its shim, but the remote-MCP config format is still
   pending, so it prints a warning instead of wiring.

@@ -103,7 +103,6 @@ LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http"})
 # agent's plugin sync regardless (a standing caveat about the agent itself).
 _AGENT_NOTES = {
     "cursor-agent": "literal key: env interpolation broken for remote headers",
-    "gemini": "literal key: header env expansion is an open FR",
     "pi": "inert until the pi-mcp-adapter extension is installed",
 }
 _AGENT_SYNC_NOTES = {
@@ -351,7 +350,7 @@ def _render_named_env_ref_server(spec, requires, env_ref_field, server_name, bin
 
 def _local_plugins(plugins):
     """The stdio (local) subset. Remote plugins are wired into Claude's
-    .mcp.json only (Phase 1): cursor/gemini can't expand ${VAR} refs in remote
+    .mcp.json only (Phase 1): cursor/pi can't expand ${VAR} refs in remote
     headers, and their env-scoped service tokens were never wired there before
     — so restricting the other agents to local plugins keeps every config
     byte-identical to the pre-plugin capabilities era."""
@@ -595,7 +594,7 @@ def reconcile_agent_servers(binary, config_path, required, home):
 
 
 def wire_plugin_servers_json(path, plugins):
-    """Sync the plugin stdio servers into a JSON agent config (cursor, gemini,
+    """Sync the plugin stdio servers into a JSON agent config (cursor,
     pi). The set of plugin-managed names is tracked in a sidecar
     (<file>.djinn-plugins) so stale entries from a plugin removed from the
     manifest are deleted without touching identity or hand-added servers."""

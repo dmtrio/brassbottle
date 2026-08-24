@@ -1,5 +1,5 @@
 # axiom — Axiom's official MCP, bridged to LOCAL stdio via `mcp-remote` so EVERY
-# agent (claude, cursor, gemini, codex; pi once its adapter is installed) reaches
+# agent (claude, cursor, codex; pi once its adapter is installed) reaches
 # it uniformly, not just Claude. mcp-remote (baked into the image by the install:
 # block) is a stdio↔HTTP proxy to mcp.axiom.co; being a local command server it
 # wires into every agent through the ordinary local-plugin path — no per-agent

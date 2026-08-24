@@ -129,7 +129,7 @@ common_secrets: {}
 #     - {agent: cursor-agent, slot: MCP_GATEWAY_TOKEN, secret: CURSOR_GATEWAY_TOKEN}
 #     - {agent: pi,           slot: MCP_GATEWAY_TOKEN, disabled: true}
 #     - {agent: claude, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_site_claude}
-#     - {agent: gemini, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_site_gemini}
+#     - {agent: cursor-agent, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_site_cursor}
 #     - {agent: claude, slot: ANNOTATED_WATCH_KEY,    secret: OBSIDIAN_WATCH_KEY_site_claude}
 # `disabled: true` omits both the secret and every MCP server that requires it.
 # (the secret: values are var names in secrets.env; see secrets.env.example)

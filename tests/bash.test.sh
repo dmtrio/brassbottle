@@ -66,8 +66,8 @@ write_keyfiles "$d" "$SHIM" "$PES" "$AS" >/dev/null
 
 assert_eq "claude.env = shared + its agent-scoped key" \
     $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval\nOBSIDIAN_ANNOTATED_KEY=ckey' "$(cat "$d/claude.env")"
-assert_eq "gemini.env = shared only (no binding)" \
-    $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval' "$(cat "$d/gemini.env")"
+assert_eq "codex.env = shared only (no binding)" \
+    $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval' "$(cat "$d/codex.env")"
 assert_eq "pi.env carries its watch key" \
     $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval\nANNOTATED_WATCH_KEY=pkey' "$(cat "$d/pi.env")"
 EXPECTED_ENV_BASENAMES=$(printf '%s\n' $SHIM | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
@@ -104,7 +104,7 @@ GH_TOKEN=defval SRC_VENDOR=vtok SRC_ACME=atok
 GOT=$(printf 'vendor\tGH_TOKEN_vendor\tSRC_VENDOR\nacme-corp\tGH_TOKEN_acme_corp\tSRC_ACME\n')
 write_keyfiles "$d" "$SHIM" "" "" "$GOT" >/dev/null
 assert_eq "per-org tokens land next to GH_TOKEN on each agent" \
-    $'GH_TOKEN=defval\nGH_TOKEN_vendor=vtok\nGH_TOKEN_acme_corp=atok' "$(cat "$d/gemini.env")"
+    $'GH_TOKEN=defval\nGH_TOKEN_vendor=vtok\nGH_TOKEN_acme_corp=atok' "$(cat "$d/codex.env")"
 assert_eq "per-org fan-out reaches every shim agent" \
     $'GH_TOKEN=defval\nGH_TOKEN_vendor=vtok\nGH_TOKEN_acme_corp=atok' "$(cat "$d/cursor-agent.env")"
 unset GH_TOKEN SRC_VENDOR SRC_ACME
