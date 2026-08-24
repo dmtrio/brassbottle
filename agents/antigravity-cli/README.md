@@ -44,8 +44,9 @@ plus `GEMINI_API_KEY` in the environment. The env var alone does nothing —
 - Installs to `~/.local/bin/agy` (already on PATH).
 - Dockerfile install loops run extracted scripts with `bash -e -o pipefail`, so
   a failed download fails the build.
-- Egress: `antigravity.google` (folded in by `egress:`); model traffic rides
-  `googleapis.com`, already allowed.
+- Egress (folded in by `egress:`): `antigravity.google` for the installer and
+  the CLI's own endpoints, `googleapis.com` for model traffic,
+  `accounts.google.com` for sign-in.
 
 ## Sources
 

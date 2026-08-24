@@ -20,6 +20,8 @@ rules_file: .gemini/GEMINI.md
 
 egress:
   - antigravity.google
+  - googleapis.com
+  - accounts.google.com
 
 mcp:
   config_path: .gemini/config/mcp_config.json
