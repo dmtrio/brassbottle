@@ -283,7 +283,7 @@ printf '%s' "$AGENT_SECRETS" \
     || fail "AGENT_SECRETS missing gateway default: '$AGENT_SECRETS'"
 PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
     AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
-    IDENTITY_SECRETS="cursor-agent:IDENTITY_KEY_0:MCP_GATEWAY_TOKEN gemini:IDENTITY_KEY_1:MCP_GATEWAY_TOKEN pi:IDENTITY_KEY_2:MCP_GATEWAY_TOKEN" \
+    IDENTITY_SECRETS="cursor-agent:IDENTITY_KEY_0:MCP_GATEWAY_TOKEN pi:IDENTITY_KEY_1:MCP_GATEWAY_TOKEN" \
     python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero"
 # AGENTS_MCP_JSON is manifest.py's own mcp-capable projection, so this checks

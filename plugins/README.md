@@ -28,7 +28,7 @@ it*. It is a heading-scoped markdown fragment (own your `##`/`###`; no top-level
 `#` title). At `up`, `src/compose_rules.py` appends the fragments of the
 **enabled** plugins to each agent's global rules file (base rules from the
 read-only `/agent-rules` mount + fragments → `~/.claude/CLAUDE.md`,
-`~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`); an interactive-shell hook
+`~/.codex/AGENTS.md`, `~/.kimi-code/AGENTS.md`); an interactive-shell hook
 recomposes so base edits stay live. No fragment (or the plugin not enabled) ⇒
 nothing merged. This complements a server's own MCP instructions — it also
 covers env-only plugins, servers you don't control, and container-specific

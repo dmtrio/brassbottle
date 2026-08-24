@@ -2,7 +2,7 @@
 # (pi.dev/install.sh) that just wraps this npm package — install it directly
 # for non-TTY builds.
 # Remote servers render as {type: http, url, headers} in ~/.pi/agent/mcp.json;
-# like gemini/cursor it cannot expand ${VAR} refs, so agent-scoped remotes get
+# like cursor it cannot expand ${VAR} refs, so agent-scoped remotes get
 # literal keys. No persisted state volume today (login state is per-container-
 # lifetime), and no composed rules file.
 

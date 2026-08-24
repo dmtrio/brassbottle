@@ -1,5 +1,5 @@
 # minimal pins the empty-plugin composition across every wiring dialect; the
 # list is EXPLICIT so adding a new agent never churns these goldens.
-agents: [aider, claude, codex, cursor, gemini, pi]
+agents: [aider, claude, codex, cursor, pi]
 repos:
   - https://github.com/example/scratch.git

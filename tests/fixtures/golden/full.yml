@@ -1,7 +1,7 @@
 task: coding
 forge: github
 memory: 4g
-agents: [claude, codex, pi, gemini, cursor, aider]
+agents: [claude, codex, pi, cursor, aider]
 repos:
   - https://github.com/example/alpha.git
   - {name: beta, url: https://github.com/example/beta.git}
@@ -21,4 +21,3 @@ common_secrets:
 agent_secrets:
   - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}
   - {agent: claude, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_claude}
-  - {agent: gemini, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_gemini}

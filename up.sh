@@ -410,7 +410,7 @@ docker exec "$CNAME" chown coder:coder /workspace/CLAUDE.md
 # edits to the base stay live. PLUGINS (space-separated enabled names) is the
 # source of truth both composes read; skills stays a symlink (a dir, not text).
 docker exec -u coder -e ENABLED_PLUGINS="$PLUGINS" "$CNAME" bash -c '
-mkdir -p /home/coder/.claude /home/coder/.codex /home/coder/.gemini /home/coder/.config/djinn
+mkdir -p /home/coder/.claude /home/coder/.codex /home/coder/.config/djinn
 printf "%s\n" "${ENABLED_PLUGINS:-}" > /home/coder/.config/djinn/enabled-plugins
 python3 /usr/local/lib/djinn/compose_rules.py --announce
 [ -e /home/coder/.claude/skills ] && [ ! -L /home/coder/.claude/skills ] || ln -sfn /agent-rules/skills /home/coder/.claude/skills

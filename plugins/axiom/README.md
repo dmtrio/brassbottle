@@ -2,7 +2,7 @@
 
 [Axiom](https://axiom.co)'s **official MCP server** (`mcp.axiom.co`), bridged to
 **local stdio** with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) so
-**every agent** (claude, cursor, gemini, codex) reaches it — not just Claude.
+**every agent** (claude, cursor, codex) reaches it — not just Claude.
 (pi is wired too, but pi MCP is inert until the `pi-mcp-adapter` extension is
 installed, like every other plugin.) It gives agents tools to query your
 observability data with APL: run queries, list datasets, inspect schemas, list
@@ -11,7 +11,7 @@ saved queries, and read monitors.
 ## Why the mcp-remote bridge
 
 Axiom is a **remote** HTTP MCP on a real internet host. A raw remote server
-(`url:` + `headers:`) only wires cleanly into Claude — cursor/gemini can't expand
+(`url:` + `headers:`) only wires cleanly into Claude — cursor/pi can't expand
 `${VAR}` in remote headers. So instead this plugin runs Axiom's documented
 bridge, `mcp-remote https://mcp.axiom.co/mcp` (a stdio↔HTTP proxy), as a **local
 command server**. Local servers wire into every agent identically, so all agents

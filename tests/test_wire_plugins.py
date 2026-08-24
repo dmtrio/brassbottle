@@ -447,15 +447,17 @@ class TestWriteAgentServer(QuietTestCase):
             data = json.loads(mcp_path.read_text())
             self.assertEqual(list(data["mcpServers"].keys()), ["obsidian-annotated"])
 
-    def test_gemini_uses_httpurl_key(self):
-        """gemini writes ~/.gemini/settings.json with key 'httpUrl' not 'url'."""
+    def test_httpurl_dialect_uses_httpurl_key(self):
+        """The httpUrl dialect renders key 'httpUrl', never 'url'. No shipped
+        agent uses it today (gemini, which did, was retired) — the dialect is
+        still supported, so it is pinned against a synthetic descriptor."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             entry = wire_plugins._literal_agent_config("httpUrl", self.SPEC, {self.SLOT: "GKEY"})
             wire_plugins.write_agent_server(
-                "gemini", ".gemini/settings.json", "obsidian-annotated", entry, home)
+                "httpurl-agent", ".httpurl/settings.json", "obsidian-annotated", entry, home)
 
-            data = json.loads((home / ".gemini" / "settings.json").read_text())
+            data = json.loads((home / ".httpurl" / "settings.json").read_text())
             entry = data["mcpServers"]["obsidian-annotated"]
             self.assertIn("httpUrl", entry)
             self.assertNotIn("url", entry)
@@ -905,8 +907,6 @@ class TestRunIntegration(QuietTestCase):
             self.assertNotIn("coding", codex_toml)
             # pi config exists
             self.assertTrue((home / ".pi" / "agent" / "mcp.json").exists())
-            # gemini config exists
-            self.assertTrue((home / ".gemini" / "settings.json").exists())
             # codex config exists
             self.assertTrue((home / ".codex" / "config.toml").exists())
 
@@ -930,7 +930,6 @@ class TestRunIntegration(QuietTestCase):
             self.assertFalse((repos_dir / ".mcp.json").exists())
             # No agent home configs
             self.assertFalse((home / ".cursor").exists())
-            self.assertFalse((home / ".gemini").exists())
             self.assertFalse((home / ".pi").exists())
             self.assertFalse((home / ".codex").exists())
 
@@ -986,7 +985,7 @@ class TestRunIntegration(QuietTestCase):
                 "agent_servers": [
                     {"name": "axiom", "spec": spec, "requires": ["AXIOM_TOKEN"],
                      "ref": ["claude"], "literal": [], "warn": [],
-                     "local": ["cursor-agent", "codex"]},  # gemini/pi NOT bound
+                     "local": ["cursor-agent", "codex"]},  # pi NOT bound
                 ],
             }
             wire_plugins.run(payload, home, workspace, {})
@@ -998,9 +997,7 @@ class TestRunIntegration(QuietTestCase):
             cursor = json.loads((home / ".cursor" / "mcp.json").read_text())["mcpServers"]
             self.assertEqual(cursor["axiom"], spec)
             self.assertIn("[mcp_servers.axiom]", (home / ".codex" / "config.toml").read_text())
-            # gemini + pi: NOT wired (no token → no server)
-            gemini = json.loads((home / ".gemini" / "settings.json").read_text())["mcpServers"]
-            self.assertNotIn("axiom", gemini)
+            # pi: NOT wired (no token → no server)
             pi = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())["mcpServers"]
             self.assertNotIn("axiom", pi)
             # the token itself is never written anywhere — only the ${VAR} ref
@@ -1445,7 +1442,7 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
                 capture_output=True, text=True, check=True).stdout)
             agent_docs[f.parent.name] = doc
         derived = manifest.derive(
-            {"agents": ["claude", "codex", "cursor", "gemini", "pi"]},
+            {"agents": ["claude", "codex", "cursor", "pi"]},
             {}, agent_docs, {"PRESENT_SECRET_VARS": "", "SECRETS_FILE": "/sec/secrets.env"},
         )
         env = {
@@ -1461,12 +1458,10 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
                 "claude\tTOKEN\tSRC\n"
                 "codex\tTOKEN\tSRC\n"
                 "cursor-agent\tTOKEN\tSRC\n"
-                "gemini\tTOKEN\tSRC\n"
                 "pi\tTOKEN\tSRC\n"),
             "IDENTITY_SECRETS": (
                 "cursor-agent:K0:TOKEN "
-                "gemini:K1:TOKEN "
-                "pi:K2:TOKEN"),
+                "pi:K1:TOKEN"),
         }
         payload = wire_plugins.build_payload(env)
         servers = {entry["name"]: entry for entry in payload["agent_servers"]}
@@ -1474,10 +1469,10 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
         self.assertEqual(servers["remote"]["warn"], ["codex"])
         self.assertEqual(
             [lit["agent"] for lit in servers["remote"]["literal"]],
-            ["cursor-agent", "gemini", "pi"],
+            ["cursor-agent", "pi"],
         )
         self.assertEqual(servers["local"]["ref"], ["claude"])
-        self.assertEqual(servers["local"]["local"], ["codex", "cursor-agent", "gemini", "pi"])
+        self.assertEqual(servers["local"]["local"], ["codex", "cursor-agent", "pi"])
         self.assertEqual(servers["local"]["warn"], [])
         self.assertEqual(servers["local"]["literal"], [])
 

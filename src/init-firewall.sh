@@ -84,7 +84,7 @@ done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 # Allowed ZONES (a zone covers itself and every subdomain). Enforcement is
 # resolver-driven: dnsmasq adds every IP it resolves for these zones to the
 # ipset at lookup time, so rotating/geo DNS (Cursor, CDNs) can't outrun the
-# firewall. Agents: claude, codex, cursor, gemini, pi (+ aider via provider
+# firewall. Agents: claude, codex, cursor, pi (+ aider via provider
 # zones). Plus package registries, GitHub assets, apt, VS Code server, and
 # Playwright browser downloads (playwright is in the base image; the standing
 # "visual check on every step" rule needs a working browser in every container).

@@ -66,5 +66,5 @@ To disable ngrok for one agent while others keep it, use `disabled: true`:
 
 ```yaml
 agent_secrets:
-  - {agent: gemini, slot: NGROK_AUTHTOKEN, disabled: true}
+  - {agent: cursor-agent, slot: NGROK_AUTHTOKEN, disabled: true}
 ```
