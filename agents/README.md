@@ -69,7 +69,7 @@ Top-level keys are closed to this set:
 |---|---|
 | `config_path` | Home-relative config path (`.mcp.json` is only valid with `claude_preapprove`). |
 | `format` | `json` or `toml`. |
-| `dialect` | `url` \| `httpUrl` \| `type-http` \| `mcpServers` (required for non-strategy JSON wiring). |
+| `dialect` | `url` \| `httpUrl` \| `type-http` \| `serverUrl` \| `mcpServers` (required for non-strategy JSON wiring). |
 | `env_refs` | Boolean or non-empty string; truthy means ref-style, false means literal-key style. |
 | `strategy` | `claude_preapprove` \| `codex_managed_block`, or absent for generic JSON path. |
 
@@ -82,7 +82,7 @@ with `src/wire_plugins.py` dispatch):
 |---|---|
 | `strategy: claude_preapprove` | `config_path: .mcp.json`, `format: json`, truthy `env_refs`. |
 | `strategy: codex_managed_block` | `format: toml` (dialect not used by this strategy). |
-| Non-strategy literal dialect | `format: json`, `dialect` in `url/httpUrl/type-http`, `env_refs: false`. |
+| Non-strategy literal dialect | `format: json`, `dialect` in `url/httpUrl/type-http/serverUrl`, `env_refs: false`. |
 | Non-strategy generic (`mcpServers`) | `format: json`, `dialect: mcpServers`, truthy `env_refs`. |
 | Non-strategy TOML | Not allowed (a TOML agent must use a named strategy). |
 
