@@ -92,9 +92,9 @@ AGENT_MCP_FIELDS = frozenset({
     "binary", "config_path", "format", "dialect", "env_refs", "strategy",
 })
 AGENT_MCP_FORMATS = frozenset({"json", "toml"})
-AGENT_MCP_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl", "mcpServers"})
 AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
 LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl"})
+AGENT_MCP_DIALECTS = LITERAL_DIALECTS | frozenset({"mcpServers"})
 
 # COSMETIC ONLY: per-agent progress notes. Wiring logic MUST NOT key off these
 # names; agents absent from these maps still wire with generic messages.
