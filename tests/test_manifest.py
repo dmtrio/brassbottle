@@ -752,6 +752,25 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         self.assertIn("agents: 'retired-agent' has no agents/retired-agent/ directory",
                       err.getvalue())
 
+    def test_serverurl_dialect_accepted_as_literal_key(self):
+        """serverUrl is a literal-key dialect (agy): accepted with env_refs
+        false, and its binary lands in LITERAL_KEY_AGENTS."""
+        agents = dict(AGENT_FILES)
+        agents["cursor"] = dict(AGENT_FILES["cursor"])
+        agents["cursor"]["mcp"] = dict(AGENT_FILES["cursor"]["mcp"], dialect="serverUrl")
+        d = derive({"agents": ["cursor"]}, agent_files=agents)
+        self.assertIn("cursor-agent", d["LITERAL_KEY_AGENTS"])
+        self.assertIn('"dialect":"serverUrl"', d["AGENTS_MCP_JSON"])
+
+    def test_serverurl_dialect_with_env_refs_true_rejected(self):
+        agents = dict(AGENT_FILES)
+        agents["cursor"] = dict(AGENT_FILES["cursor"])
+        agents["cursor"]["mcp"] = dict(
+            AGENT_FILES["cursor"]["mcp"], dialect="serverUrl", env_refs=True)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("literal-key rendering", str(cm.exception))
+
     def test_non_strategy_toml_rejected(self):
         agents = dict(AGENT_FILES)
         agents["cursor"] = dict(AGENT_FILES["cursor"])

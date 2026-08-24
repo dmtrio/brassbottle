@@ -152,7 +152,12 @@ AGENT_MCP_KEYS = frozenset({
     "config_path", "format", "dialect", "env_refs", "strategy",
 })
 AGENT_MCP_FORMATS = frozenset({"json", "toml"})
-AGENT_MCP_DIALECTS = frozenset({"url", "httpUrl", "type-http", "mcpServers"})
+# Literal-key dialects differ only in the key that carries the remote URL —
+# each agent CLI accepts exactly one (agy rejects url/httpUrl by name, gemini
+# rejected url). Kept in lockstep with wire_plugins.LITERAL_DIALECTS, which
+# owns the rendering.
+AGENT_MCP_LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl"})
+AGENT_MCP_DIALECTS = AGENT_MCP_LITERAL_DIALECTS | frozenset({"mcpServers"})
 AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
 
 # Marker for a plugins/*/plugin.yml that yq could not parse (see module docstring).
@@ -492,7 +497,7 @@ def _normalize_agent_docs(agent_files):
                     raise ManifestError(
                         f"agent '{agent}' mcp: non-strategy wiring requires format json "
                         "(a toml agent needs a named strategy)")
-                if dialect in ("url", "httpUrl", "type-http"):
+                if dialect in AGENT_MCP_LITERAL_DIALECTS:
                     if env_refs:
                         raise ManifestError(
                             f"agent '{agent}' mcp: dialect '{dialect}' is literal-key "
@@ -507,7 +512,8 @@ def _normalize_agent_docs(agent_files):
                 elif dialect != "mcpServers":
                     raise ManifestError(
                         f"agent '{agent}' mcp: non-strategy wiring requires a dialect — "
-                        "url/httpUrl/type-http (literal keys) or mcpServers (generic)")
+                        f"{'/'.join(sorted(AGENT_MCP_LITERAL_DIALECTS))} (literal keys) "
+                        "or mcpServers (generic)")
             parsed_mcp = {
                 "config_path": config_path,
                 "format": fmt,
@@ -804,7 +810,7 @@ def derive(manifest, plugin_files, agent_files, env):
         agents[name]["binary"] for name in enabled_agent_dirs
         if agents[name]["mcp"] is not None
         and not agents[name]["mcp"]["env_refs"]
-        and agents[name]["mcp"]["dialect"] in ("url", "httpUrl", "type-http")
+        and agents[name]["mcp"]["dialect"] in AGENT_MCP_LITERAL_DIALECTS
     ))
     out["AGENTS_MCP_JSON"] = json.dumps(
         [

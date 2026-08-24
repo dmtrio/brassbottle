@@ -484,6 +484,23 @@ class TestWriteAgentServer(QuietTestCase):
             self.assertEqual(entry["url"], "https://mcp-obsidian.dmetr.io/mcp")
             self.assertEqual(entry["headers"], {"Authorization": "Bearer PIKEY"})
 
+    def test_serverurl_dialect_uses_serverurl_key(self):
+        """agy accepts only 'serverUrl' for a remote server — it rejects both
+        'url' and 'httpUrl' by name — and reads headers alongside it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            entry = wire_plugins._literal_agent_config("serverUrl", self.SPEC, {self.SLOT: "AKEY"})
+            wire_plugins.write_agent_server(
+                "agy", ".gemini/config/mcp_config.json", "obsidian-annotated", entry, home)
+
+            data = json.loads((home / ".gemini" / "config" / "mcp_config.json").read_text())
+            entry = data["mcpServers"]["obsidian-annotated"]
+            self.assertIn("serverUrl", entry)
+            self.assertNotIn("url", entry)
+            self.assertNotIn("httpUrl", entry)
+            self.assertEqual(entry["serverUrl"], "https://mcp-obsidian.dmetr.io/mcp")
+            self.assertEqual(entry["headers"], {"Authorization": "Bearer AKEY"})
+
     def test_codex_warns_writes_no_file(self):
         """codex (warn_agent_server) prints a warning and writes no file."""
         with tempfile.TemporaryDirectory() as tmp:

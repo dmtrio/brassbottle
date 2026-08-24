@@ -92,9 +92,9 @@ AGENT_MCP_FIELDS = frozenset({
     "binary", "config_path", "format", "dialect", "env_refs", "strategy",
 })
 AGENT_MCP_FORMATS = frozenset({"json", "toml"})
-AGENT_MCP_DIALECTS = frozenset({"url", "httpUrl", "type-http", "mcpServers"})
+AGENT_MCP_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl", "mcpServers"})
 AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
-LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http"})
+LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl"})
 
 # COSMETIC ONLY: per-agent progress notes. Wiring logic MUST NOT key off these
 # names; agents absent from these maps still wire with generic messages.
@@ -519,7 +519,7 @@ def _merge_named_entry(path, name, entry):
 def _literal_agent_config(dialect, spec, keys):
     """Render a required remote server for a literal-key dialect. Replace every
     ${SLOT} header reference from the effective per-agent key map, then shape
-    by descriptor dialect (url/httpUrl/type-http)."""
+    by descriptor dialect (url/httpUrl/type-http/serverUrl)."""
     def replace(value):
         if not isinstance(value, str):
             return value
@@ -535,6 +535,8 @@ def _literal_agent_config(dialect, spec, keys):
         return {"type": "http", "url": spec.get("url"), "headers": headers}
     if dialect == "url":
         return {"url": spec.get("url"), "headers": headers}
+    if dialect == "serverUrl":
+        return {"serverUrl": spec.get("url"), "headers": headers}
     raise WireError(f"literal MCP wiring requires dialect one of: {', '.join(sorted(LITERAL_DIALECTS))}")
 
 
