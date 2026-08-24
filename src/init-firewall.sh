@@ -98,8 +98,6 @@ chatgpt.com
 cursor.com
 cursor.sh
 cursorapi.com
-googleapis.com
-accounts.google.com
 pi.dev
 andmakenomistakes.com
 npmjs.org

@@ -1,5 +1,11 @@
 {
   "mcpServers": {
+    "obsidian-annotated": {
+      "url": "https://mcp-obsidian.dmetr.io/mcp",
+      "headers": {
+        "Authorization": "Bearer IDENTITY_KEY_0-golden-value"
+      }
+    },
     "codebase-memory": {
       "command": "codebase-memory-mcp",
       "args": []
