@@ -36,6 +36,12 @@ DOCKERFILE="$(yq -r '.services.djinn.build.dockerfile // "Dockerfile"' compose/d
     && pass "$CONTEXT/$DOCKERFILE exists relative to the repo root" \
     || fail "$CONTEXT/$DOCKERFILE does not exist relative to the repo root"
 
+echo "── PID 1 reaps orphans (init: true → tini)"
+INIT="$(yq -r '.services.djinn.init // ""' compose/docker-compose.local.yml)"
+[ "$INIT" = "true" ] \
+    && pass "local compose sets services.djinn.init: true" \
+    || fail "local compose must set services.djinn.init: true (else orphaned children accumulate as zombies)"
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
     echo "FAILED: $FAILURES check(s)"
