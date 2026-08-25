@@ -689,6 +689,39 @@ def _codex_settings_body(settings):
     return "\n".join(lines) + "\n"
 
 
+def _drop_shadowed_top_level_keys(path, lines, keys):
+    """Drop unmanaged TOP-LEVEL assignments of any key the settings block owns.
+
+    ~/.codex is a persisted state volume, so a config.toml carrying the very
+    hand edit this mechanism replaces outlives the rebuild that starts
+    managing the key. Emitting the managed copy on top of it would leave TWO
+    top-level `sandbox_mode = …` lines, and codex's TOML parser rejects a
+    duplicate key — the agent would then fail to load its config at all,
+    which is worse than the hand edit was. The managed block wins; the
+    shadowed line is dropped with a warning naming it.
+
+    Scope is the top-level region ONLY (everything above the first table
+    header): the same bare key inside a [table] is a different key and is
+    left alone."""
+    if not keys:
+        return lines
+    kept = []
+    top_level = True
+    for line in lines:
+        stripped = line.lstrip()
+        if top_level and stripped.startswith("["):
+            top_level = False
+        if top_level:
+            key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+            if key in keys:
+                print(f"  ⚠ dropped hand-written '{key}' in {path} — it is now "
+                      "managed by the djinn codex settings block above "
+                      "(a duplicate top-level key breaks codex's config parse)")
+                continue
+        kept.append(line)
+    return kept
+
+
 def _strip_marked_block(path, lines, open_prefix, close_prefix):
     """Drop one prefix-marked managed block from `lines`, returning the rest.
 
@@ -743,6 +776,7 @@ def wire_codex_toml(path, plugins, settings=None):
     kept = _strip_marked_block(path, lines, CODEX_OPEN_PREFIX, CODEX_CLOSE_PREFIX)
     kept = _strip_marked_block(
         path, kept, CODEX_SETTINGS_OPEN_PREFIX, CODEX_SETTINGS_CLOSE_PREFIX)
+    kept = _drop_shadowed_top_level_keys(path, kept, set(settings or {}))
     stripped = "\n".join(kept) + "\n" if kept else ""
 
     head = ""
@@ -761,10 +795,10 @@ def wire_codex_toml(path, plugins, settings=None):
         )
     content = head + stripped + tail
     _write_atomic(path, content, mode=0o600, errors="surrogateescape")
-    if settings:
-        print(f"  ✓ agent settings + plugin MCP servers synced into {path} (managed blocks)")
-    else:
-        print(f"  ✓ plugin MCP servers synced into {path} (managed block)")
+    wrote = ([f"{len(settings)} agent setting(s)"] if settings else []) \
+        + ([f"{len(plugins)} plugin MCP server(s)"] if plugins else [])
+    what = " + ".join(wrote) if wrote else "no managed content"
+    print(f"  ✓ {what} synced into {path} (managed block{'s' if len(wrote) > 1 else ''})")
 
 
 def run(payload, home, workspace, env):

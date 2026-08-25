@@ -91,6 +91,11 @@ config_settings:
   booleans, or integers.
 - Only valid with `mcp.strategy: codex_managed_block` — that strategy renders
   the block, and no other wiring role has anywhere to put it.
+- An unmanaged **top-level** assignment of a managed key (the hand edit this
+  mechanism replaces, surviving on a persisted state volume) is dropped with a
+  warning: two top-level `sandbox_mode = …` lines would make codex reject its
+  own config outright. The same key inside a `[table]` is a different key and
+  is left alone.
 - It is written as a SECOND managed block, at the **head** of `config_path`
   (`# >>> djinn codex settings … >>>`), because a bare TOML key written after
   a table would parse as a member of that table. The MCP block stays at the
