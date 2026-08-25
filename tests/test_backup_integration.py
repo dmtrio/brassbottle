@@ -300,7 +300,7 @@ class BackupIntegrationTests(unittest.TestCase):
                 "sh",
                 "-c",
                 "RESTIC_REPOSITORY=/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password "
-                "restic backup /tmp --no-lock 2>&1",
+                "restic backup /etc/hostname --no-lock 2>&1",
             ],
             capture_output=True,
             text=True,
