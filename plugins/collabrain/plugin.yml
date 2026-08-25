@@ -1,0 +1,71 @@
+# collabrain — durable service wiring for the Agent Collab Hub memory
+# faculty (basic-memory + the collabrain CLI). See ./README.md for what each
+# entry does, the collabrain-repo dependency, and the Claude-only caveat on
+# the url mcp entry. Sketched in /artifacts/brain/records/PLN - Phase 1
+# Hardening.md §2.
+#
+# ONE plugin owns the two MCP servers AND the four long-running processes
+# that keep them fed and current, because they share one lifecycle — two
+# plugins that must always be enabled together are one plugin with extra
+# ceremony (PLN §2).
+
+install: |
+  uv tool install basic-memory==0.22.1
+
+# The embedding model basic-memory downloads on first use for semantic
+# search over the vault.
+egress:
+  - huggingface.co
+  - hf.co
+
+# What dies on a container recreate without these (PLN §2's "what dies on
+# ./djinn up today" list, items 3-4): basic-memory's SQLite index + config
+# (bm-state), and the downloaded embedding model (bm-hf-cache) — costing a
+# full re-embed of the vault on every re-up.
+volumes:
+  bm-state: /home/coder/.basic-memory
+  bm-hf-cache: /home/coder/.cache/huggingface
+
+# THREE mcp: entries, not two — the PLN §2 dual-entry decision. wire_plugins.py
+# wires a LOCAL (command:) entry into every MCP-capable agent, but a REMOTE
+# (url:) entry into Claude's .mcp.json only (src/wire_plugins.py's own module
+# docstring: "A spec is LOCAL ({command, args} — stdio, wired into every
+# agent) or env-scoped REMOTE ({url, headers} — http, wired into Claude's
+# .mcp.json only)"). So:
+#   - basic-memory reaches Claude over the durable HTTP server (bm-server
+#     below is simultaneously the file watcher, the MCP endpoint, and the
+#     sole SQLite writer — see README).
+#   - basic-memory-stdio is a DISTINCT server name (url and command entries
+#     cannot share one name — see README) carrying the plain `bm mcp` stdio
+#     form, so it reaches every other agent vendor. A stdio `bm mcp` spawned
+#     by a non-Claude agent is briefly a second SQLite writer while that
+#     agent's session holds it open — the same multi-writer exposure entry
+#     gate 0(d) already characterises as tolerable, and it shrinks to zero
+#     once url wiring goes multi-vendor (PLN §2).
+#   - collabrain is the tripwires MCP server (check_tripwires — see AGENTS.md).
+#     Local stdio; the collabrain repo is a container-declared dependency,
+#     not something this plugin installs or clones (see README).
+mcp:
+  basic-memory:
+    url: "http://127.0.0.1:8801/mcp"
+  basic-memory-stdio:
+    command: bm
+    args: [mcp]
+  collabrain:
+    command: uv
+    args: [--directory, /workspace/repos/collabrain, run, collabrain, tripwires-mcp]
+
+# Four in-container processes, started idempotently at the end of `./djinn up`
+# under a logging restart wrapper (tmux session svc-<name>) — services: is a
+# NEW plugin.yml key landing in brassbottle PR [1/3] (branch plugin-services,
+# src/manifest.py + up.sh + src/plugin_services.py); this plugin (PR [2/3])
+# is written to that schema. bm-server is the single long-lived process that
+# is simultaneously the file watcher, the MCP endpoint (basic-memory above),
+# and the sole SQLite writer. capture/scheduler/review are the collabrain CLI
+# subprocesses that used to be hand-started in tmux (PLN §2's "hand-started by
+# a human who remembered to do it").
+services:
+  bm-server: "bm mcp --transport streamable-http --host 127.0.0.1 --port 8801"
+  capture: "uv --directory /workspace/repos/collabrain run collabrain capture --watch"
+  scheduler: "uv --directory /workspace/repos/collabrain run collabrain schedule"
+  review: "uv --directory /workspace/repos/collabrain run collabrain review --port 8830"

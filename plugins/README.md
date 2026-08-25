@@ -41,6 +41,7 @@ opinion.
 | [`serena`](serena/) | local (stdio, baked) | — | [README](serena/README.md) |
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
 | [`codebase-memory`](codebase-memory/) | local (stdio, baked) | — | [README](codebase-memory/README.md) |
+| [`collabrain`](collabrain/) | local + remote HTTP (Claude only) + 4 in-container `services:` | auto at `./djinn up` (in-container, not `./djinn service`) | [README](collabrain/README.md) |
 | [`gateway`](gateway/) | remote HTTP | `./djinn service gateway` | [README](gateway/README.md) |
 | [`proxyman`](proxyman/) | remote HTTP | `./djinn service proxyman` | [README](proxyman/README.md) |
 | [`browser`](browser/) | remote HTTP | `./djinn service browser <container>` | [README](browser/README.md) |
