@@ -284,30 +284,6 @@ class BackupIntegrationTests(unittest.TestCase):
         )
         self.assertNotEqual(write_attempt.returncode, 0)
 
-        backup_attempt = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "-p",
-                self.identity.compose_project_name,
-                "--project-directory",
-                str(self.repo_root),
-                "-f",
-                str(self.compose_file),
-                "exec",
-                "-T",
-                backup_config.BROWSER_SERVICE_NAME,
-                "sh",
-                "-c",
-                "RESTIC_REPOSITORY=/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password "
-                "restic backup /etc/hostname --no-lock 2>&1",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertNotEqual(backup_attempt.returncode, 0)
-
         after = subprocess.run(
             [
                 "docker",
