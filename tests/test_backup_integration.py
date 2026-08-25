@@ -253,10 +253,11 @@ class BackupIntegrationTests(unittest.TestCase):
                 backup_config.BROWSER_SERVICE_NAME,
                 "sh",
                 "-c",
-                f"{restic_env} restic snapshots",
+                f"{restic_env} restic snapshots --no-lock",
             ],
             capture_output=True,
             text=True,
+            timeout=30,
         )
         self.assertEqual(before.returncode, 0)
 
@@ -279,6 +280,7 @@ class BackupIntegrationTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            timeout=30,
         )
         self.assertNotEqual(write_attempt.returncode, 0)
 
@@ -302,6 +304,7 @@ class BackupIntegrationTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            timeout=30,
         )
         self.assertNotEqual(backup_attempt.returncode, 0)
 
@@ -320,10 +323,11 @@ class BackupIntegrationTests(unittest.TestCase):
                 backup_config.BROWSER_SERVICE_NAME,
                 "sh",
                 "-c",
-                f"{restic_env} restic snapshots",
+                f"{restic_env} restic snapshots --no-lock",
             ],
             capture_output=True,
             text=True,
+            timeout=30,
         )
         self.assertEqual(after.returncode, 0)
         self.assertEqual(after.stdout, before.stdout)
