@@ -172,6 +172,29 @@ class BackupServiceLoggingTests(unittest.TestCase):
             with self.assertRaises(backup_service.BackupServiceConfigError):
                 backup_service.load_daemon_config()
 
+    def test_should_run_prune_false_until_interval_elapses(self):
+        self.assertFalse(backup_service.should_run_prune(100.0, 100.0, 86400))
+        self.assertFalse(backup_service.should_run_prune(50000.0, 100.0, 86400))
+        self.assertTrue(backup_service.should_run_prune(86501.0, 100.0, 86400))
+
+    def test_daemon_loop_skips_prune_on_first_iteration(self):
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "BACKUP_SOURCES": "/sources/artifacts",
+                "BACKUP_INTERVAL_SECONDS": "600",
+                "PRUNE_INTERVAL_SECONDS": "86400",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch("backup_service.ensure_repo_initialized"):
+                with unittest.mock.patch("backup_service.run_backup"):
+                    with unittest.mock.patch("backup_service.run_forget") as forget:
+                        with unittest.mock.patch("backup_service.time.sleep", side_effect=StopIteration):
+                            with self.assertRaises(StopIteration):
+                                backup_service.daemon_loop()
+        forget.assert_not_called()
+
     def test_daemon_loop_exits_on_invalid_config(self):
         with unittest.mock.patch.dict(
             os.environ,

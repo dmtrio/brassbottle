@@ -8,19 +8,66 @@ Stdlib only (matches ensure_net.py / manifest.py).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
 import textwrap
 from pathlib import Path
 
-# Singleton identity — fixed across every bottle's `djinn up` project.
-COMPOSE_PROJECT_NAME = "djinn-backup"
+# Singleton identity prefix — suffix is derived per resolved DJINN_HOME.
+IDENTITY_PREFIX = "djinn-backup"
 SERVICE_NAME = "backup"
-CONTAINER_NAME = "djinn-backup"
-IMAGE_TAG = "djinn-backup:local"
-# Stable restic hostname — Docker's default changes on container recreation.
-BACKUP_HOSTNAME = "djinn-backup"
+IDENTITY_SUFFIX_LENGTH = 8
+
+
+class BackupIdentity:
+    """Stable Docker identity for one djinn installation (all bottles share it)."""
+
+    def __init__(
+        self,
+        suffix: str,
+        compose_project_name: str,
+        container_name: str,
+        hostname: str,
+        image_tag: str,
+    ) -> None:
+        self.suffix = suffix
+        self.compose_project_name = compose_project_name
+        self.container_name = container_name
+        self.hostname = hostname
+        self.image_tag = image_tag
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, BackupIdentity):
+            return NotImplemented
+        return (
+            self.suffix == other.suffix
+            and self.compose_project_name == other.compose_project_name
+            and self.container_name == other.container_name
+            and self.hostname == other.hostname
+            and self.image_tag == other.image_tag
+        )
+
+
+def identity_suffix(base_path: Path) -> str:
+    """Short deterministic suffix from resolved DJINN_HOME (never the full path)."""
+    resolved = str(base_path.expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    return digest[:IDENTITY_SUFFIX_LENGTH]
+
+
+def derive_identity(base_path: Path) -> BackupIdentity:
+    """Compose project/container/hostname/image names scoped to one djinn home."""
+    suffix = identity_suffix(base_path)
+    stem = f"{IDENTITY_PREFIX}-{suffix}"
+    return BackupIdentity(
+        suffix=suffix,
+        compose_project_name=stem,
+        container_name=stem,
+        hostname=stem,
+        image_tag=f"{IDENTITY_PREFIX}:{suffix}",
+    )
 
 # In-container mount targets (stable regardless of bottle count).
 SOURCE_ARTIFACTS_MOUNT = "/sources/artifacts"
@@ -168,6 +215,7 @@ def ensure_layout(base_path: Path) -> dict[str, Path]:
 
 def render_compose_yaml(
     *,
+    identity: BackupIdentity,
     artifacts_root: Path,
     browser_tmp_root: Path,
     backup_repo: Path,
@@ -204,9 +252,9 @@ def render_compose_yaml(
             build:
               context: .
               dockerfile: backup/Dockerfile
-            image: {IMAGE_TAG}
-            container_name: {CONTAINER_NAME}
-            hostname: {BACKUP_HOSTNAME}
+            image: {identity.image_tag}
+            container_name: {identity.container_name}
+            hostname: {identity.hostname}
             restart: unless-stopped
             environment:
               RESTIC_REPOSITORY: file:{REPO_MOUNT}
@@ -226,7 +274,9 @@ def write_compose_file(base_path: Path) -> Path:
     """Ensure layout and write the generated compose overlay."""
     p = ensure_layout(base_path)
     cfg = load_host_backup_config()
+    identity = derive_identity(base_path)
     content = render_compose_yaml(
+        identity=identity,
         artifacts_root=p["artifacts_root"],
         browser_tmp_root=p["browser_tmp_root"],
         backup_repo=p["repo"],
@@ -248,7 +298,7 @@ def write_compose_file(base_path: Path) -> Path:
 
 def bottle_compose_must_not_reference_backup(compose_text: str) -> None:
     """Guardrail: bottle static compose must not mount backup paths."""
-    forbidden = ("/backups", "restic-password", "restic-repo", CONTAINER_NAME)
+    forbidden = ("/backups", "restic-password", "restic-repo", IDENTITY_PREFIX)
     for token in forbidden:
         if token in compose_text:
             raise BackupConfigError(

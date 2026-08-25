@@ -170,6 +170,72 @@ class RestoreSafetyTests(unittest.TestCase):
                 compose_file=self.base / "compose" / "backup.yml",
             )
 
+    def test_rejects_non_empty_existing_directory(self):
+        target = self.base / "restore-out"
+        target.mkdir()
+        (target / "leftover.txt").write_text("stale")
+        with self.assertRaises(RestoreTargetError):
+            validate_restore_target(
+                target,
+                artifacts_root=self.artifacts,
+                browser_tmp_root=self.browser_tmp,
+                backup_root=self.base / "backups",
+                repo=self.base / "backups" / "restic-repo",
+                password_file=self.base / "backups" / "restic-password",
+                compose_dir=self.base / "compose",
+                compose_file=self.base / "compose" / "backup.yml",
+            )
+
+    def test_accepts_empty_existing_directory(self):
+        target = self.base / "restore-empty"
+        target.mkdir()
+        resolved = validate_restore_target(
+            target,
+            artifacts_root=self.artifacts,
+            browser_tmp_root=self.browser_tmp,
+            backup_root=self.base / "backups",
+            repo=self.base / "backups" / "restic-repo",
+            password_file=self.base / "backups" / "restic-password",
+            compose_dir=self.base / "compose",
+            compose_file=self.base / "compose" / "backup.yml",
+        )
+        self.assertEqual(resolved, target.resolve())
+
+    def test_rejects_symlink_to_non_empty_directory(self):
+        real = self.base / "real-target"
+        real.mkdir()
+        (real / "data.txt").write_text("content")
+        link = self.base / "restore-link"
+        link.symlink_to(real)
+        with self.assertRaises(RestoreTargetError):
+            validate_restore_target(
+                link,
+                artifacts_root=self.artifacts,
+                browser_tmp_root=self.browser_tmp,
+                backup_root=self.base / "backups",
+                repo=self.base / "backups" / "restic-repo",
+                password_file=self.base / "backups" / "restic-password",
+                compose_dir=self.base / "compose",
+                compose_file=self.base / "compose" / "backup.yml",
+            )
+
+    def test_accepts_symlink_to_empty_directory(self):
+        real = self.base / "empty-target"
+        real.mkdir()
+        link = self.base / "restore-link-empty"
+        link.symlink_to(real)
+        resolved = validate_restore_target(
+            link,
+            artifacts_root=self.artifacts,
+            browser_tmp_root=self.browser_tmp,
+            backup_root=self.base / "backups",
+            repo=self.base / "backups" / "restic-repo",
+            password_file=self.base / "backups" / "restic-password",
+            compose_dir=self.base / "compose",
+            compose_file=self.base / "compose" / "backup.yml",
+        )
+        self.assertEqual(resolved, real.resolve())
+
     def test_requires_explicit_target(self):
         with self.assertRaises(RestoreTargetError):
             validate_restore_target(

@@ -30,6 +30,10 @@ jobs:
         run: docker build -t djinn-ci-smoke .
       - name: Backup image builds
         run: docker build -f backup/Dockerfile -t djinn-backup-ci-smoke .
+      - name: Backup integration smoke
+        env:
+          DJINN_BACKUP_CI_IMAGE: djinn-backup-ci-smoke
+        run: python3 -m unittest tests.test_backup_integration -v
       - name: Entry point exists
         # A green build with a missing/renamed entrypoint is still a broken
         # container — assert the declared ENTRYPOINT file is present and

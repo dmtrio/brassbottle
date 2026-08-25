@@ -33,6 +33,15 @@ def _conflicts_with_forbidden(resolved: Path, forbidden: Path) -> bool:
     return False
 
 
+def _directory_nonempty(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    try:
+        return any(path.iterdir())
+    except OSError:
+        return True
+
+
 def validate_restore_target(
     target: str | Path,
     *,
@@ -71,5 +80,10 @@ def validate_restore_target(
             raise RestoreTargetError(
                 f"restore target must not overlap protected path ({label}): {resolved}"
             )
+
+    if _directory_nonempty(resolved):
+        raise RestoreTargetError(
+            f"restore target directory must be empty or not exist: {resolved}"
+        )
 
     return resolved
