@@ -28,17 +28,21 @@ IMPORT_DOC = textwrap.dedent(
     """\
     # Backrest first-run import
 
-    Automatic seeding did not create `config/config.json` (the repository may
-    not be initialized yet, or the restic config export could not be read).
-    Backrest will start with an empty configuration — **do not create backup
+    Automatic seeding did not create `config/config.json` because the restic
+    repository is not initialized yet. `./djinn backup browser start` will
+    still launch Backrest with an empty configuration — **do not create backup
     plans**; djinn's Python scheduler owns backup policy and retention.
 
     ## When the restic repository exists
 
-    1. Run `./djinn backup start` and wait for at least one snapshot.
-    2. Run `./djinn backup browser start` again (seeding is retried when
+    1. Run `./djinn backup start` and wait for repository init (or a snapshot).
+    2. Run `./djinn backup browser start` again (seeding runs when
        `config/config.json` is still absent).
     3. Open the UI URL from `./djinn backup browser url`.
+
+    If the repository is initialized but browser start fails with a missing
+    config export, the backup container has not refreshed `restic-repo/config.json`
+    yet — run `./djinn backup start` first, then retry browser start.
 
     ## Manual import (if seeding keeps skipping)
 
@@ -88,6 +92,7 @@ def build_seed_config(*, instance: str, repo_guid: str) -> dict:
                 "flags": ["--no-lock"],
                 "prunePolicy": {"schedule": _disabled_schedule()},
                 "checkPolicy": {"schedule": _disabled_schedule()},
+                "forgetPolicy": {"schedule": _disabled_schedule()},
                 "autoUnlock": False,
                 "autoInitialize": False,
             }
@@ -160,8 +165,10 @@ def seed_backrest_config(base_path: Path) -> str:
 
     guid = read_restic_repo_guid(p["repo"], p["password_file"])
     if guid is None:
-        write_import_doc(p["browser_import_doc"])
-        return "skipped-guid-unavailable"
+        raise BrowserSeedError(
+            "restic repository is initialized but config export is missing or invalid — "
+            "run: ./djinn backup start (wait for init), then retry: ./djinn backup browser start"
+        )
 
     identity = derive_identity(base_path)
     instance = f"djinn-{identity.suffix}"
@@ -187,12 +194,22 @@ def seed_backrest_config(base_path: Path) -> str:
         if fd is not None:
             os.close(fd)
 
+    validate_seed_config(config_path)
     if p["browser_import_doc"].is_file():
         try:
             p["browser_import_doc"].unlink()
         except OSError:
             pass
     return "seeded"
+
+
+def _require_disabled_schedule(repo: dict, policy_key: str) -> None:
+    policy = repo.get(policy_key)
+    if not isinstance(policy, dict):
+        raise BackupConfigError(f"Backrest repo must disable {policy_key}")
+    schedule = policy.get("schedule")
+    if not isinstance(schedule, dict) or not schedule.get("disabled"):
+        raise BackupConfigError(f"Backrest repo {policy_key} schedule must be disabled")
 
 
 def validate_seed_config(config_path: Path) -> None:
@@ -210,3 +227,5 @@ def validate_seed_config(config_path: Path) -> None:
             raise BackupConfigError("Backrest repo must include --no-lock flag")
         if repo.get("autoInitialize"):
             raise BackupConfigError("Backrest repo must not auto-initialize")
+        for policy_key in ("prunePolicy", "checkPolicy", "forgetPolicy"):
+            _require_disabled_schedule(repo, policy_key)

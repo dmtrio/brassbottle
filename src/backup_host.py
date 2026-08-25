@@ -281,7 +281,11 @@ def cmd_browser_start(base_path: Path) -> int:
         write_compose_file(base_path)
         seed_status = seed_backrest_config(base_path)
     except (BackupConfigError, BrowserSeedError) as exc:
-        print(f"backup browser start error reason={exc}", file=sys.stderr)
+        print(
+            f"backup browser start error duration={time.monotonic() - started:.2f}s "
+            f"reason={exc}",
+            file=sys.stderr,
+        )
         return 1
     try:
         result = _run(

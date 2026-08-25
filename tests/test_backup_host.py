@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+import backup_browser
 import backup_host
 
 
@@ -285,6 +286,25 @@ class BackupHostTests(unittest.TestCase):
                 rc = backup_host.main(["--base-path", str(base), "browser", "url"])
             self.assertEqual(rc, 0)
             self.assertIn("http://127.0.0.1:", stdout.getvalue())
+
+    def test_browser_start_fails_when_seed_raises_guid_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            stderr = io.StringIO()
+            with mock.patch("backup_host.write_compose_file", return_value=base / "compose" / "backup.yml"):
+                with mock.patch(
+                    "backup_host.seed_backrest_config",
+                    side_effect=backup_browser.BrowserSeedError(
+                        "restic repository is initialized but config export is missing or invalid — "
+                        "run: ./djinn backup start (wait for init), then retry: ./djinn backup browser start"
+                    ),
+                ):
+                    with mock.patch("sys.stderr", stderr):
+                        rc = backup_host.main(["--base-path", str(base), "browser", "start"])
+            self.assertEqual(rc, 1)
+            err = stderr.getvalue()
+            self.assertIn("backup browser start error", err)
+            self.assertIn("./djinn backup start", err)
 
     def test_browser_start_logs_seed_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:

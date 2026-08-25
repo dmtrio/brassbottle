@@ -90,9 +90,31 @@ port before `./djinn backup browser start` (which regenerates compose):
 
 On first `browser start`, if the restic repository is already initialized and
 `backups/browser/config/config.json` does not exist, djinn seeds a minimal
-Backrest config (one repo, no plans). An existing Backrest config is **never**
-overwritten. If seeding cannot run (empty repo, missing `restic-repo/config.json` export), see
-`backups/browser/IMPORT.md` for a short manual import checklist.
+Backrest config (one repo, no plans, all maintenance schedules disabled). An
+existing Backrest config is **never** overwritten. If the repository is not
+initialized yet, browser start still launches Backrest with an empty config and
+writes `backups/browser/IMPORT.md` with a manual import checklist.
+
+If the repository **is** initialized but `restic-repo/config.json` (the export
+written by the backup container) is missing or invalid, browser start **fails**
+with an instruction to run `./djinn backup start` first so the container can
+refresh the export.
+
+### Resetting Backrest after repository reinitialization
+
+If you deliberately delete and reinitialize `backups/restic-repo/` (or replace
+it with a new repository), the backup container refreshes `restic-repo/config.json`
+on the next successful `./djinn backup start`. Backrest keeps its own state under
+`backups/browser/` and is **not** updated automatically — a stale `config.json`
+there still points at the old repository GUID.
+
+To browse the new repository in Backrest:
+
+1. Stop the browser: `./djinn backup browser stop`
+2. Remove Backrest state (at minimum `backups/browser/config/config.json`; delete
+   `backups/browser/data/` and `backups/browser/cache/` if indexing looks wrong)
+3. Run `./djinn backup start` and confirm `backups/restic-repo/config.json` exists
+4. Run `./djinn backup browser start` to seed a fresh browse-only config
 
 ```text
 ./djinn backup start                 # scheduled backups (required first)
