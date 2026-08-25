@@ -1350,6 +1350,54 @@ class TestWireCodexSettingsBlock(QuietTestCase):
             # sorted keys, TOML literals (not Python repr)
             self.assertIn("b = true\nn = 7\noff = false\ns = \"a\\\"b\"\n", content)
 
+    def test_hand_written_managed_key_is_dropped_not_duplicated(self):
+        """~/.codex is a persisted volume, so the hand edit this mechanism
+        replaces outlives the rebuild that starts managing the key. Two
+        top-level sandbox_mode lines would make codex reject its own config."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                'sandbox_mode = "workspace-write"\nmodel = "gpt-5.6-terra"\n')
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            content = config_path.read_text()
+            self.assertEqual(content.count("sandbox_mode"), 1)
+            self.assertNotIn("workspace-write", content)
+            self.assertIn('model = "gpt-5.6-terra"', content)
+
+    def test_same_key_inside_a_table_is_left_alone(self):
+        """A bare key under a [table] is a different key — only the top-level
+        region shadows the managed block."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[profiles.safe]\nsandbox_mode = "workspace-write"\n')
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            content = config_path.read_text()
+            self.assertIn('[profiles.safe]', content)
+            self.assertIn('workspace-write', content)
+            self.assertEqual(content.count("sandbox_mode"), 2)
+
+    def test_unmanaged_keys_are_never_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('sandbox_mode_extra = 1\nmodel = "x"\n')
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            content = config_path.read_text()
+            self.assertIn("sandbox_mode_extra = 1", content)
+            self.assertIn('model = "x"', content)
+
+    def test_log_names_only_the_blocks_actually_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                wire_plugins.wire_codex_toml(config_path, {}, self.SETTINGS)
+            self.assertIn("1 agent setting(s)", out.getvalue())
+            self.assertNotIn("plugin MCP server", out.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                wire_plugins.wire_codex_toml(config_path, self.PLUGINS, {})
+            self.assertIn("1 plugin MCP server(s)", out.getvalue())
+            self.assertNotIn("agent setting", out.getvalue())
+
     def test_payload_settings_require_the_codex_strategy(self):
         entry = {"binary": "kimi", "config_path": ".kimi/mcp.json", "format": "json",
                  "dialect": "mcpServers", "env_refs": True, "strategy": "",

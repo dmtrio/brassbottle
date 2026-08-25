@@ -22,10 +22,19 @@ mcp:
   strategy: codex_managed_block
 
 # Top-level keys stamped into ~/.codex/config.toml as a managed head block.
-# The container IS the sandbox — an outer boundary codex cannot see and its
-# own seccomp/landlock layer only duplicates, at the cost of breaking ordinary
-# work (writes outside the cwd, the egress-firewalled network it is allowed to
-# reach). danger-full-access is the correct setting INSIDE a djinn bottle and
-# nowhere else.
+# The container is the enforcing boundary here — one codex cannot see, and one
+# its own seccomp/landlock layer mostly duplicates at the cost of breaking
+# ordinary work (writes outside the cwd, the egress-firewalled network it is
+# explicitly allowed to reach).
+#
+# ACCEPTED TRADEOFF, stated so the next reader does not re-derive it: the
+# duplication is not total. /artifacts is bind-mounted to the user's Mac, so
+# dropping codex's own workspace-write restriction lets an unattended run
+# overwrite or delete files on the HOST there. That is the same reach every
+# other agent in the bottle already has, and /artifacts is an outbox by
+# design; the alternative (workspace-write plus explicit writable roots) buys
+# back only that one directory while re-breaking cross-worktree work.
+# danger-full-access is therefore correct INSIDE a djinn bottle and nowhere
+# else.
 config_settings:
   sandbox_mode: danger-full-access
