@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -21,6 +22,8 @@ import backup_browser  # noqa: E402
 
 
 def docker_available() -> bool:
+    if os.environ.get("DJINN_SKIP_BACKUP_INTEGRATION") == "1":
+        return False
     try:
         subprocess.run(
             ["docker", "info"],
@@ -35,6 +38,16 @@ def docker_available() -> bool:
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, text=True, check=True, **kwargs)
+
+
+class BackupIntegrationDiscoveryTests(unittest.TestCase):
+    def test_explicit_skip_prevents_early_docker_integration(self):
+        with mock.patch.dict(
+            os.environ, {"DJINN_SKIP_BACKUP_INTEGRATION": "1"}, clear=False
+        ):
+            with mock.patch("subprocess.run") as run:
+                self.assertFalse(docker_available())
+        run.assert_not_called()
 
 
 @unittest.skipUnless(docker_available(), "docker not available")

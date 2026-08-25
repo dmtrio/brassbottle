@@ -348,7 +348,7 @@ printf '%s' "$A_PAYLOAD" | jq -e '
     || fail "agent_servers payload wrong: $A_PAYLOAD"
 
 echo "── python unit tests (src/manifest.py + src/wire_plugins.py)"
-UNIT_OUT=$(python3 -m unittest discover -s tests 2>&1) \
+UNIT_OUT=$(DJINN_SKIP_BACKUP_INTEGRATION=1 python3 -m unittest discover -s tests 2>&1) \
     && pass "python3 -m unittest discover -s tests" \
     || { fail "unit tests failed:"; printf '%s\n' "$UNIT_OUT" | tail -30; }
 
