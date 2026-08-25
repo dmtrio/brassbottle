@@ -1274,6 +1274,105 @@ class TestWireCodexTomlMarkerEdges(QuietTestCase):
             self.assertIn("[mcp_servers.p]", content)
 
 
+class TestWireCodexSettingsBlock(QuietTestCase):
+    """config_settings render as a SECOND managed block at the head of the
+    file — bare TOML keys are only top-level when nothing has opened a table
+    above them, which is the mirror image of why the MCP block sits at the
+    tail."""
+
+    PLUGINS = {"serena": {"command": "bash", "args": ["-lc", "x"]}}
+    SETTINGS = {"sandbox_mode": "danger-full-access"}
+
+    def test_settings_precede_every_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            content = config_path.read_text()
+            self.assertLess(content.index("sandbox_mode"), content.index("[mcp_servers."))
+            self.assertIn('sandbox_mode = "danger-full-access"', content)
+            self.assertIn("# >>> djinn codex settings", content)
+            self.assertIn("# <<< djinn codex settings", content)
+            self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o600)
+
+    def test_hand_added_content_survives_between_the_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('model = "gpt-5.6-terra"\n[projects."/workspace"]\ntrust_level = "trusted"\n')
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            content = config_path.read_text()
+            self.assertIn('model = "gpt-5.6-terra"', content)
+            self.assertIn('[projects."/workspace"]', content)
+            self.assertLess(content.index("# <<< djinn codex settings"), content.index("model ="))
+            self.assertLess(content.index('trust_level'), content.index("# >>> djinn plugin MCP"))
+
+    def test_rerun_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text("keep = 1\n")
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            first = config_path.read_text()
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            self.assertEqual(config_path.read_text(), first)
+            self.assertEqual(first.count("sandbox_mode"), 1)
+
+    def test_dropping_settings_strips_the_stale_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS, {})
+            content = config_path.read_text()
+            self.assertNotIn("sandbox_mode", content)
+            self.assertNotIn("djinn codex settings", content)
+            self.assertIn("[mcp_servers.serena]", content)
+
+    def test_no_settings_renders_no_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            wire_plugins.wire_codex_toml(config_path, self.PLUGINS)
+            self.assertNotIn("djinn codex settings", config_path.read_text())
+
+    def test_unclosed_settings_block_raises_and_leaves_file_intact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            original = "# >>> djinn codex settings >>>\nuser_config = 1\n"
+            config_path.write_text(original)
+            with self.assertRaises(wire_plugins.WireError) as cm:
+                wire_plugins.wire_codex_toml(config_path, self.PLUGINS, self.SETTINGS)
+            self.assertIn("repair the markers", str(cm.exception))
+            self.assertEqual(config_path.read_text(), original)
+
+    def test_scalar_types_render_as_toml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            wire_plugins.wire_codex_toml(
+                config_path, {}, {"b": True, "off": False, "n": 7, "s": 'a"b'})
+            content = config_path.read_text()
+            # sorted keys, TOML literals (not Python repr)
+            self.assertIn("b = true\nn = 7\noff = false\ns = \"a\\\"b\"\n", content)
+
+    def test_payload_settings_require_the_codex_strategy(self):
+        entry = {"binary": "kimi", "config_path": ".kimi/mcp.json", "format": "json",
+                 "dialect": "mcpServers", "env_refs": True, "strategy": "",
+                 "settings": {"sandbox_mode": "danger-full-access"}}
+        with self.assertRaises(wire_plugins.WireError) as cm:
+            wire_plugins._normalize_agent_mcp_entry(entry, "agents[0]")
+        self.assertIn("only rendered by strategy codex_managed_block", str(cm.exception))
+
+    def test_payload_settings_reject_non_bare_key(self):
+        entry = {"binary": "codex", "config_path": ".codex/config.toml", "format": "toml",
+                 "dialect": "", "env_refs": False, "strategy": "codex_managed_block",
+                 "settings": {"not a key": 1}}
+        with self.assertRaises(wire_plugins.WireError) as cm:
+            wire_plugins._normalize_agent_mcp_entry(entry, "agents[0]")
+        self.assertIn("bare TOML key", str(cm.exception))
+
+    def test_payload_settings_default_to_empty_when_absent(self):
+        entry = {"binary": "codex", "config_path": ".codex/config.toml", "format": "toml",
+                 "dialect": "", "env_refs": False, "strategy": "codex_managed_block"}
+        self.assertEqual(
+            wire_plugins._normalize_agent_mcp_entry(entry, "agents[0]")["settings"], {})
+
+
 class TestBuildPayload(unittest.TestCase):
     """Host-side payload assembly from descriptor + server env inputs."""
 
