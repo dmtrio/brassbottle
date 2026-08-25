@@ -1566,5 +1566,120 @@ class TestPluginVolumes(unittest.TestCase):
         self.assertIn("  shared:", d["PLUGIN_COMPOSE_YAML"])
 
 
+class TestPluginServices(unittest.TestCase):
+    """services: — in-container processes started (idempotently, restart-
+    wrapped) at `up`. Optional; absent everywhere today (Phase 1 Hardening
+    PLN §2). Aggregated into PLUGIN_SERVICES the same way volumes/egress fold
+    across enabled plugins."""
+
+    SVC = {"install": "x", "mcp": {"cbm": {"command": "cbm"}},
+           "services": {"cbm-watch": "cbm --watch"}}
+    FILES = {**PLUGIN_FILES, "svc": SVC}
+
+    def _derive(self, man):
+        return derive(man, plugin_files=self.FILES)
+
+    def test_absent_services_key_is_a_noop(self):
+        # Every existing PLUGIN_FILES fixture declares no services: — this
+        # pins zero behavior change for containers that don't opt in.
+        self.assertEqual(derive({"plugins": ["serena"]})["PLUGIN_SERVICES"], "")
+
+    def test_services_export_line_shape(self):
+        out = self._derive({"plugins": ["svc"]})["PLUGIN_SERVICES"]
+        self.assertEqual(out, "cbm-watch\tcbm --watch\tsvc\n")
+
+    def test_a_plugin_may_declare_services_without_a_server(self):
+        files = {"p": {"services": {"only-svc": "run-it"}}}
+        d = derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertEqual(d["PLUGIN_SERVICES"], "only-svc\trun-it\tp\n")
+
+    def test_export_sorted_by_name_independent_of_plugin_order(self):
+        two = {"a": {"services": {"zzz": "run-z"}},
+               "b": {"services": {"aaa": "run-a"}}}
+        forward = derive({"plugins": ["a", "b"]}, plugin_files=two)
+        reverse = derive({"plugins": ["b", "a"]}, plugin_files=two)
+        self.assertEqual(forward["PLUGIN_SERVICES"], reverse["PLUGIN_SERVICES"])
+        self.assertEqual(forward["PLUGIN_SERVICES"],
+                         "aaa\trun-a\tb\nzzz\trun-z\ta\n")
+
+    def test_services_of_unenabled_plugins_are_absent(self):
+        self.assertEqual(self._derive({"plugins": ["serena"]})["PLUGIN_SERVICES"], "")
+
+    ERROR_CASES = [
+        ("not a map", {"services": ["cbm --watch"]},
+         "plugin 'p' services must be a map of NAME: command"),
+        ("empty command", {"services": {"svc": ""}},
+         "plugin 'p' service 'svc': command must be a non-empty string"),
+        ("whitespace-only command", {"services": {"svc": "   "}},
+         "plugin 'p' service 'svc': command must be a non-empty string"),
+        ("non-string command", {"services": {"svc": ["cbm", "--watch"]}},
+         "plugin 'p' service 'svc': command must be a non-empty string"),
+        ("uppercase name", {"services": {"Svc": "cbm --watch"}},
+         "plugin 'p' service 'Svc': illegal characters (allowed: lowercase "
+         "letters, digits, dash — it becomes a tmux session name)"),
+        ("underscore name", {"services": {"svc_name": "cbm --watch"}},
+         "plugin 'p' service 'svc_name': illegal characters (allowed: lowercase "
+         "letters, digits, dash — it becomes a tmux session name)"),
+        ("empty name", {"services": {"": "cbm --watch"}},
+         "plugin 'p' service '': illegal characters (allowed: lowercase "
+         "letters, digits, dash — it becomes a tmux session name)"),
+        ("dotted name", {"services": {"svc.name": "cbm --watch"}},
+         "plugin 'p' service 'svc.name': illegal characters (allowed: lowercase "
+         "letters, digits, dash — it becomes a tmux session name)"),
+    ]
+
+    def test_error_cases(self):
+        for name, doc, message in self.ERROR_CASES:
+            with self.subTest(name):
+                with self.assertRaises(m.ManifestError) as cm:
+                    derive({"plugins": ["p"]}, plugin_files={"p": doc})
+                self.assertEqual(str(cm.exception), message)
+
+    def test_two_plugins_cannot_share_a_service_name(self):
+        files = {"a": {"services": {"shared": "run-a"}},
+                 "b": {"services": {"shared": "run-b"}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["a", "b"]}, plugin_files=files)
+        self.assertEqual(
+            str(cm.exception),
+            "plugin 'b' service 'shared': already declared by plugin 'a' "
+            "(two plugins cannot share one service name)")
+
+    def test_disabled_plugin_does_not_collide_on_service_name(self):
+        # Only ENABLED plugins contend for the tmux/log namespace.
+        files = {"a": {"services": {"shared": "run-a"}},
+                 "b": {"services": {"shared": "run-b"}}}
+        d = derive({"plugins": ["a"]}, plugin_files=files)
+        self.assertEqual(d["PLUGIN_SERVICES"], "shared\trun-a\ta\n")
+
+    def test_a_plugin_may_declare_multiple_services(self):
+        files = {"p": {"services": {"one": "run-one", "two": "run-two"}}}
+        d = derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertEqual(d["PLUGIN_SERVICES"], "one\trun-one\tp\ntwo\trun-two\tp\n")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestServiceCommandCharset(unittest.TestCase):
+    """Review finding: TAB/newline in a command corrupts the TSV export."""
+
+    def _derive(self, cmd):
+        files = {**PLUGIN_FILES, "p": {"install": "x", "services": {"svc": cmd}}}
+        return derive({"plugins": ["p"]}, plugin_files=files)
+
+    def test_newline_in_command_rejected(self):
+        with self.assertRaisesRegex(m.ManifestError, "tabs or newlines"):
+            self._derive("export FOO=bar\nexec myserver")
+
+    def test_tab_in_command_rejected(self):
+        with self.assertRaisesRegex(m.ManifestError, "tabs or newlines"):
+            self._derive("echo a\tb")
+
+    def test_carriage_return_rejected(self):
+        with self.assertRaisesRegex(m.ManifestError, "tabs or newlines"):
+            self._derive("echo a\rb")
+
+    def test_plain_command_still_accepted(self):
+        self._derive("bm mcp --transport streamable-http --port 8801")

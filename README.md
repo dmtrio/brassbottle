@@ -46,8 +46,8 @@ Prefer the IDE? Attach with VS Code or Cursor:
   `djinn-my-app`.
 - A workspace volume at `/workspace` with `/workspace/repos` and
   `/workspace/worktrees`.
-- Agent CLIs from `agents/*/agent.yml` (`claude`, `codex`, `cursor`, `pi`,
-  `aider`, `kimi`, depending on your bottle).
+- Agent CLIs from `agents/*/agent.yml` (`claude`, `codex`, `cursor`, `agy`,
+  `pi`, `aider`, `kimi`, depending on your bottle).
 - Secret values composed outside the container into per-agent shim env files.
 - A default-deny egress firewall; add allowed domains in the bottle or with
   `./djinn allow`.

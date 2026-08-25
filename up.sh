@@ -491,6 +491,32 @@ docker exec "$CNAME" bash -c '
     printf "DJINN_UP_AT=%s\nDJINN_IMAGE_BUILT=%s\n" "$1" "$2" >> /etc/environment
 ' _ "$UP_AT" "$IMAGE_BUILT" || true
 
+# ── Plugin services (services: in plugin.yml — Phase 1 Hardening PLN §2) ──────
+# One `docker exec` PER service, after everything above so the container,
+# repos, and MCP wiring are already in place. src/plugin_services.py renders
+# an idempotent tmux-guard + logging restart wrapper for one (name, command)
+# pair and up.sh pipes it in on stdin (never `bash -c "<script>"` — see that
+# module's docstring for why); PLUGIN_SERVICES already carries only the
+# services of ENABLED plugins, cross-plugin name collisions already rejected
+# by src/manifest.py. `tmux has-session` inside the generated script makes a
+# repeat `./djinn up` restart only whatever died since the last run.
+if [ -n "$PLUGIN_SERVICES" ]; then
+    echo "  Plugin services:"
+    while IFS=$'\t' read -r SVC_NAME SVC_CMD SVC_PLUGIN; do
+        [ -n "$SVC_NAME" ] || continue
+        # Generate first, exec second: a pipeline would take docker exec's
+        # exit status and mask a generator failure (no pipefail in up.sh).
+        if SVC_SCRIPT=$("$PYTHON3" "$SCRIPT_DIR/src/plugin_services.py" "$SVC_NAME" "$SVC_CMD"); then
+            printf '%s\n' "$SVC_SCRIPT" | docker exec -i -u coder "$CNAME" bash \
+                || echo "  ! svc-$SVC_NAME (plugin '$SVC_PLUGIN') failed to start — see above"
+        else
+            echo "  ! svc-$SVC_NAME (plugin '$SVC_PLUGIN'): wrapper generation failed — see above"
+        fi
+    done <<EOF
+$PLUGIN_SERVICES
+EOF
+fi
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  $CNAME is up (manifest: $MANIFEST)"
