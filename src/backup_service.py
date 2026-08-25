@@ -85,14 +85,31 @@ def _repo_directory_has_data() -> bool:
         return True
 
 
-def _export_restic_config_json() -> None:
-    """Write restic `cat config --json` output for host-side Backrest seeding."""
+def _validate_restic_repo_id(value: object) -> str | None:
+    """Return a 64-char lowercase hex restic repository id, or None."""
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError:
+        return None
+    if len(decoded) != 32:
+        return None
+    return value.lower()
+
+
+def _export_restic_config_json() -> bool:
+    """Write restic `cat config --json` output for host-side Backrest seeding.
+
+    Refreshes the export atomically on every successful call so a replaced
+    repository cannot leave a stale GUID. Returns True when the export exists.
+    """
     repo = _restic_repo_path()
     if repo is None:
-        return
+        log_stage("export-config", "error", reason="RESTIC_REPOSITORY unset")
+        return False
+
     export_path = repo / "config.json"
-    if export_path.is_file():
-        return
     result = subprocess.run(
         ["restic", "cat", "config", "--json"],
         capture_output=True,
@@ -100,23 +117,45 @@ def _export_restic_config_json() -> None:
         check=False,
     )
     if result.returncode != 0:
-        return
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = detail[0][:200] if detail else "restic cat config failed"
+        log_stage("export-config", "error", exit_code=result.returncode, reason=reason)
+        return False
+
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return
-    repo_id = data.get("id")
-    if not isinstance(repo_id, str) or len(repo_id) != 64:
-        return
-    try:
-        bytes.fromhex(repo_id)
-    except ValueError:
-        return
+        log_stage("export-config", "error", reason="invalid-json")
+        return False
+
+    repo_id = _validate_restic_repo_id(data.get("id") if isinstance(data, dict) else None)
+    if repo_id is None:
+        log_stage("export-config", "error", reason="invalid-repo-id")
+        return False
+
     content = result.stdout if result.stdout.endswith("\n") else result.stdout + "\n"
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = export_path.with_name(f".config.json.{os.getpid()}.tmp")
+    fd: int | None = None
     try:
-        export_path.write_text(content, encoding="utf-8")
-    except OSError:
-        return
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            handle.write(content)
+        os.replace(tmp_path, export_path)
+        os.chmod(export_path, 0o600)
+    except OSError as exc:
+        if fd is not None:
+            os.close(fd)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        log_stage("export-config", "error", reason=str(exc)[:200])
+        return False
+
+    log_stage("export-config", "ok")
+    return True
 
 
 def ensure_repo_initialized() -> None:

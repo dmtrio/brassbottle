@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for in-container backup logging and retention behavior."""
 
+import json
 import os
 import subprocess
 import sys
@@ -12,6 +13,93 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import backup_service
+
+
+class BackupServiceExportTests(unittest.TestCase):
+    def _repo_env(self, repo: Path) -> dict[str, str]:
+        return {"RESTIC_REPOSITORY": f"file:{repo}"}
+
+    def test_export_restic_config_json_writes_valid_export(self):
+        guid = "f" * 64
+        stdout = json.dumps({"version": 2, "id": guid}) + "\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "restic-repo"
+            repo.mkdir()
+            with unittest.mock.patch.dict(os.environ, self._repo_env(repo), clear=False):
+                with unittest.mock.patch(
+                    "backup_service.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["restic", "cat", "config", "--json"], 0, stdout, ""
+                    ),
+                ):
+                    self.assertTrue(backup_service._export_restic_config_json())
+            export_path = repo / "config.json"
+            self.assertTrue(export_path.is_file())
+            self.assertEqual(oct(export_path.stat().st_mode & 0o777), oct(0o600))
+            self.assertEqual(json.loads(export_path.read_text())["id"], guid)
+
+    def test_export_restic_config_json_rejects_malformed_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "restic-repo"
+            repo.mkdir()
+            with unittest.mock.patch.dict(os.environ, self._repo_env(repo), clear=False):
+                with unittest.mock.patch(
+                    "backup_service.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["restic", "cat", "config", "--json"], 0, "not-json", ""
+                    ),
+                ):
+                    self.assertFalse(backup_service._export_restic_config_json())
+            self.assertFalse((repo / "config.json").exists())
+
+    def test_export_restic_config_json_rejects_invalid_repo_id(self):
+        stdout = json.dumps({"version": 2, "id": "too-short"}) + "\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "restic-repo"
+            repo.mkdir()
+            with unittest.mock.patch.dict(os.environ, self._repo_env(repo), clear=False):
+                with unittest.mock.patch(
+                    "backup_service.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["restic", "cat", "config", "--json"], 0, stdout, ""
+                    ),
+                ):
+                    self.assertFalse(backup_service._export_restic_config_json())
+            self.assertFalse((repo / "config.json").exists())
+
+    def test_export_restic_config_json_handles_subprocess_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "restic-repo"
+            repo.mkdir()
+            with unittest.mock.patch.dict(os.environ, self._repo_env(repo), clear=False):
+                with unittest.mock.patch(
+                    "backup_service.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["restic", "cat", "config", "--json"], 1, "", "repo locked"
+                    ),
+                ):
+                    self.assertFalse(backup_service._export_restic_config_json())
+            self.assertFalse((repo / "config.json").exists())
+
+    def test_export_restic_config_json_refreshes_existing_export(self):
+        old_guid = "0" * 64
+        new_guid = "1" * 64
+        old_stdout = json.dumps({"version": 2, "id": old_guid}) + "\n"
+        new_stdout = json.dumps({"version": 2, "id": new_guid}) + "\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "restic-repo"
+            repo.mkdir()
+            export_path = repo / "config.json"
+            export_path.write_text(old_stdout)
+            with unittest.mock.patch.dict(os.environ, self._repo_env(repo), clear=False):
+                with unittest.mock.patch(
+                    "backup_service.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["restic", "cat", "config", "--json"], 0, new_stdout, ""
+                    ),
+                ):
+                    self.assertTrue(backup_service._export_restic_config_json())
+            self.assertEqual(json.loads(export_path.read_text())["id"], new_guid)
 
 
 class BackupServiceLoggingTests(unittest.TestCase):

@@ -27,6 +27,18 @@ class BackupBrowserTests(unittest.TestCase):
         self.assertEqual(cfg["repos"][0]["flags"], ["--no-lock"])
         self.assertFalse(cfg["repos"][0]["autoInitialize"])
         self.assertTrue(cfg["auth"]["disabled"])
+        for policy_key in ("prunePolicy", "checkPolicy", "forgetPolicy"):
+            self.assertTrue(cfg["repos"][0][policy_key]["schedule"]["disabled"])
+
+    def test_validate_seed_config_rejects_enabled_maintenance_schedules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            payload = backup_browser.build_seed_config(instance="djinn-test", repo_guid="a" * 64)
+            payload["repos"][0]["forgetPolicy"]["schedule"]["disabled"] = False
+            config_path.write_text(json.dumps(payload) + "\n")
+            with self.assertRaises(backup_config.BackupConfigError) as ctx:
+                backup_browser.validate_seed_config(config_path)
+            self.assertIn("forgetPolicy", str(ctx.exception))
 
     def test_seed_skips_when_config_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,6 +72,26 @@ class BackupBrowserTests(unittest.TestCase):
             self.assertEqual(data["plans"], [])
             self.assertEqual(data["version"], backup_config.BACKREST_CONFIG_VERSION)
             backup_browser.validate_seed_config(p["browser_config_file"])
+
+    def test_seed_fails_when_repo_initialized_but_export_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            p = backup_config.ensure_layout(base)
+            (p["repo"] / "config").write_bytes(b"\x00" * 8)
+            with self.assertRaises(backup_browser.BrowserSeedError) as ctx:
+                backup_browser.seed_backrest_config(base)
+            self.assertIn("./djinn backup start", str(ctx.exception))
+            self.assertFalse(p["browser_config_file"].exists())
+
+    def test_seed_fails_when_repo_initialized_but_export_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            p = backup_config.ensure_layout(base)
+            (p["repo"] / "config").write_bytes(b"\x00" * 8)
+            (p["repo"] / backup_browser.RESTIC_REPO_CONFIG_JSON).write_text('{"id":"short"}\n')
+            with self.assertRaises(backup_browser.BrowserSeedError):
+                backup_browser.seed_backrest_config(base)
+            self.assertFalse(p["browser_config_file"].exists())
 
     def test_seed_never_overwrites_existing_config(self):
         with tempfile.TemporaryDirectory() as tmp:
