@@ -29,7 +29,7 @@ class BackupServiceExportTests(unittest.TestCase):
                 with unittest.mock.patch(
                     "backup_service.subprocess.run",
                     return_value=subprocess.CompletedProcess(
-                        ["restic", "cat", "config", "--json"], 0, stdout, ""
+                        ["restic", "cat", "config"], 0, stdout, ""
                     ),
                 ):
                     self.assertTrue(backup_service._export_restic_config_json())
@@ -46,7 +46,7 @@ class BackupServiceExportTests(unittest.TestCase):
                 with unittest.mock.patch(
                     "backup_service.subprocess.run",
                     return_value=subprocess.CompletedProcess(
-                        ["restic", "cat", "config", "--json"], 0, "not-json", ""
+                        ["restic", "cat", "config"], 0, "not-json", ""
                     ),
                 ):
                     self.assertFalse(backup_service._export_restic_config_json())
@@ -61,7 +61,7 @@ class BackupServiceExportTests(unittest.TestCase):
                 with unittest.mock.patch(
                     "backup_service.subprocess.run",
                     return_value=subprocess.CompletedProcess(
-                        ["restic", "cat", "config", "--json"], 0, stdout, ""
+                        ["restic", "cat", "config"], 0, stdout, ""
                     ),
                 ):
                     self.assertFalse(backup_service._export_restic_config_json())
@@ -75,7 +75,7 @@ class BackupServiceExportTests(unittest.TestCase):
                 with unittest.mock.patch(
                     "backup_service.subprocess.run",
                     return_value=subprocess.CompletedProcess(
-                        ["restic", "cat", "config", "--json"], 1, "", "repo locked"
+                        ["restic", "cat", "config"], 1, "", "repo locked"
                     ),
                 ):
                     self.assertFalse(backup_service._export_restic_config_json())
@@ -95,7 +95,7 @@ class BackupServiceExportTests(unittest.TestCase):
                 with unittest.mock.patch(
                     "backup_service.subprocess.run",
                     return_value=subprocess.CompletedProcess(
-                        ["restic", "cat", "config", "--json"], 0, new_stdout, ""
+                        ["restic", "cat", "config"], 0, new_stdout, ""
                     ),
                 ):
                     self.assertTrue(backup_service._export_restic_config_json())
