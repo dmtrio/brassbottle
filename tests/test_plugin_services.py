@@ -2,7 +2,9 @@
 """Unit tests for src/plugin_services.py — the generated per-service restart
 wrapper (Phase 1 Hardening PLN §2, services: schema, PR [1/3])."""
 
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -93,3 +95,25 @@ class TestMain(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTmuxFailureSurfaces(unittest.TestCase):
+    """Review finding: tmux failure must not report success / exit 0."""
+
+    def test_wrapper_fails_loudly_when_tmux_cannot_start(self):
+        script = ps.wrapper_script("demo", "sleep 1")
+        self.assertIn("FAILED to start", script)
+        # the success echo must be conditional on tmux new-session succeeding
+        self.assertIn("if tmux new-session", script)
+        self.assertIn("exit 1", script)
+
+    def test_wrapper_fails_at_runtime_without_tmux(self):
+        script = ps.wrapper_script("demo", "sleep 1")
+        with tempfile.TemporaryDirectory() as td:
+            env = {"PATH": td}  # no tmux, no coreutils beyond builtins
+            proc = subprocess.run(
+                ["/bin/bash", "-c", script.replace("/tmp/djinn-services", td)],
+                capture_output=True, text=True, env=env,
+            )
+        self.assertNotEqual(0, proc.returncode)
+        self.assertNotIn("started", proc.stdout)

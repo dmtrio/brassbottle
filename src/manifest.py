@@ -1146,6 +1146,11 @@ def derive(manifest, plugin_files, agent_files, env):
             if not isinstance(scmd, str) or not scmd.strip():
                 raise ManifestError(
                     f"plugin '{p}' service '{sname}': command must be a non-empty string")
+            if any(ch in scmd for ch in "\t\n\r"):
+                raise ManifestError(
+                    f"plugin '{p}' service '{sname}': command must not contain tabs or "
+                    "newlines (the PLUGIN_SERVICES export is TAB-separated lines; use "
+                    "a one-line command, e.g. `bash -lc '...'`)")
             owner = service_owner.get(sname)
             if owner is not None:
                 raise ManifestError(

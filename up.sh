@@ -504,9 +504,14 @@ if [ -n "$PLUGIN_SERVICES" ]; then
     echo "  Plugin services:"
     while IFS=$'\t' read -r SVC_NAME SVC_CMD SVC_PLUGIN; do
         [ -n "$SVC_NAME" ] || continue
-        "$PYTHON3" "$SCRIPT_DIR/src/plugin_services.py" "$SVC_NAME" "$SVC_CMD" \
-            | docker exec -i -u coder "$CNAME" bash \
-            || echo "  ! svc-$SVC_NAME (plugin '$SVC_PLUGIN') failed to start — see above"
+        # Generate first, exec second: a pipeline would take docker exec's
+        # exit status and mask a generator failure (no pipefail in up.sh).
+        if SVC_SCRIPT=$("$PYTHON3" "$SCRIPT_DIR/src/plugin_services.py" "$SVC_NAME" "$SVC_CMD"); then
+            printf '%s\n' "$SVC_SCRIPT" | docker exec -i -u coder "$CNAME" bash \
+                || echo "  ! svc-$SVC_NAME (plugin '$SVC_PLUGIN') failed to start — see above"
+        else
+            echo "  ! svc-$SVC_NAME (plugin '$SVC_PLUGIN'): wrapper generation failed — see above"
+        fi
     done <<EOF
 $PLUGIN_SERVICES
 EOF
