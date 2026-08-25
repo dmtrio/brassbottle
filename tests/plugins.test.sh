@@ -35,6 +35,7 @@ emit_agents_section() {
 
 echo "── syntax"
 bash -n up.sh && pass "bash -n up.sh" || fail "up.sh has syntax errors"
+bash -n backup.sh && pass "bash -n backup.sh" || fail "backup.sh has syntax errors"
 
 if ! command -v python3 >/dev/null; then
     # python3 is a hard up.sh requirement — a green run must never mean
@@ -140,6 +141,10 @@ MANIFEST_STATIC_TARGETS=$(python3 -c 'import sys; sys.path.insert(0, "src"); imp
 [ "$COMPOSE_STATIC_TARGETS" = "$MANIFEST_STATIC_TARGETS" ] \
     && pass "manifest.py STATIC_COMPOSE_MOUNT_PATHS matches static compose targets" \
     || fail "compose static targets '$COMPOSE_STATIC_TARGETS' != manifest.py STATIC '$MANIFEST_STATIC_TARGETS'"
+
+python3 -c 'import sys; sys.path.insert(0, "src"); import backup_config; from pathlib import Path; backup_config.bottle_compose_must_not_reference_backup(Path("compose/docker-compose.local.yml").read_text())' \
+    && pass "bottle compose does not reference backup repo or credentials" \
+    || fail "bottle compose must stay free of backup mounts"
 
 AGENT_DECLARED_VOLS=$(for af in agents/*/agent.yml; do yq -r '.state_dirs[]?.volume // ""' "$af"; done \
     | awk 'NF' | LC_ALL=C sort -u | tr '\n' ' ')
