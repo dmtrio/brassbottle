@@ -37,7 +37,15 @@ def docker_available() -> bool:
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, text=True, check=True, **kwargs)
+    result = subprocess.run(cmd, text=True, check=False, **kwargs)
+    if result.returncode != 0:
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        raise AssertionError(
+            f"command failed rc={result.returncode}: {' '.join(cmd)}\n"
+            f"stdout:\n{stdout[-4000:]}\nstderr:\n{stderr[-4000:]}"
+        )
+    return result
 
 
 class BackupIntegrationDiscoveryTests(unittest.TestCase):
@@ -48,6 +56,16 @@ class BackupIntegrationDiscoveryTests(unittest.TestCase):
             with mock.patch("subprocess.run") as run:
                 self.assertFalse(docker_available())
         run.assert_not_called()
+
+    def test_run_surfaces_captured_output_on_failure(self):
+        failed = subprocess.CompletedProcess(["example"], 7, "out detail", "err detail")
+        with mock.patch("subprocess.run", return_value=failed):
+            with self.assertRaises(AssertionError) as ctx:
+                _run(["example"], capture_output=True)
+        message = str(ctx.exception)
+        self.assertIn("rc=7", message)
+        self.assertIn("out detail", message)
+        self.assertIn("err detail", message)
 
 
 @unittest.skipUnless(docker_available(), "docker not available")
