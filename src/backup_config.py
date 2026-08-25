@@ -397,7 +397,7 @@ services:
     hostname: {identity.hostname}
     restart: unless-stopped
     environment:
-      RESTIC_REPOSITORY: file:{REPO_MOUNT}
+      RESTIC_REPOSITORY: {REPO_MOUNT}
       RESTIC_PASSWORD_FILE: {PASSWORD_MOUNT}
       BACKUP_SOURCES: {SOURCE_ARTIFACTS_MOUNT} {SOURCE_BROWSER_TMP_MOUNT}
       BACKUP_INTERVAL_SECONDS: "{backup_interval_seconds}"

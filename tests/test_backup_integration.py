@@ -216,7 +216,7 @@ class BackupIntegrationTests(unittest.TestCase):
         )
 
         restic_env = (
-            "RESTIC_REPOSITORY=file:/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password"
+            "RESTIC_REPOSITORY=/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password"
         )
 
         before = subprocess.run(
@@ -278,7 +278,7 @@ class BackupIntegrationTests(unittest.TestCase):
                 backup_config.BROWSER_SERVICE_NAME,
                 "sh",
                 "-c",
-                "RESTIC_REPOSITORY=file:/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password "
+                "RESTIC_REPOSITORY=/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password "
                 "restic backup /tmp --no-lock 2>&1",
             ],
             capture_output=True,
