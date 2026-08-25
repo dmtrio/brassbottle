@@ -87,7 +87,7 @@ def build_seed_config(*, instance: str, repo_guid: str) -> dict:
                 "password": "",
                 "env": [
                     f"RESTIC_PASSWORD_FILE={BROWSER_PASSWORD_MOUNT}",
-                    f"RESTIC_REPOSITORY=file:{BROWSER_REPO_MOUNT}",
+                    f"RESTIC_REPOSITORY={BROWSER_REPO_MOUNT}",
                 ],
                 "flags": ["--no-lock"],
                 "prunePolicy": {"schedule": _disabled_schedule()},

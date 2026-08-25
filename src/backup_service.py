@@ -67,6 +67,8 @@ def _restic_repo_path() -> Path | None:
     raw = os.environ.get("RESTIC_REPOSITORY", "")
     if raw.startswith("file:"):
         return Path(raw[5:])
+    if raw.startswith("/"):
+        return Path(raw)
     return None
 
 
@@ -200,7 +202,15 @@ def ensure_repo_initialized() -> None:
         log_stage("init", "ok", duration_sec=time.monotonic() - started, note="initialized-by-peer")
         return
 
-    log_stage("init", "error", duration_sec=time.monotonic() - started, exit_code=init.returncode)
+    detail = (init.stderr or init.stdout or "").strip().splitlines()
+    reason = detail[0][:200] if detail else "restic init failed"
+    log_stage(
+        "init",
+        "error",
+        duration_sec=time.monotonic() - started,
+        exit_code=init.returncode,
+        reason=reason,
+    )
     raise subprocess.CalledProcessError(
         init.returncode, ["restic", "init"], init.stdout, init.stderr
     )

@@ -104,6 +104,7 @@ class BackupConfigTests(unittest.TestCase):
                 text,
             )
             self.assertIn('BACKUP_INTERVAL_SECONDS: "600"', text)
+            self.assertIn("RESTIC_REPOSITORY: /repo", text)
             self.assertIn('RETENTION_HOURLY: "48"', text)
             self.assertIn('RETENTION_DAILY: "30"', text)
             self.assertIn('PRUNE_INTERVAL_SECONDS: "86400"', text)

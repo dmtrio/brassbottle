@@ -103,6 +103,12 @@ class BackupServiceExportTests(unittest.TestCase):
 
 
 class BackupServiceLoggingTests(unittest.TestCase):
+    def test_restic_repo_path_accepts_local_absolute_path(self):
+        with unittest.mock.patch.dict(
+            os.environ, {"RESTIC_REPOSITORY": "/repo"}, clear=False
+        ):
+            self.assertEqual(backup_service._restic_repo_path(), Path("/repo"))
+
     def test_log_stage_emits_boundary_metadata(self):
         buf = StringIO()
         with unittest.mock.patch("sys.stdout", buf):
