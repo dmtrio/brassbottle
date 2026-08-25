@@ -20,3 +20,12 @@ mcp:
   format: toml
   env_refs: false
   strategy: codex_managed_block
+
+# Top-level keys stamped into ~/.codex/config.toml as a managed head block.
+# The container IS the sandbox — an outer boundary codex cannot see and its
+# own seccomp/landlock layer only duplicates, at the cost of breaking ordinary
+# work (writes outside the cwd, the egress-firewalled network it is allowed to
+# reach). danger-full-access is the correct setting INSIDE a djinn bottle and
+# nowhere else.
+config_settings:
+  sandbox_mode: danger-full-access

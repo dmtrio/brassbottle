@@ -21,6 +21,17 @@ class CodexWiring(unittest.TestCase):
         self.assertNotIn("Bearer", toml)
         kit.assert_matches_golden(r, golden, wire_fn=do_wire)
 
+    def test_sandbox_mode_is_declared_and_rendered_above_every_table(self):
+        """The container is the sandbox, so codex runs with its own layer off.
+        A bare TOML key is only top-level while no table has opened above it —
+        assert the ordering, not just the presence."""
+        self.assertEqual(
+            kit.load_descriptor("codex")["config_settings"]["sandbox_mode"],
+            "danger-full-access")
+        toml = kit.wire("codex").read(".codex/config.toml")
+        self.assertIn('sandbox_mode = "danger-full-access"', toml)
+        self.assertLess(toml.index("sandbox_mode"), toml.index("[mcp_servers."))
+
 
 if __name__ == "__main__":
     unittest.main()

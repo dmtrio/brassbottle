@@ -742,6 +742,50 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
             derive({}, agent_files=agents)
         self.assertIn("literal-key rendering", str(cm.exception))
 
+    def test_config_settings_land_in_the_agent_mcp_payload(self):
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(
+            AGENT_FILES["codex"],
+            config_settings={"sandbox_mode": "danger-full-access", "quiet": True, "n": 3},
+        )
+        d = derive({"agents": ["codex"]}, agent_files=agents)
+        entry = json.loads(d["AGENTS_MCP_JSON"])[0]
+        self.assertEqual(
+            entry["settings"], {"sandbox_mode": "danger-full-access", "quiet": True, "n": 3})
+
+    def test_agents_without_config_settings_carry_an_empty_map(self):
+        d = derive({"agents": ["codex"]}, agent_files=AGENT_FILES)
+        self.assertEqual(json.loads(d["AGENTS_MCP_JSON"])[0]["settings"], {})
+
+    def test_config_settings_require_the_codex_strategy(self):
+        agents = dict(AGENT_FILES)
+        agents["claude"] = dict(AGENT_FILES["claude"], config_settings={"a": 1})
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("config_settings requires mcp.strategy codex_managed_block",
+                      str(cm.exception))
+
+    def test_config_settings_reject_non_bare_toml_key(self):
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(AGENT_FILES["codex"], config_settings={"not a key": 1})
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("must match [A-Za-z0-9_-]+", str(cm.exception))
+
+    def test_config_settings_reject_non_scalar_value(self):
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(AGENT_FILES["codex"], config_settings={"a": {"b": 1}})
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("must be a string, boolean, or integer", str(cm.exception))
+
+    def test_config_settings_must_be_a_map(self):
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(AGENT_FILES["codex"], config_settings=["a"])
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("config_settings must be a map", str(cm.exception))
+
     def test_unknown_agent_name_warns_and_is_dropped(self):
         """A manifest naming a retired agent still derives — with a warning, so
         the missing CLI is self-diagnosing rather than silent."""

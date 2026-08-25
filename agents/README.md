@@ -62,6 +62,7 @@ Top-level keys are closed to this set:
 | `rules_file: <home-relative path>` | Global rules file path for this CLI (for composed rules). Optional. |
 | `egress: [host, ...]` | Extra firewall allowlist hostnames folded in when enabled. Optional. |
 | `mcp: {...}` | MCP descriptor; omit for a non-MCP agent. |
+| `config_settings: {key: scalar, ...}` | Top-level scalar keys stamped into the agent's own config file as a managed block. `codex_managed_block` only. Optional. |
 
 `mcp` keys are closed to:
 
@@ -72,6 +73,30 @@ Top-level keys are closed to this set:
 | `dialect` | `url` \| `httpUrl` \| `type-http` \| `serverUrl` \| `mcpServers` (required for non-strategy JSON wiring). |
 | `env_refs` | Boolean or non-empty string; truthy means ref-style, false means literal-key style. |
 | `strategy` | `claude_preapprove` \| `codex_managed_block`, or absent for generic JSON path. |
+
+## `config_settings`
+
+Some CLIs need a *setting* (not an MCP server) to be correct inside a
+container — codex's `sandbox_mode`, whose own seccomp/landlock layer only
+duplicates the container boundary while breaking ordinary work. Declaring it
+in the descriptor is what makes a rebuilt container come up right; a hand edit
+in one container does not.
+
+```yaml
+config_settings:
+  sandbox_mode: danger-full-access
+```
+
+- Keys must be bare TOML keys (`[A-Za-z0-9_-]+`); values are strings,
+  booleans, or integers.
+- Only valid with `mcp.strategy: codex_managed_block` — that strategy renders
+  the block, and no other wiring role has anywhere to put it.
+- It is written as a SECOND managed block, at the **head** of `config_path`
+  (`# >>> djinn codex settings … >>>`), because a bare TOML key written after
+  a table would parse as a member of that table. The MCP block stays at the
+  tail for the mirror-image reason (its `[mcp_servers.*]` tables would swallow
+  any bare key below them). Hand edits between the two blocks survive; edits
+  inside either are overwritten every `djinn up`.
 
 ## Closed MCP combo rules
 

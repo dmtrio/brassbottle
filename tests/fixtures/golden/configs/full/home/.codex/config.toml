@@ -1,3 +1,6 @@
+# >>> djinn codex settings (managed by up.sh; edits inside are overwritten) >>>
+sandbox_mode = "danger-full-access"
+# <<< djinn codex settings <<<
 # >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>
 [mcp_servers.codebase-memory]
 command = "codebase-memory-mcp"

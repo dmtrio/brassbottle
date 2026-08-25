@@ -152,7 +152,11 @@ MOSH_PORTS_RE = re.compile(r"^[0-9]{1,5}:[0-9]{1,5}\Z")
 
 AGENT_TOP_LEVEL_KEYS = frozenset({
     "binary", "install", "state_dirs", "rules_file", "egress", "mcp",
+    "config_settings",
 })
+# Scalar types renderable as TOML top-level keys by the managed-settings block.
+AGENT_CONFIG_SETTING_TYPES = (str, bool, int)
+AGENT_CONFIG_SETTING_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 AGENT_MCP_KEYS = frozenset({
     "config_path", "format", "dialect", "env_refs", "strategy",
 })
@@ -540,6 +544,32 @@ def _normalize_agent_docs(agent_files):
                     "other's sidecar-reconciled servers)")
             mcp_config_owner[config_path] = agent
 
+        # config_settings: top-level scalar keys stamped into the agent's own
+        # config file as a second managed block. Only the codex_managed_block
+        # strategy renders one today (TOML top-level keys must precede every
+        # table, so the block has to sit at the head of the file — a shape no
+        # other wiring role has), and the check keeps that in lockstep with
+        # wire_plugins.py's dispatch the same way the MCP combo rules are.
+        raw_settings = doc.get("config_settings")
+        config_settings = {}
+        if not _falsy(raw_settings):
+            if not isinstance(raw_settings, dict):
+                raise ManifestError(f"agent '{agent}' config_settings must be a map")
+            if parsed_mcp is None or parsed_mcp["strategy"] != "codex_managed_block":
+                raise ManifestError(
+                    f"agent '{agent}' config_settings requires mcp.strategy "
+                    "codex_managed_block (no other wiring role renders a settings block)")
+            for key, value in raw_settings.items():
+                if not isinstance(key, str) or not AGENT_CONFIG_SETTING_KEY_RE.match(key):
+                    raise ManifestError(
+                        f"agent '{agent}' config_settings key {key!r} must match [A-Za-z0-9_-]+ "
+                        "(it is emitted as a bare TOML key)")
+                if not isinstance(value, AGENT_CONFIG_SETTING_TYPES):
+                    raise ManifestError(
+                        f"agent '{agent}' config_settings.{key} must be a string, "
+                        "boolean, or integer")
+                config_settings[key] = value
+
         normalized[agent] = {
             "binary": binary,
             "install": install,
@@ -547,6 +577,7 @@ def _normalize_agent_docs(agent_files):
             "rules_file": rules_file,
             "egress": egress,
             "mcp": parsed_mcp,
+            "config_settings": config_settings,
         }
     return normalized
 
@@ -826,6 +857,7 @@ def derive(manifest, plugin_files, agent_files, env):
                 "dialect": agents[name]["mcp"]["dialect"],
                 "env_refs": agents[name]["mcp"]["env_refs"],
                 "strategy": agents[name]["mcp"]["strategy"],
+                "settings": agents[name]["config_settings"],
             }
             for name in enabled_agent_dirs
             if agents[name]["mcp"] is not None

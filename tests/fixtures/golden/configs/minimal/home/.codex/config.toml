@@ -1,0 +1,3 @@
+# >>> djinn codex settings (managed by up.sh; edits inside are overwritten) >>>
+sandbox_mode = "danger-full-access"
+# <<< djinn codex settings <<<

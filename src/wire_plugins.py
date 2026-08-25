@@ -37,7 +37,10 @@ Payload:
 
 - agents is AGENTS_MCP_JSON from manifest.py, ordered by enabled agent
   descriptor directory name. This module validates it strictly (shape and
-  allowed dialect/strategy values) before wiring any files.
+  allowed dialect/strategy values) before wiring any files. Each entry may
+  carry `settings` (the descriptor's config_settings): top-level scalar keys
+  stamped into the agent's own config as a second managed block, rendered
+  only by the codex_managed_block strategy.
 - plugin_mcp_entries carries one object per NON-agent-scoped plugin (host-side
   manifest.py extracts them from plugins/<name>.yml). A spec is LOCAL
   ({command, args} — stdio, wired into every agent) or env-scoped REMOTE
@@ -72,6 +75,7 @@ symlink into someone's dotfiles — the old `cat >` behavior).
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -88,9 +92,27 @@ CODEX_CLOSE_PREFIX = "# <<< djinn plugin MCP"
 CODEX_OPEN_MARKER = "# >>> djinn plugin MCP (managed by up.sh; edits inside are overwritten) >>>"
 CODEX_CLOSE_MARKER = "# <<< djinn plugin MCP <<<"
 
+# The codex managed SETTINGS block (descriptor config_settings). It is a
+# separate block from the MCP one and lives at the HEAD of the file, because a
+# bare TOML key written after a table would be parsed as a member of that
+# table — the MCP block renders [mcp_servers.*] tables and must stay at the
+# tail for exactly the mirror-image reason.
+CODEX_SETTINGS_OPEN_PREFIX = "# >>> djinn codex settings"
+CODEX_SETTINGS_CLOSE_PREFIX = "# <<< djinn codex settings"
+CODEX_SETTINGS_OPEN_MARKER = "# >>> djinn codex settings (managed by up.sh; edits inside are overwritten) >>>"
+CODEX_SETTINGS_CLOSE_MARKER = "# <<< djinn codex settings <<<"
+# Settings keys are emitted as bare TOML keys, so they are constrained to the
+# bare-key charset host-side (manifest.py) and re-checked here.
+CODEX_SETTING_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
+
 AGENT_MCP_FIELDS = frozenset({
     "binary", "config_path", "format", "dialect", "env_refs", "strategy",
+    "settings",
 })
+# settings is the one OPTIONAL descriptor field: an agent with no
+# config_settings block renders no settings block, and absent must mean the
+# same as {} so a payload built before the field existed still wires.
+AGENT_MCP_REQUIRED_FIELDS = AGENT_MCP_FIELDS - frozenset({"settings"})
 AGENT_MCP_FORMATS = frozenset({"json", "toml"})
 AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
 LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl"})
@@ -162,9 +184,9 @@ def _normalize_agent_mcp_entry(entry, where):
     if extra:
         raise WireError(
             f"{where} has unsupported field(s): {', '.join(extra)} "
-            "(expected binary, config_path, format, dialect, env_refs, strategy)"
+            "(expected binary, config_path, format, dialect, env_refs, strategy, settings)"
         )
-    missing = sorted(k for k in AGENT_MCP_FIELDS if k not in entry)
+    missing = sorted(k for k in AGENT_MCP_REQUIRED_FIELDS if k not in entry)
     if missing:
         raise WireError(f"{where} is missing required field(s): {', '.join(missing)}")
 
@@ -174,6 +196,9 @@ def _normalize_agent_mcp_entry(entry, where):
     dialect = entry.get("dialect")
     env_refs = entry.get("env_refs")
     strategy = entry.get("strategy")
+    settings = entry.get("settings")
+    if settings is None:
+        settings = {}
 
     if not isinstance(binary, str) or not binary:
         raise WireError(f"{where}.binary must be a non-empty string")
@@ -191,6 +216,19 @@ def _normalize_agent_mcp_entry(entry, where):
         raise WireError(f"{where}.strategy must be a string")
     if strategy and strategy not in AGENT_MCP_STRATEGIES:
         raise WireError(f"{where}.strategy must be one of: {', '.join(sorted(AGENT_MCP_STRATEGIES))}")
+    if not isinstance(settings, dict):
+        raise WireError(f"{where}.settings must be a JSON object")
+    for key, value in settings.items():
+        if not isinstance(key, str) or not CODEX_SETTING_KEY_RE.match(key):
+            raise WireError(
+                f"{where}.settings has key {key!r} that is not a bare TOML key "
+                "([A-Za-z0-9_-]+)")
+        if not isinstance(value, (str, bool, int)):
+            raise WireError(
+                f"{where}.settings.{key} must be a string, boolean, or integer")
+    if settings and strategy != "codex_managed_block":
+        raise WireError(
+            f"{where}.settings is only rendered by strategy codex_managed_block")
 
     return {
         "binary": binary,
@@ -199,6 +237,7 @@ def _normalize_agent_mcp_entry(entry, where):
         "dialect": dialect,
         "env_refs": env_refs,
         "strategy": strategy,
+        "settings": dict(settings),
     }
 
 
@@ -633,11 +672,60 @@ def _codex_block_body(plugins):
     return "\n\n".join(tables) + "\n"
 
 
-def wire_codex_toml(path, plugins):
-    """Sync the plugin servers into codex's config.toml as a managed marker
-    block, stripped and re-appended each run; hand edits outside the markers
-    survive. An opening marker without its closer hard-fails rather than
-    letting the strip eat the rest of the file."""
+def _codex_settings_body(settings):
+    """Render config_settings as bare top-level TOML keys, sorted for
+    determinism. Strings go through json.dumps (whose escapes are a TOML
+    subset); booleans are lowercased; ints render bare."""
+    lines = []
+    for key in sorted(settings):
+        value = settings[key]
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        elif isinstance(value, int):
+            rendered = str(value)
+        else:
+            rendered = json.dumps(value, ensure_ascii=False)
+        lines.append(f"{key} = {rendered}")
+    return "\n".join(lines) + "\n"
+
+
+def _strip_marked_block(path, lines, open_prefix, close_prefix):
+    """Drop one prefix-marked managed block from `lines`, returning the rest.
+
+    An opener with no closer hard-fails rather than letting the strip eat the
+    remainder of the file (the old sed silently deleted to EOF)."""
+    kept = []
+    in_block = False
+    for line in lines:
+        if not in_block and line.startswith(open_prefix):
+            in_block = True
+            continue
+        if in_block:
+            if line.startswith(close_prefix):
+                in_block = False
+            continue
+        kept.append(line)
+    if in_block:
+        # Stricter than the old grep guard on purpose: a block still open at
+        # EOF is caught even when an EARLIER block closed properly (stray
+        # second opener, or a closer that sits above its opener).
+        raise WireError(
+            f"{path} has an opening '{open_prefix}' marker but no closing one "
+            "— repair the markers (the strip would delete everything below them)"
+        )
+    return kept
+
+
+def wire_codex_toml(path, plugins, settings=None):
+    """Sync codex's config.toml: descriptor `settings` into a managed block at
+    the HEAD of the file, plugin servers into a managed block at the TAIL.
+    Both are stripped and re-rendered each run; hand edits outside the markers
+    (and between the blocks) survive. An opening marker without its closer
+    hard-fails rather than letting the strip eat the rest of the file.
+
+    The two ends are not stylistic: bare top-level TOML keys are only
+    top-level while no table has opened above them, and [mcp_servers.*] tables
+    would claim any bare key written below them."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.touch()
@@ -652,39 +740,31 @@ def wire_codex_toml(path, plugins):
     if lines and lines[-1] == "":
         lines.pop()
 
-    kept = []
-    in_block = False
-    for line in lines:
-        if not in_block and line.startswith(CODEX_OPEN_PREFIX):
-            in_block = True
-            continue
-        if in_block:
-            if line.startswith(CODEX_CLOSE_PREFIX):
-                in_block = False
-            continue
-        kept.append(line)
-    if in_block:
-        # Stricter than the old grep guard on purpose: a block still open at
-        # EOF is caught even when an EARLIER block closed properly (stray
-        # second opener, or a closer that sits above its opener) — the old
-        # sed silently deleted from the stray opener to EOF in those cases.
-        raise WireError(
-            f"{path} has an opening djinn plugin marker but no closing one "
-            "— repair the markers (the strip would delete everything below them)"
-        )
+    kept = _strip_marked_block(path, lines, CODEX_OPEN_PREFIX, CODEX_CLOSE_PREFIX)
+    kept = _strip_marked_block(
+        path, kept, CODEX_SETTINGS_OPEN_PREFIX, CODEX_SETTINGS_CLOSE_PREFIX)
     stripped = "\n".join(kept) + "\n" if kept else ""
 
+    head = ""
+    if settings:
+        head = (
+            CODEX_SETTINGS_OPEN_MARKER + "\n"
+            + _codex_settings_body(settings)
+            + CODEX_SETTINGS_CLOSE_MARKER + "\n"
+        )
+    tail = ""
     if plugins:
-        content = (
-            stripped
-            + CODEX_OPEN_MARKER + "\n"
+        tail = (
+            CODEX_OPEN_MARKER + "\n"
             + _codex_block_body(plugins)
             + CODEX_CLOSE_MARKER + "\n"
         )
-    else:
-        content = stripped
+    content = head + stripped + tail
     _write_atomic(path, content, mode=0o600, errors="surrogateescape")
-    print(f"  ✓ plugin MCP servers synced into {path} (managed block)")
+    if settings:
+        print(f"  ✓ agent settings + plugin MCP servers synced into {path} (managed blocks)")
+    else:
+        print(f"  ✓ plugin MCP servers synced into {path} (managed block)")
 
 
 def run(payload, home, workspace, env):
@@ -761,7 +841,7 @@ def run(payload, home, workspace, env):
             for s in agent_servers:
                 if binary in s["warn"]:
                     warn_agent_server(binary, config_path, s["name"], s["requires"])
-            wire_codex_toml(path, local_for(binary))
+            wire_codex_toml(path, local_for(binary), agent["settings"])
             continue
 
         if fmt != "json":
