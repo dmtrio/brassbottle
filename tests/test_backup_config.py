@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Unit tests for singleton backup compose generation and path layout."""
 
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -11,6 +13,17 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import backup_config
+
+
+def _load_compose_dict(compose_text: str) -> dict:
+    result = subprocess.run(
+        ["yq", "-o=json", "-"],
+        input=compose_text,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
 
 
 class BackupConfigTests(unittest.TestCase):
@@ -38,6 +51,8 @@ class BackupConfigTests(unittest.TestCase):
             self.assertEqual(p["browser_tmp_root"], base / "browser-tmp")
             self.assertEqual(p["repo"], base / "backups" / "restic-repo")
             self.assertEqual(p["password_file"], base / "backups" / "restic-password")
+            self.assertEqual(p["browser_root"], base / "backups" / "browser")
+            self.assertEqual(p["browser_config_file"], base / "backups" / "browser" / "config" / "config.json")
 
     def test_ensure_layout_creates_password_with_restrictive_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -47,18 +62,28 @@ class BackupConfigTests(unittest.TestCase):
             self.assertEqual(p["password_file"].stat().st_mode & 0o777, 0o600)
             self.assertGreater(len(p["password_file"].read_text().strip()), 16)
 
+    def _render_compose(self, base: Path, p: dict) -> str:
+        identity = backup_config.derive_identity(base)
+        bind = backup_config.load_browser_bind_config()
+        return backup_config.render_compose_yaml(
+            identity=identity,
+            artifacts_root=p["artifacts_root"],
+            browser_tmp_root=p["browser_tmp_root"],
+            backup_repo=p["repo"],
+            password_file=p["password_file"],
+            browser_config_dir=p["browser_config_dir"],
+            browser_data_dir=p["browser_data_dir"],
+            browser_cache_dir=p["browser_cache_dir"],
+            browser_bind_host=str(bind["host"]),
+            browser_bind_port=int(bind["port"]),
+        )
+
     def test_render_compose_has_readonly_source_mounts_and_singleton_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             p = backup_config.ensure_layout(base)
             identity = backup_config.derive_identity(base)
-            text = backup_config.render_compose_yaml(
-                identity=identity,
-                artifacts_root=p["artifacts_root"],
-                browser_tmp_root=p["browser_tmp_root"],
-                backup_repo=p["repo"],
-                password_file=p["password_file"],
-            )
+            text = self._render_compose(base, p)
             self.assertIn(f"container_name: {identity.container_name}", text)
             self.assertIn(f"hostname: {identity.hostname}", text)
             self.assertIn(f"image: {identity.image_tag}", text)
@@ -81,19 +106,34 @@ class BackupConfigTests(unittest.TestCase):
             self.assertIn('BACKUP_INTERVAL_SECONDS: "600"', text)
             self.assertIn('RETENTION_HOURLY: "48"', text)
             self.assertIn('RETENTION_DAILY: "30"', text)
+            self.assertIn('PRUNE_INTERVAL_SECONDS: "86400"', text)
+            self.assertIn(backup_config.BACKREST_IMAGE, text)
+            self.assertIn(f"container_name: {identity.container_name}-browser", text)
+            backup_config.browser_compose_must_not_mount_sources_or_scheduler(text)
+
+    def test_render_compose_parses_with_yq_and_structural_invariants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            p = backup_config.ensure_layout(base)
+            text = self._render_compose(base, p)
+            data = _load_compose_dict(text)
+            backup_config.validate_generated_compose_structure(data)
+            services = data["services"]
+            self.assertIn(backup_config.SERVICE_NAME, services)
+            self.assertIn(backup_config.BROWSER_SERVICE_NAME, services)
+            self.assertEqual(
+                services[backup_config.BROWSER_SERVICE_NAME]["image"],
+                backup_config.BACKREST_IMAGE,
+            )
+            browser_ports = services[backup_config.BROWSER_SERVICE_NAME]["ports"]
+            self.assertTrue(str(browser_ports[0]).startswith("127.0.0.1:"))
 
     def test_render_compose_quotes_paths_with_spaces_and_colons(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "my home" / "djinn:1"
             p = backup_config.ensure_layout(base)
             identity = backup_config.derive_identity(base)
-            text = backup_config.render_compose_yaml(
-                identity=identity,
-                artifacts_root=p["artifacts_root"],
-                browser_tmp_root=p["browser_tmp_root"],
-                backup_repo=p["repo"],
-                password_file=p["password_file"],
-            )
+            text = self._render_compose(base, p)
             quoted_artifacts = backup_config._yaml_double_quoted(
                 f'{p["artifacts_root"]}:{backup_config.SOURCE_ARTIFACTS_MOUNT}:ro'
             )
@@ -210,6 +250,25 @@ class BackupConfigTests(unittest.TestCase):
                     backup_config.ensure_layout(base)
             self.assertIn("cannot create", str(ctx.exception))
             self.assertNotIn("Traceback", str(ctx.exception))
+
+    def test_load_browser_bind_config_defaults_to_localhost(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            cfg = backup_config.load_browser_bind_config()
+        self.assertEqual(cfg["host"], "127.0.0.1")
+        self.assertEqual(cfg["port"], 9898)
+
+    def test_load_browser_bind_config_rejects_non_loopback_host(self):
+        with mock.patch.dict(os.environ, {backup_config.ENV_BROWSER_HOST: "0.0.0.0"}, clear=True):
+            with self.assertRaises(backup_config.BackupConfigError):
+                backup_config.load_browser_bind_config()
+
+    def test_load_browser_bind_config_validates_port(self):
+        with mock.patch.dict(os.environ, {backup_config.ENV_BROWSER_PORT: "70000"}, clear=True):
+            with self.assertRaises(backup_config.BackupConfigError):
+                backup_config.load_browser_bind_config()
+
+    def test_browser_url_formats_ipv6(self):
+        self.assertEqual(backup_config.browser_url("::1", 9898), "http://[::1]:9898/")
 
     def test_write_compose_file_write_oserror_is_clean(self):
         with tempfile.TemporaryDirectory() as tmp:

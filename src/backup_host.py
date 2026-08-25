@@ -15,12 +15,17 @@ from pathlib import Path
 from backup_config import (
     BackupConfigError,
     BackupIdentity,
+    BROWSER_SERVICE_NAME,
+    browser_container_name,
+    browser_url,
     derive_identity,
     ensure_layout,
+    load_browser_bind_config,
     paths,
     SERVICE_NAME,
     write_compose_file,
 )
+from backup_browser import BrowserSeedError, seed_backrest_config
 from backup_restore import RestoreTargetError, validate_restore_target
 
 
@@ -87,6 +92,7 @@ def _run(
 def _service_running(
     base_path: Path,
     identity: BackupIdentity,
+    service: str = SERVICE_NAME,
     *,
     boundary: str | None = None,
 ) -> bool:
@@ -97,18 +103,26 @@ def _service_running(
         capture_output=True,
     )
     running_services = (result.stdout or "").split()
-    return result.returncode == 0 and SERVICE_NAME in running_services
+    return result.returncode == 0 and service in running_services
 
 
-def _require_service_running(base_path: Path, identity: BackupIdentity, boundary: str) -> None:
+def _require_service_running(
+    base_path: Path,
+    identity: BackupIdentity,
+    boundary: str,
+    *,
+    service: str = SERVICE_NAME,
+    hint: str | None = None,
+) -> None:
     compose_file = paths(base_path)["compose_file"]
     if not compose_file.exists():
         raise BackupHostError("backup service is not configured — run: ./djinn backup start")
-    if not _service_running(base_path, identity, boundary=boundary):
-        raise BackupHostError(
-            "backup container is not running — run: ./djinn backup start "
+    if not _service_running(base_path, identity, service, boundary=boundary):
+        start_hint = hint or (
+            f"backup container is not running — run: ./djinn backup start "
             "(restore works without the daemon via compose run)"
         )
+        raise BackupHostError(start_hint)
 
 
 def cmd_start(base_path: Path) -> int:
@@ -122,7 +136,7 @@ def cmd_start(base_path: Path) -> int:
         return 1
     try:
         result = _run(
-            _compose_cmd(base_path, identity, "up", "-d", "--build"),
+            _compose_cmd(base_path, identity, "up", "-d", "--build", SERVICE_NAME),
             boundary="start",
             started=started,
             check=False,
@@ -153,7 +167,7 @@ def cmd_stop(base_path: Path) -> int:
         return 0
     try:
         result = _run(
-            _compose_cmd(base_path, identity, "down"),
+            _compose_cmd(base_path, identity, "stop", SERVICE_NAME),
             boundary="stop",
             started=started,
             check=False,
@@ -193,7 +207,7 @@ def cmd_logs(base_path: Path, follow: bool) -> int:
     compose_file = paths(base_path)["compose_file"]
     if not compose_file.exists():
         raise BackupHostError("backup service is not configured — run: ./djinn backup start")
-    args = ["logs"]
+    args = ["logs", SERVICE_NAME]
     if follow:
         args.append("-f")
     try:
@@ -257,6 +271,124 @@ def cmd_check(base_path: Path) -> int:
         f"duration={time.monotonic() - started:.2f}s"
     )
     return rc
+
+
+def cmd_browser_start(base_path: Path) -> int:
+    identity = derive_identity(base_path)
+    started = time.monotonic()
+    print(f"backup browser start begin base={base_path}")
+    try:
+        write_compose_file(base_path)
+        seed_status = seed_backrest_config(base_path)
+    except (BackupConfigError, BrowserSeedError) as exc:
+        print(f"backup browser start error reason={exc}", file=sys.stderr)
+        return 1
+    try:
+        result = _run(
+            _compose_cmd(base_path, identity, "up", "-d", BROWSER_SERVICE_NAME),
+            boundary="browser start",
+            started=started,
+            check=False,
+        )
+    except DockerCommandMissing:
+        return DOCKER_MISSING_EXIT
+    if result.returncode != 0:
+        print(
+            f"backup browser start error duration={time.monotonic() - started:.2f}s "
+            f"exit_code={result.returncode}",
+            file=sys.stderr,
+        )
+        return result.returncode
+    bind = load_browser_bind_config()
+    print(
+        f"backup browser start ok duration={time.monotonic() - started:.2f}s "
+        f"container={browser_container_name(identity)} "
+        f"seed={seed_status} url={browser_url(str(bind['host']), int(bind['port']))}"
+    )
+    return 0
+
+
+def cmd_browser_stop(base_path: Path) -> int:
+    identity = derive_identity(base_path)
+    started = time.monotonic()
+    print("backup browser stop begin")
+    compose_file = paths(base_path)["compose_file"]
+    if not compose_file.exists():
+        print("backup browser stop ok duration=0.00s note=not-configured")
+        return 0
+    try:
+        result = _run(
+            _compose_cmd(base_path, identity, "stop", BROWSER_SERVICE_NAME),
+            boundary="browser stop",
+            started=started,
+            check=False,
+        )
+    except DockerCommandMissing:
+        return DOCKER_MISSING_EXIT
+    if result.returncode != 0:
+        print(
+            f"backup browser stop error duration={time.monotonic() - started:.2f}s "
+            f"exit_code={result.returncode}",
+            file=sys.stderr,
+        )
+        return result.returncode
+    print(f"backup browser stop ok duration={time.monotonic() - started:.2f}s")
+    return 0
+
+
+def cmd_browser_status(base_path: Path) -> int:
+    identity = derive_identity(base_path)
+    compose_file = paths(base_path)["compose_file"]
+    if not compose_file.exists():
+        print(f"backup browser status not-configured project={identity.compose_project_name}")
+        return 1
+    try:
+        running = _service_running(
+            base_path,
+            identity,
+            BROWSER_SERVICE_NAME,
+            boundary="browser status",
+        )
+    except DockerCommandMissing:
+        return DOCKER_MISSING_EXIT
+    bind = load_browser_bind_config()
+    print(
+        f"backup browser status {'running' if running else 'stopped'} "
+        f"container={browser_container_name(identity)} "
+        f"url={browser_url(str(bind['host']), int(bind['port']))}"
+    )
+    return 0 if running else 1
+
+
+def cmd_browser_logs(base_path: Path, follow: bool) -> int:
+    identity = derive_identity(base_path)
+    compose_file = paths(base_path)["compose_file"]
+    if not compose_file.exists():
+        raise BackupHostError(
+            "backup browser is not configured — run: ./djinn backup browser start"
+        )
+    args = ["logs", BROWSER_SERVICE_NAME]
+    if follow:
+        args.append("-f")
+    try:
+        return _run(
+            _compose_cmd(base_path, identity, *args),
+            boundary="browser logs",
+            check=False,
+        ).returncode
+    except DockerCommandMissing:
+        return DOCKER_MISSING_EXIT
+
+
+def cmd_browser_url(base_path: Path) -> int:
+    compose_file = paths(base_path)["compose_file"]
+    if not compose_file.exists():
+        raise BackupHostError(
+            "backup browser is not configured — run: ./djinn backup browser start"
+        )
+    bind = load_browser_bind_config()
+    print(browser_url(str(bind["host"]), int(bind["port"])))
+    return 0
 
 
 def cmd_restore(base_path: Path, snapshot: str, target: str) -> int:
@@ -331,6 +463,14 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("-f", "--follow", action="store_true", help="follow log output")
     sub.add_parser("snapshots", help="list restic snapshots")
     sub.add_parser("check", help="run restic check")
+    browser = sub.add_parser("browser", help="Backrest browse-only UI (read-only repo)")
+    browser_sub = browser.add_subparsers(dest="browser_command", required=True)
+    browser_sub.add_parser("start", help="start the Backrest browser UI container")
+    browser_sub.add_parser("stop", help="stop the Backrest browser UI container")
+    browser_sub.add_parser("status", help="show whether the browser UI is running")
+    browser_sub.add_parser("url", help="print the local Backrest UI URL")
+    browser_logs = browser_sub.add_parser("logs", help="show Backrest container logs")
+    browser_logs.add_argument("-f", "--follow", action="store_true", help="follow log output")
     restore = sub.add_parser("restore", help="restore a snapshot to an explicit target directory")
     restore.add_argument("snapshot", help="snapshot ID (or restic selector)")
     restore.add_argument("--target", required=True, help="host directory to restore into")
@@ -364,6 +504,17 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_snapshots(base_path)
         if args.command == "check":
             return cmd_check(base_path)
+        if args.command == "browser":
+            if args.browser_command == "start":
+                return cmd_browser_start(base_path)
+            if args.browser_command == "stop":
+                return cmd_browser_stop(base_path)
+            if args.browser_command == "status":
+                return cmd_browser_status(base_path)
+            if args.browser_command == "logs":
+                return cmd_browser_logs(base_path, args.follow)
+            if args.browser_command == "url":
+                return cmd_browser_url(base_path)
         if args.command == "restore":
             return cmd_restore(base_path, args.snapshot, args.target)
     except DockerCommandMissing:

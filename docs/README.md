@@ -13,7 +13,7 @@ user to a working container; this directory holds the extra context.
   Git identity routing.
 - `remote.md` explains SSH, tmux, mosh, and ntfy-driven remote access.
 - `backup.md` documents the singleton artifact backup service (restic lifecycle,
-  paths, retention, restore, and disaster-recovery checks).
+  Backrest browse-only UI, paths, retention, restore, and disaster-recovery checks).
 - `workspace.CLAUDE.md` is copied into containers as `/workspace/CLAUDE.md` and
   defines the workspace/worktree contract for agents.
 

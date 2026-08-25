@@ -15,11 +15,19 @@ cycles for any bottle.
 ./djinn backup snapshots
 ./djinn backup check
 ./djinn backup restore <snapshot-id> --target <host-path>
+./djinn backup browser start   # Backrest UI (read-only repo browse/restore)
+./djinn backup browser stop
+./djinn backup browser status
+./djinn backup browser logs    # add -f to follow
+./djinn backup browser url     # print local UI URL (127.0.0.1 by default)
 ```
 
 `start` is idempotent: repeated runs update the same compose project and
 container for this `DJINN_HOME`. Only one backup container should exist per djinn
-home. Different `DJINN_HOME` paths on the same Docker host get distinct
+home. The generated `compose/backup.yml` defines **both** the scheduled backup
+daemon and the optional Backrest browser service in one compose project per
+`DJINN_HOME`. `./djinn backup start` and `./djinn backup browser start` can run
+independently and coexist. Different `DJINN_HOME` paths on the same Docker host get distinct
 compose project and container names (derived from a short hash of the resolved
 home path), so one installation cannot silently replace another's backup service.
 
@@ -44,6 +52,7 @@ brassbottle checkout).
 | `browser-tmp/` | Live browser exchange dir (read-only mount) |
 | `backups/restic-repo/` | Restic repository (read/write, backup container only) |
 | `backups/restic-password` | Restic password file (mode 600, backup container only) |
+| `backups/browser/` | Backrest UI state only (config, data, cache) — isolated from scheduler |
 | `compose/backup.yml` | Generated compose overlay (do not hand-edit) |
 
 Bottle compose **never** mounts `backups/`, the password file, or the backup
@@ -55,6 +64,45 @@ Inside the backup container:
 - `/sources/browser-tmp` — read-only browser-tmp root
 - `/repo` — restic repository
 - `/run/secrets/restic-password` — password file (read-only)
+
+## Backrest browser UI (browse-only)
+
+[Backrest](https://github.com/garethgeorge/backrest) v1.14.1 provides a local
+web UI to browse snapshots and restore files. It is **not** a second backup
+policy writer:
+
+- **Zero plans** — djinn's Python/restic scheduler owns schedules, retention,
+  forget, prune, and check.
+- **Read-only repository** — the restic repo and password mount read-only into
+  the Backrest container; repository access uses `--no-lock`.
+- **No live sources** — `artifacts/` and `browser-tmp/` are never mounted into
+  Backrest.
+- **Isolated config** — Backrest config/data/cache live under
+  `backups/browser/` and never touch djinn scheduler settings.
+
+The UI binds to loopback only by default (`127.0.0.1:9898`). Override the host
+port before `./djinn backup browser start` (which regenerates compose):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DJINN_BACKUP_BROWSER_PORT` | `9898` | Host port for the Backrest UI |
+| `DJINN_BACKUP_BROWSER_HOST` | `127.0.0.1` | Loopback bind address (`localhost` or `::1` also allowed) |
+
+On first `browser start`, if the restic repository is already initialized and
+`backups/browser/config/config.json` does not exist, djinn seeds a minimal
+Backrest config (one repo, no plans). An existing Backrest config is **never**
+overwritten. If seeding cannot run (empty repo, missing `restic-repo/config.json` export), see
+`backups/browser/IMPORT.md` for a short manual import checklist.
+
+```text
+./djinn backup start                 # scheduled backups (required first)
+./djinn backup browser start         # pull pinned Backrest image, seed if needed
+./djinn backup browser url           # http://127.0.0.1:9898/
+```
+
+Use `./djinn backup restore` for CLI restores; use Backrest when a graphical
+file browser is easier. Never create backup plans or maintenance schedules in
+the Backrest UI.
 
 ## Schedule and retention
 

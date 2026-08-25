@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import backup_config  # noqa: E402
+import backup_browser  # noqa: E402
 
 
 def docker_available() -> bool:
@@ -159,6 +160,128 @@ class BackupIntegrationTests(unittest.TestCase):
         restored_browser = restore_target / "sources" / "browser-tmp" / "exchange" / "state.json"
         self.assertTrue(restored_browser.is_file())
         self.assertIn("home", restored_browser.read_text())
+
+    def test_backrest_browser_repo_mount_is_read_only(self):
+        """Backrest cannot mutate the restic repository (read-only mount)."""
+        self._compose_run(backup_config.SERVICE_NAME, "backup")
+
+        seed_status = backup_browser.seed_backrest_config(self.home)
+        self.assertIn(seed_status, ("seeded", "skipped-existing-config"))
+
+        _run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                self.identity.compose_project_name,
+                "--project-directory",
+                str(self.repo_root),
+                "-f",
+                str(self.compose_file),
+                "up",
+                "-d",
+                backup_config.BROWSER_SERVICE_NAME,
+            ]
+        )
+
+        restic_env = (
+            "RESTIC_REPOSITORY=file:/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password"
+        )
+
+        before = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                self.identity.compose_project_name,
+                "--project-directory",
+                str(self.repo_root),
+                "-f",
+                str(self.compose_file),
+                "exec",
+                "-T",
+                backup_config.BROWSER_SERVICE_NAME,
+                "sh",
+                "-c",
+                f"{restic_env} restic snapshots",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(before.returncode, 0)
+
+        write_attempt = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                self.identity.compose_project_name,
+                "--project-directory",
+                str(self.repo_root),
+                "-f",
+                str(self.compose_file),
+                "exec",
+                "-T",
+                backup_config.BROWSER_SERVICE_NAME,
+                "sh",
+                "-c",
+                "touch /repo/.djinn-ro-test 2>&1",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(write_attempt.returncode, 0)
+
+        backup_attempt = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                self.identity.compose_project_name,
+                "--project-directory",
+                str(self.repo_root),
+                "-f",
+                str(self.compose_file),
+                "exec",
+                "-T",
+                backup_config.BROWSER_SERVICE_NAME,
+                "sh",
+                "-c",
+                "RESTIC_REPOSITORY=file:/repo RESTIC_PASSWORD_FILE=/run/secrets/restic-password "
+                "restic backup /tmp --no-lock 2>&1",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(backup_attempt.returncode, 0)
+
+        after = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                self.identity.compose_project_name,
+                "--project-directory",
+                str(self.repo_root),
+                "-f",
+                str(self.compose_file),
+                "exec",
+                "-T",
+                backup_config.BROWSER_SERVICE_NAME,
+                "sh",
+                "-c",
+                f"{restic_env} restic snapshots",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(after.returncode, 0)
+        self.assertEqual(after.stdout, before.stdout)
+
+        compose_text = self.compose_file.read_text()
+        backup_config.browser_compose_must_not_mount_sources_or_scheduler(compose_text)
+        self.assertIn('"127.0.0.1:', compose_text)
+        self.assertIn(backup_config.BACKREST_IMAGE, compose_text)
 
 
 if __name__ == "__main__":
