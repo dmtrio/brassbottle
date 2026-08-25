@@ -131,6 +131,25 @@ class BackupIntegrationTests(unittest.TestCase):
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+        try:
+            subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--entrypoint",
+                    "sh",
+                    "-v",
+                    f"{self.home}:/cleanup",
+                    self.identity.image_tag,
+                    "-c",
+                    "chmod -R a+rwX /cleanup",
+                ],
+                capture_output=True,
+                timeout=120,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
         self._tmp.cleanup()
 
     def _compose_run(self, *args: str) -> subprocess.CompletedProcess[str]:

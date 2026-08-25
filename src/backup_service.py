@@ -101,7 +101,7 @@ def _validate_restic_repo_id(value: object) -> str | None:
 
 
 def _export_restic_config_json() -> bool:
-    """Write restic `cat config --json` output for host-side Backrest seeding.
+    """Write Restic's JSON `cat config` output for host-side Backrest seeding.
 
     Refreshes the export atomically on every successful call so a replaced
     repository cannot leave a stale GUID. Returns True when the export exists.
@@ -113,7 +113,7 @@ def _export_restic_config_json() -> bool:
 
     export_path = repo / "config.json"
     result = subprocess.run(
-        ["restic", "cat", "config", "--json"],
+        ["restic", "cat", "config"],
         capture_output=True,
         text=True,
         check=False,

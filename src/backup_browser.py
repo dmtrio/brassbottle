@@ -116,7 +116,7 @@ def validate_restic_repo_id(value: object) -> str | None:
 
 
 def parse_restic_config_json(text: str) -> str | None:
-    """Parse restic `cat config --json` output and return the repository id."""
+    """Parse Restic's JSON `cat config` output and return the repository id."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
