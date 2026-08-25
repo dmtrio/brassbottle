@@ -2,6 +2,7 @@
 """Unit tests for src/plugin_services.py — the generated per-service restart
 wrapper (Phase 1 Hardening PLN §2, services: schema, PR [1/3])."""
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -53,12 +54,17 @@ class TestWrapperScript(unittest.TestCase):
         script = ps.wrapper_script("my-service", "true")
         lines = script.splitlines()
         open_lines = [l for l in lines if "<<'" in l]
-        self.assertEqual(len(open_lines), 1)
+        # Two heredocs: the command file (child shell) and the wrapper script.
+        self.assertEqual(len(open_lines), 2)
+        for open_line in open_lines:
+            tag = open_line.split("<<'")[1].rstrip("'")
+            self.assertIn(tag, lines)
+            # Closing tag line must be unindented (heredoc requirement).
+            close_line = next(l for l in lines if l == tag)
+            self.assertEqual(close_line, close_line.strip())
+        # Both heredocs close: tag lines appear once per heredoc.
         tag = open_lines[0].split("<<'")[1].rstrip("'")
-        self.assertIn(tag, lines)
-        # Closing tag line must be unindented (heredoc requirement).
-        close_line = next(l for l in lines if l == tag)
-        self.assertEqual(close_line, close_line.strip())
+        self.assertEqual(len([l for l in lines if l == tag]), 2)
 
     def test_rejects_uppercase_name(self):
         with self.assertRaises(ValueError):
@@ -117,3 +123,46 @@ class TestTmuxFailureSurfaces(unittest.TestCase):
             )
         self.assertNotEqual(0, proc.returncode)
         self.assertNotIn("started", proc.stdout)
+
+
+class TestCommandControlFlowIsolation(unittest.TestCase):
+    """Review finding (PR #60): `exit 0` / `exec ...` commands must end the
+    child shell only — the wrapper still logs the exit and keeps its loop."""
+
+    def _run_one_iteration(self, command):
+        with tempfile.TemporaryDirectory() as td:
+            outer = ps.wrapper_script("demo", command).replace("/tmp/djinn-services", td)
+            # A failing fake tmux: the outer script writes both files, then
+            # fails to launch — which is exactly what we want here. (A bare
+            # PATH isn't enough: the dev container has tmux, and a stray
+            # svc-demo session would make has-session short-circuit.)
+            fakebin = Path(td) / "bin"
+            fakebin.mkdir()
+            fake_tmux = fakebin / "tmux"
+            fake_tmux.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake_tmux.chmod(0o755)
+            env = {"PATH": f"{fakebin}:{os.defpath}"}
+            subprocess.run(["/bin/bash", "-c", outer], capture_output=True,
+                           text=True, env=env)
+            wrapper = Path(td) / "demo.sh"
+            self.assertTrue(wrapper.exists())
+            self.assertTrue((Path(td) / "demo.cmd.sh").exists())
+            # One loop iteration: timeout fires during the backoff sleep,
+            # after the exit has been logged.
+            subprocess.run(["timeout", "1", "/bin/bash", str(wrapper)],
+                           capture_output=True, text=True)
+            return (Path(td) / "demo.log").read_text(encoding="utf-8")
+
+    def test_bare_exit_still_logs_and_loops(self):
+        log = self._run_one_iteration("exit 0")
+        self.assertIn("start (attempt 1)", log)
+        self.assertIn("exit code=0", log)
+
+    def test_exec_replaces_child_not_wrapper(self):
+        log = self._run_one_iteration("exec true")
+        self.assertIn("start (attempt 1)", log)
+        self.assertIn("exit code=0", log)
+
+    def test_nonzero_exit_code_recorded(self):
+        log = self._run_one_iteration("exit 7")
+        self.assertIn("exit code=7", log)

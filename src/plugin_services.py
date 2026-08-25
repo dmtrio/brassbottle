@@ -64,6 +64,7 @@ def wrapper_script(name, command):
     session = f"svc-{name}"
     log_path = f"{LOG_DIR}/{name}.log"
     script_path = f"{LOG_DIR}/{name}.sh"
+    cmd_path = f"{LOG_DIR}/{name}.cmd.sh"
     # Unique per service and (barring a name containing this exact literal,
     # which SERVICE_NAME_RE already rules out having odd chars in) not a
     # substring the command could plausibly emit — a plain 'EOF' is common
@@ -75,13 +76,19 @@ mkdir -p {LOG_DIR}
 if tmux has-session -t {session} 2>/dev/null; then
   echo "  = {session} already running"
 else
+  cat > {cmd_path} <<'{heredoc_tag}'
+{command}
+{heredoc_tag}
   cat > {script_path} <<'{heredoc_tag}'
 log() {{ printf '%s %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> {log_path}; }}
 fails=0
 while true; do
   start_ts=$(date +%s)
   log "start (attempt $((fails + 1)))"
-  {command}
+  # Child shell, own file: the command's control flow (exit, exec) ends the
+  # CHILD, never this wrapper — a bare `exit 0` service still gets its exit
+  # logged and its restart loop (review finding on PR #60).
+  bash {cmd_path}
   code=$?
   dur=$(( $(date +%s) - start_ts ))
   log "exit code=$code after ${{dur}}s"
