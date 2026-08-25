@@ -98,8 +98,12 @@ while true; do
 done
 {heredoc_tag}
   chmod +x {script_path}
-  tmux new-session -d -s {session} bash {script_path}
-  echo "  + {session} started"
+  if tmux new-session -d -s {session} bash {script_path}; then
+    echo "  + {session} started"
+  else
+    echo "  ! {session} FAILED to start (tmux new-session failed)" >&2
+    exit 1
+  fi
 fi
 """
 

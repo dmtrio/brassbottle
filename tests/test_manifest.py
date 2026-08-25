@@ -1660,3 +1660,26 @@ class TestPluginServices(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestServiceCommandCharset(unittest.TestCase):
+    """Review finding: TAB/newline in a command corrupts the TSV export."""
+
+    def _derive(self, cmd):
+        files = {**PLUGIN_FILES, "p": {"install": "x", "services": {"svc": cmd}}}
+        return derive({"plugins": ["p"]}, plugin_files=files)
+
+    def test_newline_in_command_rejected(self):
+        with self.assertRaisesRegex(m.ManifestError, "tabs or newlines"):
+            self._derive("export FOO=bar\nexec myserver")
+
+    def test_tab_in_command_rejected(self):
+        with self.assertRaisesRegex(m.ManifestError, "tabs or newlines"):
+            self._derive("echo a\tb")
+
+    def test_carriage_return_rejected(self):
+        with self.assertRaisesRegex(m.ManifestError, "tabs or newlines"):
+            self._derive("echo a\rb")
+
+    def test_plain_command_still_accepted(self):
+        self._derive("bm mcp --transport streamable-http --port 8801")
