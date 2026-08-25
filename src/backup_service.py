@@ -140,12 +140,14 @@ def _export_restic_config_json() -> bool:
     tmp_path = export_path.with_name(f".config.json.{os.getpid()}.tmp")
     fd: int | None = None
     try:
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # This contains non-secret repository metadata. It must be readable by
+        # the host operator even though the container writes it as root.
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = None
             handle.write(content)
         os.replace(tmp_path, export_path)
-        os.chmod(export_path, 0o600)
+        os.chmod(export_path, 0o644)
     except OSError as exc:
         if fd is not None:
             os.close(fd)
