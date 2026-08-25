@@ -14,6 +14,7 @@ Usage: ./djinn <subcommand> [args...]
   up       <name>              create/update a container from its manifest
   down     <name> [--purge]    stop (or purge) a container
   service  <name> [args...]    start a plugin's host-side service on this Mac
+  backup   <cmd> [args...]     singleton artifact backup (start/stop/status/...)
   allow    <container> <domain...>  add domains to a running container's egress allowlist
   keys     <container> ...     edit one container's agent MCP credentials
   help                         show this message
@@ -24,6 +25,7 @@ case "${1:-}" in
     up)      shift; exec "$SCRIPT_DIR/up.sh" "$@" ;;
     down)    shift; exec "$SCRIPT_DIR/down.sh" "$@" ;;
     service) shift; exec "$SCRIPT_DIR/service.sh" "$@" ;;
+    backup)  shift; exec "$SCRIPT_DIR/backup.sh" "$@" ;;
     allow)   shift; exec "$SCRIPT_DIR/bin/allow-egress.sh" "$@" ;;
     keys)    shift; exec "$SCRIPT_DIR/bin/update-agent-keys.sh" "$@" ;;
     help|-h|--help) usage; exit 0 ;;
