@@ -133,6 +133,11 @@ VOLUME_ROOT = "/home/coder"
 VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]+\Z")
 # Directory name under /workspace/repos/<name> — no slash, no leading dot/dash.
 REPO_DIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
+# services: keys (plugins/<name>/plugin.yml). Kebab-case only: a service name
+# becomes a tmux session name (svc-<name>) and a log/script filename under
+# /tmp/djinn-services/ inside the container (src/plugin_services.py) — a
+# boring charset keeps it stable across the docker-exec/tmux/heredoc hops.
+SERVICE_NAME_RE = re.compile(r"^[a-z0-9-]+\Z")
 # Forge org/user name (git.orgs key). GitHub's own rule: alphanumerics and
 # single hyphens, no leading/trailing hyphen. Only '-' is non-alphanumeric, so
 # the GH_TOKEN_<owner> sanitization (below) is a bijection over valid owners —
@@ -995,6 +1000,8 @@ def derive(manifest, plugin_files, agent_files, env):
     plugin_volumes = {}    # volume name -> container path (enabled plugins only)
     volume_owner = {}      # volume name -> plugin, for collision messages
     path_owner = {}        # container path -> plugin
+    plugin_services = {}   # service name -> {"command": ..., "plugin": ...} (enabled plugins only)
+    service_owner = {}     # service name -> plugin, for collision messages
     for p in plugins:
         doc = plugin_files[p]
         if doc is None:
@@ -1131,6 +1138,35 @@ def derive(manifest, plugin_files, agent_files, env):
             volume_owner[vname] = p
             path_owner[vpath] = p
 
+        # ── services: in-container processes started (idempotently, under a
+        # restart wrapper) at the end of `./djinn up` — see src/plugin_services.py
+        # and up.sh's "Plugin services" section. Optional and absent from every
+        # plugin today, purely additive (Phase 1 Hardening PLN §2). A service
+        # name is validated like a volume name but shares ONE namespace across
+        # every ENABLED plugin (not just within one plugin's own map), because
+        # it becomes a tmux session name — two plugins racing for svc-<name>
+        # would silently restart each other's process.
+        services = doc.get("services")
+        services = {} if _falsy(services) else services
+        if not isinstance(services, dict):
+            raise ManifestError(
+                f"plugin '{p}' services must be a map of NAME: command")
+        for sname, scmd in services.items():
+            if not isinstance(sname, str) or not SERVICE_NAME_RE.match(sname):
+                raise ManifestError(
+                    f"plugin '{p}' service '{sname}': illegal characters (allowed: "
+                    "lowercase letters, digits, dash — it becomes a tmux session name)")
+            if not isinstance(scmd, str) or not scmd.strip():
+                raise ManifestError(
+                    f"plugin '{p}' service '{sname}': command must be a non-empty string")
+            owner = service_owner.get(sname)
+            if owner is not None:
+                raise ManifestError(
+                    f"plugin '{p}' service '{sname}': already declared by plugin '{owner}' "
+                    "(two plugins cannot share one service name)")
+            service_owner[sname] = p
+            plugin_services[sname] = {"command": scmd, "plugin": p}
+
         hp = doc.get("host_port")
         if not _falsy(hp):
             # A host grant needs a server that actually dials the host: a
@@ -1238,6 +1274,15 @@ def derive(manifest, plugin_files, agent_files, env):
     # worth unit-testing, and up.sh should only place the file, not format it.
     out["PLUGIN_COMPOSE_YAML"] = plugin_compose_overlay(plugin_volumes)
     out["AGENTS_COMPOSE_YAML"] = agent_compose_overlay(agent_volumes)
+    # One "name<TAB>command<TAB>plugin" line per declared service of an
+    # ENABLED plugin, sorted by name (order-independent of the plugin list,
+    # same reasoning as the compose overlays above). up.sh reads this with the
+    # same `while IFS=$'\t' read` idiom it already uses for REPOS/AGENT_SECRETS
+    # and hands each (name, command) pair to src/plugin_services.py.
+    out["PLUGIN_SERVICES"] = "".join(
+        f"{name}\t{plugin_services[name]['command']}\t{plugin_services[name]['plugin']}\n"
+        for name in sorted(plugin_services)
+    )
     # Sorted + deduped so the firewall grant string is order-independent of the
     # plugin list and two plugins sharing a port don't double up the grant.
     out["HOST_MCP_PORTS"] = ",".join(str(p) for p in sorted(set(host_ports)))
