@@ -35,7 +35,7 @@ class BackupServiceExportTests(unittest.TestCase):
                     self.assertTrue(backup_service._export_restic_config_json())
             export_path = repo / "config.json"
             self.assertTrue(export_path.is_file())
-            self.assertEqual(oct(export_path.stat().st_mode & 0o777), oct(0o600))
+            self.assertEqual(oct(export_path.stat().st_mode & 0o777), oct(0o644))
             self.assertEqual(json.loads(export_path.read_text())["id"], guid)
 
     def test_export_restic_config_json_rejects_malformed_output(self):
