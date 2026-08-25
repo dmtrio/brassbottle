@@ -65,6 +65,7 @@ one** of `command:` (local) or `url:` (remote).
 | `host_port: <int>` | Opens the container firewall to `host.docker.internal:<port>`. Valid with a remote (`url:`) server **or** a local bridge that dials the host (`rhinomcp`); rejected with no MCP server, and a local-only plugin must reference `${HOST_PORT}` in the bridge's `command`/`args` (proof something dials the grant). `${HOST_PORT}` in a remote `url` or a local `command`/`args` resolves to it. A manifest `plugin_ports:` override replaces this default (see below). |
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
 | `volumes: {<name>: /container/path}` | Per-container named volume(s) for state that must outlive a container recreate — see below. Mounted only in containers that enable the plugin. |
+| `services: {<name>: "<command>"}` | In-container process(es) started at `up` — see below. Mounted only for enabled plugins. |
 | `requires: [<SLOT>, …]` | Optional MCP-server field. The server is configured only for agents with every required slot; uncredentialed servers omit it. |
 | `egress: [host, …]` | Bare hostnames added to this container's firewall allowlist. |
 
@@ -136,6 +137,45 @@ starts — walking up to fix the missing **parents** docker created root-owned
 too, stopping at the first directory that is already coder's. So a plugin
 declares the volume and does not have to `mkdir` anything, at any depth.
 
+## `services` — in-container processes started at `up`
+
+Anything a plugin needs kept running inside the container — a long-lived MCP
+backend, a watcher, a scheduler — declares it here instead of a hand-started
+tmux session that dies with the container:
+
+```yaml
+services:
+  bm-server: "bm mcp --transport streamable-http --host 127.0.0.1 --port 8801"
+  capture:   "uv --directory /workspace/repos/collabrain run collabrain capture --watch"
+```
+
+At the end of `./djinn up`, for each declared service of an **enabled**
+plugin, `src/plugin_services.py` (host-side, like `src/manifest.py`) renders
+one idempotent script and `up.sh` pipes it into one `docker exec … bash` per
+service:
+
+- Runs detached in a tmux session named `svc-<name>` — `tmux has-session -t
+  svc-<name>` gates the whole thing, so a service still running is left
+  alone and re-running `./djinn up` only restarts what died.
+- The command runs under a small restart loop: on exit it logs a timestamp
+  and exit code to `/tmp/djinn-services/<name>.log` **inside the
+  container**, then restarts — 5s between attempts, escalating to 30s once
+  restarts keep happening faster than a minute apart (a crash loop stays
+  loud in the log instead of spinning silently). Nothing caps the retry
+  count.
+- The log path is deliberately generic and container-local (`/tmp`, not a
+  mounted volume) — this mechanism has no idea what a service's own durable
+  logging needs are. A service that wants logs to survive a recreate writes
+  them itself under a path the plugin's own `volumes:` mounts.
+
+Rules, enforced by `src/manifest.py` at derive time:
+
+| Rule | Why |
+|---|---|
+| Name: lowercase letters, digits, dash (`[a-z0-9-]+`) | Becomes the tmux session name (`svc-<name>`) and the log/script filename — a boring charset keeps it stable across the docker-exec/tmux/heredoc hops. |
+| Command: a non-empty string | It runs verbatim inside the restart loop; an empty command would loop forever doing nothing while still "restarting" every 5s. |
+| Unique across every **enabled** plugin | Service names share one tmux/log namespace — two plugins racing for `svc-<name>` would silently restart each other's process. Two containers each running a different plugin that happens to reuse a name are unaffected (only enabled plugins contend). |
+
 ## `plugin_ports` — per-container host port
 
 Host-service plugins (`host_port:` in `plugin.yml`) listen on a Mac port. Host
@@ -186,8 +226,13 @@ warns and yields no binding.
 - **Compose** gets a generated overlay when an enabled plugin declares
   `volumes:` (`$BASE_PATH/compose/<container>.plugins.yml`, one more `-f`); the
   entrypoint chowns its mountpoints to coder.
+- At the end of `up.sh`, each declared `services:` entry of an enabled plugin
+  is started (idempotently) inside the container — see `services` above.
 - **`djinn service <name>`** (via `service.sh`) runs `plugins/<name>/run.sh` on
   the host (resolves `BASE_PATH` and hands it down); it never touches docker.
+  Not to be confused with `services:` above — `run.sh` is a **host**-side
+  process the user starts by hand; `services:` are **in-container** processes
+  `up.sh` starts automatically.
 
 ### `test_*.py` — unit tests
 
