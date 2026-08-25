@@ -13,12 +13,12 @@ import time
 from pathlib import Path
 
 from backup_config import (
-    COMPOSE_PROJECT_NAME,
-    CONTAINER_NAME,
-    SERVICE_NAME,
     BackupConfigError,
+    BackupIdentity,
+    derive_identity,
     ensure_layout,
     paths,
+    SERVICE_NAME,
     write_compose_file,
 )
 from backup_restore import RestoreTargetError, validate_restore_target
@@ -41,13 +41,13 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _compose_cmd(base_path: Path, *args: str) -> list[str]:
+def _compose_cmd(base_path: Path, identity: BackupIdentity, *args: str) -> list[str]:
     p = paths(base_path)
     return [
         "docker",
         "compose",
         "-p",
-        COMPOSE_PROJECT_NAME,
+        identity.compose_project_name,
         "--project-directory",
         str(_repo_root()),
         "-f",
@@ -84,7 +84,35 @@ def _run(
         raise BackupHostError(reason) from exc
 
 
+def _service_running(
+    base_path: Path,
+    identity: BackupIdentity,
+    *,
+    boundary: str | None = None,
+) -> bool:
+    result = _run(
+        _compose_cmd(base_path, identity, "ps", "--status", "running", "--services"),
+        boundary=boundary,
+        check=False,
+        capture_output=True,
+    )
+    running_services = (result.stdout or "").split()
+    return result.returncode == 0 and SERVICE_NAME in running_services
+
+
+def _require_service_running(base_path: Path, identity: BackupIdentity, boundary: str) -> None:
+    compose_file = paths(base_path)["compose_file"]
+    if not compose_file.exists():
+        raise BackupHostError("backup service is not configured — run: ./djinn backup start")
+    if not _service_running(base_path, identity, boundary=boundary):
+        raise BackupHostError(
+            "backup container is not running — run: ./djinn backup start "
+            "(restore works without the daemon via compose run)"
+        )
+
+
 def cmd_start(base_path: Path) -> int:
+    identity = derive_identity(base_path)
     started = time.monotonic()
     print(f"backup start begin base={base_path}")
     try:
@@ -94,7 +122,7 @@ def cmd_start(base_path: Path) -> int:
         return 1
     try:
         result = _run(
-            _compose_cmd(base_path, "up", "-d", "--build"),
+            _compose_cmd(base_path, identity, "up", "-d", "--build"),
             boundary="start",
             started=started,
             check=False,
@@ -110,12 +138,13 @@ def cmd_start(base_path: Path) -> int:
         return result.returncode
     print(
         f"backup start ok duration={time.monotonic() - started:.2f}s "
-        f"container={CONTAINER_NAME} project={COMPOSE_PROJECT_NAME}"
+        f"container={identity.container_name} project={identity.compose_project_name}"
     )
     return 0
 
 
 def cmd_stop(base_path: Path) -> int:
+    identity = derive_identity(base_path)
     started = time.monotonic()
     print("backup stop begin")
     compose_file = paths(base_path)["compose_file"]
@@ -124,7 +153,7 @@ def cmd_stop(base_path: Path) -> int:
         return 0
     try:
         result = _run(
-            _compose_cmd(base_path, "down"),
+            _compose_cmd(base_path, identity, "down"),
             boundary="stop",
             started=started,
             check=False,
@@ -143,29 +172,24 @@ def cmd_stop(base_path: Path) -> int:
 
 
 def cmd_status(base_path: Path) -> int:
+    identity = derive_identity(base_path)
     compose_file = paths(base_path)["compose_file"]
     if not compose_file.exists():
-        print(f"backup status not-configured project={COMPOSE_PROJECT_NAME}")
+        print(f"backup status not-configured project={identity.compose_project_name}")
         return 1
     try:
-        result = _run(
-            _compose_cmd(base_path, "ps", "--status", "running", "--services"),
-            boundary="status",
-            check=False,
-            capture_output=True,
-        )
+        running = _service_running(base_path, identity, boundary="status")
     except DockerCommandMissing:
         return DOCKER_MISSING_EXIT
-    running_services = (result.stdout or "").split()
-    running = result.returncode == 0 and SERVICE_NAME in running_services
     print(
         f"backup status {'running' if running else 'stopped'} "
-        f"container={CONTAINER_NAME} project={COMPOSE_PROJECT_NAME}"
+        f"container={identity.container_name} project={identity.compose_project_name}"
     )
     return 0 if running else 1
 
 
 def cmd_logs(base_path: Path, follow: bool) -> int:
+    identity = derive_identity(base_path)
     compose_file = paths(base_path)["compose_file"]
     if not compose_file.exists():
         raise BackupHostError("backup service is not configured — run: ./djinn backup start")
@@ -174,7 +198,7 @@ def cmd_logs(base_path: Path, follow: bool) -> int:
         args.append("-f")
     try:
         return _run(
-            _compose_cmd(base_path, *args),
+            _compose_cmd(base_path, identity, *args),
             boundary="logs",
             check=False,
         ).returncode
@@ -182,13 +206,22 @@ def cmd_logs(base_path: Path, follow: bool) -> int:
         return DOCKER_MISSING_EXIT
 
 
-def _exec_restic(base_path: Path, boundary: str, *restic_args: str) -> int:
-    compose_file = paths(base_path)["compose_file"]
-    if not compose_file.exists():
-        raise BackupHostError("backup service is not configured — run: ./djinn backup start")
+def _exec_restic(base_path: Path, identity: BackupIdentity, boundary: str, *restic_args: str) -> int:
+    try:
+        _require_service_running(base_path, identity, boundary)
+    except DockerCommandMissing:
+        return DOCKER_MISSING_EXIT
     try:
         return _run(
-            _compose_cmd(base_path, "exec", "-T", SERVICE_NAME, "restic", *restic_args),
+            _compose_cmd(
+                base_path,
+                identity,
+                "exec",
+                "-T",
+                SERVICE_NAME,
+                "restic",
+                *restic_args,
+            ),
             boundary=boundary,
             check=False,
         ).returncode
@@ -197,22 +230,37 @@ def _exec_restic(base_path: Path, boundary: str, *restic_args: str) -> int:
 
 
 def cmd_snapshots(base_path: Path) -> int:
+    identity = derive_identity(base_path)
     started = time.monotonic()
     print("backup snapshots begin")
-    rc = _exec_restic(base_path, "snapshots", "snapshots")
-    print(f"backup snapshots end status={'ok' if rc == 0 else 'error'} duration={time.monotonic() - started:.2f}s")
+    try:
+        rc = _exec_restic(base_path, identity, "snapshots", "snapshots")
+    except BackupHostError:
+        raise
+    print(
+        f"backup snapshots end status={'ok' if rc == 0 else 'error'} "
+        f"duration={time.monotonic() - started:.2f}s"
+    )
     return rc
 
 
 def cmd_check(base_path: Path) -> int:
+    identity = derive_identity(base_path)
     started = time.monotonic()
     print("backup check begin")
-    rc = _exec_restic(base_path, "check", "check")
-    print(f"backup check end status={'ok' if rc == 0 else 'error'} duration={time.monotonic() - started:.2f}s")
+    try:
+        rc = _exec_restic(base_path, identity, "check", "check")
+    except BackupHostError:
+        raise
+    print(
+        f"backup check end status={'ok' if rc == 0 else 'error'} "
+        f"duration={time.monotonic() - started:.2f}s"
+    )
     return rc
 
 
 def cmd_restore(base_path: Path, snapshot: str, target: str) -> int:
+    identity = derive_identity(base_path)
     p = ensure_layout(base_path)
     compose_file = p["compose_file"]
     if not compose_file.exists():
@@ -240,15 +288,9 @@ def cmd_restore(base_path: Path, snapshot: str, target: str) -> int:
     # `run --rm` with an explicit target bind — never restores over live mounts.
     try:
         rc = _run(
-            [
-                "docker",
-                "compose",
-                "-p",
-                COMPOSE_PROJECT_NAME,
-                "--project-directory",
-                str(_repo_root()),
-                "-f",
-                str(compose_file),
+            _compose_cmd(
+                base_path,
+                identity,
                 "run",
                 "--rm",
                 "-v",
@@ -259,7 +301,7 @@ def cmd_restore(base_path: Path, snapshot: str, target: str) -> int:
                 "restore",
                 snapshot,
                 "/restore",
-            ],
+            ),
             boundary="restore",
             started=started,
             check=False,

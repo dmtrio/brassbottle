@@ -216,6 +216,26 @@ class BackupHostTests(unittest.TestCase):
                     self.assertIn("required command not found on PATH: docker", err)
                     self.assertNotIn("Traceback", err)
 
+    def test_snapshots_requires_running_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._compose_base(tmp)
+            stderr = io.StringIO()
+            with mock.patch("backup_host._service_running", return_value=False):
+                with mock.patch("sys.stderr", stderr):
+                    rc = backup_host.main(["--base-path", str(base), "snapshots"])
+            self.assertEqual(rc, 1)
+            self.assertIn("backup container is not running", stderr.getvalue())
+
+    def test_check_requires_running_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._compose_base(tmp)
+            stderr = io.StringIO()
+            with mock.patch("backup_host._service_running", return_value=False):
+                with mock.patch("sys.stderr", stderr):
+                    rc = backup_host.main(["--base-path", str(base), "check"])
+            self.assertEqual(rc, 1)
+            self.assertIn("backup container is not running", stderr.getvalue())
+
     def test_restore_mkdir_oserror_is_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = self._compose_base(tmp)

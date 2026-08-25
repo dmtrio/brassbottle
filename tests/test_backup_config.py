@@ -14,10 +14,21 @@ import backup_config
 
 
 class BackupConfigTests(unittest.TestCase):
-    def test_singleton_naming_constants(self):
-        self.assertEqual(backup_config.COMPOSE_PROJECT_NAME, "djinn-backup")
-        self.assertEqual(backup_config.CONTAINER_NAME, "djinn-backup")
-        self.assertEqual(backup_config.SERVICE_NAME, "backup")
+    def test_derive_identity_is_stable_per_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "home"
+            first = backup_config.derive_identity(base)
+            second = backup_config.derive_identity(base)
+            self.assertEqual(first, second)
+            self.assertEqual(len(first.suffix), backup_config.IDENTITY_SUFFIX_LENGTH)
+            self.assertTrue(first.compose_project_name.startswith("djinn-backup-"))
+
+    def test_derive_identity_differs_for_different_homes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home_a = backup_config.derive_identity(root / "a")
+            home_b = backup_config.derive_identity(root / "b")
+            self.assertNotEqual(home_a.compose_project_name, home_b.compose_project_name)
 
     def test_paths_under_djinn_home(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -40,14 +51,17 @@ class BackupConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             p = backup_config.ensure_layout(base)
+            identity = backup_config.derive_identity(base)
             text = backup_config.render_compose_yaml(
+                identity=identity,
                 artifacts_root=p["artifacts_root"],
                 browser_tmp_root=p["browser_tmp_root"],
                 backup_repo=p["repo"],
                 password_file=p["password_file"],
             )
-            self.assertIn("container_name: djinn-backup", text)
-            self.assertIn("hostname: djinn-backup", text)
+            self.assertIn(f"container_name: {identity.container_name}", text)
+            self.assertIn(f"hostname: {identity.hostname}", text)
+            self.assertIn(f"image: {identity.image_tag}", text)
             self.assertIn(
                 backup_config._yaml_double_quoted(
                     f'{p["artifacts_root"]}:{backup_config.SOURCE_ARTIFACTS_MOUNT}:ro'
@@ -72,7 +86,9 @@ class BackupConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "my home" / "djinn:1"
             p = backup_config.ensure_layout(base)
+            identity = backup_config.derive_identity(base)
             text = backup_config.render_compose_yaml(
+                identity=identity,
                 artifacts_root=p["artifacts_root"],
                 browser_tmp_root=p["browser_tmp_root"],
                 backup_repo=p["repo"],
@@ -96,9 +112,10 @@ class BackupConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             out = backup_config.write_compose_file(base)
+            identity = backup_config.derive_identity(base)
             self.assertEqual(out, base / "compose" / "backup.yml")
             self.assertTrue(out.is_file())
-            self.assertIn("djinn-backup", out.read_text())
+            self.assertIn(identity.container_name, out.read_text())
 
     def test_load_host_backup_config_reads_djinn_backup_env(self):
         with mock.patch.dict(

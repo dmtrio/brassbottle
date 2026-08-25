@@ -218,6 +218,11 @@ def run_restore(snapshot: str, target: str) -> None:
     log_stage("restore", "ok", duration_sec=time.monotonic() - started, snapshot_id=snapshot)
 
 
+def should_run_prune(now: float, last_prune: float, prune_interval: float) -> bool:
+    """Return True when elapsed time since last_prune meets prune_interval."""
+    return now - last_prune >= prune_interval
+
+
 def daemon_loop() -> None:
     sources = os.environ.get("BACKUP_SOURCES", "").split()
     if not sources:
@@ -246,14 +251,14 @@ def daemon_loop() -> None:
         log_stage("daemon", "error", reason="repository init failed")
         sys.exit(1)
 
-    last_prune = 0.0
+    last_prune = time.monotonic()
     while True:
         try:
             run_backup(sources)
         except subprocess.CalledProcessError:
             log_stage("run", "error")
         now = time.monotonic()
-        if now - last_prune >= prune_interval:
+        if should_run_prune(now, last_prune, prune_interval):
             try:
                 run_forget()
                 last_prune = now

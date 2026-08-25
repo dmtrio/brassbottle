@@ -17,9 +17,17 @@ cycles for any bottle.
 ./djinn backup restore <snapshot-id> --target <host-path>
 ```
 
-`start` is idempotent: repeated runs update the same compose project
-(`djinn-backup`) and container (`djinn-backup`). Only one backup container
-should exist per djinn home.
+`start` is idempotent: repeated runs update the same compose project and
+container for this `DJINN_HOME`. Only one backup container should exist per djinn
+home. Different `DJINN_HOME` paths on the same Docker host get distinct
+compose project and container names (derived from a short hash of the resolved
+home path), so one installation cannot silently replace another's backup service.
+
+`snapshots` and `check` require the backup container to be **running** — they
+use `docker compose exec` against the long-running daemon. If the service is
+stopped, the CLI reports a clear error suggesting `./djinn backup start`.
+`restore` uses `docker compose run --rm` and works without the daemon (useful
+during disaster recovery).
 
 On first start the service initializes an empty restic repository before the
 first scheduled backup. Concurrent starters race safely — a peer that wins the
@@ -66,6 +74,9 @@ runs `restic forget` with the retention policy, prunes unreachable data, then
 runs `restic check` to verify repository integrity. Check failures are logged
 and surfaced as errors.
 
+The first forget/prune cycle runs only after `PRUNE_INTERVAL_SECONDS` elapses
+from daemon start — not immediately on container start.
+
 Interval and retention values must be positive integers. Invalid values cause
 the daemon to exit with a visible error instead of crashing or busy-looping.
 
@@ -79,9 +90,16 @@ Restores always target an explicit host directory **outside** the live
 `artifacts/` and `browser-tmp/` trees and **outside** backup internals
 (`backups/`, the restic repository, password file, and generated compose overlay).
 The operator CLI rejects targets that equal, contain, or are contained by any of
-those paths, and rejects an existing non-directory target (file, symlink, etc.).
+those paths, rejects an existing non-directory target (file, symlink, etc.), and
+rejects **non-empty** existing directories.
+
+`restic restore` merges into the target directory: files whose paths appear in
+the snapshot overwrite any colliding files already present. Reusing a directory
+that still holds unrelated files can destroy them. Use a fresh or empty scratch
+directory for every restore.
 
 ```text
+./djinn backup start          # required before snapshots/check
 ./djinn backup snapshots
 ./djinn backup restore latest --target /tmp/artifact-restore
 ```
@@ -92,10 +110,13 @@ directly over live artifact data.
 ## Docker dependency
 
 The backup service requires Docker and Docker Compose on the host. `start` builds
-`backup/Dockerfile` (python:3.12-alpine + restic) locally as `djinn-backup:local`.
+`backup/Dockerfile` (python:3.12-alpine + restic) locally with an image tag
+scoped to this `DJINN_HOME`.
 
-CI builds this image on every PR. Local development without Docker can still run
-the Python unit tests; end-to-end backup/restore requires Docker on the host.
+CI builds this image on every PR and runs a Docker/restic integration smoke
+test (init, backup, snapshots, check, restore). Local development without Docker
+can still run the Python unit tests; end-to-end backup/restore requires Docker
+on the host.
 
 ## Disaster recovery verification
 
@@ -104,7 +125,7 @@ Periodically confirm backups are recoverable:
 1. `./djinn backup status` — container running
 2. `./djinn backup snapshots` — recent `scheduled` snapshots exist
 3. `./djinn backup check` — repository integrity passes
-4. Restore to a scratch directory and spot-check files:
+4. Restore to an **empty** scratch directory and spot-check files:
 
    ```text
    ./djinn backup restore latest --target /tmp/dr-verify
