@@ -30,6 +30,8 @@ jobs:
         run: docker build -t djinn-ci-smoke .
       - name: Backup image builds
         run: docker build -f backup/Dockerfile -t djinn-backup-ci-smoke .
+      - name: Pull pinned Backrest image
+        run: docker pull ghcr.io/garethgeorge/backrest:v1.14.1
       - name: Backup integration smoke
         env:
           DJINN_BACKUP_CI_IMAGE: djinn-backup-ci-smoke

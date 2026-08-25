@@ -112,11 +112,51 @@ class BackupHostTests(unittest.TestCase):
                 with mock.patch(
                     "backup_host._run",
                     return_value=mock.Mock(returncode=1),
-                ):
+                ) as mocked:
                     with mock.patch("sys.stderr", stderr):
                         rc = backup_host.main(["--base-path", str(base), "start"])
             self.assertEqual(rc, 1)
             self.assertIn("backup start error", stderr.getvalue())
+            args = mocked.call_args[0][0]
+            self.assertEqual(args[-1], backup_host.SERVICE_NAME)
+
+    def test_stop_scopes_compose_stop_to_scheduler_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._compose_base(tmp)
+            with mock.patch(
+                "backup_host._run",
+                return_value=mock.Mock(returncode=0),
+            ) as mocked:
+                rc = backup_host.main(["--base-path", str(base), "stop"])
+            self.assertEqual(rc, 0)
+            args = mocked.call_args[0][0]
+            self.assertEqual(args[-2:], ["stop", backup_host.SERVICE_NAME])
+
+    def test_logs_scopes_compose_logs_to_scheduler_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._compose_base(tmp)
+            with mock.patch(
+                "backup_host._run",
+                return_value=mock.Mock(returncode=0),
+            ) as mocked:
+                rc = backup_host.main(["--base-path", str(base), "logs"])
+            self.assertEqual(rc, 0)
+            args = mocked.call_args[0][0]
+            self.assertEqual(args[-1], backup_host.SERVICE_NAME)
+
+    def test_browser_start_scopes_compose_up_to_browser_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with mock.patch("backup_host.write_compose_file", return_value=base / "compose" / "backup.yml"):
+                with mock.patch("backup_host.seed_backrest_config", return_value="seeded"):
+                    with mock.patch(
+                        "backup_host._run",
+                        return_value=mock.Mock(returncode=0),
+                    ) as mocked:
+                        rc = backup_host.main(["--base-path", str(base), "browser", "start"])
+            self.assertEqual(rc, 0)
+            args = mocked.call_args[0][0]
+            self.assertEqual(args[-1], backup_host.BROWSER_SERVICE_NAME)
 
     def test_start_config_error_is_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +210,10 @@ class BackupHostTests(unittest.TestCase):
             ["logs"],
             ["snapshots"],
             ["check"],
+            ["browser", "start"],
+            ["browser", "stop"],
+            ["browser", "status"],
+            ["browser", "logs"],
             ["restore", "latest", "--target", "restore-target"],
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,6 +246,18 @@ class BackupHostTests(unittest.TestCase):
                                     rc = backup_host.main(
                                         ["--base-path", str(base), *argv]
                                     )
+                            elif argv[0] == "browser":
+                                with mock.patch(
+                                    "backup_host.write_compose_file",
+                                    return_value=base / "compose" / "backup.yml",
+                                ):
+                                    with mock.patch(
+                                        "backup_host.seed_backrest_config",
+                                        return_value="skipped-existing-config",
+                                    ):
+                                        rc = backup_host.main(
+                                            ["--base-path", str(base), *argv]
+                                        )
                             else:
                                 rc = backup_host.main(
                                     ["--base-path", str(base), *argv]
@@ -209,12 +265,44 @@ class BackupHostTests(unittest.TestCase):
                     self.assertEqual(
                         rc,
                         backup_host.DOCKER_MISSING_EXIT,
-                        msg=f"{argv[0]} should exit {backup_host.DOCKER_MISSING_EXIT}",
+                        msg=f"{' '.join(argv)} should exit {backup_host.DOCKER_MISSING_EXIT}",
                     )
                     err = stderr.getvalue()
-                    self.assertIn(f"backup {argv[0]} error", err)
+                    boundary = (
+                        f"backup {argv[0]} {argv[1]} error"
+                        if argv[0] == "browser"
+                        else f"backup {argv[0]} error"
+                    )
+                    self.assertIn(boundary, err)
                     self.assertIn("required command not found on PATH: docker", err)
                     self.assertNotIn("Traceback", err)
+
+    def test_browser_url_prints_local_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._compose_base(tmp)
+            stdout = io.StringIO()
+            with mock.patch("sys.stdout", stdout):
+                rc = backup_host.main(["--base-path", str(base), "browser", "url"])
+            self.assertEqual(rc, 0)
+            self.assertIn("http://127.0.0.1:", stdout.getvalue())
+
+    def test_browser_start_logs_seed_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            stderr = io.StringIO()
+            stdout = io.StringIO()
+            with mock.patch("backup_host.write_compose_file", return_value=base / "compose" / "backup.yml"):
+                with mock.patch("backup_host.seed_backrest_config", return_value="seeded"):
+                    with mock.patch(
+                        "backup_host._run",
+                        return_value=mock.Mock(returncode=0),
+                    ):
+                        with mock.patch("sys.stdout", stdout):
+                            rc = backup_host.main(["--base-path", str(base), "browser", "start"])
+            self.assertEqual(rc, 0)
+            out = stdout.getvalue()
+            self.assertIn("backup browser start ok", out)
+            self.assertIn("seed=seeded", out)
 
     def test_snapshots_requires_running_container(self):
         with tempfile.TemporaryDirectory() as tmp:

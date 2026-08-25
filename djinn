@@ -14,7 +14,7 @@ Usage: ./djinn <subcommand> [args...]
   up       <name>              create/update a container from its manifest
   down     <name> [--purge]    stop (or purge) a container
   service  <name> [args...]    start a plugin's host-side service on this Mac
-  backup   <cmd> [args...]     singleton artifact backup (start/stop/status/...)
+  backup   <cmd> [args...]     singleton artifact backup (start/stop/status/.../browser)
   allow    <container> <domain...>  add domains to a running container's egress allowlist
   keys     <container> ...     edit one container's agent MCP credentials
   help                         show this message

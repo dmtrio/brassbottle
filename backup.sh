@@ -12,6 +12,7 @@
 #   ./backup.sh snapshots
 #   ./backup.sh check
 #   ./backup.sh restore <snapshot> --target <host-path>
+#   ./backup.sh browser start|stop|status|logs|url
 
 set -eo pipefail
 
@@ -29,6 +30,7 @@ fi
 if [ -z "${1:-}" ]; then
     echo "Usage: ./backup.sh <cmd> [args...]"
     echo "  start | stop | status | logs [-f] | snapshots | check | restore <id> --target <path>"
+    echo "  browser start | stop | status | logs [-f] | url"
     exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/backup_host.py" --help
 fi
 

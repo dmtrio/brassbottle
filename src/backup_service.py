@@ -85,6 +85,40 @@ def _repo_directory_has_data() -> bool:
         return True
 
 
+def _export_restic_config_json() -> None:
+    """Write restic `cat config --json` output for host-side Backrest seeding."""
+    repo = _restic_repo_path()
+    if repo is None:
+        return
+    export_path = repo / "config.json"
+    if export_path.is_file():
+        return
+    result = subprocess.run(
+        ["restic", "cat", "config", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return
+    repo_id = data.get("id")
+    if not isinstance(repo_id, str) or len(repo_id) != 64:
+        return
+    try:
+        bytes.fromhex(repo_id)
+    except ValueError:
+        return
+    content = result.stdout if result.stdout.endswith("\n") else result.stdout + "\n"
+    try:
+        export_path.write_text(content, encoding="utf-8")
+    except OSError:
+        return
+
+
 def ensure_repo_initialized() -> None:
     """Initialize the restic repository if needed (idempotent, race-tolerant)."""
     started = time.monotonic()
@@ -92,6 +126,7 @@ def ensure_repo_initialized() -> None:
 
     probe = subprocess.run(["restic", "snapshots"], capture_output=True, text=True)
     if probe.returncode == 0:
+        _export_restic_config_json()
         log_stage("init", "ok", duration_sec=time.monotonic() - started, note="already-initialized")
         return
 
@@ -111,15 +146,18 @@ def ensure_repo_initialized() -> None:
 
     init = subprocess.run(["restic", "init"], capture_output=True, text=True)
     if init.returncode == 0:
+        _export_restic_config_json()
         log_stage("init", "ok", duration_sec=time.monotonic() - started)
         return
 
     if _repo_already_initialized(init.stderr or "", init.stdout or ""):
+        _export_restic_config_json()
         log_stage("init", "ok", duration_sec=time.monotonic() - started, note="race-won-by-peer")
         return
 
     retry = subprocess.run(["restic", "snapshots"], capture_output=True, text=True)
     if retry.returncode == 0:
+        _export_restic_config_json()
         log_stage("init", "ok", duration_sec=time.monotonic() - started, note="initialized-by-peer")
         return
 
