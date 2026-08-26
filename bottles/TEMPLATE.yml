@@ -88,6 +88,12 @@ capabilities:
 #   plugins: [serena, gateway, obsidian-annotated]   # serena: local; others remote
 plugins: []
 
+# Optional egress plugin — agent-facing request/check MCP tools plus the
+# request-egress CLI. Core interception and ./djinn allow work without this;
+# enable when agents need explicit pre-flight tools (especially codex, which
+# takes no remote MCP servers).
+#   plugins: [egress]
+
 # Per-container host port for a host-service plugin (optional). Host ports are
 # exclusive, so two containers running the same plugin need different values —
 # same reason each container has its own ssh.port / remote.mosh_ports. Overrides

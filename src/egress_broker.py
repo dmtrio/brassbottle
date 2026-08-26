@@ -392,6 +392,7 @@ def file_egress_with_hold(
     host_is_ip: bool = False,
     hold_seconds: int = DEFAULT_HOLD_SECONDS,
     timeout: float | None = None,
+    reason: str | None = None,
     opener: Callable[..., Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """POST /egress and return (json_body, error_reason)."""
@@ -407,6 +408,8 @@ def file_egress_with_hold(
     }
     if host_is_ip:
         payload["host_is_ip"] = True
+    if reason is not None:
+        payload["reason"] = reason
 
     endpoint = url.rstrip("/") + "/egress"
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")

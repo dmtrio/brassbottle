@@ -45,3 +45,20 @@ container restart.
 This is for quick experiments only. The generated key files are recomposed on
 the next `djinn up`; durable changes belong in `.djinn/secrets.env` and the
 bottle's `common_secrets:` / `agent_secrets:`.
+
+## `request-egress`
+
+In-container CLI for filing egress approval when an agent has no MCP tools
+(codex, `cursor-agent`, shell scripts). Wraps the same host broker long-poll as
+the transparent broker and the optional `egress` plugin's MCP tools.
+
+```bash
+request-egress docs.stripe.com "fetch API reference"
+request-egress host1.example.com host2.example.com "batch pre-flight"
+request-egress neon.tech:5432 "db:migrate pre-flight"
+request-egress --check api.stripe.com
+```
+
+Exit codes: **0** allowed, **1** denied (or broker error), **2** timed out still
+queued. Operator approval remains host-side (`./djinn allow` / `./djinn allow
+--watch`).
