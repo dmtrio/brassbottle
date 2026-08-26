@@ -43,47 +43,81 @@ still win.
 | Rules | bundled `rules/` or your `RULES_PATH` repo | yes | yes |
 | Non-code outputs | `$DJINN_HOME/artifacts/<name>/` mounted at `/artifacts` | yes | yes |
 
-## Shell Aliases
+## Shell Aliases and Completion
 
-`djinn` resolves its own location, so it can run from any directory. If you want
-short commands, add aliases to your shell config:
+`djinn` resolves its own location, so it can run from any directory. One alias
+onto the dispatcher gives you every subcommand:
 
 ```bash
-export DJINN_REPO="$HOME/git/brassbottle"
-alias djup="$DJINN_REPO/djinn up"
-alias djdown="$DJINN_REPO/djinn down"
-alias djsvc="$DJINN_REPO/djinn service"
-alias djallow="$DJINN_REPO/djinn allow"
-alias djkeys="$DJINN_REPO/djinn keys"
-alias cddj="cd \$DJINN_REPO"
+export DJINN_REPO="$HOME/git/brassbottle"   # adjust to your clone
+alias djinn="$DJINN_REPO/djinn"
+alias cdj='cd "$DJINN_REPO"'
 ```
 
-Container-name completion can delegate to `src/common.sh`, which keeps
-`BOTTLES_PATH` and compatibility resolution in one place:
+Completion resolves bottle names through `src/common.sh`, which keeps
+`BOTTLES_PATH` and the compatibility fallbacks in one place — never hardcode
+the bottles directory.
+
+For bash:
 
 ```bash
-_dj_names() {
-  local dir f names=""
-  dir=$(bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$BOTTLES_PATH"')
-  for f in "$dir"/*.yml; do
-    f=${f##*/}
-    [ "$f" = TEMPLATE.yml ] && continue
-    names="$names ${f%.yml}"
-  done
-  COMPREPLY=($(compgen -W "$names" -- "${COMP_WORDS[COMP_CWORD]}"))
+_djinn_complete() {
+    local cur=${COMP_WORDS[COMP_CWORD]} sub=${COMP_WORDS[1]}
+    local dir f names=""
+    case $COMP_CWORD in
+        1) names="up down service backup allow keys help" ;;
+        2)
+            case $sub in
+                up|down|allow|keys)
+                    dir=$(bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$BOTTLES_PATH"')
+                    for f in "$dir"/*.yml; do
+                        f=${f##*/}
+                        [ "$f" = TEMPLATE.yml ] && continue
+                        names="$names ${f%.yml}"
+                    done ;;
+                service)
+                    for f in "$DJINN_REPO"/plugins/*/run.sh; do
+                        [ -e "$f" ] || continue
+                        f=${f%/run.sh}; names="$names ${f##*/}"
+                    done ;;
+                backup) names="start stop status logs snapshots check restore browser" ;;
+            esac ;;
+        3)
+            [ "$sub" = backup ] && [ "${COMP_WORDS[2]}" = browser ] \
+                && names="start stop status logs url" ;;
+    esac
+    COMPREPLY=($(compgen -W "$names" -- "$cur"))
 }
-complete -F _dj_names djup djdown
+complete -F _djinn_complete djinn
 ```
 
-For zsh, use the same aliases and native glob handling:
+For zsh:
 
 ```zsh
-_dj_names_zsh() {
-  local dir
-  dir=$(bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$BOTTLES_PATH"')
-  local -a names=(${dir}/*.yml(N:t:r))
-  names=(${names:#TEMPLATE})
-  compadd -a names
+_djinn_bottles() {
+    local dir
+    dir=$(bash -c '. "$DJINN_REPO/src/common.sh" 2>/dev/null; echo "$BOTTLES_PATH"')
+    local -a names=(${dir}/*.yml(N:t:r))
+    compadd -a -- ${names:#TEMPLATE}
 }
-compdef _dj_names_zsh djup djdown
+
+_djinn() {
+    if (( CURRENT == 2 )); then
+        compadd up down service backup allow keys help
+    elif (( CURRENT == 3 )); then
+        case "$words[2]" in
+            up|down|allow|keys) _djinn_bottles ;;
+            service) compadd -- ${DJINN_REPO}/plugins/*/run.sh(N:h:t) ;;
+            backup)  compadd start stop status logs snapshots check restore browser ;;
+        esac
+    elif (( CURRENT == 4 )) && [[ "$words[2]" == backup && "$words[3]" == browser ]]; then
+        compadd start stop status logs url
+    fi
+}
+compdef _djinn djinn
 ```
+
+If you prefer per-verb aliases (`djup`, `djdown`, …), point them at
+`"$DJINN_REPO/djinn up"` and friends and add `complete -F _djinn_complete` /
+`compdef` entries for each — but the single `djinn` alias keeps completion in
+one place, including `djinn backup`.
