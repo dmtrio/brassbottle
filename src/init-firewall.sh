@@ -19,8 +19,9 @@
 #   HOST_MCP_PORTS         comma/space-separated TCP ports on
 #                          host.docker.internal to open (MCP servers on the
 #                          host). Unset = host unreachable.
-#   ENABLE_EGRESS_BROKER   when true (default), log blocked egress via NFLOG
-#                          group 32 for the container-side nflog reader.
+#   ENABLE_EGRESS_BROKER   when true (default), redirect blocked :80/:443 to
+#                          the in-container broker, log via NFLOG group 32,
+#                          and start the transparent broker (entrypoint).
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -228,8 +229,14 @@ if [ -n "${HOST_MCP_PORTS:-}" ]; then
     done
 fi
 
-# Copy blocked egress to userspace before the final REJECT (non-terminating).
+# Transparent egress broker (B3): REDIRECT blocked :80/:443 to the local
+# listener, plus a companion filter ACCEPT for the redirected 127.0.0.1:3128
+# destination (the generic -o lo ACCEPT does not cover REDIRECT targets).
+# Disabled together with the broker process when ENABLE_EGRESS_BROKER=false.
 if [ "${ENABLE_EGRESS_BROKER:-true}" = "true" ]; then
+    # Broker filter ACCEPT must precede NFLOG: redirected connections already
+    # show dst=127.0.0.1:3128 and would flood the operator queue as bogus filings.
+    /usr/local/bin/egress_broker_firewall.sh add
     iptables -A OUTPUT -j NFLOG --nflog-group 32 --nflog-prefix "djinn-egress"
 fi
 
