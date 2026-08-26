@@ -444,6 +444,29 @@ assert_contains "dispatcher exports BASE_PATH to the launcher" "$out" "base=set"
 # BOTTLES_PATH up.sh does; unexported it would silently ignore ./.env.
 assert_contains "dispatcher exports BOTTLES_PATH to the launcher" "$out" "bottles=set"
 
+# ────────────────────────────────────────────────────────────────────────────
+echo "── ./djinn allow routing ──"
+DJBOX="$WORK/djbox"
+mkdir -p "$DJBOX/bin" "$DJBOX/src"
+cp "$REPO/djinn" "$DJBOX/"
+cat > "$DJBOX/bin/allow-egress.sh" <<'MOCK'
+#!/bin/bash
+echo "ROUTE_ALLOW_EGRESS $*"
+MOCK
+chmod +x "$DJBOX/bin/allow-egress.sh"
+cat > "$DJBOX/src/egress_watch.py" <<'MOCK'
+#!/usr/bin/env python3
+import sys
+print("ROUTE_EGRESS_WATCH", " ".join(sys.argv[1:]))
+MOCK
+chmod +x "$DJBOX/src/egress_watch.py"
+out=$(cd "$DJBOX" && ./djinn allow --watch extra 2>&1); rc=$?
+assert_rc "allow --watch routes to egress_watch.py" 0 "$rc"
+assert_contains "allow --watch execs watcher" "$out" "ROUTE_EGRESS_WATCH extra"
+out=$(cd "$DJBOX" && ./djinn allow foo example.com 2>&1); rc=$?
+assert_rc "allow <container> <domain> routes to allow-egress.sh" 0 "$rc"
+assert_contains "allow forwards container and domain" "$out" "ROUTE_ALLOW_EGRESS foo example.com"
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then echo "FAILED: $FAILURES bash test(s)"; exit 1; fi
 echo "all bash tests passed"
