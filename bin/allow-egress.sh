@@ -90,18 +90,21 @@ echo ""
 
 # Best-effort: release held broker connections when a host-side daemon is up.
 notify_egress_daemon() {
+    # Daemon-invoked runs already release the request; notify is for manual ./djinn allow.
+    [ "${DJINN_EGRESS_SKIP_NOTIFY:-}" = "1" ] && return 0
+
     local token_file="$RUN_PATH/egress/${OPERATOR_TOKEN_FILENAME:-operator.token}"
     local broker_port="${EGRESS_BROKER_PORT:-8816}"
     local broker_url="http://127.0.0.1:${broker_port}"
     local token container="$CONTAINER"
 
     [ -f "$token_file" ] || return 0
-    curl -sf --connect-timeout 1 "${broker_url}/health" >/dev/null 2>&1 || return 0
+    curl -sf --connect-timeout 1 --max-time 5 "${broker_url}/health" >/dev/null 2>&1 || return 0
     token="$(<"$token_file")" || return 0
     [ -n "$token" ] || return 0
 
     for d in "${DOMAINS[@]}"; do
-        curl -sf --connect-timeout 2 -X POST "${broker_url}/decide" \
+        curl -sf --connect-timeout 2 --max-time 5 -X POST "${broker_url}/decide" \
             -H "Authorization: Bearer ${token}" \
             -H "Content-Type: application/json" \
             -d "{\"container\":\"${container}\",\"host\":\"${d}\",\"decision\":\"allow\",\"scope\":\"live\"}" \
