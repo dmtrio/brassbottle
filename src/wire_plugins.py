@@ -122,6 +122,10 @@ AGENT_MCP_FORMATS = frozenset({"json", "toml"})
 AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
 LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl"})
 AGENT_MCP_DIALECTS = LITERAL_DIALECTS | frozenset({"mcpServers"})
+# Kept in lockstep with manifest.CODEX_MANAGED_BLOCK_ENV_REFS (parity-tested in
+# tests/test_wire_plugins.py): "bearer_token_env_var" is the only field name
+# _codex_block_body renders, so it is the only string manifest.py may accept.
+CODEX_MANAGED_BLOCK_ENV_REFS = frozenset({False, "bearer_token_env_var"})
 
 # COSMETIC ONLY: per-agent progress notes. Wiring logic MUST NOT key off these
 # names; agents absent from these maps still wire with generic messages.
@@ -355,11 +359,19 @@ def _claude_server(spec):
 
 def _render_named_env_ref_server(spec, requires, env_ref_field, server_name, binary):
     """Render a remote ref-style server for agents whose env_refs is a STRING
-    destination field name (e.g. kimi's bearerTokenEnvVar).
+    destination field name (e.g. kimi's bearerTokenEnvVar, codex's
+    bearer_token_env_var). Every such field is, by construction, a BEARER
+    token env var — the agent CLI builds its own `Authorization: Bearer
+    <value>` header from it, nothing else. So the spec's header being
+    replaced must actually BE `Authorization: Bearer ${SLOT}`, not merely
+    some other header (e.g. `X-API-Key: ${SLOT}`) that happens to contain the
+    marker — accepting that would silently send Bearer auth to a server that
+    requires a different scheme, with no error anywhere.
 
     Contract (validated host-side in build_payload and re-checked defensively
-    here): one required slot, and a header value containing ${SLOT}. The header
-    carrying that bearer ref is removed and replaced with <env_ref_field>: SLOT.
+    here): one required slot, and headers == {"Authorization": "Bearer
+    ${SLOT}", ...other headers untouched}. The Authorization header is
+    removed and replaced with <env_ref_field>: SLOT.
     """
     if len(requires) != 1:
         raise WireError(
@@ -373,20 +385,16 @@ def _render_named_env_ref_server(spec, requires, env_ref_field, server_name, bin
             f"string env_refs remote wiring requires headers with a ${{{slot}}} bearer reference")
 
     marker = "${" + slot + "}"
-    matches = [
-        key for key, value in headers.items()
-        if isinstance(value, str) and marker in value
-    ]
-    if not matches:
+    if headers.get("Authorization") != f"Bearer {marker}":
         raise WireError(
             f"agent server '{server_name}' cannot be rendered for agent '{binary}': "
-            f"string env_refs remote wiring requires a headers entry containing {marker}")
+            f"string env_refs remote wiring requires headers.Authorization == "
+            f'"Bearer {marker}" exactly — a named env_refs field is always a '
+            "bearer token, never another auth scheme or header name")
 
-    # Canonical shape uses Authorization; if multiple match, strip that one.
-    header_to_strip = "Authorization" if "Authorization" in matches else matches[0]
     rendered = dict(spec)
     rendered_headers = dict(headers)
-    del rendered_headers[header_to_strip]
+    del rendered_headers["Authorization"]
     rendered["headers"] = rendered_headers
     rendered[env_ref_field] = slot
     return rendered
@@ -668,12 +676,13 @@ def wire_plugin_servers_json(path, plugins):
 def _codex_block_body(plugins):
     """Render the [mcp_servers.*] tables. Server names were validated to
     [A-Za-z0-9_-] host-side (safe as bare TOML keys). A LOCAL (stdio) spec
-    emits command/args as JSON (a TOML subset). A REMOTE spec (agent-scoped,
-    rendered by _render_named_env_ref_server with env_refs
-    bearer_token_env_var — see agents/codex/agent.yml) emits codex's own
-    native remote-MCP shape: `url` + `bearer_token_env_var`, an env var NAME
-    codex reads itself at connect time, never a literal secret. codex has no
-    header passthrough beyond that single bearer slot, so a remote spec still
+    emits command/args as JSON (a TOML subset). A REMOTE spec is always the
+    output of _render_named_env_ref_server (codex's env_refs is the fixed
+    string bearer_token_env_var — see agents/codex/agent.yml), which
+    unconditionally sets that field, so it emits codex's own native
+    remote-MCP shape: `url` + `bearer_token_env_var`, an env var NAME codex
+    reads itself at connect time, never a literal secret. codex has no header
+    passthrough beyond that single bearer slot, so a remote spec still
     carrying other headers after bearer-extraction can't be rendered here."""
     tables = []
     for name, spec in plugins.items():
@@ -688,11 +697,9 @@ def _codex_block_body(plugins):
                 "bearer-token extraction — codex only supports url + a single "
                 "bearer_token_env_var, not arbitrary headers")
         url = json.dumps(spec.get("url"), ensure_ascii=False)
-        lines = [f"[mcp_servers.{name}]", f"url = {url}"]
-        token_field = spec.get("bearer_token_env_var")
-        if token_field:
-            lines.append(f"bearer_token_env_var = {json.dumps(token_field, ensure_ascii=False)}")
-        tables.append("\n".join(lines))
+        token_field = json.dumps(spec.get("bearer_token_env_var"), ensure_ascii=False)
+        tables.append(
+            f"[mcp_servers.{name}]\nurl = {url}\nbearer_token_env_var = {token_field}")
     return "\n\n".join(tables) + "\n"
 
 
@@ -1010,6 +1017,17 @@ def build_payload(env):
                     # bearerTokenEnvVar) is only legal for the single-slot
                     # bearer-header remote shape. Validate HOST-side so
                     # unsupported descriptors fail before container wiring.
+                    # ACCEPTED TRADEOFF: this raises for the whole payload
+                    # build (up.sh runs under `set -e`, so ANY agent bound
+                    # here with a bad descriptor/plugin combo — e.g. a future
+                    # multi-slot remote — aborts wiring for every agent, not
+                    # just this one). That is the existing behavior for every
+                    # named-ref agent (kimi already carries it); codex now
+                    # shares it too. Fail LOUD and early over silently
+                    # dropping the server is the whole point of this
+                    # validation, and every current remote plugin
+                    # (obsidian-annotated, browser) is single-slot, so this
+                    # is latent, not active.
                     _render_named_env_ref_server(
                         sd["spec"], requires, agent["env_refs"], name, binary
                     )
