@@ -43,6 +43,7 @@ TOKENS_DIRNAME = "tokens"
 LOCK_FILENAME = "daemon.lock"
 CONFIG_FILENAME = "config.json"
 OPERATOR_TOKEN_FILENAME = "operator.token"
+DAEMON_SKIP_NOTIFY_ENV = "DJINN_EGRESS_SKIP_NOTIFY"
 
 IP_APPLY_FAILED_REASON = (
     "destination is an IP address; add it to the bottle manifest "
@@ -89,6 +90,7 @@ class OpenRequestState:
     pending_hits: int = 0
     last_hit_logged: datetime | None = None
     decision: Decision | None = None
+    applying: bool = False
     waiter_outcome: Decision | None = None
     waiters: list[threading.Event] = field(default_factory=list)
 
@@ -585,6 +587,12 @@ class EgressBroker:
             decision,
             scope or "",
         )
+        allow_error: str | None = None
+        resolved_scope: str | None = None
+        apply_container: str | None = None
+        apply_host: str | None = None
+        run_apply_outside_lock = False
+
         with self._lock:
             state = self._requests.get(request_id)
             if state is None:
@@ -593,12 +601,17 @@ class EgressBroker:
                 raise EgressBrokerHostError(
                     f"request_id={request_id} already decided"
                 )
+            if state.applying:
+                LOG.info(
+                    "egress broker decide noop request_id=%s reason=apply_in_progress",
+                    request_id,
+                )
+                return None
 
             now = self.now()
             self._flush_hits(state)
 
             outcome: Decision | None = None
-            allow_error: str | None = None
 
             if decision == "allow":
                 resolved_scope = scope or "live"
@@ -616,23 +629,12 @@ class EgressBroker:
                     allow_error = IP_REQUIRES_CIDR_REASON
                     outcome = Decision(decision="error", reason=IP_REQUIRES_CIDR_REASON)
                 else:
-                    apply_ok = self._apply_allow(state, resolved_scope)
-                    if apply_ok:
-                        self._log.append(
-                            "allowed",
-                            request_id,
-                            ts=now,
-                            scope=resolved_scope,
-                            host=state.host,
-                            container=state.container,
-                        )
-                        self._log.append("applied", request_id, ts=self.now())
-                        outcome = Decision(decision="allow", scope=resolved_scope)
-                        state.decision = outcome
-                    else:
-                        self._log.append("apply_failed", request_id, ts=self.now())
-                        allow_error = APPLY_FAILED_REASON
-                        outcome = Decision(decision="error", reason=APPLY_FAILED_REASON)
+                    # self._lock must not be held across subprocess/network I/O
+                    # (allow-egress.sh can call back into this daemon).
+                    state.applying = True
+                    apply_container = state.container
+                    apply_host = state.host
+                    run_apply_outside_lock = True
             elif decision == "deny":
                 fields: dict[str, Any] = {}
                 if reason is not None:
@@ -645,7 +647,47 @@ class EgressBroker:
                     f"invalid decision {decision!r} (must be allow or deny)"
                 )
 
-            if outcome is not None:
+            if not run_apply_outside_lock and outcome is not None:
+                self._wake_waiters(state, outcome)
+                if state.decision is not None:
+                    self._remove_open(state)
+
+        if run_apply_outside_lock:
+            assert resolved_scope is not None
+            assert apply_container is not None
+            assert apply_host is not None
+            apply_ok = self._apply_allow(apply_container, apply_host, resolved_scope)
+
+            with self._lock:
+                state = self._requests.get(request_id)
+                if state is None or not state.applying:
+                    LOG.info(
+                        "egress broker decide stale request_id=%s after apply",
+                        request_id,
+                    )
+                    return allow_error
+
+                state.applying = False
+                now = self.now()
+                outcome = None
+
+                if apply_ok:
+                    self._log.append(
+                        "allowed",
+                        request_id,
+                        ts=now,
+                        scope=resolved_scope,
+                        host=state.host,
+                        container=state.container,
+                    )
+                    self._log.append("applied", request_id, ts=self.now())
+                    outcome = Decision(decision="allow", scope=resolved_scope)
+                    state.decision = outcome
+                else:
+                    self._log.append("apply_failed", request_id, ts=self.now())
+                    allow_error = APPLY_FAILED_REASON
+                    outcome = Decision(decision="error", reason=APPLY_FAILED_REASON)
+
                 self._wake_waiters(state, outcome)
                 if state.decision is not None:
                     self._remove_open(state)
@@ -684,21 +726,23 @@ class EgressBroker:
             decided.append(request_id)
         return decided
 
-    def _apply_allow(self, state: OpenRequestState, scope: str) -> bool:
+    def _apply_allow(self, container: str, host: str, scope: str) -> bool:
         save_target = "yml" if scope == "manifest" else "none"
         cmd = [
             str(self._allow_script()),
-            state.container,
-            state.host,
+            container,
+            host,
             "--save",
             save_target,
         ]
+        env = os.environ.copy()
+        env[DAEMON_SKIP_NOTIFY_ENV] = "1"
         started = time.monotonic()
         LOG.info(
             "egress broker subprocess spawn argv_len=%d container=%s host=%s save=%s",
             len(cmd),
-            state.container,
-            state.host,
+            container,
+            host,
             save_target,
         )
         try:
@@ -707,6 +751,7 @@ class EgressBroker:
                 capture_output=True,
                 text=True,
                 check=False,
+                env=env,
             )
         except OSError as exc:
             LOG.info(

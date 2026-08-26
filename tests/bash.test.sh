@@ -327,6 +327,92 @@ assert_contains "short name resolves to the djinn- prefixed container" "$out" "C
 out=$(run_ae djinn-mycontainer cdn.playwright.dev --save none)
 assert_contains "full djinn- prefixed name also accepted" "$out" "Container: djinn-mycontainer"
 
+# notify_egress_daemon: skip when daemon invoked the script; curl /decide for manual runs.
+echo "── allow-egress notify daemon ──"
+CURL_LOG="$WORK/curl.log"
+: > "$CURL_LOG"
+mkdir -p "$WORK/curlbin"
+cat > "$WORK/curlbin/curl" <<MOCK
+#!/bin/bash
+echo "\$*" >> "$CURL_LOG"
+exit 0
+MOCK
+chmod +x "$WORK/curlbin/curl"
+
+DJINN_HOME="$WORK/djhome"
+RUN_PATH="$DJINN_HOME/run"
+mkdir -p "$RUN_PATH/egress"
+echo "notify-test-token" > "$RUN_PATH/egress/operator.token"
+
+cat > "$WORK/aebin/docker" <<'MOCK'
+#!/bin/bash
+case "$1" in
+    inspect)
+        if [ "$2" = "-f" ]; then
+            name="$4"
+            fmt="$3"
+        else
+            name="$2"
+            fmt=""
+        fi
+        for c in $MOCK_EXISTING_CONTAINERS; do
+            if [ "$c" = "$name" ]; then
+                if [ "$fmt" = "{{.State.Running}}" ]; then
+                    echo true
+                else
+                    echo false
+                fi
+                exit 0
+            fi
+        done
+        exit 1
+        ;;
+    exec)
+        if [ "$3" = "test" ] && [ "$4" = "-f" ] && [ "$5" = "/etc/dnsmasq.conf" ]; then
+            exit 0
+        fi
+        if [ "$2" = "-i" ]; then
+            exit 0
+        fi
+        exit 0
+        ;;
+    ps) exit 0 ;;
+    *) exit 0 ;;
+esac
+MOCK
+chmod +x "$WORK/aebin/docker"
+
+run_ae_notify() {
+    ( cd "$SBOX" && env DJINN_HOME="$DJINN_HOME" BOTTLES_PATH="$WORK/no-such-manifests" \
+        MOCK_EXISTING_CONTAINERS="${MOCK_EXISTING_CONTAINERS-djinn-mycontainer}" \
+        EGRESS_BROKER_PORT="${EGRESS_BROKER_PORT:-8816}" \
+        PATH="$WORK/curlbin:$WORK/aebin:$PATH" bash bin/allow-egress.sh "$@" ) 2>&1
+}
+
+: > "$CURL_LOG"
+out=$(run_ae_notify mycontainer notify.example.com --save none); rc=$?
+assert_rc "notify path with running container rc 0" 0 "$rc"
+assert_contains "notify path echoes domain" "$out" "notify.example.com"
+if grep -q '/decide' "$CURL_LOG"; then
+    pass "manual allow notifies egress daemon"
+else
+    fail "manual allow should POST /decide to egress daemon"
+fi
+if grep -q -- '--max-time' "$CURL_LOG"; then
+    pass "notify curls use --max-time"
+else
+    fail "notify curls missing --max-time"
+fi
+
+: > "$CURL_LOG"
+out=$(DJINN_EGRESS_SKIP_NOTIFY=1 run_ae_notify mycontainer skip.example.com --save none); rc=$?
+assert_rc "daemon-invoked allow skips notify rc 0" 0 "$rc"
+if grep -q '/decide' "$CURL_LOG"; then
+    fail "daemon-invoked allow should not POST /decide"
+else
+    pass "daemon-invoked allow skips notify"
+fi
+
 # An unknown container → a clear error naming the attempt, plus a ps -a hint.
 MOCK_EXISTING_CONTAINERS=""
 out=$(run_ae ghost cdn.playwright.dev --save none 2>&1); rc=$?

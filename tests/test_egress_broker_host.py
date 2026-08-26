@@ -929,6 +929,175 @@ class EgressBrokerHostTests(unittest.TestCase):
             waiter_thread.join(timeout=5)
             self.assertEqual(result["body"], {"decision": "allow", "scope": "live"})
 
+    def test_apply_allow_sets_skip_notify_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=60)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            with mock.patch("subprocess.run") as mocked:
+                mocked.return_value = mock.Mock(returncode=0)
+                b.decide(request_id, "allow", scope="live")
+                env = mocked.call_args.kwargs["env"]
+                self.assertEqual(env[broker.DAEMON_SKIP_NOTIFY_ENV], "1")
+            join_thread_or_fail(thread, label="file_request")
+
+    def test_decide_allow_with_notify_script_does_not_deadlock(self):
+        """A decide() whose apply script calls back into /decide must not wedge.
+
+        This is a REAL reproduction, and it is fussy on purpose. Two things must
+        hold or the test silently proves nothing (both were true of an earlier
+        version of it, which passed even with the fix removed):
+
+          * the callback curl must be UNBOUNDED. If the fake script caps it,
+            a genuine deadlock just times out and the test goes green.
+          * the script must actually reach /decide with a VALID body. The port
+            and operator token have to be handed to it, and the args are
+            (container, host, --save, <target>) — an earlier version read $2/$3
+            and so POSTed host="--save", which the daemon rejects as an invalid
+            domain before it ever touches the lock. No mutation could make that
+            deadlock.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            egress_root = tmp_path / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+
+            port_file = tmp_path / "port"
+            token_file = tmp_path / "operator.token"
+
+            fake_repo = tmp_path / "repo"
+            bin_dir = fake_repo / "bin"
+            bin_dir.mkdir(parents=True)
+            allow_script = bin_dir / "allow-egress.sh"
+            allow_script.write_text(
+                f"""#!/bin/bash
+if [ "${{DJINN_EGRESS_SKIP_NOTIFY:-}}" != "1" ]; then
+  PORT="$(cat {port_file})"
+  TOKEN="$(cat {token_file})"
+  curl -s --connect-timeout 2 \\
+    -X POST "http://127.0.0.1:${{PORT}}/decide" \\
+    -H "Authorization: Bearer ${{TOKEN}}" \\
+    -H "Content-Type: application/json" \\
+    -d "{{\\"container\\":\\"$1\\",\\"host\\":\\"$2\\",\\"decision\\":\\"allow\\",\\"scope\\":\\"live\\"}}" \\
+    >/dev/null 2>&1 || true
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            allow_script.chmod(0o755)
+
+            clock = FakeClock(NOW)
+            b = broker.EgressBroker(
+                egress_root,
+                repo_root=fake_repo,
+                now_fn=clock.now,
+                hold_seconds_default=5,
+            )
+            server = self._http_server(egress_root, b, tokens_dir)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            self.addCleanup(server.shutdown)
+            host, port = server.server_address
+            wait_for_tcp_listening(host, port)
+            port_file.write_text(str(port), encoding="utf-8")
+            token_file.write_text(server.operator_token, encoding="utf-8")
+
+            filed = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            filed.start()
+            self.addCleanup(lambda: filed.join(timeout=10))
+            request_id = wait_for_broker_open_request(b)
+
+            done = threading.Event()
+
+            def approve() -> None:
+                try:
+                    b.decide(request_id, "allow", scope="live")
+                finally:
+                    done.set()
+
+            approver = threading.Thread(target=approve, daemon=True)
+            approver.start()
+
+            # The deadlock manifests as decide() never returning. A generous
+            # deadline keeps this from flaking on a loaded runner while still
+            # failing fast on a real regression.
+            self.assertTrue(
+                done.wait(timeout=20),
+                "decide() did not return: the apply script's call back into "
+                "/decide deadlocked against the lock decide() holds",
+            )
+
+    def test_concurrent_decide_allow_applies_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=60)
+            filed = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            filed.start()
+            request_id = wait_for_broker_open_request(b)
+
+            apply_started = threading.Event()
+            release_apply = threading.Event()
+            call_count = 0
+
+            def slow_apply(*args, **kwargs) -> mock.Mock:
+                nonlocal call_count
+                call_count += 1
+                apply_started.set()
+                if not release_apply.wait(timeout=5.0):
+                    raise AssertionError("release_apply not signaled")
+                return mock.Mock(returncode=0)
+
+            first = threading.Thread(target=lambda: b.decide(request_id, "allow"))
+            with mock.patch("subprocess.run", side_effect=slow_apply):
+                first.start()
+                self.assertTrue(
+                    apply_started.wait(timeout=5.0),
+                    "subprocess.apply did not start",
+                )
+                second_error: list[BaseException] = []
+
+                def second_decide() -> None:
+                    try:
+                        b.decide(request_id, "allow")
+                    except BaseException as exc:
+                        second_error.append(exc)
+
+                second = threading.Thread(target=second_decide)
+                second.start()
+                join_thread_or_fail(second, timeout=5.0, label="second decide")
+                release_apply.set()
+                join_thread_or_fail(first, timeout=5.0, label="first decide")
+
+            self.assertEqual(second_error, [])
+            self.assertEqual(call_count, 1)
+            join_thread_or_fail(filed, label="file_request")
+            allowed = [
+                r
+                for r in self._log_records(root)
+                if r.get("kind") == "allowed" and r.get("request_id") == request_id
+            ]
+            self.assertEqual(len(allowed), 1)
+
+    def test_notify_egress_daemon_curls_use_max_time(self):
+        script = (REPO_ROOT / "bin" / "allow-egress.sh").read_text(encoding="utf-8")
+        self.assertGreaterEqual(script.count("--max-time"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
