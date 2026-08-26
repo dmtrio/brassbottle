@@ -78,6 +78,10 @@ class EgressBrokerHostTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     broker.normalize_host(raw)
 
+    def test_normalize_host_rejects_ip_literals(self):
+        with self.assertRaises(ValueError):
+            broker.normalize_host("192.0.2.55")
+
     def test_dedupe_same_key_one_open_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -188,11 +192,12 @@ class EgressBrokerHostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             egress_root = root / "egress"
-            egress_root.mkdir()
-            token_path = egress_root / broker.TOKEN_FILENAME
-            token_path.write_text("test-token\n", encoding="utf-8")
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "bottle-a.token").write_text("test-token\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, "test-token")
+            store = broker.BottleTokenStore(tokens_dir)
+            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -201,7 +206,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 conn.request(
                     "POST",
                     "/egress",
-                    json.dumps({"container": "c", "host": "neon.tech", "port": 443}),
+                    json.dumps({"host": "neon.tech", "port": 443}),
                     {"Content-Type": "application/json"},
                 )
                 resp = conn.getresponse()
@@ -212,7 +217,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 conn.request(
                     "POST",
                     "/egress",
-                    json.dumps({"container": "c", "host": "neon.tech", "port": 443}),
+                    json.dumps({"host": "neon.tech", "port": 443}),
                     {
                         "Content-Type": "application/json",
                         "Authorization": "Bearer wrong",
@@ -225,15 +230,17 @@ class EgressBrokerHostTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=5)
 
-    def test_auth_correct_bearer_accepted(self):
+    def test_token_for_bottle_a_cannot_file_for_bottle_b(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             egress_root = root / "egress"
-            egress_root.mkdir()
-            token_path = egress_root / broker.TOKEN_FILENAME
-            token_path.write_text("good-token\n", encoding="utf-8")
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "bottle-a.token").write_text("token-a\n", encoding="utf-8")
+            (tokens_dir / "bottle-b.token").write_text("token-b\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, "good-token")
+            store = broker.BottleTokenStore(tokens_dir)
+            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -242,7 +249,50 @@ class EgressBrokerHostTests(unittest.TestCase):
                 conn.request(
                     "POST",
                     "/egress",
-                    json.dumps({"container": "c", "host": "neon.tech", "port": 443}),
+                    json.dumps(
+                        {
+                            "container": "bottle-b",
+                            "host": "neon.tech",
+                            "port": 443,
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer token-a",
+                    },
+                )
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, HTTPStatus.FORBIDDEN)
+                conn.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_auth_correct_bearer_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "my-bottle.token").write_text("good-token\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            store = broker.BottleTokenStore(tokens_dir)
+            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/egress",
+                    json.dumps(
+                        {
+                            "container": "my-bottle",
+                            "host": "neon.tech",
+                            "port": 443,
+                        }
+                    ),
                     {
                         "Content-Type": "application/json",
                         "Authorization": "Bearer good-token",
@@ -359,9 +409,12 @@ class EgressBrokerHostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             egress_root = root / "egress"
-            egress_root.mkdir()
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("token\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, "token")
+            store = broker.BottleTokenStore(tokens_dir)
+            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -424,6 +477,83 @@ class EgressBrokerHostTests(unittest.TestCase):
                 }
             )
             self.assertNotIn("docs.stripe.com", payload)
+
+    def test_ip_destination_accepted_and_filed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            store = broker.BottleTokenStore(tokens_dir)
+            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/egress",
+                    json.dumps({"host": "192.0.2.55", "port": 5432}),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer tok",
+                    },
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.OK)
+                self.assertEqual(body["decision"], "pending")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            requested = [
+                r for r in self._log_records(egress_root) if r.get("kind") == "requested"
+            ]
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(requested[0]["host"], "192.0.2.55")
+            self.assertTrue(requested[0].get("host_is_ip"))
+
+    def test_ipv6_literal_accepted(self):
+        host, is_ip = broker.normalize_destination("2001:db8::1")
+        self.assertTrue(is_ip)
+        self.assertEqual(host, "2001:db8::1")
+
+    def test_approve_ip_never_invokes_allow_egress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=60)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "192.0.2.55", 5432),
+                kwargs={"host_is_ip": True},
+            )
+            thread.start()
+            time.sleep(0.2)
+            request_id = next(iter(b._requests))
+            with mock.patch("subprocess.run") as mocked:
+                b.decide(request_id, "allow", scope="live")
+                mocked.assert_not_called()
+            thread.join(timeout=5)
+            failed = [
+                r
+                for r in self._log_records(root)
+                if r.get("kind") == "apply_failed" and r.get("request_id") == request_id
+            ]
+            self.assertEqual(len(failed), 1)
+            self.assertIn("egress_cidrs", failed[0].get("reason", ""))
+
+    def test_bottle_token_store_reload_on_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp) / "tokens"
+            tokens_dir.mkdir()
+            store = broker.BottleTokenStore(tokens_dir)
+            self.assertIsNone(store.resolve_bottle("new-token"))
+            (tokens_dir / "late.token").write_text("new-token\n", encoding="utf-8")
+            self.assertEqual(store.resolve_bottle("new-token"), "late")
 
 
 if __name__ == "__main__":

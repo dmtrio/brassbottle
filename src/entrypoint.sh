@@ -57,6 +57,13 @@ unset _vol_path _p
 if [ "${ENABLE_FIREWALL:-true}" = "true" ]; then
     if /usr/local/bin/init-firewall.sh; then
         echo "✓ Egress firewall active"
+        if [ "${ENABLE_EGRESS_BROKER:-true}" = "true" ]; then
+            if PYTHONPATH=/usr/local/lib/djinn python3 /usr/local/lib/djinn/egress_nflog.py & then
+                echo "✓ Egress NFLOG reader started"
+            else
+                echo "⚠ Egress NFLOG reader failed to start (non-fatal)"
+            fi
+        fi
     else
         echo ""
         echo "FATAL: firewall setup failed (missing NET_ADMIN/NET_RAW caps?)."

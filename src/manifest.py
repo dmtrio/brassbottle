@@ -891,6 +891,14 @@ def derive(manifest, plugin_files, agent_files, env):
     caps = _section(manifest, "capabilities")
     egress_items = _comma_list(caps.get("egress"), "capabilities.egress")
     cidr_items = _comma_list(caps.get("egress_cidrs"), "capabilities.egress_cidrs")
+    if "egress_broker" not in caps or caps.get("egress_broker") is None:
+        enable_egress_broker = "true"
+    else:
+        enable_egress_broker = _raw_flag(caps.get("egress_broker"), "capabilities.egress_broker")
+        if enable_egress_broker not in ("true", "false"):
+            raise ManifestError(
+                f"capabilities.egress_broker must be true or false (got {enable_egress_broker!r})")
+    out["ENABLE_EGRESS_BROKER"] = enable_egress_broker
     sugar_plugins = []
     for cap in ("gateway", "proxyman", "browser"):
         if _raw_flag(caps.get(cap), f"capabilities.{cap}") == "true":
@@ -1340,6 +1348,9 @@ def derive(manifest, plugin_files, agent_files, env):
         f"{name}\t{plugin_services[name]['command']}\t{plugin_services[name]['plugin']}\n"
         for name in sorted(plugin_services)
     )
+    # Core egress broker (not plugin-gated): host port for filing blocked egress.
+    if enable_egress_broker == "true":
+        host_ports.append(8816)
     # Sorted + deduped so the firewall grant string is order-independent of the
     # plugin list and two plugins sharing a port don't double up the grant.
     out["HOST_MCP_PORTS"] = ",".join(str(p) for p in sorted(set(host_ports)))
