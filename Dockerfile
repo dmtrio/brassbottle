@@ -292,10 +292,15 @@ COPY src/egress_log.py /usr/local/lib/djinn/egress_log.py
 COPY src/egress_broker_host.py /usr/local/lib/djinn/egress_broker_host.py
 COPY src/egress_broker.py /usr/local/lib/djinn/egress_broker.py
 COPY src/egress_nflog.py /usr/local/lib/djinn/egress_nflog.py
+COPY src/egress_request.py /usr/local/lib/djinn/egress_request.py
 RUN chmod 644 /usr/local/lib/djinn/egress_log.py \
     /usr/local/lib/djinn/egress_broker_host.py \
     /usr/local/lib/djinn/egress_broker.py \
-    /usr/local/lib/djinn/egress_nflog.py
+    /usr/local/lib/djinn/egress_nflog.py \
+    /usr/local/lib/djinn/egress_request.py
+
+COPY src/egress_request.py /usr/local/bin/request-egress
+RUN chmod 755 /usr/local/bin/request-egress
 
 # Dedicated uid for the in-container egress broker. iptables (B3) exempts this
 # owner from REDIRECT so the broker's own upstream dials are not looped back.

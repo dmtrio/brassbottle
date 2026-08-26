@@ -51,6 +51,7 @@ opinion.
 | [`rhinomcp-official`](rhinomcp-official/) | remote HTTP (in-Rhino server, official) | Rhino: `MCPStart` | [README](rhinomcp-official/README.md) |
 | [`rhinomcp`](rhinomcp/) | local (stdio bridge → host TCP 1999, baked) | Rhino: `mcpstart` | [README](rhinomcp/README.md) |
 | [`cordyceps`](cordyceps/) | remote HTTP (in-Grasshopper server) | GH: Cordyceps component | [README](cordyceps/README.md) |
+| [`egress`](egress/) | local (stdio, baked) | host broker on 8816 | [README](egress/README.md) |
 
 ## `plugin.yml` schema
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Operator-run Phase A egress smoke helpers (host-side).
+"""Operator-run Phase A+B egress smoke helpers (host-side).
 
-End-to-end checks for the egress broker, NFLOG reader, and invariants.
-Invoked by tests/egress.smoke.sh; unit-tested in tests/test_egress_smoke_lib.py.
+End-to-end checks for the egress broker, NFLOG reader, transparent broker
+live paths, and invariants. Invoked by tests/egress.smoke.sh; unit-tested in
+tests/test_egress_smoke_lib.py.
 """
 
 from __future__ import annotations
@@ -13,14 +14,15 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
-from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -30,6 +32,9 @@ import egress_log as el  # noqa: E402
 
 Status = Literal["pass", "fail", "skip"]
 DEFAULT_HTTPS_HOST = "docs.stripe.com"
+DEFAULT_HTTP_HOST = "neverssl.com"
+DEFAULT_FAST_GITHUB = "api.github.com"
+DEFAULT_FAST_NPM = "registry.npmjs.org"
 DEFAULT_PG_IP = "192.0.2.55"
 DEFAULT_PG_PORT = 5432
 DEFAULT_COALESCE_HOST = "www.example.com"
@@ -764,6 +769,19 @@ def run_smoke(
             "capabilities.egress_broker: false",
         )
 
+    from egress_smoke_phase_b import run_smoke_phase_b
+
+    run_smoke_phase_b(
+        summary,
+        bottle=bottle,
+        container=container,
+        base_path=base_path,
+        repo_root=repo_root,
+        https_host=https_host,
+        kill_switch_container=kill_switch_container,
+        sleep=sleep,
+    )
+
     return summary
 
 
@@ -789,7 +807,7 @@ def build_parser():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Phase A egress operator smoke test (host-side)",
+        description="Phase A+B egress operator smoke test (host-side)",
     )
     parser.add_argument(
         "bottle",

@@ -1,0 +1,14 @@
+# egress — agent-facing egress filing tools (optional plugin).
+# Core interception, NFLOG filing, and operator approval work without this;
+# enable it when an agent needs explicit request/check MCP tools. See ./README.md.
+
+install: |
+  # Stdlib-only local MCP server — fail the image build on syntax errors rather
+  # than at first agent use. (egress_request lives in /usr/local/lib/djinn and
+  # is COPYed later in the Dockerfile; py_compile covers this file only.)
+  python3 -m py_compile /opt/plugins/egress/mcp_server.py
+
+mcp:
+  egress:
+    command: python3
+    args: [/opt/plugins/egress/mcp_server.py]

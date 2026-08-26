@@ -35,17 +35,23 @@ def wait_for_tcp_listening(
 def wait_for_broker_open_request(
     b: broker.EgressBroker,
     *,
+    count: int = 1,
     timeout: float = 10.0,
     poll: float = 0.01,
 ) -> str:
-    """Poll until the broker has at least one open request; return its id."""
+    """Poll until the broker has at least `count` open requests; return one id.
+
+    Waiting on the observable state — the request actually reaching the broker's
+    map — rather than on a fixed sleep is what keeps these tests steady on a
+    loaded CI runner.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with b._lock:
-            if b._requests:
+            if len(b._requests) >= count:
                 return next(iter(b._requests))
         time.sleep(poll)
-    raise TimeoutError(f"broker had no open request after {timeout}s")
+    raise TimeoutError(f"broker had fewer than {count} open request(s) after {timeout}s")
 
 
 def join_thread_or_fail(

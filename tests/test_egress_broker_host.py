@@ -731,7 +731,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 kwargs={"request_id": "cafebabe"},
             )
             thread.start()
-            time.sleep(0.2)
+            wait_for_broker_open_request(b)
             second_body, second_id = b.file_request(
                 "coding-brassbottle",
                 "other.example.com",
@@ -819,7 +819,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             ]
             for thread in threads:
                 thread.start()
-            time.sleep(0.2)
+            wait_for_broker_open_request(b, count=2)
             with mock.patch("subprocess.run") as mocked:
                 mocked.return_value = mock.Mock(returncode=0)
                 decided = b.decide_allow_for_zone(
@@ -898,7 +898,7 @@ class EgressBrokerHostTests(unittest.TestCase):
 
             waiter_thread = threading.Thread(target=waiter)
             waiter_thread.start()
-            time.sleep(0.2)
+            wait_for_broker_open_request(b)
             try:
                 with mock.patch("subprocess.run") as mocked:
                     mocked.return_value = mock.Mock(returncode=0)
