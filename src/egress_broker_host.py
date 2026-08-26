@@ -42,6 +42,7 @@ STALE_SWEEP_INTERVAL_SECONDS = 300
 TOKENS_DIRNAME = "tokens"
 LOCK_FILENAME = "daemon.lock"
 CONFIG_FILENAME = "config.json"
+OPERATOR_TOKEN_FILENAME = "operator.token"
 
 IP_APPLY_FAILED_REASON = (
     "destination is an IP address; add it to the bottle manifest "
@@ -55,6 +56,7 @@ DOMAIN_RE = re.compile(
     r"^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"[A-Za-z][A-Za-z0-9-]{0,61}[A-Za-z0-9]$"
 )
+REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
 
 class EgressBrokerHostError(Exception):
@@ -155,6 +157,16 @@ def normalize_host(raw: str) -> str:
     return host
 
 
+def host_covered_by_zone(host: str, zone: str) -> bool:
+    """Return True when host is zone itself or a subdomain of zone."""
+    return host == zone or host.endswith("." + zone)
+
+
+def validate_request_id(request_id: str) -> bool:
+    """Return True when request_id matches broker-generated ids (uuid4 hex[:8])."""
+    return bool(REQUEST_ID_RE.fullmatch(request_id))
+
+
 def _utc_now(now: datetime | None = None) -> datetime:
     if now is None:
         return datetime.now(timezone.utc)
@@ -163,7 +175,7 @@ def _utc_now(now: datetime | None = None) -> datetime:
     return now.astimezone(timezone.utc)
 
 
-def _load_bottle_token(token_path: Path) -> str:
+def _load_secret_token(token_path: Path, *, created_log: str) -> str:
     if token_path.is_file():
         token = token_path.read_text(encoding="utf-8").strip()
         if token:
@@ -176,8 +188,24 @@ def _load_bottle_token(token_path: Path) -> str:
     fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(token + "\n")
-    LOG.info("egress broker bottle token created bottle=%s", token_path.stem)
+    LOG.info(created_log)
     return token
+
+
+def _load_bottle_token(token_path: Path) -> str:
+    return _load_secret_token(
+        token_path,
+        created_log=f"egress broker bottle token created bottle={token_path.stem}",
+    )
+
+
+def ensure_operator_token(egress_root: Path) -> str:
+    """Create or return the host-only operator bearer token (never in containers)."""
+    token_path = egress_root / OPERATOR_TOKEN_FILENAME
+    return _load_secret_token(
+        token_path,
+        created_log="egress broker operator token created",
+    )
 
 
 def ensure_bottle_token(base_path: Path, bottle: str) -> str:
@@ -373,63 +401,138 @@ class EgressBroker:
         reason: str | None = None,
         hold_seconds: int | None = None,
         host_is_ip: bool = False,
+        request_id: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """File or coalesce an egress request; return JSON body and request_id."""
+        if request_id is not None and not validate_request_id(request_id):
+            raise EgressBrokerHostError(
+                f"invalid request_id {request_id!r} (expected 8 lowercase hex chars)"
+            )
+
         key = _request_key(container, host, port)
         hold = hold_seconds if hold_seconds is not None else self._hold_seconds_default
         now = self.now()
 
         with self._lock:
-            existing_id = self._key_index.get(key)
-            if existing_id and existing_id in self._requests:
-                state = self._requests[existing_id]
-                self._record_hit(state)
-                request_id = existing_id
-                LOG.info(
-                    "egress broker request coalesce request_id=%s container=%s host=%s port=%d",
-                    request_id,
-                    container,
-                    host,
-                    port,
-                )
+            if request_id is not None:
+                existing_by_id = self._requests.get(request_id)
+                if existing_by_id is not None:
+                    self._record_hit(existing_by_id)
+                    state = existing_by_id
+                    request_id = existing_by_id.request_id
+                    LOG.info(
+                        "egress broker request coalesce request_id=%s container=%s host=%s port=%d",
+                        request_id,
+                        container,
+                        host,
+                        port,
+                    )
+                    if state.decision is not None:
+                        body = self._decision_body(state.decision)
+                        return body, request_id
+                else:
+                    existing_id = self._key_index.get(key)
+                    if existing_id and existing_id in self._requests:
+                        state = self._requests[existing_id]
+                        self._record_hit(state)
+                        request_id = existing_id
+                        LOG.info(
+                            "egress broker request coalesce request_id=%s container=%s host=%s port=%d",
+                            request_id,
+                            container,
+                            host,
+                            port,
+                        )
+                        if state.decision is not None:
+                            body = self._decision_body(state.decision)
+                            return body, request_id
+                    else:
+                        state = OpenRequestState(
+                            request_id=request_id,
+                            container=container,
+                            host=host,
+                            port=port,
+                            opened_at=now,
+                            host_is_ip=host_is_ip,
+                        )
+                        fields: dict[str, Any] = {
+                            "container": container,
+                            "host": host,
+                            "port": port,
+                        }
+                        if host_is_ip:
+                            fields["host_is_ip"] = True
+                        if uid is not None:
+                            fields["uid"] = uid
+                        if comm is not None:
+                            fields["comm"] = comm
+                        if reason is not None:
+                            fields["reason"] = reason
+                        self._log.append("requested", request_id, ts=now, **fields)
+                        self._notify_operator(request_id, now)
+                        self._requests[request_id] = state
+                        self._key_index[key] = request_id
+                        LOG.info(
+                            "egress broker request filed request_id=%s container=%s host=%s port=%d",
+                            request_id,
+                            container,
+                            host,
+                            port,
+                        )
+                        if state.decision is not None:
+                            body = self._decision_body(state.decision)
+                            return body, request_id
             else:
-                request_id = uuid4().hex
-                state = OpenRequestState(
-                    request_id=request_id,
-                    container=container,
-                    host=host,
-                    port=port,
-                    opened_at=now,
-                    host_is_ip=host_is_ip,
-                )
-                fields: dict[str, Any] = {
-                    "container": container,
-                    "host": host,
-                    "port": port,
-                }
-                if host_is_ip:
-                    fields["host_is_ip"] = True
-                if uid is not None:
-                    fields["uid"] = uid
-                if comm is not None:
-                    fields["comm"] = comm
-                if reason is not None:
-                    fields["reason"] = reason
-                self._log.append("requested", request_id, ts=now, **fields)
-                self._notify_operator(request_id, now)
-                self._requests[request_id] = state
-                self._key_index[key] = request_id
-                LOG.info(
-                    "egress broker request filed request_id=%s container=%s host=%s port=%d",
-                    request_id,
-                    container,
-                    host,
-                    port,
-                )
+                existing_id = self._key_index.get(key)
+                if existing_id and existing_id in self._requests:
+                    state = self._requests[existing_id]
+                    self._record_hit(state)
+                    request_id = existing_id
+                    LOG.info(
+                        "egress broker request coalesce request_id=%s container=%s host=%s port=%d",
+                        request_id,
+                        container,
+                        host,
+                        port,
+                    )
+                else:
+                    request_id = uuid4().hex
+                    state = OpenRequestState(
+                        request_id=request_id,
+                        container=container,
+                        host=host,
+                        port=port,
+                        opened_at=now,
+                        host_is_ip=host_is_ip,
+                    )
+                    fields = {
+                        "container": container,
+                        "host": host,
+                        "port": port,
+                    }
+                    if host_is_ip:
+                        fields["host_is_ip"] = True
+                    if uid is not None:
+                        fields["uid"] = uid
+                    if comm is not None:
+                        fields["comm"] = comm
+                    if reason is not None:
+                        fields["reason"] = reason
+                    self._log.append("requested", request_id, ts=now, **fields)
+                    self._notify_operator(request_id, now)
+                    self._requests[request_id] = state
+                    self._key_index[key] = request_id
+                    LOG.info(
+                        "egress broker request filed request_id=%s container=%s host=%s port=%d",
+                        request_id,
+                        container,
+                        host,
+                        port,
+                    )
 
-            if state.decision is not None:
-                body = self._decision_body(state.decision)
-                return body, request_id
+                if state.decision is not None:
+                    body = self._decision_body(state.decision)
+                    return body, request_id
 
         decision = self._wait_for_decision(state, hold)
         if decision is None:
@@ -555,6 +658,32 @@ class EgressBroker:
         )
         return allow_error
 
+    def decide_allow_for_zone(
+        self,
+        container: str,
+        domain: str,
+        *,
+        scope: str = "live",
+    ) -> list[str]:
+        """Release open requests whose host falls under domain (host-side only)."""
+        zone = normalize_host(domain)
+        with self._lock:
+            candidates = [
+                state.request_id
+                for state in self._requests.values()
+                if state.decision is None
+                and state.container == container
+                and host_covered_by_zone(state.host, zone)
+            ]
+        decided: list[str] = []
+        for request_id in candidates:
+            try:
+                self.decide(request_id, "allow", scope=scope)
+            except EgressBrokerHostError:
+                continue
+            decided.append(request_id)
+        return decided
+
     def _apply_allow(self, state: OpenRequestState, scope: str) -> bool:
         save_target = "yml" if scope == "manifest" else "none"
         cmd = [
@@ -651,9 +780,11 @@ class EgressBrokerHTTPServer(ThreadingHTTPServer):
         server_address: tuple[str, int],
         broker: EgressBroker,
         token_store: BottleTokenStore,
+        operator_token: str,
     ) -> None:
         self.broker = broker
         self.token_store = token_store
+        self.operator_token = operator_token
         super().__init__(server_address, EgressBrokerRequestHandler)
 
 
@@ -693,6 +824,20 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
             return None
         return bottle
 
+    def _resolve_operator_auth(self) -> bool:
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return False
+        provided = header[7:].strip()
+        if not provided:
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return False
+        if not hmac.compare_digest(provided, self.server.operator_token):
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return False
+        return True
+
     def do_GET(self) -> None:
         if self.path == "/health":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
@@ -700,9 +845,70 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if self.path == "/decide":
+            self._handle_decide_post()
+            return
         if self.path != "/egress":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
+        self._handle_egress_post()
+
+    def _handle_decide_post(self) -> None:
+        if not self._resolve_operator_auth():
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        LOG.info("egress broker request enter path=/decide bytes=%d", length)
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
+            return
+
+        container = payload.get("container")
+        if not isinstance(container, str) or not container:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "container is required"})
+            return
+
+        host_raw = payload.get("host")
+        if not isinstance(host_raw, str) or not host_raw:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "host is required"})
+            return
+
+        decision = payload.get("decision")
+        if decision != "allow":
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "decision must be allow"})
+            return
+
+        scope = payload.get("scope", "live")
+        if scope not in ("live", "manifest"):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid scope"})
+            return
+
+        try:
+            normalize_host(host_raw)
+        except ValueError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid host"})
+            return
+
+        try:
+            decided = self.server.broker.decide_allow_for_zone(
+                container,
+                host_raw,
+                scope=scope,
+            )
+        except EgressBrokerHostError as exc:
+            LOG.info("egress broker decide error reason=%s", exc)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        self._send_json(HTTPStatus.OK, {"decided": decided})
+
+    def _handle_egress_post(self) -> None:
         container = self._resolve_bottle_from_auth()
         if container is None:
             return
@@ -767,6 +973,18 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "reason must be a string"})
             return
 
+        client_request_id = payload.get("request_id")
+        if client_request_id is not None:
+            if not isinstance(client_request_id, str):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "request_id must be a string"},
+                )
+                return
+            if not validate_request_id(client_request_id):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request_id"})
+                return
+
         try:
             body, _request_id = self.server.broker.file_request(
                 container,
@@ -777,10 +995,15 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
                 reason=reason,
                 hold_seconds=hold_seconds,
                 host_is_ip=host_is_ip,
+                request_id=client_request_id,
             )
         except EgressLogError as exc:
             LOG.info("egress broker request error reason=%s", exc)
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "log error"})
+            return
+        except EgressBrokerHostError as exc:
+            LOG.info("egress broker request error reason=%s", exc)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
         self._send_json(HTTPStatus.OK, body)
@@ -841,7 +1064,8 @@ def run_daemon(
         repo_root=repo_root,
         hold_seconds_default=hold_default,
     )
-    server = EgressBrokerHTTPServer((host, port), broker, token_store)
+    operator_token = ensure_operator_token(egress_root)
+    server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
         target=_stale_sweep_loop,

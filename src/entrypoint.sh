@@ -58,6 +58,15 @@ if [ "${ENABLE_FIREWALL:-true}" = "true" ]; then
     if /usr/local/bin/init-firewall.sh; then
         echo "✓ Egress firewall active"
         if [ "${ENABLE_EGRESS_BROKER:-true}" = "true" ]; then
+            if PYTHONPATH=/usr/local/lib/djinn python3 /usr/local/lib/djinn/egress_broker.py --supervise & then
+                echo "✓ Egress transparent broker active"
+            else
+                /usr/local/bin/egress_broker_firewall.sh remove || true
+                echo ""
+                echo "FATAL: egress transparent broker failed to start."
+                echo "Removed broker REDIRECT rules to avoid blackholing :80/:443."
+                exit 1
+            fi
             if PYTHONPATH=/usr/local/lib/djinn python3 /usr/local/lib/djinn/egress_nflog.py & then
                 echo "✓ Egress NFLOG reader started"
             else

@@ -44,6 +44,8 @@ class FakeClock:
 
 
 class EgressBrokerHostTests(unittest.TestCase):
+    OPERATOR_TOKEN = "operator-test-token"
+
     def _broker(
         self,
         root: Path,
@@ -67,6 +69,22 @@ class EgressBrokerHostTests(unittest.TestCase):
             for line in path.read_text(encoding="utf-8").splitlines()
             if line
         ]
+
+    def _http_server(
+        self,
+        egress_root: Path,
+        b: broker.EgressBroker,
+        tokens_dir: Path,
+        *,
+        operator_token: str | None = None,
+    ) -> broker.EgressBrokerHTTPServer:
+        store = broker.BottleTokenStore(tokens_dir)
+        return broker.EgressBrokerHTTPServer(
+            ("127.0.0.1", 0),
+            b,
+            store,
+            operator_token or self.OPERATOR_TOKEN,
+        )
 
     def test_normalize_host_table(self):
         cases = [
@@ -199,8 +217,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             tokens_dir.mkdir(parents=True)
             (tokens_dir / "bottle-a.token").write_text("test-token\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            store = broker.BottleTokenStore(tokens_dir)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
+            server = self._http_server(egress_root, b, tokens_dir)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -243,8 +260,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             (tokens_dir / "bottle-a.token").write_text("token-a\n", encoding="utf-8")
             (tokens_dir / "bottle-b.token").write_text("token-b\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            store = broker.BottleTokenStore(tokens_dir)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
+            server = self._http_server(egress_root, b, tokens_dir)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -281,8 +297,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             tokens_dir.mkdir(parents=True)
             (tokens_dir / "my-bottle.token").write_text("good-token\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            store = broker.BottleTokenStore(tokens_dir)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
+            server = self._http_server(egress_root, b, tokens_dir)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -417,8 +432,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             tokens_dir.mkdir(parents=True)
             (tokens_dir / "c.token").write_text("token\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            store = broker.BottleTokenStore(tokens_dir)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
+            server = self._http_server(egress_root, b, tokens_dir)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -491,8 +505,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             tokens_dir.mkdir(parents=True)
             (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
-            store = broker.BottleTokenStore(tokens_dir)
-            server = broker.EgressBrokerHTTPServer(("127.0.0.1", 0), b, store)
+            server = self._http_server(egress_root, b, tokens_dir)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
@@ -687,6 +700,234 @@ class EgressBrokerHostTests(unittest.TestCase):
             self.assertIsNone(store.resolve_bottle("new-token"))
             (tokens_dir / "late.token").write_text("new-token\n", encoding="utf-8")
             self.assertEqual(store.resolve_bottle("new-token"), "late")
+
+    def test_client_request_id_adopted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=1)
+            body, request_id = b.file_request(
+                "coding-brassbottle",
+                "neon.tech",
+                443,
+                request_id="deadbeef",
+            )
+            self.assertEqual(request_id, "deadbeef")
+            self.assertEqual(body["decision"], "pending")
+            self.assertIn("deadbeef", b._requests)
+            requested = [
+                r for r in self._log_records(root) if r.get("kind") == "requested"
+            ]
+            self.assertEqual(requested[0]["request_id"], "deadbeef")
+
+    def test_duplicate_request_id_coalesces_open_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=60)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+                kwargs={"request_id": "cafebabe"},
+            )
+            thread.start()
+            time.sleep(0.2)
+            second_body, second_id = b.file_request(
+                "coding-brassbottle",
+                "other.example.com",
+                80,
+                request_id="cafebabe",
+            )
+            self.assertEqual(second_id, "cafebabe")
+            self.assertEqual(second_body["decision"], "pending")
+            self.assertEqual(len(b._requests), 1)
+            requested = [
+                r for r in self._log_records(root) if r.get("kind") == "requested"
+            ]
+            self.assertEqual(len(requested), 1)
+            b.decide("cafebabe", "deny")
+            thread.join(timeout=5)
+
+    def test_malformed_request_id_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=1)
+            with self.assertRaises(broker.EgressBrokerHostError):
+                b.file_request(
+                    "coding-brassbottle",
+                    "neon.tech",
+                    443,
+                    request_id="not-valid",
+                )
+
+    def test_http_malformed_request_id_returns_400(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/egress",
+                    json.dumps(
+                        {
+                            "host": "neon.tech",
+                            "port": 443,
+                            "request_id": "BAD-ID",
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer tok",
+                    },
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(body["error"], "invalid request_id")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_host_covered_by_zone(self):
+        self.assertTrue(broker.host_covered_by_zone("docs.stripe.com", "stripe.com"))
+        self.assertTrue(broker.host_covered_by_zone("stripe.com", "stripe.com"))
+        self.assertFalse(broker.host_covered_by_zone("notstripe.com", "stripe.com"))
+
+    def test_decide_allow_for_zone_releases_matching_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            results: dict[str, dict[str, object]] = {}
+
+            def waiter(host: str) -> None:
+                body, _ = b.file_request("coding-brassbottle", host, 443)
+                results[host] = body
+
+            threads = [
+                threading.Thread(target=waiter, args=("docs.stripe.com",)),
+                threading.Thread(target=waiter, args=("api.github.com",)),
+            ]
+            for thread in threads:
+                thread.start()
+            time.sleep(0.2)
+            with mock.patch("subprocess.run") as mocked:
+                mocked.return_value = mock.Mock(returncode=0)
+                decided = b.decide_allow_for_zone(
+                    "coding-brassbottle",
+                    "stripe.com",
+                    scope="live",
+                )
+            self.assertEqual(len(decided), 1)
+            github_id = next(
+                rid
+                for rid, state in b._requests.items()
+                if state.host == "api.github.com"
+            )
+            self.assertIsNone(b._requests[github_id].decision)
+            b.decide(github_id, "deny")
+            for thread in threads:
+                thread.join(timeout=5)
+            self.assertEqual(
+                results["docs.stripe.com"],
+                {"decision": "allow", "scope": "live"},
+            )
+            self.assertEqual(results["api.github.com"], {"decision": "deny"})
+
+    def test_decide_endpoint_requires_operator_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("bottle-tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/decide",
+                    json.dumps(
+                        {
+                            "container": "coding-brassbottle",
+                            "host": "docs.stripe.com",
+                            "decision": "allow",
+                            "scope": "live",
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer bottle-tok",
+                    },
+                )
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, HTTPStatus.UNAUTHORIZED)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_releases_open_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("bottle-tok\n", encoding="utf-8")
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "docs.stripe.com", 443)
+                result["body"] = body
+
+            waiter_thread = threading.Thread(target=waiter)
+            waiter_thread.start()
+            time.sleep(0.2)
+            try:
+                with mock.patch("subprocess.run") as mocked:
+                    mocked.return_value = mock.Mock(returncode=0)
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/decide",
+                        json.dumps(
+                            {
+                                "container": "coding-brassbottle",
+                                "host": "stripe.com",
+                                "decision": "allow",
+                                "scope": "live",
+                            }
+                        ),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp.status, HTTPStatus.OK)
+                    self.assertEqual(len(body["decided"]), 1)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            waiter_thread.join(timeout=5)
+            self.assertEqual(result["body"], {"decision": "allow", "scope": "live"})
 
 
 if __name__ == "__main__":

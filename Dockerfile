@@ -246,6 +246,8 @@ RUN apt-get update && apt-get install -y \
 
 COPY src/init-firewall.sh /usr/local/bin/init-firewall.sh
 RUN chmod +x /usr/local/bin/init-firewall.sh
+COPY src/egress_broker_firewall.sh /usr/local/bin/egress_broker_firewall.sh
+RUN chmod +x /usr/local/bin/egress_broker_firewall.sh
 
 # Per-org git credential router (entrypoint installs it as the github.com
 # credential helper). Routes by repo owner to GH_TOKEN_<owner>, falling back to
@@ -288,10 +290,16 @@ RUN chmod 644 /usr/local/lib/djinn/code_workspace.py
 
 COPY src/egress_log.py /usr/local/lib/djinn/egress_log.py
 COPY src/egress_broker_host.py /usr/local/lib/djinn/egress_broker_host.py
+COPY src/egress_broker.py /usr/local/lib/djinn/egress_broker.py
 COPY src/egress_nflog.py /usr/local/lib/djinn/egress_nflog.py
 RUN chmod 644 /usr/local/lib/djinn/egress_log.py \
     /usr/local/lib/djinn/egress_broker_host.py \
+    /usr/local/lib/djinn/egress_broker.py \
     /usr/local/lib/djinn/egress_nflog.py
+
+# Dedicated uid for the in-container egress broker. iptables (B3) exempts this
+# owner from REDIRECT so the broker's own upstream dials are not looped back.
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin djinnbroker
 
 ENV SSH_ENABLED=false
 

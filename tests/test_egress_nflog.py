@@ -194,8 +194,33 @@ class NflogReaderTests(unittest.TestCase):
         self.assertEqual(filings[0]["uid"], 1000)
         self.assertIn("192.0.2.55", str(filings[0]["reason"]))
 
+    def test_handle_message_skips_loopback_destination(self):
+        payload = _ipv4_tcp_packet("127.0.0.1", 3128)
+        message = _build_packet_nlmsg(
+            {
+                nflog.NFULA_PAYLOAD: payload,
+                nflog.NFULA_UID: struct.pack("!I", 1000),
+                nflog.NFULA_PREFIX: b"djinn-egress",
+            }
+        )
+        filings: list[dict[str, object]] = []
+        reader = nflog.NflogReader(
+            container="coding-brassbottle",
+            broker_url="http://127.0.0.1:8816",
+            broker_token="secret",
+            file_fn=lambda **kwargs: filings.append(kwargs),
+        )
+        reader.handle_message(message)
+        self.assertEqual(filings, [])
+
 
 class HostForFilingTests(unittest.TestCase):
+    def test_is_loopback_destination(self):
+        self.assertTrue(nflog.is_loopback_destination("127.0.0.1"))
+        self.assertTrue(nflog.is_loopback_destination("127.255.255.255"))
+        self.assertTrue(nflog.is_loopback_destination("::1"))
+        self.assertFalse(nflog.is_loopback_destination("192.0.2.55"))
+
     def test_reverse_dns_success_yields_domain(self):
         with mock.patch.object(nflog, "reverse_dns", return_value="db.example.com"):
             self.assertEqual(nflog.host_for_filing("192.0.2.55"), "db.example.com")

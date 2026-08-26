@@ -88,6 +88,27 @@ echo "Container: $CONTAINER"
 echo "Domains:   ${DOMAINS[*]}"
 echo ""
 
+# Best-effort: release held broker connections when a host-side daemon is up.
+notify_egress_daemon() {
+    local token_file="$RUN_PATH/egress/${OPERATOR_TOKEN_FILENAME:-operator.token}"
+    local broker_port="${EGRESS_BROKER_PORT:-8816}"
+    local broker_url="http://127.0.0.1:${broker_port}"
+    local token container="$CONTAINER"
+
+    [ -f "$token_file" ] || return 0
+    curl -sf --connect-timeout 1 "${broker_url}/health" >/dev/null 2>&1 || return 0
+    token="$(<"$token_file")" || return 0
+    [ -n "$token" ] || return 0
+
+    for d in "${DOMAINS[@]}"; do
+        curl -sf --connect-timeout 2 -X POST "${broker_url}/decide" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json" \
+            -d "{\"container\":\"${container}\",\"host\":\"${d}\",\"decision\":\"allow\",\"scope\":\"live\"}" \
+            >/dev/null 2>&1 || true
+    done
+}
+
 # ── Apply live (no container restart) ─────────────────────────────────────────
 # Domains are passed as positional args to an un-expanded (<<'EOF') script, so
 # their values are never interpolated into the script text.
@@ -122,6 +143,7 @@ for d in "$@"; do
     echo "  $d -> ip=[${ips:-none}] https=$code"
 done
 EOF
+    notify_egress_daemon
     echo ""
 elif [ "$RUNNING" = "true" ]; then
     echo "⚠ $CONTAINER is running but has no /etc/dnsmasq.conf (firewall disabled?)."

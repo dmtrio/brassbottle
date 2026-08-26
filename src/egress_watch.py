@@ -37,6 +37,7 @@ from egress_broker_host import (
     _load_config,
     _repo_root,
     _stale_sweep_loop,
+    ensure_operator_token,
     is_ip_literal,
     resolve_base_path,
     resolve_egress_root,
@@ -453,7 +454,8 @@ def run_watch(
         repo_root=repo_root or _repo_root(),
         hold_seconds_default=hold_default,
     )
-    server = EgressBrokerHTTPServer((host, port), broker, token_store)
+    operator_token = ensure_operator_token(egress_root)
+    server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
         target=_stale_sweep_loop,

@@ -8,6 +8,7 @@ HTTP. Stdlib only; runs inside the container as root.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -162,6 +163,14 @@ def parse_packet_message(data: bytes) -> ParsedPacket | None:
         prefix = prefix_raw.rstrip(b"\x00").decode(errors="replace")
 
     return ParsedPacket(dst_ip=dst_ip, dst_port=dst_port, uid=uid, prefix=prefix)
+
+
+def is_loopback_destination(dst_ip: str) -> bool:
+    """Return True for 127.0.0.0/8 or ::1 — never a real egress target."""
+    try:
+        return ipaddress.ip_address(dst_ip).is_loopback
+    except ValueError:
+        return False
 
 
 def reverse_dns(ip: str) -> str | None:
@@ -347,6 +356,8 @@ class NflogReader:
         if packet is None:
             return
         if packet.prefix and packet.prefix != self._prefix:
+            return
+        if is_loopback_destination(packet.dst_ip):
             return
 
         port = packet.dst_port if packet.dst_port is not None else 0
