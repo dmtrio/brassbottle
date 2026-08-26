@@ -7,7 +7,6 @@ import json
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -16,9 +15,16 @@ from pathlib import Path
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(TESTS_DIR))
 import egress_broker_host as broker  # noqa: E402
 import egress_log  # noqa: E402
+from egress_test_sync import (  # noqa: E402
+    join_thread_or_fail,
+    wait_for_broker_open_request,
+    wait_for_tcp_listening,
+)
 
 NOW = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
 AUG_END = datetime(2026, 8, 31, 23, 0, 0, tzinfo=timezone.utc)
@@ -92,17 +98,16 @@ class EgressBrokerHostTests(unittest.TestCase):
                 args=("coding-brassbottle", "neon.tech", 443),
             )
             thread.start()
-            time.sleep(0.2)
+            open_id = wait_for_broker_open_request(b)
             second_body, second_id = b.file_request(
                 "coding-brassbottle",
                 "neon.tech",
                 443,
             )
-            open_id = next(iter(b._requests))
             self.assertEqual(second_id, open_id)
             self.assertEqual(second_body["decision"], "pending")
             b.decide(open_id, "deny")
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
             requested = [
                 r for r in self._log_records(root) if r.get("kind") == "requested"
             ]
@@ -129,11 +134,10 @@ class EgressBrokerHostTests(unittest.TestCase):
                 args=("coding-brassbottle", "neon.tech", 443),
             )
             thread.start()
-            time.sleep(0.2)
-            request_id = next(iter(b._requests))
+            request_id = wait_for_broker_open_request(b)
             self.assertNotEqual(request_id, "old-req")
             b.decide(request_id, "deny")
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
             requested = [
                 r for r in self._log_records(root) if r.get("kind") == "requested"
             ]
@@ -149,8 +153,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 args=("coding-brassbottle", "neon.tech", 443),
             )
             thread.start()
-            time.sleep(0.2)
-            request_id = next(iter(b._requests))
+            request_id = wait_for_broker_open_request(b)
             for _ in range(100):
                 with b._lock:
                     state = b._requests[request_id]
@@ -159,7 +162,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             with b._lock:
                 b._flush_hits(b._requests[request_id])
             b.decide(request_id, "deny")
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
             hits = [r for r in self._log_records(root) if r.get("kind") == "hit"]
             self.assertGreaterEqual(len(hits), 2)
             self.assertLess(len(hits), 20)
@@ -174,12 +177,11 @@ class EgressBrokerHostTests(unittest.TestCase):
                 args=("coding-brassbottle", "neon.tech", 443),
             )
             thread.start()
-            time.sleep(0.2)
-            request_id = next(iter(b._requests))
+            request_id = wait_for_broker_open_request(b)
             clock.advance(25 * 3600)
             closed = b.sweep_stale()
             self.assertEqual(closed, 1)
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
             denied = [
                 r
                 for r in self._log_records(root, clock.now())
@@ -201,6 +203,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
+            wait_for_tcp_listening(host, port)
             try:
                 conn = HTTPConnection(host, port, timeout=5)
                 conn.request(
@@ -228,7 +231,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 conn.close()
             finally:
                 server.shutdown()
-                thread.join(timeout=5)
+                join_thread_or_fail(thread, label="broker server")
 
     def test_token_for_bottle_a_cannot_file_for_bottle_b(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -244,6 +247,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
+            wait_for_tcp_listening(host, port)
             try:
                 conn = HTTPConnection(host, port, timeout=5)
                 conn.request(
@@ -266,7 +270,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 conn.close()
             finally:
                 server.shutdown()
-                thread.join(timeout=5)
+                join_thread_or_fail(thread, label="broker server")
 
     def test_auth_correct_bearer_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -281,6 +285,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
+            wait_for_tcp_listening(host, port)
             try:
                 conn = HTTPConnection(host, port, timeout=5)
                 conn.request(
@@ -304,7 +309,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 self.assertEqual(body["decision"], "pending")
             finally:
                 server.shutdown()
-                thread.join(timeout=5)
+                join_thread_or_fail(thread, label="broker server")
 
     def test_firewall_save_unreachable_in_argv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -316,14 +321,13 @@ class EgressBrokerHostTests(unittest.TestCase):
                 args=("coding-brassbottle", "neon.tech", 443),
             )
             thread.start()
-            time.sleep(0.2)
-            request_id = next(iter(b._requests))
+            request_id = wait_for_broker_open_request(b)
             with mock.patch("subprocess.run") as mocked:
                 mocked.return_value = mock.Mock(returncode=0)
                 b.decide(request_id, "allow", scope="live")
                 argv = mocked.call_args[0][0]
                 self.assertNotIn("firewall", argv)
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
 
     def test_approve_live_builds_expected_argv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,8 +339,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 args=("coding-brassbottle", "neon.tech", 443),
             )
             thread.start()
-            time.sleep(0.2)
-            request_id = next(iter(b._requests))
+            request_id = wait_for_broker_open_request(b)
             with mock.patch("subprocess.run") as mocked:
                 mocked.return_value = mock.Mock(returncode=0)
                 b.decide(request_id, "allow", scope="live")
@@ -351,7 +354,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                         "none",
                     ],
                 )
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
 
     def test_approve_manifest_builds_expected_argv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -363,14 +366,13 @@ class EgressBrokerHostTests(unittest.TestCase):
                 args=("coding-brassbottle", "neon.tech", 443),
             )
             thread.start()
-            time.sleep(0.2)
-            request_id = next(iter(b._requests))
+            request_id = wait_for_broker_open_request(b)
             with mock.patch("subprocess.run") as mocked:
                 mocked.return_value = mock.Mock(returncode=0)
                 b.decide(request_id, "allow", scope="manifest")
                 argv = mocked.call_args[0][0]
                 self.assertEqual(argv[-1], "yml")
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
 
     def test_second_daemon_instance_refuses_to_start(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,10 +398,9 @@ class EgressBrokerHostTests(unittest.TestCase):
 
             thread = threading.Thread(target=waiter)
             thread.start()
-            time.sleep(0.2)
-            open_id = next(iter(b._requests))
+            open_id = wait_for_broker_open_request(b)
             b.decide(open_id, "allow", scope="manifest")
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request waiter")
             self.assertEqual(
                 result["body"],
                 {"decision": "allow", "scope": "manifest"},
@@ -418,6 +419,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
+            wait_for_tcp_listening(host, port)
             try:
                 conn = HTTPConnection(host, port, timeout=5)
                 conn.request("GET", "/health")
@@ -427,7 +429,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 self.assertEqual(body, {"status": "ok"})
             finally:
                 server.shutdown()
-                thread.join(timeout=5)
+                join_thread_or_fail(thread, label="broker server")
 
     def test_rebuild_across_month_rotation_keeps_dedupe_and_approvable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -491,6 +493,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             host, port = server.server_address
+            wait_for_tcp_listening(host, port)
             try:
                 conn = HTTPConnection(host, port, timeout=5)
                 conn.request(
@@ -508,7 +511,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 self.assertEqual(body["decision"], "pending")
             finally:
                 server.shutdown()
-                thread.join(timeout=5)
+                join_thread_or_fail(thread, label="broker server")
             requested = [
                 r for r in self._log_records(egress_root) if r.get("kind") == "requested"
             ]
@@ -532,12 +535,11 @@ class EgressBrokerHostTests(unittest.TestCase):
                 kwargs={"host_is_ip": True},
             )
             thread.start()
-            time.sleep(0.2)
-            request_id = next(iter(b._requests))
+            request_id = wait_for_broker_open_request(b)
             with mock.patch("subprocess.run") as mocked:
                 b.decide(request_id, "allow", scope="live")
                 mocked.assert_not_called()
-            thread.join(timeout=5)
+            join_thread_or_fail(thread, label="file_request")
             failed = [
                 r
                 for r in self._log_records(root)
