@@ -6,6 +6,10 @@ sandbox_mode = "danger-full-access"
 command = "stdio-bridge"
 args = []
 
+[mcp_servers.remote-srv]
+url = "https://example.test/mcp"
+bearer_token_env_var = "TEST_TOKEN"
+
 [mcp_servers.local-srv]
 command = "bridge"
 args = ["--stdio"]

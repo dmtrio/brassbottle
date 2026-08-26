@@ -1,9 +1,12 @@
 # codex — OpenAI Codex CLI (npm @openai/codex).
 # MCP wiring is a prefix-marked managed block in ~/.codex/config.toml
 # (codex_managed_block strategy owns the rendering, so no dialect is
-# declared). Remote-header secrets are warn-only today: codex gets local
-# (stdio) servers; an agent-scoped remote logs a warning instead of baking
-# a literal key.
+# declared). codex's own `codex mcp add --url … --bearer-token-env-var …`
+# confirms its native remote-MCP shape is `url` + `bearer_token_env_var`
+# (an env var NAME, read by codex itself at connect time — no ${VAR} shell
+# expansion, no literal secret in the file), so a single-slot bearer-header
+# agent-scoped remote renders the same way any other bearerTokenEnvVar-style
+# agent (e.g. kimi) does; codex has no header passthrough beyond that.
 
 binary: codex
 
@@ -18,7 +21,7 @@ rules_file: .codex/AGENTS.md
 mcp:
   config_path: .codex/config.toml
   format: toml
-  env_refs: false
+  env_refs: bearer_token_env_var
   strategy: codex_managed_block
 
 # Top-level keys stamped into ~/.codex/config.toml as a managed head block.

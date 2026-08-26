@@ -27,11 +27,11 @@ Payload:
       "agent_servers": [
         {"name": "obsidian-annotated", "slot": "OBSIDIAN_ANNOTATED_KEY",
          "spec": {"url": ..., "headers": {...${SLOT}...}},
-         "ref":     ["claude", "kimi"],                    # env-ref configs
+         "ref":     ["claude", "kimi", "codex"],           # env-ref configs
          "literal": [{"agent": "cursor-agent",
                       "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}],
-         "warn":    ["codex"],                             # REMOTE spec only
-         "local":   ["cursor-agent", "codex", ...]}        # LOCAL spec only
+         "warn":    [],                                    # REMOTE spec only
+         "local":   ["cursor-agent", ...]}                 # LOCAL spec only
       ]
     }
 
@@ -51,13 +51,18 @@ Payload:
   presents each bound agent's own role derived from AGENTS_MCP_JSON:
   - bool-ref agents (`env_refs: true`) keep ${SLOT} refs (`ref`),
   - named-ref agents (`env_refs: "<field>"`) keep remote URL/header shape but
-    swap the bearer header ref for `<field>: "SLOT"` (`ref`),
+    swap the bearer header ref for `<field>: "SLOT"` (`ref`) — codex is one of
+    these (`env_refs: bearer_token_env_var`, its own native remote-MCP field
+    name; `_codex_block_body` renders it into the managed TOML block),
   - literal agents bake per-agent key env names (`literal`),
-  - managed-block agents warn for remote (`warn`),
+  - a managed-block agent that has NOT set a named env_refs field warns for
+    remote instead of wiring it (`warn` — pending verification of that
+    agent's remote-MCP config format; codex no longer needs this),
   and LOCAL specs route through each bound agent's local wiring path (`local`
-  for non-ref-style, `ref` for ref-style). Env-only agent-scoped slots (watch
-  keys — no server) never reach the payload; up.sh delivers them straight into
-  the agent's env file.
+  for non-ref-style, `ref` for ref-style — a ref-style agent's LOCAL
+  agent-scoped server still lands in `ref` and is rendered verbatim). Env-only
+  agent-scoped slots (watch keys — no server) never reach the payload; up.sh
+  delivers them straight into the agent's env file.
 - Keys never ride in the payload: each literal[] element names an environment
   variable (set on the docker exec) that holds the key, so the payload is
   secret-free. Ref-style and managed-block agents receive no literal key.
@@ -662,13 +667,32 @@ def wire_plugin_servers_json(path, plugins):
 
 def _codex_block_body(plugins):
     """Render the [mcp_servers.*] tables. Server names were validated to
-    [A-Za-z0-9_-] host-side (safe as bare TOML keys); command/args are emitted
-    as JSON, whose string and array escapes are a TOML subset."""
+    [A-Za-z0-9_-] host-side (safe as bare TOML keys). A LOCAL (stdio) spec
+    emits command/args as JSON (a TOML subset). A REMOTE spec (agent-scoped,
+    rendered by _render_named_env_ref_server with env_refs
+    bearer_token_env_var — see agents/codex/agent.yml) emits codex's own
+    native remote-MCP shape: `url` + `bearer_token_env_var`, an env var NAME
+    codex reads itself at connect time, never a literal secret. codex has no
+    header passthrough beyond that single bearer slot, so a remote spec still
+    carrying other headers after bearer-extraction can't be rendered here."""
     tables = []
     for name, spec in plugins.items():
-        command = json.dumps(spec.get("command"), ensure_ascii=False)
-        args = json.dumps(spec.get("args") or [], ensure_ascii=False, separators=(",", ":"))
-        tables.append(f"[mcp_servers.{name}]\ncommand = {command}\nargs = {args}")
+        if "command" in spec:
+            command = json.dumps(spec.get("command"), ensure_ascii=False)
+            args = json.dumps(spec.get("args") or [], ensure_ascii=False, separators=(",", ":"))
+            tables.append(f"[mcp_servers.{name}]\ncommand = {command}\nargs = {args}")
+            continue
+        if spec.get("headers"):
+            raise WireError(
+                f"codex MCP server '{name}': remote spec still has header(s) after "
+                "bearer-token extraction — codex only supports url + a single "
+                "bearer_token_env_var, not arbitrary headers")
+        url = json.dumps(spec.get("url"), ensure_ascii=False)
+        lines = [f"[mcp_servers.{name}]", f"url = {url}"]
+        token_field = spec.get("bearer_token_env_var")
+        if token_field:
+            lines.append(f"bearer_token_env_var = {json.dumps(token_field, ensure_ascii=False)}")
+        tables.append("\n".join(lines))
     return "\n\n".join(tables) + "\n"
 
 
@@ -875,7 +899,9 @@ def run(payload, home, workspace, env):
             for s in agent_servers:
                 if binary in s["warn"]:
                     warn_agent_server(binary, config_path, s["name"], s["requires"])
-            wire_codex_toml(path, local_for(binary), agent["settings"])
+            codex_servers = local_for(binary)
+            codex_servers.update(ref_required_by_agent.get(binary, {}))
+            wire_codex_toml(path, codex_servers, agent["settings"])
             continue
 
         if fmt != "json":

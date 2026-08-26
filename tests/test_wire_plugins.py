@@ -826,6 +826,57 @@ class TestWireCodexToml(QuietTestCase):
             self.assertNotIn("[mcp_servers.stale]", content)
             self.assertIn("[mcp_servers.new]", content)
 
+    def test_remote_bearer_spec_renders_url_and_token_env_var(self):
+        """A remote spec (no 'command') renders codex's native url +
+        bearer_token_env_var shape — the field _render_named_env_ref_server
+        fills in for a bearer_token_env_var-style agent, never a literal
+        secret or a ${VAR} ref."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            plugins = {"obsidian-annotated": {
+                "url": "https://mcp-obsidian.dmetr.io/mcp",
+                "headers": {},
+                "bearer_token_env_var": "OBSIDIAN_ANNOTATED_KEY",
+            }}
+
+            wire_plugins.wire_codex_toml(config_path, plugins)
+
+            content = config_path.read_text()
+            self.assertIn("[mcp_servers.obsidian-annotated]", content)
+            self.assertIn('url = "https://mcp-obsidian.dmetr.io/mcp"', content)
+            self.assertIn('bearer_token_env_var = "OBSIDIAN_ANNOTATED_KEY"', content)
+            self.assertNotIn("headers", content)
+            self.assertNotIn("command", content)
+
+    def test_remote_spec_without_token_field_omits_it(self):
+        """A remote spec with no bearer_token_env_var (unauthenticated remote
+        MCP) renders url alone — the field is optional, not required."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            plugins = {"open": {"url": "https://example.com/mcp", "headers": {}}}
+
+            wire_plugins.wire_codex_toml(config_path, plugins)
+
+            content = config_path.read_text()
+            self.assertIn('url = "https://example.com/mcp"', content)
+            self.assertNotIn("bearer_token_env_var", content)
+
+    def test_remote_spec_with_leftover_headers_raises(self):
+        """codex has no header passthrough beyond the single bearer slot: a
+        remote spec still carrying a header after bearer-extraction is
+        unrenderable and must hard-fail, not silently drop the header."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            plugins = {"weird": {
+                "url": "https://example.com/mcp",
+                "headers": {"X-Extra": "value"},
+                "bearer_token_env_var": "SLOT",
+            }}
+
+            with self.assertRaises(wire_plugins.WireError) as cm:
+                wire_plugins.wire_codex_toml(config_path, plugins)
+            self.assertIn("header(s)", str(cm.exception))
+
 
 class TestRunIntegration(QuietTestCase):
     """Integration tests for the run function."""
@@ -859,7 +910,7 @@ class TestRunIntegration(QuietTestCase):
         cls.AGENTS_ALL = descriptors
 
     def test_full_payload_all_agents_wired(self):
-        """Full payload: descriptors drive claude ref, literal trio, and codex warn/local."""
+        """Full payload: descriptors drive claude ref, literal trio, and codex ref/local."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             workspace = Path(tmp) / "workspace"
@@ -883,10 +934,10 @@ class TestRunIntegration(QuietTestCase):
                      "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
                               "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},
                      "requires": ["OBSIDIAN_ANNOTATED_KEY"],
-                     "ref": ["claude"],
+                     "ref": ["claude", "codex"],
                      "literal": [{"agent": "cursor-agent",
                                   "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}],
-                     "warn": ["codex"],
+                     "warn": [],
                      "local": []},
                 ],
             }
@@ -918,9 +969,13 @@ class TestRunIntegration(QuietTestCase):
                 cursor_data["mcpServers"]["obsidian-annotated"]["headers"]["Authorization"],
                 "Bearer LITERALKEY"
             )
-            # codex managed block carries the local plugin, not the remote one
+            # codex managed block carries the local plugin AND the agent-scoped
+            # remote (bearer_token_env_var), but not the ordinary remote plugin
             codex_toml = (home / ".codex" / "config.toml").read_text()
             self.assertIn("[mcp_servers.myserena]", codex_toml)
+            self.assertIn("[mcp_servers.obsidian-annotated]", codex_toml)
+            self.assertIn('url = "https://mcp-obsidian.dmetr.io/mcp"', codex_toml)
+            self.assertIn('bearer_token_env_var = "OBSIDIAN_ANNOTATED_KEY"', codex_toml)
             self.assertNotIn("coding", codex_toml)
             # pi config exists
             self.assertTrue((home / ".pi" / "agent" / "mcp.json").exists())
@@ -1629,14 +1684,17 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
         }
         payload = wire_plugins.build_payload(env)
         servers = {entry["name"]: entry for entry in payload["agent_servers"]}
-        self.assertEqual(servers["remote"]["ref"], ["claude"])
-        self.assertEqual(servers["remote"]["warn"], ["codex"])
+        self.assertEqual(servers["remote"]["ref"], ["claude", "codex"])
+        self.assertEqual(servers["remote"]["warn"], [])
         self.assertEqual(
             [lit["agent"] for lit in servers["remote"]["literal"]],
             ["cursor-agent", "pi"],
         )
-        self.assertEqual(servers["local"]["ref"], ["claude"])
-        self.assertEqual(servers["local"]["local"], ["codex", "cursor-agent", "pi"])
+        # codex's env_refs is now a named string (bearer_token_env_var), so a
+        # bound LOCAL agent-scoped server routes through the same 'ref' bucket
+        # too (rendered verbatim — see run()'s ref handling) rather than 'local'.
+        self.assertEqual(servers["local"]["ref"], ["claude", "codex"])
+        self.assertEqual(servers["local"]["local"], ["cursor-agent", "pi"])
         self.assertEqual(servers["local"]["warn"], [])
         self.assertEqual(servers["local"]["literal"], [])
 

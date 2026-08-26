@@ -20,5 +20,7 @@ server per agent:
 - **claude** — `.mcp.json` keeps the `${VAR}` ref (the shim expands it).
 - **cursor-agent / pi** — the literal key is baked into their config
   (they can't expand env refs in remote headers).
-- **codex** — key reaches its shim, but the remote-MCP config format is still
-  pending, so it prints a warning instead of wiring.
+- **codex** — wired into its managed TOML block as `url` +
+  `bearer_token_env_var` (codex's own native remote-MCP shape); codex reads
+  the token from its own process env at connect time, so the file carries no
+  literal secret and no `${VAR}` ref either.

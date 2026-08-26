@@ -8,7 +8,12 @@ import agent_test_kit as kit
 
 
 class CodexWiring(unittest.TestCase):
-    def test_local_in_managed_block_remote_not_baked(self):
+    def test_local_and_remote_baked_no_literal_secret(self):
+        """Both the LOCAL and the bearer-header REMOTE agent-scoped server land
+        in the managed TOML block — codex's own native url +
+        bearer_token_env_var shape, naming the env var it reads at connect
+        time. The literal secret value and the header string never appear:
+        codex is never handed anything to leak, only the var's NAME."""
         golden = Path(__file__).parent / "golden"
 
         def do_wire():
@@ -16,9 +21,13 @@ class CodexWiring(unittest.TestCase):
 
         r = do_wire()
         toml = r.read(".codex/config.toml")
-        self.assertNotIn("remote-srv", toml)
+        self.assertIn("[mcp_servers.remote-srv]", toml)
+        self.assertIn('url = "https://example.test/mcp"', toml)
+        self.assertIn('bearer_token_env_var = "TEST_TOKEN"', toml)
+        self.assertIn("[mcp_servers.local-srv]", toml)
         self.assertNotIn("TEST_SECRET", toml)
         self.assertNotIn("Bearer", toml)
+        self.assertNotIn("headers", toml)
         kit.assert_matches_golden(r, golden, wire_fn=do_wire)
 
     def test_sandbox_mode_is_declared_and_rendered_above_every_table(self):
