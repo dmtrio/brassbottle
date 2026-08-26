@@ -501,6 +501,14 @@ def _normalize_agent_docs(agent_files):
                 if fmt != "toml":
                     raise ManifestError(
                         f"agent '{agent}' mcp: strategy codex_managed_block requires format toml")
+                if env_refs is True:
+                    raise ManifestError(
+                        f"agent '{agent}' mcp: strategy codex_managed_block does not support "
+                        "env_refs: true — the managed TOML block has no ${VAR} header "
+                        "expansion (unlike claude's shim), so a bare bool ref can never "
+                        "actually be rendered. Use a named string env_refs naming the field "
+                        "this agent's OWN remote-MCP config understands (e.g. codex's own "
+                        "bearer_token_env_var), or env_refs: false")
             else:
                 if fmt != "json":
                     raise ManifestError(

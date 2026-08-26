@@ -111,7 +111,7 @@ with `src/wire_plugins.py` dispatch):
 | Descriptor shape | Required constraints |
 |---|---|
 | `strategy: claude_preapprove` | `config_path: .mcp.json`, `format: json`, truthy `env_refs`. |
-| `strategy: codex_managed_block` | `format: toml` (dialect not used by this strategy). |
+| `strategy: codex_managed_block` | `format: toml` (dialect not used by this strategy). `env_refs` is optional but must not be bare `true` (the managed TOML block has no `${VAR}` header expansion): a named string (e.g. `bearer_token_env_var`, codex's own field name) renders a bound agent-scoped bearer-header remote server into the managed block via that field; `false` falls back to a warning for any such server instead of wiring it. |
 | Non-strategy literal dialect | `format: json`, `dialect` in `url/httpUrl/type-http/serverUrl`, `env_refs: false`. |
 | Non-strategy generic (`mcpServers`) | `format: json`, `dialect: mcpServers`, truthy `env_refs`. |
 | Non-strategy TOML | Not allowed (a TOML agent must use a named strategy). |
