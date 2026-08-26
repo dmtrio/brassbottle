@@ -2,7 +2,7 @@
 """egress_log.py — append-only audit log and queue-state fold for egress approval.
 
 Owns everything under the caller-supplied root ($BASE_PATH/run/egress): monthly
-JSONL logs, rotation carry_forward headers, and an optional read cursor.
+JSONL logs and rotation carry_forward headers.
 Stdlib only; host-side (macOS and Linux).
 """
 
@@ -97,9 +97,6 @@ def _log_dir(root: Path) -> Path:
 def _log_path(root: Path, filename: str) -> Path:
     return _log_dir(root) / filename
 
-
-def _cursor_path(root: Path) -> Path:
-    return root / "cursor.json"
 
 
 def _ensure_log_dir(root: Path) -> None:
@@ -265,13 +262,13 @@ def _read_file_records(
     offset: int,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
     """Read records from one log file starting at byte offset."""
-    LOG.info(
+    LOG.debug(
         "egress_log read enter path=%s offset=%d",
         path.name,
         offset,
     )
     if not path.is_file():
-        LOG.info(
+        LOG.debug(
             "egress_log read exit path=%s records=0 skipped=0 offset=%d",
             path.name,
             offset,
@@ -280,7 +277,7 @@ def _read_file_records(
 
     size = path.stat().st_size
     if offset > size:
-        LOG.info(
+        LOG.debug(
             "egress_log read exit path=%s records=0 skipped=0 offset=0 replay=full",
             path.name,
         )
@@ -292,7 +289,7 @@ def _read_file_records(
 
     records, skipped = _parse_jsonl_lines(data, path=path)
     new_offset = offset + len(data)
-    LOG.info(
+    LOG.debug(
         "egress_log read exit path=%s records=%d skipped=%d offset=%d",
         path.name,
         len(records),
@@ -302,77 +299,6 @@ def _read_file_records(
     return records, new_offset, len(records), skipped
 
 
-def _load_cursor_offset(root: Path, *, current_file: str) -> int | None:
-    """Return a validated byte offset, or None to replay the whole current file."""
-    cursor_file = _cursor_path(root)
-    if not cursor_file.is_file():
-        LOG.info("egress_log cursor missing replay=full file=%s", current_file)
-        return None
-
-    try:
-        raw = cursor_file.read_text(encoding="utf-8")
-        payload = json.loads(raw)
-    except (OSError, json.JSONDecodeError, TypeError):
-        LOG.info("egress_log cursor malformed replay=full file=%s", current_file)
-        return None
-
-    if not isinstance(payload, dict):
-        LOG.info("egress_log cursor malformed replay=full file=%s", current_file)
-        return None
-
-    file_name = payload.get("file")
-    offset = payload.get("offset")
-    if not isinstance(file_name, str) or not isinstance(offset, int):
-        LOG.info("egress_log cursor malformed replay=full file=%s", current_file)
-        return None
-
-    if file_name != current_file:
-        LOG.info(
-            "egress_log cursor stale file=%s cursor_file=%s replay=full",
-            current_file,
-            file_name,
-        )
-        return None
-
-    path = _log_path(root, current_file)
-    if not path.is_file():
-        LOG.info("egress_log cursor file missing replay=full file=%s", current_file)
-        return None
-
-    if offset < 0 or offset >= path.stat().st_size:
-        LOG.info(
-            "egress_log cursor offset at or past eof replay=full file=%s offset=%d",
-            current_file,
-            offset,
-        )
-        return None
-
-    LOG.info(
-        "egress_log cursor valid file=%s offset=%d replay=cursor",
-        current_file,
-        offset,
-    )
-    return offset
-
-
-def _write_cursor(root: Path, *, file_name: str, offset: int) -> None:
-    payload = json.dumps({"file": file_name, "offset": offset}, separators=(",", ":"))
-    path = _cursor_path(root)
-    tmp = path.with_suffix(".tmp")
-    try:
-        tmp.write_text(payload + "\n", encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError as exc:
-        LOG.info(
-            "egress_log cursor write failed file=%s offset=%d error=%s",
-            file_name,
-            offset,
-            exc,
-        )
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _append_bytes(path: Path, payload: bytes) -> None:
@@ -507,33 +433,26 @@ class EgressLog:
         _ensure_month_file(self._root, event_now)
         path = _log_path(self._root, current_name)
 
-        cursor_offset = _load_cursor_offset(self._root, current_file=current_name)
-        if cursor_offset is None:
-            LOG.info(
-                "egress_log fold replay=full file=%s",
-                current_name,
-            )
-        else:
-            LOG.info(
-                "egress_log fold replay=cursor file=%s offset=%d",
-                current_name,
-                cursor_offset,
-            )
+        # The fold is stateless: it always replays the whole current file
+        # (carry_forward header plus this month's events). A cursor was carried
+        # here for a while, but nothing ever read from it — the offset was
+        # consulted only to decide which log line to print, and being AT eof
+        # (the normal, fully-caught-up state) was reported as a fallback. Since
+        # the watcher folds on every poll, that produced several lines a second
+        # of misleading noise for something that optimised nothing. Replay of a
+        # month's file is milliseconds; if an incremental reader is ever added,
+        # reintroduce the cursor then, and make it actually seek.
+        records, _new_offset, parsed, skipped = _read_file_records(path, offset=0)
 
-        # Stateless fold always replays the entire current file (carry_forward
-        # header plus every event this month). Cursor is consulted for logging
-        # and updated after a successful read; a mid-file offset is not a safe
-        # partial-replay boundary across restarts.
-        records, new_offset, parsed, skipped = _read_file_records(path, offset=0)
+        state = _fold_records(records)
 
-        LOG.info(
-            "egress_log fold exit file=%s records=%d skipped=%d open=%d",
+        # DEBUG, not INFO: this runs on every watcher poll. It is a read, not a
+        # handoff, so it does not carry the boundary-logging requirement.
+        LOG.debug(
+            "egress_log fold file=%s records=%d skipped=%d open=%d",
             current_name,
             parsed,
             skipped,
-            len(_fold_records(records).open_requests),
+            len(state.open_requests),
         )
-        state = _fold_records(records)
-        if path.is_file():
-            _write_cursor(self._root, file_name=current_name, offset=new_offset)
         return state
