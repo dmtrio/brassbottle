@@ -350,7 +350,12 @@ printf '%s' "$A_PAYLOAD" | jq -e '
 echo "── python unit tests (src/manifest.py + src/wire_plugins.py)"
 UNIT_OUT=$(DJINN_SKIP_BACKUP_INTEGRATION=1 python3 -m unittest discover -s tests 2>&1) \
     && pass "python3 -m unittest discover -s tests" \
-    || { fail "unit tests failed:"; printf '%s\n' "$UNIT_OUT" | tail -30; }
+    || { fail "unit tests failed:"
+         # Show the FAILURES/ERRORS block, not a blind tail: these suites print
+         # a lot of progress chatter, so `tail -30` reliably shows only the last
+         # few passing lines and hides the actual traceback.
+         printf '%s\n' "$UNIT_OUT" | sed -n '/^\(FAIL\|ERROR\):/,$p' | head -60
+         printf '%s\n' "$UNIT_OUT" | grep -E '^(FAILED|Ran [0-9]+ tests)' ; }
 
 echo "── bundled skill: djinn-bottle checker"
 # The skill's checker streams manifest.py --derive the same payload up.sh
