@@ -40,18 +40,27 @@ class EgressLogError(Exception):
 
 @dataclass(frozen=True)
 class OpenRequest:
-    """One still-open egress approval request (queue membership only)."""
+    """One still-open egress approval request (queue membership only).
+
+    container/host/port/opened_at describe the pending ask, not permitted egress.
+    Closed requests (allowed/denied) are removed from the fold; the log must never
+    answer "is host X permitted" — ipset allowed-domains is the sole authority.
+    """
 
     request_id: str
     state: str
+    container: str | None = None
+    host: str | None = None
+    port: int | None = None
+    opened_at: str | None = None
 
 
 @dataclass(frozen=True)
 class QueueState:
     """Fold result: open approval requests keyed by request_id.
 
-    Deliberately excludes hosts, domains, and any notion of permitted egress —
-    see fold_queue().
+    Open entries may carry the host they are asking about; closed requests leave
+    no host trace — see fold_queue() and OpenRequest.
     """
 
     open_requests: Mapping[str, OpenRequest]
@@ -105,6 +114,33 @@ def _validate_kind(kind: str) -> None:
         raise EgressLogError(f"unknown event kind {kind!r}")
 
 
+def _merge_open_fields(
+    record: dict[str, Any],
+    existing: OpenRequest | None,
+    *,
+    kind: str,
+) -> tuple[str | None, str | None, int | None, str | None]:
+    container = record.get("container")
+    host = record.get("host")
+    port = record.get("port")
+    if not isinstance(container, str):
+        container = existing.container if existing else None
+    if not isinstance(host, str):
+        host = existing.host if existing else None
+    if not isinstance(port, int):
+        port = existing.port if existing else None
+
+    if kind == "requested" and isinstance(record.get("ts"), str):
+        opened_at = record["ts"]
+    elif isinstance(record.get("opened_at"), str):
+        opened_at = record["opened_at"]
+    elif existing is not None:
+        opened_at = existing.opened_at
+    else:
+        opened_at = None
+    return container, host, port, opened_at
+
+
 def _apply_record(
     open_map: dict[str, OpenRequest],
     record: dict[str, Any],
@@ -123,8 +159,20 @@ def _apply_record(
                 continue
             request_id = item.get("request_id") or item.get("id")
             state = item.get("state")
-            if isinstance(request_id, str) and isinstance(state, str):
-                open_map[request_id] = OpenRequest(request_id=request_id, state=state)
+            if not isinstance(request_id, str) or not isinstance(state, str):
+                continue
+            container = item.get("container")
+            host = item.get("host")
+            port = item.get("port")
+            opened_at = item.get("opened_at")
+            open_map[request_id] = OpenRequest(
+                request_id=request_id,
+                state=state,
+                container=container if isinstance(container, str) else None,
+                host=host if isinstance(host, str) else None,
+                port=port if isinstance(port, int) else None,
+                opened_at=opened_at if isinstance(opened_at, str) else None,
+            )
         return
 
     if kind not in EVENT_KINDS:
@@ -139,7 +187,20 @@ def _apply_record(
         return
 
     if kind in OPEN_STATE_KINDS:
-        open_map[request_id] = OpenRequest(request_id=request_id, state=kind)
+        existing = open_map.get(request_id)
+        container, host, port, opened_at = _merge_open_fields(
+            record,
+            existing,
+            kind=kind,
+        )
+        open_map[request_id] = OpenRequest(
+            request_id=request_id,
+            state=kind,
+            container=container,
+            host=host,
+            port=port,
+            opened_at=opened_at,
+        )
         return
 
     # applied / apply_failed — audit-only; queue membership unchanged.
@@ -365,10 +426,18 @@ def _write_carry_forward(
     open_map: Mapping[str, OpenRequest],
     ts: datetime,
 ) -> None:
-    open_list = [
-        {"request_id": req.request_id, "state": req.state}
-        for req in sorted(open_map.values(), key=lambda item: item.request_id)
-    ]
+    open_list: list[dict[str, Any]] = []
+    for req in sorted(open_map.values(), key=lambda item: item.request_id):
+        entry: dict[str, Any] = {"request_id": req.request_id, "state": req.state}
+        if req.container is not None:
+            entry["container"] = req.container
+        if req.host is not None:
+            entry["host"] = req.host
+        if req.port is not None:
+            entry["port"] = req.port
+        if req.opened_at is not None:
+            entry["opened_at"] = req.opened_at
+        open_list.append(entry)
     record = {
         "ts": _iso_ts(ts),
         "kind": CARRY_FORWARD_KIND,

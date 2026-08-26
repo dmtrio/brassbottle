@@ -48,6 +48,87 @@ class EgressLogTests(unittest.TestCase):
             self.assertIn("req-a", state.open_requests)
             self.assertEqual(state.open_requests["req-a"].state, "requested")
 
+    def test_open_request_fields_survive_month_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = self._log(root)
+            log.append(
+                "requested",
+                "req-a",
+                ts=AUG_END,
+                container="coding-brassbottle",
+                host="docs.stripe.com",
+                port=443,
+            )
+
+            state = log.fold_queue(now=SEP_START)
+            req = state.open_requests["req-a"]
+            self.assertEqual(req.state, "requested")
+            self.assertEqual(req.container, "coding-brassbottle")
+            self.assertEqual(req.host, "docs.stripe.com")
+            self.assertEqual(req.port, 443)
+            self.assertEqual(req.opened_at, "2026-08-31T23:00:00Z")
+
+            log.append("notified", "req-a", ts=SEP_START)
+            state = log.fold_queue(now=SEP_START)
+            req = state.open_requests["req-a"]
+            self.assertEqual(req.state, "notified")
+            self.assertEqual(req.container, "coding-brassbottle")
+            self.assertEqual(req.host, "docs.stripe.com")
+            self.assertEqual(req.port, 443)
+            self.assertEqual(req.opened_at, "2026-08-31T23:00:00Z")
+
+            september_path = egress_log._log_path(
+                root, egress_log._month_filename(SEP_START)
+            )
+            header = json.loads(
+                september_path.read_text(encoding="utf-8").splitlines()[0]
+            )
+            self.assertEqual(header["kind"], egress_log.CARRY_FORWARD_KIND)
+            self.assertEqual(
+                header["open"],
+                [
+                    {
+                        "request_id": "req-a",
+                        "state": "requested",
+                        "container": "coding-brassbottle",
+                        "host": "docs.stripe.com",
+                        "port": 443,
+                        "opened_at": "2026-08-31T23:00:00Z",
+                    }
+                ],
+            )
+
+    def test_allowed_leaves_no_host_trace_in_fold_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = self._log(root)
+            host = "secret.example.com"
+            log.append(
+                "requested",
+                "req-allowed",
+                ts=APRIL,
+                container="coding-brassbottle",
+                host=host,
+                port=443,
+            )
+            log.append("allowed", "req-allowed", ts=APRIL, host=host, scope="live")
+            state = log.fold_queue(now=APRIL)
+            self.assertEqual(state.open_requests, {})
+            payload = json.dumps(
+                {
+                    request_id: {
+                        "state": req.state,
+                        "container": req.container,
+                        "host": req.host,
+                        "port": req.port,
+                        "opened_at": req.opened_at,
+                    }
+                    for request_id, req in state.open_requests.items()
+                }
+            )
+            self.assertNotIn(host, payload)
+
     def test_fold_queue_on_empty_root_returns_empty_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -126,7 +207,13 @@ class EgressLogTests(unittest.TestCase):
             self.assertEqual(header["kind"], egress_log.CARRY_FORWARD_KIND)
             self.assertEqual(
                 header["open"],
-                [{"request_id": "cross-month", "state": "hit"}],
+                [
+                    {
+                        "request_id": "cross-month",
+                        "state": "hit",
+                        "opened_at": "2026-03-31T12:00:00Z",
+                    }
+                ],
             )
 
     def test_cursor_pointing_at_previous_file_falls_back_to_full_replay(self):

@@ -71,3 +71,7 @@ fi
 # var instead of each hand-typing "djinn-" (partial consolidation —
 # src/entrypoint.sh and src/tmux-notify.sh are baked and stay as they are).
 DJINN_CTR_PREFIX="djinn-"
+
+# Runtime state (pid files, sockets, egress broker run dir). Read-only
+# derivation — callers mkdir what they need under $RUN_PATH themselves.
+RUN_PATH="$BASE_PATH/run"
