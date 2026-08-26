@@ -286,6 +286,13 @@ RUN chmod 644 /usr/local/lib/djinn/compose_rules.py
 COPY src/code_workspace.py /usr/local/lib/djinn/code_workspace.py
 RUN chmod 644 /usr/local/lib/djinn/code_workspace.py
 
+COPY src/egress_log.py /usr/local/lib/djinn/egress_log.py
+COPY src/egress_broker_host.py /usr/local/lib/djinn/egress_broker_host.py
+COPY src/egress_nflog.py /usr/local/lib/djinn/egress_nflog.py
+RUN chmod 644 /usr/local/lib/djinn/egress_log.py \
+    /usr/local/lib/djinn/egress_broker_host.py \
+    /usr/local/lib/djinn/egress_nflog.py
+
 ENV SSH_ENABLED=false
 
 # ── Remote session tools: tmux + mosh (RFC 04) ───────────────────────────────

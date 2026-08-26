@@ -137,6 +137,16 @@ DERIVED=$(
 )
 eval "$DERIVED"
 
+# Per-bottle egress broker token: read host-side, inject as env at create time.
+# Never bind-mount $BASE_PATH/run/ into a container — the queue must stay
+# host-only. The token is visible to processes in the container; that is fine
+# (filing is what request-egress does) and per-bottle tokens limit blast radius.
+EGRESS_BROKER_TOKEN=""
+if [ "$ENABLE_EGRESS_BROKER" = "true" ]; then
+    EGRESS_BROKER_TOKEN="$("$PYTHON3" "$SCRIPT_DIR/src/egress_broker_host.py" \
+        --base-path "$BASE_PATH" --ensure-bottle-token "$NAME")"
+fi
+
 # Resolve the container's default git token from the manifest's git.token (a
 # secrets.env var NAME; manifest.py already checked it is set). Absent → keep
 # GH_TOKEN as sourced from secrets.env, so manifests with no git.token keep the
@@ -258,6 +268,7 @@ GIT_USER_NAME="$GIT_USER_NAME" GIT_USER_EMAIL="$GIT_USER_EMAIL" \
 AGENTS_ENABLED="$AGENTS_ENABLED" \
 HOST_MCP_PORTS="$HOST_MCP_PORTS" EXTRA_ALLOWED_DOMAINS="$EGRESS" \
 ALLOWED_CIDRS="$EGRESS_CIDRS" \
+ENABLE_EGRESS_BROKER="$ENABLE_EGRESS_BROKER" EGRESS_BROKER_TOKEN="$EGRESS_BROKER_TOKEN" \
 KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWSER_TMP_PATH" MEM_LIMIT="$MEM_LIMIT" \
 SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
 REMOTE_TMUX="$REMOTE_TMUX" \

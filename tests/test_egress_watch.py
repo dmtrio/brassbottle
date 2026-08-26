@@ -66,6 +66,16 @@ class EgressWatchTests(unittest.TestCase):
         block = watch.format_request_block(details)
         self.assertIn("docs.stripe.com", block)
         self.assertIn("(and everything under it)", block)
+        self.assertIn("[p] allow + persist to manifest", block)
+
+    def test_ip_request_prompt_is_distinct_and_omits_persist(self):
+        details = self._details(host="192.0.2.55", port=5432)
+        block = watch.format_request_block(details)
+        self.assertIn("192.0.2.55", block)
+        self.assertIn("IP address", block)
+        self.assertIn("ALLOWED_CIDRS", block)
+        self.assertNotIn("[p] allow + persist", block)
+        self.assertNotIn("(and everything under it)", block)
 
     def test_terminal_choices_map_to_decide_calls(self):
         cases = [

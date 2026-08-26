@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -38,9 +39,15 @@ STALE_HOURS = 24
 HIT_COALESCE_SECONDS = 60
 STALE_SWEEP_INTERVAL_SECONDS = 300
 
-TOKEN_FILENAME = "bearer.token"
+TOKENS_DIRNAME = "tokens"
 LOCK_FILENAME = "daemon.lock"
 CONFIG_FILENAME = "config.json"
+
+IP_APPLY_FAILED_REASON = (
+    "destination is an IP address; add it to the bottle manifest "
+    "capabilities.egress_cidrs (ALLOWED_CIDRS) — allow-egress.sh accepts "
+    "domain zones only"
+)
 
 DOMAIN_RE = re.compile(
     r"^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
@@ -73,6 +80,7 @@ class OpenRequestState:
     host: str
     port: int
     opened_at: datetime
+    host_is_ip: bool = False
     pending_hits: int = 0
     last_hit_logged: datetime | None = None
     decision: Decision | None = None
@@ -86,8 +94,8 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def normalize_host(raw: str) -> str:
-    """Strip wildcards, scheme, port, and path; lowercase; validate domain syntax."""
+def _strip_host_candidate(raw: str) -> str:
+    """Strip wildcards, scheme, port, and path; lowercase."""
     value = raw.strip().lower()
     if "://" in value:
         value = value.split("://", 1)[1]
@@ -95,15 +103,52 @@ def normalize_host(raw: str) -> str:
         value = value.rsplit("@", 1)[1]
     if "/" in value:
         value = value.split("/", 1)[0]
-    if ":" in value:
+    if value.startswith("[") and "]" in value:
+        inner, _, rest = value.partition("]")
+        candidate = inner[1:]
+        if rest.startswith(":") and rest[1:].isdigit():
+            return candidate
+        return candidate
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
+    if value.count(":") == 1:
         host_part, port_part = value.rsplit(":", 1)
         if port_part.isdigit():
             value = host_part
     if value.startswith("*."):
         value = value[2:]
-    if not DOMAIN_RE.fullmatch(value):
-        raise ValueError(f"not a valid domain name: {raw!r}")
     return value
+
+
+def is_ip_literal(host: str) -> bool:
+    """True when host is a normalized IPv4/IPv6 literal."""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def normalize_destination(raw: str) -> tuple[str, bool]:
+    """Normalize a filing destination; return (host, is_ip_literal)."""
+    value = _strip_host_candidate(raw)
+    try:
+        return str(ipaddress.ip_address(value)), True
+    except ValueError:
+        pass
+    if not DOMAIN_RE.fullmatch(value):
+        raise ValueError(f"not a valid domain name or IP address: {raw!r}")
+    return value, False
+
+
+def normalize_host(raw: str) -> str:
+    """Strip wildcards, scheme, port, and path; lowercase; validate domain syntax."""
+    host, is_ip = normalize_destination(raw)
+    if is_ip:
+        raise ValueError(f"not a valid domain name: {raw!r}")
+    return host
 
 
 def _utc_now(now: datetime | None = None) -> datetime:
@@ -114,7 +159,7 @@ def _utc_now(now: datetime | None = None) -> datetime:
     return now.astimezone(timezone.utc)
 
 
-def _load_token(token_path: Path) -> str:
+def _load_bottle_token(token_path: Path) -> str:
     if token_path.is_file():
         token = token_path.read_text(encoding="utf-8").strip()
         if token:
@@ -127,8 +172,53 @@ def _load_token(token_path: Path) -> str:
     fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(token + "\n")
-    LOG.info("egress broker token created path=%s", token_path.name)
+    LOG.info("egress broker bottle token created bottle=%s", token_path.stem)
     return token
+
+
+def ensure_bottle_token(base_path: Path, bottle: str) -> str:
+    """Create or return the per-bottle bearer token (host-side only)."""
+    token_path = resolve_egress_root(base_path) / TOKENS_DIRNAME / f"{bottle}.token"
+    return _load_bottle_token(token_path)
+
+
+class BottleTokenStore:
+    """Map bearer tokens to bottle names; reload from disk on auth miss."""
+
+    def __init__(self, tokens_dir: Path) -> None:
+        self._tokens_dir = tokens_dir
+        self._token_to_bottle: dict[str, str] = {}
+        self._lock = threading.RLock()
+        self._reload()
+
+    def _reload(self) -> None:
+        mapping: dict[str, str] = {}
+        if self._tokens_dir.is_dir():
+            for path in self._tokens_dir.glob("*.token"):
+                bottle = path.stem
+                try:
+                    token = path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if token:
+                    mapping[token] = bottle
+        with self._lock:
+            self._token_to_bottle = mapping
+
+    def resolve_bottle(self, provided: str) -> str | None:
+        """Return the bottle for a bearer token, or None if unknown."""
+        for attempt in range(2):
+            with self._lock:
+                items = list(self._token_to_bottle.items())
+            matched: str | None = None
+            for token, bottle in items:
+                if hmac.compare_digest(provided, token):
+                    matched = bottle
+            if matched is not None:
+                return matched
+            if attempt == 0:
+                self._reload()
+        return None
 
 
 def _load_config(config_path: Path) -> dict[str, Any]:
@@ -214,12 +304,14 @@ class EgressBroker:
                 )
                 continue
             opened_at = self._parse_ts(open_req.opened_at, now)
+            host_is_ip = is_ip_literal(host)
             state = OpenRequestState(
                 request_id=request_id,
                 container=container,
                 host=host,
                 port=port,
                 opened_at=opened_at,
+                host_is_ip=host_is_ip,
             )
             self._requests[request_id] = state
             self._key_index[_request_key(container, host, port)] = request_id
@@ -275,6 +367,7 @@ class EgressBroker:
         comm: str | None = None,
         reason: str | None = None,
         hold_seconds: int | None = None,
+        host_is_ip: bool = False,
     ) -> tuple[dict[str, Any], str]:
         """File or coalesce an egress request; return JSON body and request_id."""
         key = _request_key(container, host, port)
@@ -302,12 +395,15 @@ class EgressBroker:
                     host=host,
                     port=port,
                     opened_at=now,
+                    host_is_ip=host_is_ip,
                 )
                 fields: dict[str, Any] = {
                     "container": container,
                     "host": host,
                     "port": port,
                 }
+                if host_is_ip:
+                    fields["host_is_ip"] = True
                 if uid is not None:
                     fields["uid"] = uid
                 if comm is not None:
@@ -395,11 +491,19 @@ class EgressBroker:
                     host=state.host,
                     container=state.container,
                 )
-                apply_ok = self._apply_allow(state, resolved_scope)
-                if apply_ok:
-                    self._log.append("applied", request_id, ts=self.now())
+                if state.host_is_ip or is_ip_literal(state.host):
+                    self._log.append(
+                        "apply_failed",
+                        request_id,
+                        ts=self.now(),
+                        reason=IP_APPLY_FAILED_REASON,
+                    )
                 else:
-                    self._log.append("apply_failed", request_id, ts=self.now())
+                    apply_ok = self._apply_allow(state, resolved_scope)
+                    if apply_ok:
+                        self._log.append("applied", request_id, ts=self.now())
+                    else:
+                        self._log.append("apply_failed", request_id, ts=self.now())
                 state.decision = Decision(decision="allow", scope=resolved_scope)
             elif decision == "deny":
                 fields: dict[str, Any] = {}
@@ -512,10 +616,10 @@ class EgressBrokerHTTPServer(ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         broker: EgressBroker,
-        token: str,
+        token_store: BottleTokenStore,
     ) -> None:
         self.broker = broker
-        self.token = token
+        self.token_store = token_store
         super().__init__(server_address, EgressBrokerRequestHandler)
 
 
@@ -540,16 +644,20 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _check_auth(self) -> bool:
+    def _resolve_bottle_from_auth(self) -> str | None:
         header = self.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
-            return False
+            return None
         provided = header[7:].strip()
-        if not hmac.compare_digest(provided, self.server.token):
+        if not provided:
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
-            return False
-        return True
+            return None
+        bottle = self.server.token_store.resolve_bottle(provided)
+        if bottle is None:
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return None
+        return bottle
 
     def do_GET(self) -> None:
         if self.path == "/health":
@@ -561,7 +669,8 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/egress":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
-        if not self._check_auth():
+        container = self._resolve_bottle_from_auth()
+        if container is None:
             return
 
         length = int(self.headers.get("Content-Length", "0"))
@@ -576,21 +685,29 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
             return
 
-        container = payload.get("container")
+        body_container = payload.get("container")
+        if body_container is not None:
+            if not isinstance(body_container, str):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "container must be a string"},
+                )
+                return
+            if body_container != container:
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+
         host_raw = payload.get("host")
         port = payload.get("port")
-        if not isinstance(container, str) or not isinstance(host_raw, str):
-            self._send_json(
-                HTTPStatus.BAD_REQUEST,
-                {"error": "container and host are required"},
-            )
+        if not isinstance(host_raw, str):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "host is required"})
             return
         if not isinstance(port, int):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "port must be an integer"})
             return
 
         try:
-            host = normalize_host(host_raw)
+            host, host_is_ip = normalize_destination(host_raw)
         except ValueError:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid host"})
             return
@@ -625,6 +742,7 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
                 comm=comm,
                 reason=reason,
                 hold_seconds=hold_seconds,
+                host_is_ip=host_is_ip,
             )
         except EgressLogError as exc:
             LOG.info("egress broker request error reason=%s", exc)
@@ -669,7 +787,9 @@ def run_daemon(
     egress_root = resolve_egress_root(base_path)
     egress_root.mkdir(parents=True, exist_ok=True)
 
-    token = _load_token(egress_root / TOKEN_FILENAME)
+    tokens_dir = egress_root / TOKENS_DIRNAME
+    tokens_dir.mkdir(parents=True, exist_ok=True)
+    token_store = BottleTokenStore(tokens_dir)
     config = _load_config(egress_root / CONFIG_FILENAME)
     hold_default = config.get("hold_seconds", DEFAULT_HOLD_SECONDS)
     if not isinstance(hold_default, int):
@@ -683,7 +803,7 @@ def run_daemon(
         repo_root=repo_root,
         hold_seconds_default=hold_default,
     )
-    server = EgressBrokerHTTPServer((host, port), broker, token)
+    server = EgressBrokerHTTPServer((host, port), broker, token_store)
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
         target=_stale_sweep_loop,
@@ -711,6 +831,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="bind port")
+    parser.add_argument(
+        "--ensure-bottle-token",
+        metavar="BOTTLE",
+        help="print (creating if needed) the per-bottle bearer token and exit",
+    )
     return parser
 
 
@@ -719,6 +844,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     base_path = resolve_base_path(args.base_path)
+    if args.ensure_bottle_token:
+        print(ensure_bottle_token(base_path, args.ensure_bottle_token))
+        return 0
     try:
         run_daemon(base_path, host=args.host, port=args.port)
     except DaemonAlreadyRunning as exc:

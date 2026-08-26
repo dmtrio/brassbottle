@@ -24,16 +24,18 @@ from egress_broker_host import (
     CONFIG_FILENAME,
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PORT,
+    IP_APPLY_FAILED_REASON,
     LOCK_FILENAME,
-    TOKEN_FILENAME,
+    TOKENS_DIRNAME,
+    BottleTokenStore,
     DaemonAlreadyRunning,
     DaemonLock,
     EgressBroker,
     EgressBrokerHTTPServer,
     _load_config,
-    _load_token,
     _repo_root,
     _stale_sweep_loop,
+    is_ip_literal,
     resolve_base_path,
     resolve_egress_root,
 )
@@ -66,17 +68,25 @@ class OperatorChoice:
     action: str  # allow_live | allow_manifest | deny | skip
 
 
-def allow_prompt_line(host: str) -> str:
+def allow_prompt_line(host: str, *, host_is_ip: bool = False) -> str:
     """Question line stating zone/subdomain coverage semantics."""
+    if host_is_ip:
+        return (
+            f"Allow traffic to {host}? "
+            "(requires ALLOWED_CIDRS in the bottle manifest — not allow-egress.sh)"
+        )
     return f"Allow {host} (and everything under it)?"
 
 
 def format_request_block(details: RequestDetails) -> str:
     """Render the per-request summary shown before the prompt."""
+    host_is_ip = is_ip_literal(details.host)
     lines = [
         f"Container: {details.container}",
         f"Host:port: {details.host}:{details.port}",
     ]
+    if host_is_ip:
+        lines.append("Destination: IP address (manual CIDR grant required on approve)")
     if details.uid is not None or details.comm is not None:
         uid = details.uid if details.uid is not None else "?"
         comm = details.comm if details.comm is not None else "?"
@@ -86,14 +96,21 @@ def format_request_block(details: RequestDetails) -> str:
     if details.reason:
         lines.append(f"Reason: {details.reason}")
     lines.append("")
-    lines.append(allow_prompt_line(details.host))
+    lines.append(allow_prompt_line(details.host, host_is_ip=host_is_ip))
     lines.append("")
-    lines.append(
-        "[a] allow (live only)   "
-        "[p] allow + persist to manifest   "
-        "[d] deny   "
-        "[s] skip"
-    )
+    if host_is_ip:
+        lines.append(
+            "[a] allow (records approval; add CIDR to manifest manually)   "
+            "[d] deny   "
+            "[s] skip"
+        )
+    else:
+        lines.append(
+            "[a] allow (live only)   "
+            "[p] allow + persist to manifest   "
+            "[d] deny   "
+            "[s] skip"
+        )
     return "\n".join(lines)
 
 
@@ -143,10 +160,13 @@ def build_osascript_argv(
 def build_dialog_message(details: RequestDetails) -> tuple[str, str]:
     """Return (title, message) for the macOS dialog."""
     title = "Egress approval"
+    host_is_ip = is_ip_literal(details.host)
     message = (
         f"{details.container} wants {details.host}:{details.port}\n"
-        f"{allow_prompt_line(details.host)}"
+        f"{allow_prompt_line(details.host, host_is_ip=host_is_ip)}"
     )
+    if host_is_ip:
+        message += f"\n\nOn approve: {IP_APPLY_FAILED_REASON}"
     return title, message
 
 
@@ -409,7 +429,9 @@ def run_watch(
     egress_root = resolve_egress_root(base_path)
     egress_root.mkdir(parents=True, exist_ok=True)
 
-    token = _load_token(egress_root / TOKEN_FILENAME)
+    tokens_dir = egress_root / TOKENS_DIRNAME
+    tokens_dir.mkdir(parents=True, exist_ok=True)
+    token_store = BottleTokenStore(tokens_dir)
     config = _load_config(egress_root / CONFIG_FILENAME)
     hold_default = config.get("hold_seconds", DEFAULT_HOLD_SECONDS)
     if not isinstance(hold_default, int):
@@ -423,7 +445,7 @@ def run_watch(
         repo_root=repo_root or _repo_root(),
         hold_seconds_default=hold_default,
     )
-    server = EgressBrokerHTTPServer((host, port), broker, token)
+    server = EgressBrokerHTTPServer((host, port), broker, token_store)
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
         target=_stale_sweep_loop,
