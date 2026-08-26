@@ -86,6 +86,24 @@ class OriginalDstTests(unittest.TestCase):
         self.assertIn("512", str(ctx.exception))
 
 
+
+class DaemonErrorDecisionTests(unittest.TestCase):
+    """An apply that failed host-side must never reach the caller as an allow."""
+
+    def test_error_decision_maps_to_daemon_error_not_allow(self):
+        for reason in ("apply_failed", "ip_requires_cidr"):
+            with self.subTest(reason=reason):
+                body = {"decision": "error", "reason": reason}
+                self.assertEqual(broker._decision_outcome(body), "daemon_error")
+
+    def test_known_decisions_still_map(self):
+        self.assertEqual(broker._decision_outcome({"decision": "allow"}), "allow")
+        self.assertEqual(broker._decision_outcome({"decision": "deny"}), "deny")
+        self.assertEqual(broker._decision_outcome({"decision": "pending"}), "pending")
+
+    def test_unknown_decision_is_a_fault_not_an_allow(self):
+        self.assertEqual(broker._decision_outcome({"decision": "banana"}), "daemon_error")
+
 class SniExtractionTests(unittest.TestCase):
     def test_extract_sni_present(self):
         payload = _build_client_hello("api.example.com")

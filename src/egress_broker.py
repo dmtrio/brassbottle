@@ -349,6 +349,23 @@ def build_http_403(host: str, request_id: str) -> bytes:
     return ("\r\n".join(headers) + "\r\n\r\n").encode("ascii") + body
 
 
+def _decision_outcome(body: object) -> str:
+    """Map a host-daemon decision body to a broker outcome.
+
+    Anything that is not an explicit allow/deny/pending is a FAULT, never an
+    allow. In particular decision="error" means the host attempted the grant
+    and it did not take — allow-egress.sh failed, or the destination is an IP
+    literal needing a manual CIDR. Reporting that as "allow" would send the
+    caller retrying into a rule that was never installed.
+    """
+    if not isinstance(body, dict):
+        return "daemon_error"
+    decision = body.get("decision")
+    if decision in ("allow", "deny", "pending"):
+        return decision
+    return "daemon_error"
+
+
 def build_http_502() -> bytes:
     body = b"Egress approval broker unreachable.\n"
     headers = [
@@ -549,16 +566,7 @@ def wait_for_filing_or_client_abort(
             if not filing_thread.is_alive():
                 if filing_error.get("value"):
                     return "daemon_error"
-                body = filing_result.get("value")
-                if isinstance(body, dict):
-                    decision = body.get("decision")
-                    if decision == "allow":
-                        return "allow"
-                    if decision == "deny":
-                        return "deny"
-                    if decision == "pending":
-                        return "pending"
-                return "daemon_error"
+                return _decision_outcome(filing_result.get("value"))
 
             remaining = deadline - now_fn()
             events = sel.select(timeout=min(1.0, max(0.0, remaining)))
