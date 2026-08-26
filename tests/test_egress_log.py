@@ -25,6 +25,31 @@ class EgressLogTests(unittest.TestCase):
     def _log(self, root: Path) -> egress_log.EgressLog:
         return egress_log.EgressLog(root)
 
+    def test_fold_is_stateless_and_writes_no_cursor(self):
+        """The fold replays the whole current file and keeps no read state.
+
+        A (file, offset) cursor used to be written here. Nothing ever read from
+        it — fold_queue always replayed from offset 0 — so its only effect was a
+        log line on every poll claiming a fallback, including in the normal
+        fully-caught-up case. It was removed rather than left as dead weight.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = egress_log.EgressLog(root)
+            log.append("requested", "req-a", ts=MARCH, container="cb",
+                       host="docs.stripe.com", port=443)
+
+            first = log.fold_queue(now=MARCH)
+            second = egress_log.EgressLog(root).fold_queue(now=MARCH)
+            self.assertEqual(set(first.open_requests), {"req-a"})
+            self.assertEqual(set(second.open_requests), {"req-a"})
+
+            self.assertEqual(
+                sorted(q.name for q in root.iterdir()),
+                ["log"],
+                "fold must not persist read state beside the log",
+            )
+
     def test_queue_state_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -215,54 +240,6 @@ class EgressLogTests(unittest.TestCase):
                     }
                 ],
             )
-
-    def test_cursor_pointing_at_previous_file_falls_back_to_full_replay(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            log = self._log(root)
-            log.append("requested", "req-a", ts=APRIL)
-            current = egress_log._month_filename(APRIL)
-            egress_log._cursor_path(root).write_text(
-                json.dumps({"file": egress_log._month_filename(MARCH), "offset": 0})
-                + "\n",
-                encoding="utf-8",
-            )
-
-            state = log.fold_queue(now=APRIL)
-            self.assertIn("req-a", state.open_requests)
-
-    def test_missing_cursor_falls_back_without_raising(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            log = self._log(root)
-            log.append("requested", "req-b", ts=APRIL)
-            self.assertFalse(egress_log._cursor_path(root).exists())
-            state = log.fold_queue(now=APRIL)
-            self.assertIn("req-b", state.open_requests)
-
-    def test_malformed_cursor_falls_back_without_raising(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            log = self._log(root)
-            log.append("requested", "req-c", ts=APRIL)
-            egress_log._cursor_path(root).write_text("not-json\n", encoding="utf-8")
-            state = log.fold_queue(now=APRIL)
-            self.assertIn("req-c", state.open_requests)
-
-    def test_cursor_offset_past_eof_falls_back_without_raising(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            log = self._log(root)
-            log.append("requested", "req-d", ts=APRIL)
-            current = egress_log._month_filename(APRIL)
-            path = egress_log._log_path(root, current)
-            past_eof = path.stat().st_size + 1024
-            egress_log._cursor_path(root).write_text(
-                json.dumps({"file": current, "offset": past_eof}) + "\n",
-                encoding="utf-8",
-            )
-            state = log.fold_queue(now=APRIL)
-            self.assertIn("req-d", state.open_requests)
 
     def test_torn_trailing_line_discarded_without_losing_prior_records(self):
         with tempfile.TemporaryDirectory() as tmp:

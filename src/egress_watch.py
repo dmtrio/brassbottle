@@ -470,6 +470,18 @@ def run_watch(
     server_thread.start()
 
     LOG.info("egress watch listening host=%s port=%d", host, server.server_address[1])
+
+    # Written to the output stream, not the logger: with logging at WARNING the
+    # watcher is otherwise completely silent while idle, which reads as hung.
+    # This is the operator's only confirmation that approvals will reach them.
+    sys.stdout.write(
+        f"Watching for egress requests on {host}:{server.server_address[1]}\n"
+        f"  queue:  {egress_root}\n"
+        f"  keys:   [a] allow (live)  [p] allow + persist  [d] deny  [s] skip\n"
+        f"  Ctrl-C to stop. -v for boundary logs.\n\n"
+    )
+    sys.stdout.flush()
+
     watcher = EgressWatcher(broker, EgressLog(egress_root), poll_interval=poll_interval)
     try:
         watcher.run_forever()
@@ -498,13 +510,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="seconds between queue polls when idle",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="-v for boundary logs (INFO), -vv for reads too (DEBUG)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args_ns = parser.parse_args(argv)
+    args = args_ns
+
+    # WARNING, not INFO. This is an interactive operator UI that polls the queue
+    # roughly twice a second, and the daemon it runs in-process logs boundaries
+    # on every read — at INFO those bury the approval prompts the operator is
+    # here to answer. Diagnostics move to -v; the prompts themselves are written
+    # to the output stream, not the logger, so they are unaffected either way.
+    level = logging.DEBUG if getattr(args_ns, "verbose", 0) > 1 else (
+        logging.INFO if getattr(args_ns, "verbose", 0) == 1 else logging.WARNING
+    )
+    logging.basicConfig(level=level, format="%(message)s")
     base_path = resolve_base_path(args.base_path)
     try:
         run_watch(
