@@ -7,17 +7,19 @@ import io
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(TESTS_DIR))
 import egress_broker_host as broker  # noqa: E402
 import egress_log  # noqa: E402
 import egress_watch as watch  # noqa: E402
+from egress_test_sync import join_thread_or_fail, wait_for_broker_open_request  # noqa: E402
 
 NOW = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -56,9 +58,17 @@ class EgressWatchTests(unittest.TestCase):
             args=("coding-brassbottle", "docs.stripe.com", 443),
         )
         thread.start()
-        time.sleep(0.2)
-        request_id = next(iter(b._requests))
-        self.addCleanup(lambda: thread.join(timeout=5))
+        request_id = wait_for_broker_open_request(b)
+
+        def cleanup() -> None:
+            if thread.is_alive():
+                with b._lock:
+                    still_open = request_id in b._requests
+                if still_open:
+                    b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+
+        self.addCleanup(cleanup)
         return request_id
 
     def test_prompt_contains_host_and_subdomain_coverage(self):
