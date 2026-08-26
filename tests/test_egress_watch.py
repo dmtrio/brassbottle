@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import sys
 import tempfile
 import threading
@@ -332,3 +333,85 @@ class EgressWatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatcherStartupSurfaceTests(unittest.TestCase):
+    """Pin the operator-visible surface of ./djinn allow --watch.
+
+    These exist because the watcher shipped setting the root logger to INFO
+    while polling the queue about twice a second, which buried the approval
+    prompts under roughly ten lines a second of boundary logging. Nothing in
+    the suite covered main() or run_watch(), so the regression was invisible
+    until someone ran it. Both the level selection and the banner are pinned
+    here so the usability fix cannot quietly come undone.
+    """
+
+    def setUp(self) -> None:
+        root = logging.getLogger()
+        self._prev_level = root.level
+        self._prev_handlers = root.handlers[:]
+        self.addCleanup(self._restore_logging)
+
+    def _restore_logging(self) -> None:
+        root = logging.getLogger()
+        root.handlers[:] = self._prev_handlers
+        root.setLevel(self._prev_level)
+
+    def _main_level(self, argv: list[str]) -> int:
+        """Run main() with run_watch stubbed out; return the root logger level."""
+        root = logging.getLogger()
+        root.handlers.clear()
+        root.setLevel(logging.NOTSET)
+        with mock.patch.object(watch, "run_watch") as run:
+            rc = watch.main(argv)
+        self.assertEqual(rc, 0)
+        run.assert_called_once()
+        return logging.getLogger().level
+
+    def test_default_is_quiet(self):
+        # WARNING, not INFO: the prompts are the signal, the boundary logs are
+        # noise at two polls a second.
+        self.assertEqual(self._main_level([]), logging.WARNING)
+
+    def test_single_v_gives_boundary_logs(self):
+        self.assertEqual(self._main_level(["-v"]), logging.INFO)
+
+    def test_double_v_gives_reads_too(self):
+        self.assertEqual(self._main_level(["-vv"]), logging.DEBUG)
+
+    def test_run_watch_prints_a_startup_banner(self):
+        """A silent watcher reads as hung — it must say it is listening."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            buf = io.StringIO()
+            # run_forever() would block; the banner is printed before it.
+            with mock.patch.object(watch.EgressWatcher, "run_forever",
+                                   return_value=None), \
+                 mock.patch.object(sys, "stdout", buf):
+                watch.run_watch(base, host="127.0.0.1", port=0)
+            out = buf.getvalue()
+
+        self.assertIn("Watching for egress requests on 127.0.0.1:", out)
+        self.assertIn("queue:", out)
+        self.assertIn(str(watch.resolve_egress_root(base)), out)
+        for key in ("[a]", "[p]", "[d]", "[s]"):
+            self.assertIn(key, out, f"key legend must mention {key}")
+
+    def test_run_watch_creates_the_run_directory(self):
+        """RUN_PATH is a side-effect-free derivation; the daemon creates it.
+
+        This asserts the behaviour, not a particular line: the egress root and
+        tokens/ mkdir calls are redundant with each other (tokens_dir is created
+        with parents=True), so removing either one alone still passes. Removing
+        both fails, which is the property worth having.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "fresh"
+            self.assertFalse(base.exists())
+            with mock.patch.object(watch.EgressWatcher, "run_forever",
+                                   return_value=None), \
+                 mock.patch.object(sys, "stdout", io.StringIO()):
+                watch.run_watch(base, host="127.0.0.1", port=0)
+            egress_root = watch.resolve_egress_root(base)
+            self.assertTrue(egress_root.is_dir())
+            self.assertTrue((egress_root / watch.TOKENS_DIRNAME).is_dir())
