@@ -866,6 +866,32 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
             derive({}, agent_files=agents)
         self.assertIn("strategy codex_managed_block requires format toml", str(cm.exception))
 
+    def test_codex_managed_block_rejects_bare_bool_env_refs(self):
+        """codex_managed_block's TOML block has no ${VAR} header expansion, so
+        env_refs: true (bare bool ref-passthrough) can never actually be
+        rendered — it must be caught here, not silently dropped at wire time."""
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(AGENT_FILES["codex"])
+        agents["codex"]["mcp"] = dict(AGENT_FILES["codex"]["mcp"], env_refs=True)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("only accepts env_refs: false or env_refs: bearer_token_env_var",
+                       str(cm.exception))
+
+    def test_codex_managed_block_rejects_unknown_env_refs_string(self):
+        """_codex_block_body only ever renders the bearer_token_env_var field —
+        any other string (a typo, or an unrelated field name like the spec's
+        own 'url' key) must be rejected here, not accepted and silently
+        rendered wrong (an overwritten field, or a dropped credential)."""
+        agents = dict(AGENT_FILES)
+        agents["codex"] = dict(AGENT_FILES["codex"])
+        agents["codex"]["mcp"] = dict(
+            AGENT_FILES["codex"]["mcp"], env_refs="bearer_token_env")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({}, agent_files=agents)
+        self.assertIn("only accepts env_refs: false or env_refs: bearer_token_env_var",
+                       str(cm.exception))
+
     def test_duplicate_mcp_binary_rejected(self):
         agents = dict(AGENT_FILES)
         agents["aider"] = dict(AGENT_FILES["aider"], binary="claude")

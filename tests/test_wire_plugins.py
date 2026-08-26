@@ -388,6 +388,49 @@ class TestPreapproveClaude(QuietTestCase):
                 wire_plugins.preapprove_claude(home, workspace)
 
 
+class TestRenderNamedEnvRefServer(unittest.TestCase):
+    """Tests for _render_named_env_ref_server — the named-ref (bearerTokenEnvVar
+    / bearer_token_env_var) rendering path shared by kimi and codex."""
+
+    SLOT = "TOKEN"
+
+    def test_bearer_header_renders_field_and_strips_authorization(self):
+        spec = {"url": "https://example.test/mcp",
+                "headers": {"Authorization": "Bearer ${TOKEN}"}}
+        rendered = wire_plugins._render_named_env_ref_server(
+            spec, [self.SLOT], "bearer_token_env_var", "srv", "codex")
+        self.assertEqual(rendered["headers"], {})
+        self.assertEqual(rendered["bearer_token_env_var"], "TOKEN")
+
+    def test_other_headers_survive_untouched(self):
+        spec = {"url": "https://example.test/mcp",
+                "headers": {"Authorization": "Bearer ${TOKEN}", "X-Extra": "kept"}}
+        rendered = wire_plugins._render_named_env_ref_server(
+            spec, [self.SLOT], "bearer_token_env_var", "srv", "codex")
+        self.assertEqual(rendered["headers"], {"X-Extra": "kept"})
+
+    def test_non_bearer_header_scheme_rejected(self):
+        """A named env_refs field always means bearer auth (the agent CLI
+        builds Authorization: Bearer <value> itself) — a spec whose auth
+        actually rides a different header must be rejected, not silently
+        rendered as Bearer auth against a server that requires something else."""
+        spec = {"url": "https://example.test/mcp",
+                "headers": {"X-API-Key": "${TOKEN}"}}
+        with self.assertRaises(wire_plugins.WireError) as cm:
+            wire_plugins._render_named_env_ref_server(
+                spec, [self.SLOT], "bearer_token_env_var", "srv", "codex")
+        self.assertIn("requires headers.Authorization", str(cm.exception))
+
+    def test_authorization_header_not_exactly_bearer_marker_rejected(self):
+        """Authorization present but not the canonical 'Bearer ${SLOT}' shape
+        (e.g. extra text, wrong scheme) must also be rejected."""
+        spec = {"url": "https://example.test/mcp",
+                "headers": {"Authorization": "Token ${TOKEN}"}}
+        with self.assertRaises(wire_plugins.WireError):
+            wire_plugins._render_named_env_ref_server(
+                spec, [self.SLOT], "bearer_token_env_var", "srv", "codex")
+
+
 class TestWriteAgentServer(QuietTestCase):
     """Tests for literal rendering and write_agent_server / warn_agent_server."""
 
@@ -847,19 +890,6 @@ class TestWireCodexToml(QuietTestCase):
             self.assertIn('bearer_token_env_var = "OBSIDIAN_ANNOTATED_KEY"', content)
             self.assertNotIn("headers", content)
             self.assertNotIn("command", content)
-
-    def test_remote_spec_without_token_field_omits_it(self):
-        """A remote spec with no bearer_token_env_var (unauthenticated remote
-        MCP) renders url alone — the field is optional, not required."""
-        with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config.toml"
-            plugins = {"open": {"url": "https://example.com/mcp", "headers": {}}}
-
-            wire_plugins.wire_codex_toml(config_path, plugins)
-
-            content = config_path.read_text()
-            self.assertIn('url = "https://example.com/mcp"', content)
-            self.assertNotIn("bearer_token_env_var", content)
 
     def test_remote_spec_with_leftover_headers_raises(self):
         """codex has no header passthrough beyond the single bearer slot: a
@@ -1566,7 +1596,8 @@ class TestBuildPayload(unittest.TestCase):
         with self.assertRaises(wire_plugins.WireError) as cm:
             wire_plugins.build_payload(env)
         self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", str(cm.exception))
-        self.assertIn("headers entry containing ${OBSIDIAN_ANNOTATED_KEY}", str(cm.exception))
+        self.assertIn("requires headers.Authorization", str(cm.exception))
+        self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", str(cm.exception))
 
     def test_round_trips_through_run(self):
         """The payload build_payload emits is exactly what run() consumes: a
@@ -1801,6 +1832,8 @@ class TestManifestWireParity(unittest.TestCase):
         self.assertEqual(wire_plugins.AGENT_MCP_FORMATS, manifest.AGENT_MCP_FORMATS)
         self.assertEqual(wire_plugins.AGENT_MCP_DIALECTS, manifest.AGENT_MCP_DIALECTS)
         self.assertEqual(wire_plugins.AGENT_MCP_STRATEGIES, manifest.AGENT_MCP_STRATEGIES)
+        self.assertEqual(wire_plugins.CODEX_MANAGED_BLOCK_ENV_REFS,
+                          manifest.CODEX_MANAGED_BLOCK_ENV_REFS)
 
     def test_every_manifest_legal_combo_round_trips_build_and_run(self):
         env_ref_variants = [True, False, "ENV_REF"]

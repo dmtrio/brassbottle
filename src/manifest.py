@@ -168,6 +168,16 @@ AGENT_MCP_FORMATS = frozenset({"json", "toml"})
 AGENT_MCP_LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl"})
 AGENT_MCP_DIALECTS = AGENT_MCP_LITERAL_DIALECTS | frozenset({"mcpServers"})
 AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
+# codex_managed_block's closed env_refs set. False renders no agent-scoped
+# remote at all (warns instead); "bearer_token_env_var" is the ONE field name
+# _codex_block_body actually renders (codex's own native remote-MCP shape —
+# kept in lockstep with wire_plugins.CODEX_MANAGED_BLOCK_ENV_REFS). Any other
+# string (a typo, or a field codex doesn't have) would render a broken config —
+# either an overwritten field (env_refs: url) or a silently missing credential
+# (env_refs: bearer_token_env, _codex_block_body never sees it) — so it is
+# rejected here rather than discovered at wire time. True is rejected too: the
+# managed TOML block has no ${VAR} header expansion, unlike claude's shim.
+CODEX_MANAGED_BLOCK_ENV_REFS = frozenset({False, "bearer_token_env_var"})
 
 # Marker for a plugins/*/plugin.yml that yq could not parse (see module docstring).
 UNREADABLE = object()
@@ -501,14 +511,16 @@ def _normalize_agent_docs(agent_files):
                 if fmt != "toml":
                     raise ManifestError(
                         f"agent '{agent}' mcp: strategy codex_managed_block requires format toml")
-                if env_refs is True:
+                if env_refs not in CODEX_MANAGED_BLOCK_ENV_REFS:
                     raise ManifestError(
-                        f"agent '{agent}' mcp: strategy codex_managed_block does not support "
-                        "env_refs: true — the managed TOML block has no ${VAR} header "
-                        "expansion (unlike claude's shim), so a bare bool ref can never "
-                        "actually be rendered. Use a named string env_refs naming the field "
-                        "this agent's OWN remote-MCP config understands (e.g. codex's own "
-                        "bearer_token_env_var), or env_refs: false")
+                        f"agent '{agent}' mcp: strategy codex_managed_block only accepts "
+                        "env_refs: false or env_refs: bearer_token_env_var — env_refs: true "
+                        "can't work (the managed TOML block has no ${VAR} header expansion, "
+                        "unlike claude's shim), and no other string is safe: "
+                        "_codex_block_body only ever renders the bearer_token_env_var field, "
+                        "so a typo or a different field name would either overwrite an "
+                        "unrelated key (env_refs: url) or silently drop the credential "
+                        "(env_refs: bearer_token_env)")
             else:
                 if fmt != "json":
                     raise ManifestError(
