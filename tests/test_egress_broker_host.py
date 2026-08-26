@@ -399,7 +399,9 @@ class EgressBrokerHostTests(unittest.TestCase):
             thread = threading.Thread(target=waiter)
             thread.start()
             open_id = wait_for_broker_open_request(b)
-            b.decide(open_id, "allow", scope="manifest")
+            with mock.patch("subprocess.run") as mocked:
+                mocked.return_value = mock.Mock(returncode=0)
+                b.decide(open_id, "allow", scope="manifest")
             join_thread_or_fail(thread, label="file_request waiter")
             self.assertEqual(
                 result["body"],
@@ -529,17 +531,35 @@ class EgressBrokerHostTests(unittest.TestCase):
             root = Path(tmp)
             clock = FakeClock(NOW)
             b = self._broker(root, clock, hold_seconds=60)
-            thread = threading.Thread(
-                target=b.file_request,
-                args=("coding-brassbottle", "192.0.2.55", 5432),
-                kwargs={"host_is_ip": True},
-            )
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request(
+                    "coding-brassbottle",
+                    "192.0.2.55",
+                    5432,
+                    host_is_ip=True,
+                )
+                result["body"] = body
+
+            thread = threading.Thread(target=waiter)
             thread.start()
             request_id = wait_for_broker_open_request(b)
             with mock.patch("subprocess.run") as mocked:
-                b.decide(request_id, "allow", scope="live")
+                err = b.decide(request_id, "allow", scope="live")
                 mocked.assert_not_called()
+            self.assertEqual(err, broker.IP_REQUIRES_CIDR_REASON)
             join_thread_or_fail(thread, label="file_request")
+            self.assertEqual(
+                result["body"],
+                {"decision": "error", "reason": broker.IP_REQUIRES_CIDR_REASON},
+            )
+            with b._lock:
+                self.assertIn(request_id, b._requests)
+            allowed = [
+                r for r in self._log_records(root) if r.get("kind") == "allowed"
+            ]
+            self.assertEqual(allowed, [])
             failed = [
                 r
                 for r in self._log_records(root)
@@ -547,6 +567,95 @@ class EgressBrokerHostTests(unittest.TestCase):
             ]
             self.assertEqual(len(failed), 1)
             self.assertIn("egress_cidrs", failed[0].get("reason", ""))
+
+    def test_apply_failure_keeps_request_open_and_reports_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=60)
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "neon.tech", 443)
+                result["body"] = body
+
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            with mock.patch("subprocess.run") as mocked:
+                mocked.return_value = mock.Mock(returncode=1)
+                err = b.decide(request_id, "allow", scope="live")
+                self.assertEqual(err, broker.APPLY_FAILED_REASON)
+            join_thread_or_fail(thread, label="file_request")
+            self.assertEqual(
+                result["body"],
+                {"decision": "error", "reason": broker.APPLY_FAILED_REASON},
+            )
+            with b._lock:
+                self.assertIn(request_id, b._requests)
+            allowed = [r for r in self._log_records(root) if r.get("kind") == "allowed"]
+            self.assertEqual(allowed, [])
+            failed = [
+                r
+                for r in self._log_records(root)
+                if r.get("kind") == "apply_failed" and r.get("request_id") == request_id
+            ]
+            self.assertEqual(len(failed), 1)
+
+    def test_success_appends_allowed_once_and_closes_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=60)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            with mock.patch("subprocess.run") as mocked:
+                mocked.return_value = mock.Mock(returncode=0)
+                err = b.decide(request_id, "allow", scope="live")
+                self.assertIsNone(err)
+            join_thread_or_fail(thread, label="file_request")
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)
+            allowed = [
+                r
+                for r in self._log_records(root)
+                if r.get("kind") == "allowed" and r.get("request_id") == request_id
+            ]
+            self.assertEqual(len(allowed), 1)
+
+    def test_apply_runs_before_allowed_is_logged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=60)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            order: list[str] = []
+
+            def track_run(*args, **kwargs) -> mock.Mock:
+                order.append("apply")
+                return mock.Mock(returncode=0)
+
+            original_append = b._log.append
+
+            def track_append(kind: str, request_id: str, **kwargs: object) -> None:
+                if kind == "allowed":
+                    order.append("allowed")
+                original_append(kind, request_id, **kwargs)
+
+            with mock.patch("subprocess.run", side_effect=track_run):
+                with mock.patch.object(b._log, "append", track_append):
+                    b.decide(request_id, "allow", scope="live")
+            join_thread_or_fail(thread, label="file_request")
+            self.assertEqual(order, ["apply", "allowed"])
 
     def test_bottle_token_store_reload_on_miss(self):
         with tempfile.TemporaryDirectory() as tmp:

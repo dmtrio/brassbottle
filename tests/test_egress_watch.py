@@ -178,6 +178,27 @@ class EgressWatchTests(unittest.TestCase):
             with b._lock:
                 self.assertIn(request_id, b._requests)
 
+    def test_watcher_run_once_apply_failure_surfaces_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = egress_log.EgressLog(root)
+            b = self._broker(root)
+            request_id = self._file_request(b)
+            out = io.StringIO()
+            watcher = watch.EgressWatcher(
+                b,
+                log,
+                input_fn=lambda _p: "a",
+                output=out,
+                platform="linux",
+            )
+            with mock.patch("subprocess.run") as mocked:
+                mocked.return_value = mock.Mock(returncode=1)
+                self.assertTrue(watcher.run_once())
+            self.assertIn("NOT applied", out.getvalue())
+            with b._lock:
+                self.assertIn(request_id, b._requests)
+
     def test_watcher_run_once_allow_live(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -225,13 +246,6 @@ class EgressWatchTests(unittest.TestCase):
 
     def test_dialog_allow_maps_to_live(self):
         proc = mock.Mock()
-        poll_state = {"n": 0}
-
-        def poll() -> int | None:
-            poll_state["n"] += 1
-            return 0 if poll_state["n"] > 2 else None
-
-        proc.poll.side_effect = poll
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
 
@@ -248,6 +262,72 @@ class EgressWatchTests(unittest.TestCase):
         )
         choice = watcher._prompt_with_dialog(self._details())
         self.assertEqual(choice.action, "allow_live")
+
+    def test_dialog_allow_without_terminal_input(self):
+        """Dialog Allow must win with no tmux keypress (the original bug)."""
+        gate = threading.Event()
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("Allow\n")
+        proc.stderr = io.StringIO("")
+
+        def input_fn(_prompt: str) -> str:
+            gate.wait()
+            return "a"
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=input_fn,
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: proc,
+        )
+        choice = watcher._prompt_with_dialog(self._details())
+        self.assertEqual(choice.action, "allow_live")
+        self.assertFalse(gate.is_set())
+
+    def test_terminal_wins_when_it_answers_first(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        proc.stdout = io.StringIO("Allow\n")
+        proc.stderr = io.StringIO("")
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: "d",
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: proc,
+        )
+        choice = watcher._prompt_with_dialog(self._details())
+        self.assertEqual(choice.action, "deny")
+        proc.terminate.assert_called_once()
+
+    def test_prompt_threads_join_after_resolution(self):
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("Allow\n")
+        proc.stderr = io.StringIO("")
+        threads: list[threading.Thread] = []
+        real_thread = threading.Thread
+
+        def track_thread(*args, **kwargs) -> threading.Thread:
+            thread = real_thread(*args, **kwargs)
+            threads.append(thread)
+            return thread
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: "s",
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: proc,
+        )
+        with mock.patch.object(watch.threading, "Thread", track_thread):
+            watcher._prompt_with_dialog(self._details())
+        for thread in threads:
+            join_thread_or_fail(thread, label="prompt worker")
 
 
 if __name__ == "__main__":

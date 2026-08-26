@@ -48,6 +48,8 @@ IP_APPLY_FAILED_REASON = (
     "capabilities.egress_cidrs (ALLOWED_CIDRS) — allow-egress.sh accepts "
     "domain zones only"
 )
+IP_REQUIRES_CIDR_REASON = "ip_requires_cidr"
+APPLY_FAILED_REASON = "apply_failed"
 
 DOMAIN_RE = re.compile(
     r"^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
@@ -69,6 +71,7 @@ class Decision:
 
     decision: str
     scope: str | None = None
+    reason: str | None = None
 
 
 @dataclass
@@ -84,6 +87,7 @@ class OpenRequestState:
     pending_hits: int = 0
     last_hit_logged: datetime | None = None
     decision: Decision | None = None
+    waiter_outcome: Decision | None = None
     waiters: list[threading.Event] = field(default_factory=list)
 
 
@@ -348,7 +352,8 @@ class EgressBroker:
         self._log_hit(state, now=self.now(), count=state.pending_hits)
         state.pending_hits = 0
 
-    def _wake_waiters(self, state: OpenRequestState) -> None:
+    def _wake_waiters(self, state: OpenRequestState, outcome: Decision) -> None:
+        state.waiter_outcome = outcome
         for event in state.waiters:
             event.set()
         state.waiters.clear()
@@ -435,6 +440,9 @@ class EgressBroker:
         if decision.decision == "allow":
             body: dict[str, Any] = {"decision": "allow", "scope": decision.scope or "live"}
             return body
+        if decision.decision == "error":
+            body = {"decision": "error", "reason": decision.reason or "error"}
+            return body
         return {"decision": "deny"}
 
     def _wait_for_decision(self, state: OpenRequestState, hold_seconds: int) -> Decision | None:
@@ -448,6 +456,10 @@ class EgressBroker:
             return None
 
         with self._lock:
+            outcome = state.waiter_outcome
+            state.waiter_outcome = None
+            if outcome is not None:
+                return outcome
             return state.decision
 
     def decide(
@@ -457,8 +469,13 @@ class EgressBroker:
         scope: str | None = None,
         *,
         reason: str | None = None,
-    ) -> None:
-        """Release held long-polls for one request (approver UI entry point)."""
+    ) -> str | None:
+        """Release held long-polls for one request (approver UI entry point).
+
+        Returns None when the decision is final (allow applied, or deny). On
+        allow paths where no rule was installed, returns the error reason string
+        and keeps the request open for retry.
+        """
         LOG.info(
             "egress broker decide enter request_id=%s decision=%s scope=%s",
             request_id,
@@ -477,49 +494,66 @@ class EgressBroker:
             now = self.now()
             self._flush_hits(state)
 
+            outcome: Decision | None = None
+            allow_error: str | None = None
+
             if decision == "allow":
                 resolved_scope = scope or "live"
                 if resolved_scope not in ("live", "manifest"):
                     raise EgressBrokerHostError(
                         f"invalid scope {resolved_scope!r} (must be live or manifest)"
                     )
-                self._log.append(
-                    "allowed",
-                    request_id,
-                    ts=now,
-                    scope=resolved_scope,
-                    host=state.host,
-                    container=state.container,
-                )
                 if state.host_is_ip or is_ip_literal(state.host):
                     self._log.append(
                         "apply_failed",
                         request_id,
-                        ts=self.now(),
+                        ts=now,
                         reason=IP_APPLY_FAILED_REASON,
                     )
+                    allow_error = IP_REQUIRES_CIDR_REASON
+                    outcome = Decision(decision="error", reason=IP_REQUIRES_CIDR_REASON)
                 else:
                     apply_ok = self._apply_allow(state, resolved_scope)
                     if apply_ok:
+                        self._log.append(
+                            "allowed",
+                            request_id,
+                            ts=now,
+                            scope=resolved_scope,
+                            host=state.host,
+                            container=state.container,
+                        )
                         self._log.append("applied", request_id, ts=self.now())
+                        outcome = Decision(decision="allow", scope=resolved_scope)
+                        state.decision = outcome
                     else:
                         self._log.append("apply_failed", request_id, ts=self.now())
-                state.decision = Decision(decision="allow", scope=resolved_scope)
+                        allow_error = APPLY_FAILED_REASON
+                        outcome = Decision(decision="error", reason=APPLY_FAILED_REASON)
             elif decision == "deny":
                 fields: dict[str, Any] = {}
                 if reason is not None:
                     fields["reason"] = reason
                 self._log.append("denied", request_id, ts=now, **fields)
-                state.decision = Decision(decision="deny")
+                outcome = Decision(decision="deny")
+                state.decision = outcome
             else:
                 raise EgressBrokerHostError(
                     f"invalid decision {decision!r} (must be allow or deny)"
                 )
 
-            self._wake_waiters(state)
-            self._remove_open(state)
+            if outcome is not None:
+                self._wake_waiters(state, outcome)
+                if state.decision is not None:
+                    self._remove_open(state)
 
-        LOG.info("egress broker decide exit request_id=%s decision=%s", request_id, decision)
+        LOG.info(
+            "egress broker decide exit request_id=%s decision=%s allow_error=%s",
+            request_id,
+            decision,
+            allow_error or "",
+        )
+        return allow_error
 
     def _apply_allow(self, state: OpenRequestState, scope: str) -> bool:
         save_target = "yml" if scope == "manifest" else "none"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import queue
 import subprocess
 import sys
 import threading
@@ -25,6 +26,7 @@ from egress_broker_host import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PORT,
     IP_APPLY_FAILED_REASON,
+    IP_REQUIRES_CIDR_REASON,
     LOCK_FILENAME,
     TOKENS_DIRNAME,
     BottleTokenStore,
@@ -239,20 +241,31 @@ def apply_operator_choice(
     broker: EgressBroker,
     request_id: str,
     choice: OperatorChoice,
-) -> None:
-    """Invoke broker.decide() for the operator choice (skip is a no-op)."""
+) -> str | None:
+    """Invoke broker.decide() for the operator choice (skip is a no-op).
+
+    Returns an error reason when allow could not be applied; None on success.
+    """
     if choice.action == "skip":
-        return
+        return None
     if choice.action == "deny":
         broker.decide(request_id, "deny")
-        return
+        return None
     if choice.action == "allow_live":
-        broker.decide(request_id, "allow", scope="live")
-        return
+        return broker.decide(request_id, "allow", scope="live")
     if choice.action == "allow_manifest":
-        broker.decide(request_id, "allow", scope="manifest")
-        return
+        return broker.decide(request_id, "allow", scope="manifest")
     raise ValueError(f"unknown operator action {choice.action!r}")
+
+
+def format_apply_failure(reason: str) -> str:
+    """Operator-facing line when allow-egress.sh did not install a rule."""
+    if reason == IP_REQUIRES_CIDR_REASON:
+        return (
+            "Egress rule NOT applied: destination is an IP address — "
+            f"{IP_APPLY_FAILED_REASON}"
+        )
+    return f"Egress rule NOT applied ({reason}) — request remains open for retry"
 
 
 def _dialog_choice_from_output(output: str) -> OperatorChoice | None:
@@ -326,7 +339,10 @@ class EgressWatcher:
             if choice.action == "skip":
                 self._deferred.add(request_id)
                 return True
-            apply_operator_choice(self._broker, request_id, choice)
+            apply_error = apply_operator_choice(self._broker, request_id, choice)
+            if apply_error is not None:
+                self._output.write(format_apply_failure(apply_error) + "\n")
+                self._output.flush()
             self._deferred.discard(request_id)
             return True
 
@@ -353,18 +369,19 @@ class EgressWatcher:
                 return choice
 
     def _prompt_with_dialog(self, details: RequestDetails) -> OperatorChoice:
-        winner: list[OperatorChoice | None] = [None]
-        decided = threading.Event()
+        choice_queue: queue.Queue[OperatorChoice] = queue.Queue(maxsize=1)
         dialog_proc: list[subprocess.Popen[str] | None] = [None]
-        lock = threading.Lock()
 
-        def set_winner(choice: OperatorChoice) -> bool:
-            with lock:
-                if winner[0] is not None:
-                    return False
-                winner[0] = choice
-                decided.set()
-                return True
+        def terminal_thread() -> None:
+            while True:
+                raw = self._input_fn("")
+                choice = parse_terminal_choice(raw)
+                if choice is not None:
+                    try:
+                        choice_queue.put_nowait(choice)
+                    except queue.Full:
+                        pass
+                    return
 
         def dialog_thread() -> None:
             title, message = build_dialog_message(details)
@@ -383,38 +400,29 @@ class EgressWatcher:
             except OSError:
                 return
             dialog_proc[0] = proc
-            while not decided.is_set():
-                try:
-                    status = proc.poll()
-                except (OSError, ValueError):
-                    status = 0
-                if status is not None:
-                    break
-                time.sleep(0.05)
-            if decided.is_set():
-                _terminate_process(proc)
-                return
             try:
                 stdout = proc.stdout.read() if proc.stdout is not None else ""
             except (OSError, ValueError):
                 stdout = ""
             choice = _dialog_choice_from_output(stdout)
             if choice is not None:
-                set_winner(choice)
+                try:
+                    choice_queue.put_nowait(choice)
+                except queue.Full:
+                    pass
 
-        thread = threading.Thread(target=dialog_thread, daemon=True)
-        thread.start()
-        while not decided.is_set():
-            raw = self._input_fn("")
-            choice = parse_terminal_choice(raw)
-            if choice is None:
-                time.sleep(0.05)
-                continue
-            if set_winner(choice):
-                break
+        terminal = threading.Thread(target=terminal_thread, daemon=True)
+        dialog = threading.Thread(target=dialog_thread, daemon=True)
+        terminal.start()
+        dialog.start()
+        try:
+            choice = choice_queue.get()
+        except Exception:
+            choice = OperatorChoice("skip")
         _terminate_process(dialog_proc[0])
-        thread.join(timeout=2)
-        return winner[0] if winner[0] is not None else OperatorChoice("skip")
+        terminal.join(timeout=2)
+        dialog.join(timeout=2)
+        return choice
 
 
 def run_watch(
