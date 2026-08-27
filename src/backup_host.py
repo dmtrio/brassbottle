@@ -482,11 +482,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def resolve_base_path(raw: str) -> Path:
+    # expanduser throughout: ./.env is sourced by bash, so DJINN_HOME="$HOME/x"
+    # arrives already expanded, but a literal ~/x does not — and Path("~/x")
+    # would quietly create a directory actually named "~" in the cwd, leaving
+    # the real backup repo untouched and the operator none the wiser.
     if raw:
-        return Path(raw)
-    env = __import__("os").environ.get("DJINN_HOME", "")
+        return Path(raw).expanduser()
+    env = __import__("os").environ.get("DJINN_HOME", "").strip()
     if env:
-        return Path(env)
+        return Path(env).expanduser()
     return Path(__file__).resolve().parent.parent / ".djinn"
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for host-side backup operator argument validation."""
 
+import os
 import io
 import sys
 import tempfile
@@ -383,3 +384,31 @@ class BackupHostTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolveBasePathTests(unittest.TestCase):
+    """DJINN_HOME=~/djinn must not create a directory literally named '~'.
+
+    ./.env is sourced by bash, so DJINN_HOME="$HOME/x" arrives expanded — but a
+    literal ~/x does not, and Path("~/x") would silently make a "~" directory in
+    the cwd, leaving the real backup repo untouched with nothing reported.
+    """
+
+    def test_env_value_is_expanded_and_trimmed(self):
+        for value in ("~/djinn", "  ~/djinn  "):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"DJINN_HOME": value}):
+                    self.assertEqual(
+                        backup_host.resolve_base_path(""),
+                        Path.home() / "djinn",
+                    )
+
+    def test_explicit_base_path_is_expanded(self):
+        self.assertEqual(
+            backup_host.resolve_base_path("~/djinn"), Path.home() / "djinn"
+        )
+
+    def test_absolute_path_is_unchanged(self):
+        self.assertEqual(
+            backup_host.resolve_base_path("/tmp/djinn"), Path("/tmp/djinn")
+        )
