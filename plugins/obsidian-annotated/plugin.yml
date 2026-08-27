@@ -1,6 +1,28 @@
-# obsidian-annotated — remote MCP at mcp-obsidian.dmetr.io (a real internet host,
-# reached via egress, so no host_port). Its required secret resolves per agent,
-# so the server is wired only where an effective key exists. See ./README.md.
+# obsidian-annotated — the Annotated Obsidian MCP (mcp-obsidian.dmetr.io, a real
+# internet host reached via egress, so no host_port), bridged to LOCAL stdio via
+# `mcp-remote` so every bound agent reaches it through the ordinary local-plugin
+# path. mcp-remote is a BASE TOOL — installed once by the Dockerfile and treated
+# like bash by src/manifest.py (BASE_IMAGE_BINS) — so this plugin carries no
+# install: block; the version and the reason for its floor live there.
+#
+# Why local rather than the remote url:/headers: shape it used to have: agents
+# that cannot expand ${VAR} inside a remote header (cursor-agent, pi) had the
+# key BAKED LITERALLY into their config files on disk. Under mcp-remote the key
+# is substituted from each agent's own process env at connect time, so it lands
+# in no MCP config file and not on the command line either (argv holds the
+# literal "${OBSIDIAN_ANNOTATED_KEY}"). Same property axiom has.
+#
+# The per-agent key survives the change — that matters here, because Annotated
+# attributes comment threads BY KEY. requires: still gates the server on an
+# effective key, so exactly the agents bound in the manifest get it, and each
+# one connects with its own:
+#   agent_secrets:
+#     - {agent: claude,       slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_me_claude}
+#     - {agent: cursor-agent, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_bot_cursor_agent}
+#
+# The server execs the baked `mcp-remote` binary directly (not `npx`), so
+# startup never reaches for the npm registry — it runs fully offline behind the
+# runtime egress firewall. See ./README.md.
 
 secrets:
   OBSIDIAN_ANNOTATED_KEY: {}
@@ -10,6 +32,6 @@ egress:
 
 mcp:
   obsidian-annotated:
-    url: https://mcp-obsidian.dmetr.io/mcp
-    headers: {Authorization: "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}
+    command: mcp-remote
+    args: ["https://mcp-obsidian.dmetr.io/mcp", "--header", "Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"]
     requires: [OBSIDIAN_ANNOTATED_KEY]

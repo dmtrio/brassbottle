@@ -57,9 +57,9 @@ volumes:
 PLUGIN_SERVICES=''
 HOST_MCP_PORTS='8816'
 ENABLE_EGRESS_BROKER=true
-AGENT_SERVERS_JSON='{"axiom":{"spec":{"command":"mcp-remote","args":["https://mcp.axiom.co/mcp","--header","Authorization: Bearer ${AXIOM_TOKEN}"]},"requires":["AXIOM_TOKEN"]},"obsidian-annotated":{"spec":{"url":"https://mcp-obsidian.dmetr.io/mcp","headers":{"Authorization":"Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},"requires":["OBSIDIAN_ANNOTATED_KEY"]}}'
+AGENT_SERVERS_JSON='{"axiom":{"spec":{"command":"mcp-remote","args":["https://mcp.axiom.co/mcp","--header","Authorization: Bearer ${AXIOM_TOKEN}"]},"requires":["AXIOM_TOKEN"]},"obsidian-annotated":{"spec":{"command":"mcp-remote","args":["https://mcp-obsidian.dmetr.io/mcp","--header","Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"]},"requires":["OBSIDIAN_ANNOTATED_KEY"]}}'
 AGENT_SERVER_SLOTS='AXIOM_TOKEN OBSIDIAN_ANNOTATED_KEY'
-AGENT_SERVER_REMOTE_SLOTS=OBSIDIAN_ANNOTATED_KEY
+AGENT_SERVER_REMOTE_SLOTS=''
 AGENT_SECRETS='cursor-agent	AXIOM_TOKEN	AXIOM_KEY_cursor
 claude	OBSIDIAN_ANNOTATED_KEY	OBSIDIAN_KEY_claude
 cursor-agent	OBSIDIAN_ANNOTATED_KEY	OBSIDIAN_KEY_cursor

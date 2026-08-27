@@ -354,9 +354,21 @@ printf '%s' "$A_PAYLOAD" | jq -e '
     (.agent_servers | length) == 1
     and .agent_servers[0].name == "obsidian-annotated"
     and .agent_servers[0].ref == ["claude"]
-    and (.agent_servers[0].literal == [{agent: "cursor-agent", key_envs: {OBSIDIAN_ANNOTATED_KEY: "IDENTITY_KEY_0"}}])' >/dev/null \
+    and .agent_servers[0].local == ["cursor-agent"]
+    and .agent_servers[0].literal == []' >/dev/null \
     && pass "hybrid overrides → build-payload yields per-agent obsidian wiring" \
     || fail "agent_servers payload wrong: $A_PAYLOAD"
+# literal == [] is the point of the mcp-remote bridge, not incidental: a literal
+# entry is what puts the raw key into cursor-agent's config file on disk. It is
+# empty because the spec is local (command:), so cursor-agent is routed through
+# `local` instead and mcp-remote substitutes the key from its own env. Assert it
+# against the REAL plugin.yml (read above), so reverting the plugin to a remote
+# url:/headers: shape fails here rather than silently reinstating the key.
+printf '%s' "$A_PAYLOAD" | jq -e '
+    (.agent_servers[0].spec | has("command") and (.command == "mcp-remote"))
+    and (.agent_servers[0].spec | has("url") | not)' >/dev/null \
+    && pass "obsidian-annotated ships as a local mcp-remote bridge, not a remote spec" \
+    || fail "obsidian spec is not a local mcp-remote bridge: $A_PAYLOAD"
 
 echo "── python unit tests (src/manifest.py + src/wire_plugins.py)"
 UNIT_OUT=$(DJINN_SKIP_BACKUP_INTEGRATION=1 python3 -m unittest discover -s tests 2>&1) \

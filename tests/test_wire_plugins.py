@@ -1012,6 +1012,100 @@ class TestRunIntegration(QuietTestCase):
             # codex config exists
             self.assertTrue((home / ".codex" / "config.toml").exists())
 
+    def test_remote_to_local_upgrade_removes_the_literal_key_on_disk(self):
+        """A container upgrading across the obsidian-annotated bridge change.
+
+        The previous run wired the server as REMOTE, so a literal-key agent has
+        the raw key in its config and a .djinn-servers sidecar naming the server.
+        This run ships the same server as LOCAL (command: mcp-remote), which is a
+        different wiring path: reconcile_agent_servers must delete the stale
+        remote entry BEFORE wire_plugin_servers_json writes the local one, or the
+        cleanup pass eats the entry it was supposed to replace and the agent ends
+        up with no server at all.
+
+        The key leaving the file is the whole point of the migration, so it is
+        asserted on the raw text, not just the parsed entry.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            workspace = Path(tmp) / "workspace"
+            (workspace / "repos").mkdir(parents=True)
+            cursor_mcp = home / ".cursor" / "mcp.json"
+            cursor_mcp.parent.mkdir(parents=True)
+            # Exactly what the old remote wiring left behind, plus a hand-added
+            # server that must survive untouched.
+            cursor_mcp.write_text(json.dumps({"mcpServers": {
+                "obsidian-annotated": {
+                    "url": "https://mcp-obsidian.dmetr.io/mcp",
+                    "headers": {"Authorization": "Bearer SECRETKEY"}},
+                "hand-added": {"command": "mine", "args": []},
+            }}))
+            (cursor_mcp.parent / "mcp.json.djinn-servers").write_text('["obsidian-annotated"]\n')
+
+            agent = {"binary": "cursor-agent", "config_path": ".cursor/mcp.json",
+                     "format": "json", "dialect": "url", "env_refs": False,
+                     "strategy": ""}
+            spec = {"command": "mcp-remote",
+                    "args": ["https://mcp-obsidian.dmetr.io/mcp", "--header",
+                             "Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"]}
+            payload = {
+                "agents": [agent],
+                "plugin_mcp_entries": [],
+                "agent_servers": [
+                    {"name": "obsidian-annotated", "spec": spec,
+                     "requires": ["OBSIDIAN_ANNOTATED_KEY"],
+                     "ref": [], "literal": [], "warn": [],
+                     "local": ["cursor-agent"]},
+                ],
+            }
+
+            wire_plugins.run(payload, home, workspace, {})
+
+            raw = cursor_mcp.read_text()
+            self.assertNotIn("SECRETKEY", raw)
+            servers = json.loads(raw)["mcpServers"]
+            self.assertEqual(servers["obsidian-annotated"], spec)
+            self.assertEqual(servers["hand-added"], {"command": "mine", "args": []})
+            # The server moved sidecars: no longer agent-server-managed, now
+            # plugin-managed. A leftover name in the old sidecar would delete it
+            # again on the next run.
+            self.assertEqual(
+                json.loads((cursor_mcp.parent / "mcp.json.djinn-servers").read_text()), [])
+            self.assertIn(
+                "obsidian-annotated",
+                json.loads((cursor_mcp.parent / "mcp.json.djinn-plugins").read_text()))
+
+    def test_remote_to_local_upgrade_is_idempotent(self):
+        """Running the post-migration payload twice is a no-op the second time —
+        the stale-delete only fires while the old sidecar still names the server."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            workspace = Path(tmp) / "workspace"
+            (workspace / "repos").mkdir(parents=True)
+            spec = {"command": "mcp-remote",
+                    "args": ["https://mcp-obsidian.dmetr.io/mcp", "--header",
+                             "Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"]}
+            payload = {
+                "agents": [{"binary": "cursor-agent", "config_path": ".cursor/mcp.json",
+                            "format": "json", "dialect": "url", "env_refs": False,
+                            "strategy": ""}],
+                "plugin_mcp_entries": [],
+                "agent_servers": [
+                    {"name": "obsidian-annotated", "spec": spec,
+                     "requires": ["OBSIDIAN_ANNOTATED_KEY"],
+                     "ref": [], "literal": [], "warn": [],
+                     "local": ["cursor-agent"]},
+                ],
+            }
+            cursor_mcp = home / ".cursor" / "mcp.json"
+
+            wire_plugins.run(payload, home, workspace, {})
+            first = cursor_mcp.read_text()
+            wire_plugins.run(payload, home, workspace, {})
+            self.assertEqual(cursor_mcp.read_text(), first)
+            self.assertEqual(
+                json.loads(cursor_mcp.read_text())["mcpServers"]["obsidian-annotated"], spec)
+
     def test_empty_agents_no_agent_configs_created(self):
         """No payload agents means no agent config wiring runs at all."""
         with tempfile.TemporaryDirectory() as tmp:
