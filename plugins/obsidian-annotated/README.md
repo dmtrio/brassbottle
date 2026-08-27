@@ -1,9 +1,10 @@
 # obsidian-annotated
 
-The Annotated Obsidian MCP endpoint (`mcp-obsidian.dmetr.io`). **Remote** HTTP
+The Annotated Obsidian MCP endpoint (`mcp-obsidian.dmetr.io`) — a remote HTTP
 server on a real internet host (reached via the egress allowlist, so no
-`host_port`, no host service). Its required secret resolves per agent, and the
-server is wired only where the manifest supplies an effective key.
+`host_port`, no host service), bridged to **local stdio** by `mcp-remote`. Its
+required secret resolves per agent, and the server is wired only where the
+manifest supplies an effective key.
 
 ```yaml
 plugins: [obsidian-annotated]
@@ -14,13 +15,25 @@ agent_secrets:
 
 ## Per-agent wiring
 
-`djinn up` delivers each bound agent's key into its own `<agent>.env` and wires the
-server per agent:
+`djinn up` delivers each bound agent's key into its own `<agent>.env` and wires
+the server per agent. Because the spec is local (`command: mcp-remote`), every
+bound agent gets the **same** entry — a stdio command — through the ordinary
+local wiring path; `mcp-remote` substitutes `${OBSIDIAN_ANNOTATED_KEY}` into the
+`Authorization` header from its own process env at connect time. So no config
+file on disk carries the key, and no agent needs to understand remote-MCP
+headers.
 
-- **claude** — `.mcp.json` keeps the `${VAR}` ref (the shim expands it).
-- **cursor-agent / pi** — the literal key is baked into their config
-  (they can't expand env refs in remote headers).
-- **codex** — wired into its managed TOML block as `url` +
-  `bearer_token_env_var` (codex's own native remote-MCP shape); codex reads
-  the token from its own process env at connect time, so the file carries no
-  literal secret and no `${VAR}` ref either.
+The per-agent key is what Annotated uses to attribute comment threads, and it is
+preserved: each agent's shim env holds its own resolved key, so each connects as
+itself.
+
+This replaced an earlier remote (`url:` + `headers:`) shape, under which
+cursor-agent and pi — which cannot expand `${VAR}` inside a remote header — had
+the literal key baked into their config files. `mcp-remote` is a base tool
+installed once by the Dockerfile; see `plugins/axiom/` for the same pattern.
+
+## Access
+
+`requires: [OBSIDIAN_ANNOTATED_KEY]` gates the server: an agent with no
+effective key for the slot gets no entry at all. Binding a key is the only way
+an agent reaches the vault, before and after the bridge change.
