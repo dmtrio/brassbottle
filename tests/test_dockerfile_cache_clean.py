@@ -11,32 +11,60 @@ from pathlib import Path
 REPO = Path(__file__).parent.parent
 DOCKERFILE = (REPO / "Dockerfile").read_text(encoding="utf-8")
 
-# RUN blocks split on Dockerfile stage comments; each block is one logical layer.
-_RUN_BLOCKS = re.split(r"(?m)^# ── ", DOCKERFILE)
+def _instructions(text):
+    """The Dockerfile's logical instructions, backslash-continuations joined.
+
+    Splitting on `# ── ` section comments (the earlier approach) does NOT
+    express the property under test: a purge relocated into a *separate* RUN
+    inside the same commented section still reads as "after the loop", but
+    lands in a later layer and shrinks nothing. Only real instruction
+    boundaries distinguish those two cases.
+    """
+    out, cur = [], []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        # A comment inside a continuation is stripped by the Dockerfile parser
+        # and does NOT end the instruction (the repo relies on this — see the
+        # "Keep pipefail" note inside the plugin bake loop).
+        if stripped.startswith("#"):
+            continue
+        if not cur and not stripped:
+            continue
+        cur.append(line)
+        if not line.endswith("\\"):
+            out.append("\n".join(cur))
+            cur = []
+    if cur:
+        out.append("\n".join(cur))
+    return out
 
 
-def _block_after(header_fragment: str) -> str:
-    for block in _RUN_BLOCKS:
-        if header_fragment in block:
-            return block
-    raise AssertionError(f"no Dockerfile section matching {header_fragment!r}")
+_INSTRUCTIONS = _instructions(DOCKERFILE)
+
+
+def _run_containing(marker: str) -> str:
+    """The single RUN instruction containing `marker` — one image layer."""
+    hits = [i for i in _INSTRUCTIONS if i.startswith("RUN") and marker in i]
+    if not hits:
+        raise AssertionError(f"no RUN instruction contains {marker!r}")
+    if len(hits) > 1:
+        raise AssertionError(f"{marker!r} appears in {len(hits)} RUN instructions")
+    return hits[0]
 
 
 class DockerfileCacheCleanTests(unittest.TestCase):
     def test_pip_packages_run_purges_pip_cache_in_same_layer(self):
-        block = _block_after("Python packages")
-        self.assertIn("pip3 install pipenv playwright", block)
+        block = _run_containing("pip3 install pipenv playwright")
         self.assertIn("pip3 cache purge", block)
         self.assertNotIn("pip cache purge", block)
 
     def test_uv_install_run_cleans_uv_cache_in_same_layer(self):
-        block = _block_after("uv (Python package manager)")
-        self.assertIn("uv/install.sh", block)
+        block = _run_containing("uv/install.sh")
         self.assertIn("uv cache clean", block)
 
     def test_plugin_bake_run_cleans_uv_npm_and_pip_in_same_layer(self):
-        block = _block_after("Plugins (drop-in local MCP tools)")
-        self.assertIn("for f in /opt/plugins/*/plugin.yml", block)
+        block = _run_containing("/tmp/plugin-install.sh")
         for cmd in ("uv cache clean", "npm cache clean --force", "pip3 cache purge"):
             self.assertIn(cmd, block)
         # Purge must follow the install loop, not precede it.
@@ -45,8 +73,7 @@ class DockerfileCacheCleanTests(unittest.TestCase):
             self.assertGreater(block.index(cmd), loop_end)
 
     def test_agent_bake_run_cleans_npm_and_pip_in_same_layer(self):
-        block = _block_after("Agents (descriptor-driven install")
-        self.assertIn("for f in /opt/agents/*/agent.yml", block)
+        block = _run_containing("/tmp/agent-install.sh")
         self.assertIn("npm cache clean --force", block)
         self.assertIn("pip3 cache purge", block)
         loop_end = block.index("done;")
