@@ -28,7 +28,8 @@ RUN apt-get update && apt-get install -y \
 # ── Python packages ──────────────────────────────────────────────────────────
 # --break-system-packages: Ubuntu 24.04 marks Python as externally managed
 # (PEP 668). Safe to override here — the container is the isolation layer.
-RUN pip3 install pipenv playwright --break-system-packages
+RUN pip3 install pipenv playwright --break-system-packages \
+    && pip3 cache purge
 
 # ── GitHub CLI ────────────────────────────────────────────────────────────────
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -81,7 +82,8 @@ ENV PATH="/home/coder/.local/bin:/home/coder/.fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm use lts-latest
 
 # ── uv (Python package manager) ──────────────────────────────────────────────
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv cache clean
 
 # ── Plugins (drop-in local MCP tools) ────────────────────────────────────────
 # Each plugin is a directory: plugins/<name>/plugin.yml (+ optional host-only
@@ -121,6 +123,9 @@ RUN set -e; \
         # this build if the download side fails.
         bash -e -o pipefail /tmp/plugin-install.sh; \
     done; \
+    uv cache clean; \
+    npm cache clean --force; \
+    pip3 cache purge; \
     rm -f /tmp/plugin-install.sh
 
 # ── Agents (descriptor-driven install + runtime index) ───────────────────────
@@ -128,8 +133,9 @@ RUN set -e; \
 # layer is a deliberate cache trade-off: ANY edit under agents/ (a comment fix
 # included) or a changed AGENTS_ENABLED invalidates the COPY below and re-runs
 # every enabled agent's install (~minutes, network-bound). Accepted per the PLN
-# — the loop sits late so the expensive toolchain layers above stay cached; an
-# npm cache mount is the documented mitigation if this proves annoying.
+# — the loop sits late so the expensive toolchain layers above stay cached; a
+# single npm cache purge at the end of this RUN keeps the layer lean without
+# a BuildKit cache mount.
 COPY --chown=$USERNAME:$USERNAME agents /opt/agents
 RUN set -e; \
     eval "$(fnm env)"; \
@@ -146,6 +152,8 @@ RUN set -e; \
         # this build if the download side fails.
         bash -e -o pipefail /tmp/agent-install.sh; \
     done; \
+    npm cache clean --force; \
+    pip3 cache purge; \
     rm -f /tmp/agent-install.sh
 
 # ── Agent-identity shims ──────────────────────────────────────────────────────
