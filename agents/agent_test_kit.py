@@ -178,6 +178,20 @@ def _scratch_path(agent_dir_name: str, *, remote_server, local_server,
     return AGENT_SCRATCH_ROOT / agent_dir_name
 
 
+def _local_command_names(payload: dict) -> set:
+    """Every `command` a LOCAL server in this payload will be launched with."""
+    names = set()
+    for entry in payload.get("plugin_mcp_entries") or []:
+        for spec in entry.values():
+            if isinstance(spec, dict) and isinstance(spec.get("command"), str):
+                names.add(spec["command"])
+    for s in payload.get("agent_servers") or []:
+        spec = s.get("spec") or {}
+        if isinstance(spec.get("command"), str):
+            names.add(spec["command"])
+    return {n for n in names if n}
+
+
 def _build_run_env(derived: dict, ident: str, count: int,
                    key_env_values: dict | None) -> dict:
     """Build the container-side env for wire_plugins.run from test values only."""
@@ -279,6 +293,19 @@ def wire(agent_dir_name: str, *, remote_server=True, local_server=True,
     workspace = scratch / "workspace"
     home.mkdir(parents=True)
     (workspace / "repos").mkdir(parents=True)
+
+    # wire_plugins drops a LOCAL server whose command is not on PATH (a plugin
+    # whose install: produced nothing must not wire a server that cannot
+    # start). The fixtures' commands are synthetic, so give them real stubs and
+    # point run() at that dir — exercising the check rather than bypassing it,
+    # which is the whole point of having it.
+    stub_bin = scratch / "stub-bin"
+    stub_bin.mkdir(parents=True)
+    for spec in _local_command_names(payload):
+        stub = stub_bin / spec
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    run_env = dict(run_env, PATH=str(stub_bin))
 
     with contextlib.redirect_stdout(io.StringIO()):
         wire_plugins.run(payload, home, workspace, run_env)

@@ -1576,10 +1576,16 @@ class TestBuildPayload(unittest.TestCase):
                 "kimi\tTOKEN_B\tSRC\n"
             ),
         }
-        with self.assertRaises(wire_plugins.WireError) as cm:
-            wire_plugins.build_payload(env)
-        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", str(cm.exception))
-        self.assertIn("exactly one required slot", str(cm.exception))
+        # SKIP, don't raise: an unsupported pairing costs kimi this one
+        # server, never the whole container's wiring (see build_payload).
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            payload = wire_plugins.build_payload(env)
+        self.assertEqual(payload["agent_servers"], [],
+                         "no agent could take it, so the server drops out")
+        out = buf.getvalue()
+        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", out)
+        self.assertIn("exactly one required slot", out)
 
     def test_named_env_refs_remote_requires_bearer_header_reference(self):
         env = {
@@ -1593,11 +1599,14 @@ class TestBuildPayload(unittest.TestCase):
             }),
             "AGENT_SECRETS": "kimi\tOBSIDIAN_ANNOTATED_KEY\tSRC\n",
         }
-        with self.assertRaises(wire_plugins.WireError) as cm:
-            wire_plugins.build_payload(env)
-        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", str(cm.exception))
-        self.assertIn("requires headers.Authorization", str(cm.exception))
-        self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", str(cm.exception))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            payload = wire_plugins.build_payload(env)
+        self.assertEqual(payload["agent_servers"], [])
+        out = buf.getvalue()
+        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", out)
+        self.assertIn("requires headers.Authorization", out)
+        self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", out)
 
     def test_round_trips_through_run(self):
         """The payload build_payload emits is exactly what run() consumes: a
