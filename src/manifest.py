@@ -946,6 +946,15 @@ def derive(manifest, plugin_files, agent_files, env):
     if plugin_errors:
         raise ManifestError(
             "manifest plugins failed validation:\n" + "\n".join(plugin_errors))
+    # Two vars, same set, deliberately different order — do not collapse them.
+    # PLUGINS keeps MANIFEST order: up.sh writes it to ~/.config/djinn/
+    # enabled-plugins, and compose_rules.load_fragments() concatenates each
+    # plugin's AGENTS.md in that order, so the author controls how rule
+    # fragments stack. PLUGINS_ENABLED is SORTED because it becomes a Docker
+    # build ARG: a changed ARG invalidates every later RUN, so an unsorted
+    # value would rebuild the plugin-install layer (gear360 alone pulls ~1GiB
+    # of apt deps) on a manifest edit that merely reordered `plugins:`.
+    # AGENTS_ENABLED needs no such twin — nothing downstream reads agent order.
     out["PLUGINS"] = " ".join(plugins)
     out["PLUGINS_ENABLED"] = " ".join(sorted(plugins))
 
