@@ -42,8 +42,8 @@ opinion.
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
 | [`codebase-memory`](codebase-memory/) | local (stdio, baked) | — | [README](codebase-memory/README.md) |
 | [`gateway`](gateway/) | remote HTTP | `./djinn service gateway` | [README](gateway/README.md) |
-| [`proxyman`](proxyman/) | remote HTTP | `./djinn service proxyman` | [README](proxyman/README.md) |
-| [`browser`](browser/) | remote HTTP | `./djinn service browser <container>` | [README](browser/README.md) |
+| [`proxyman`](proxyman/) | local (stdio bridge → host :8813, baked) | `./djinn service proxyman` | [README](proxyman/README.md) |
+| [`browser`](browser/) | local (stdio bridge → host :8814, baked) | `./djinn service browser <container>` | [README](browser/README.md) |
 | [`obsidian-annotated`](obsidian-annotated/) | remote HTTP (real host) | — | [README](obsidian-annotated/README.md) |
 | [`axiom`](axiom/) | local (stdio bridge → mcp.axiom.co, baked) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
