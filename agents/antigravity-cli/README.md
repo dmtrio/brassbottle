@@ -44,8 +44,21 @@ plus `GEMINI_API_KEY` in the environment. The env var alone does nothing —
 - Installs to `~/.local/bin/agy` (already on PATH).
 - Dockerfile install loops run extracted scripts with `bash -e -o pipefail`, so
   a failed download fails the build.
+- `install.sh` is a two-host affair: it is *served* from `antigravity.google`,
+  but the release manifest (`$DOWNLOAD_BASE_URL/manifests/<platform>.json`) and
+  the auto-updater both hit
+  `antigravity-cli-auto-updater-974169037036.us-central1.run.app`. The manifest
+  lists the tarball under `storage.googleapis.com`.
+- `fetch_manifest` swallows every error (`2>/dev/null || true`) and reports one
+  generic `Fatal: Could not connect to the release server` for a firewall block,
+  a 403, a 404 and a transient blip alike — the message names none of them.
+  This has been seen to fail a build and then succeed on an unchanged retry, so
+  **retry once before diagnosing**. If it repeats, get the real status with
+  `curl -o /dev/null -w '%{http_code}' "$DOWNLOAD_BASE_URL/manifests/<platform>.json"`
+  rather than reading the wording as a firewall verdict.
 - Egress (folded in by `egress:`): `antigravity.google` for the installer and
-  the CLI's own endpoints, `googleapis.com` for model traffic,
+  the CLI's own endpoints, the Cloud Run host above for the release manifest
+  and updater, `googleapis.com` for model traffic and release tarballs,
   `accounts.google.com` for sign-in.
 
 ## Sources

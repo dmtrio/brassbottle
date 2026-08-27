@@ -27,6 +27,28 @@ class AntigravityWiring(unittest.TestCase):
         self.assertEqual(os.stat(mcp_path).st_mode & 0o777, 0o600)
         kit.assert_matches_golden(r, golden, wire_fn=do_wire)
 
+    def test_egress_covers_the_installer_download_host(self):
+        """install.sh is served from antigravity.google but downloads from
+        elsewhere: DOWNLOAD_BASE_URL is a Cloud Run host, and the release
+        tarball it names lives under storage.googleapis.com. Allowing only
+        antigravity.google fails the image build with a misleadingly generic
+        "Could not connect to the release server"."""
+        import yaml
+
+        doc = yaml.safe_load((Path(__file__).parent / "agent.yml").read_text())
+        egress = doc["egress"]
+        install = doc["install"]
+
+        self.assertIn(
+            "antigravity-cli-auto-updater-974169037036.us-central1.run.app", egress)
+        # The tarball host is covered by the googleapis.com zone (a zone
+        # already covers its subdomains).
+        self.assertIn("googleapis.com", egress)
+        # Guard against install.sh's served-from host being dropped as
+        # "redundant" — it is a genuinely different host from the download base.
+        self.assertIn("antigravity.google", egress)
+        self.assertIn("antigravity.google", install)
+
 
 if __name__ == "__main__":
     unittest.main()

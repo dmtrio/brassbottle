@@ -19,7 +19,14 @@ state_dirs:
 rules_file: .gemini/GEMINI.md
 
 egress:
+  # antigravity.google serves only install.sh. That script then fetches the
+  # release manifest, and agy's auto-updater fetches from, a SEPARATE Cloud Run
+  # host (DOWNLOAD_BASE_URL in install.sh) — without it the install dies with a
+  # generic "Could not connect to the release server". The manifest's tarball
+  # URL lives under storage.googleapis.com, covered by the googleapis.com zone.
+  # The host embeds Google's project number; re-check install.sh if it 404s.
   - antigravity.google
+  - antigravity-cli-auto-updater-974169037036.us-central1.run.app
   - googleapis.com
   - accounts.google.com
 
