@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -626,6 +627,27 @@ class EgressBrokerHostTests(unittest.TestCase):
                 if r.get("kind") == "allowed" and r.get("request_id") == request_id
             ]
             self.assertEqual(len(allowed), 1)
+
+    def test_resolve_base_path_expands_user_and_trims(self):
+        """DJINN_HOME=~/djinn must not create a directory literally named '~'.
+
+        ./.env is sourced by bash, so DJINN_HOME="$HOME/x" arrives expanded —
+        but a literal ~/x does not, and Path("~/x") would silently make a "~"
+        directory in the cwd. The symptom is a queue nothing ever writes to.
+        """
+        with mock.patch.dict(os.environ, {"DJINN_HOME": "~/djinn"}):
+            self.assertEqual(
+                broker.resolve_base_path(""),
+                Path.home() / "djinn",
+            )
+        with mock.patch.dict(os.environ, {"DJINN_HOME": "  ~/djinn  "}):
+            self.assertEqual(
+                broker.resolve_base_path(""),
+                Path.home() / "djinn",
+            )
+        # an explicit --base-path is expanded too
+        self.assertEqual(broker.resolve_base_path("~/djinn"), Path.home() / "djinn")
+
 
     def test_apply_runs_before_allowed_is_logged(self):
         with tempfile.TemporaryDirectory() as tmp:
