@@ -803,11 +803,15 @@ def resolve_egress_root(base_path: Path) -> Path:
 
 
 def resolve_base_path(raw: str) -> Path:
+    # expanduser throughout: ./.env is sourced by bash, so DJINN_HOME="$HOME/x"
+    # arrives already expanded, but a literal ~/x does not — and Path("~/x")
+    # would quietly create a directory actually named "~" in the cwd. That is
+    # the kind of thing you only notice when the queue turns out to be empty.
     if raw:
-        return Path(raw)
-    env = os.environ.get("DJINN_HOME", "")
+        return Path(raw).expanduser()
+    env = os.environ.get("DJINN_HOME", "").strip()
     if env:
-        return Path(env)
+        return Path(env).expanduser()
     return _repo_root() / ".djinn"
 
 
