@@ -440,6 +440,14 @@ def _drop_missing_local(servers, where, path=None):
     later as an agent's MCP server that would not start, with nothing in the
     up.sh output pointing at the cause.
     """
+    if path is None:
+        # No PATH from the caller means we cannot know what is installed, so
+        # do not guess. Production always supplies one (main() passes
+        # os.environ); a test that wants this check supplies a stub dir. This
+        # keeps wiring DETERMINISTIC — without it, whether a server wires
+        # depends on what happens to be installed wherever the code runs, and
+        # golden fixtures differ between a dev container and CI.
+        return dict(servers)
     kept = {}
     for name, spec in servers.items():
         if "command" in spec and _command_missing(spec, path):
@@ -895,11 +903,14 @@ def run(payload, home, workspace, env):
     # front, so every downstream path (local_for, ref_required_by_agent, the
     # uniform local set) inherits the same filtered view rather than each
     # re-deciding. Container-side only — see _command_missing.
-    exec_path = env.get("PATH") if isinstance(env, dict) else None
+    # Only check binaries when the caller told us where to look — see
+    # _drop_missing_local. env is os.environ in production.
+    exec_path = env.get("PATH") if hasattr(env, "get") else None
     plugins = _drop_missing_local(plugins, "plugins", exec_path)
     kept_servers = []
     for s in agent_servers:
-        if "command" in s["spec"] and _command_missing(s["spec"], exec_path):
+        if (exec_path is not None and "command" in s["spec"]
+                and _command_missing(s["spec"], exec_path)):
             print(f"  ⚠ agent-scoped MCP server {s['name']!r} NOT wired for any "
                   f"agent — its command {s['spec'].get('command')!r} is not on "
                   "PATH. Every other server still wired.")
