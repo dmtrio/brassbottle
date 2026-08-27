@@ -88,6 +88,12 @@ class PluginGateExecutionTests(unittest.TestCase):
         script = script.replace("/tmp/plugin-install.sh", str(tmp / "install.sh"))
         # fnm is not on PATH here and is irrelevant to gating.
         script = script.replace('eval "$(fnm env)";', "")
+        # Drop the trailing cache purges: they are a different concern (image
+        # size — see test_dockerfile_cache_clean.py) and running them here
+        # would wipe the developer's real ~/.cache/uv and ~/.npm. A test must
+        # not have that side effect, so they are removed rather than sandboxed.
+        script = "\n".join(l for l in script.splitlines()
+                           if "cache clean" not in l and "cache purge" not in l)
 
         proc = subprocess.run(
             ["bash", "-c", script],
