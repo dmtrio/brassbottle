@@ -486,6 +486,16 @@ grep -qF -- "python3 /usr/local/lib/djinn/code_workspace.py /workspace/dev.code-
     || fail "up.sh no longer wires to code_workspace.py (update this suite!)"
 # up.sh sources the extracted key-composition helper and calls it (the logic is
 # unit-tested by tests/bash.test.sh; this pin proves up.sh still wires to it).
+# ./djinn allow --watch must resolve the djinn home through common.sh and hand
+# it to Python in the environment, the way backup.sh does. egress_watch.py reads
+# only the DJINN_HOME *variable* and never ./.env, so without this it silently
+# falls back to $SCRIPT_DIR/.djinn — the watcher then polls an empty queue that
+# nothing writes to, looking healthy while every container 401s on a token it
+# cannot match.
+grep -qF -- '. "$SCRIPT_DIR/src/common.sh"' djinn \
+    && grep -qF -- 'exec env DJINN_HOME="$BASE_PATH" python3 "$SCRIPT_DIR/src/egress_watch.py"' djinn \
+    && pass "djinn allow --watch resolves DJINN_HOME via common.sh" \
+    || fail "djinn allow --watch no longer hands DJINN_HOME to egress_watch.py (it would use the wrong queue)"
 grep -qF -- '. "$SCRIPT_DIR/src/keyfiles.sh"' up.sh \
     && grep -qF -- 'write_keyfiles "$KEYS_PATH"' up.sh \
     && pass "up.sh sources + calls src/keyfiles.sh" \
