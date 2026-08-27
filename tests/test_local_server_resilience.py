@@ -14,6 +14,7 @@ Two failure modes, both previously fatal or silent:
 
 import io
 import json
+import os
 import re
 import shutil
 import sys
@@ -113,7 +114,7 @@ class MissingLocalBinaryTests(unittest.TestCase):
                 {"good": {"command": "sh", "args": []},
                  "broken": {"command": "definitely-not-installed-xyz"},
                  "remote": {"url": "https://example.test/mcp"}},
-                "plugins")
+                "plugins", os.environ["PATH"])
         self.assertEqual(set(kept), {"good", "remote"},
                          "a remote spec has no command and must pass through")
         out = buf.getvalue()
@@ -136,11 +137,87 @@ class MissingLocalBinaryTests(unittest.TestCase):
         }
         buf = io.StringIO()
         with redirect_stdout(buf):
-            wire_plugins.run(payload, str(home), str(tmp / "ws"), {})
+            wire_plugins.run(payload, str(home), str(tmp / "ws"),
+                             {"PATH": os.environ["PATH"]})
         written = json.loads((home / ".ag" / "mcp.json").read_text())
         self.assertIn("good", written["mcpServers"])
         self.assertNotIn("broken", written["mcpServers"])
         self.assertIn("broken", buf.getvalue())
+
+
+    def test_no_path_means_no_check(self):
+        """Without a caller-supplied PATH the check is SKIPPED, not guessed.
+
+        Wiring must not depend on what happens to be installed wherever the
+        code runs — that made golden fixtures pass in a dev container and fail
+        in CI. Production always supplies one (main() passes os.environ).
+        """
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            kept = wire_plugins._drop_missing_local(
+                {"broken": {"command": "definitely-not-installed-xyz"}},
+                "plugins", None)
+        self.assertEqual(set(kept), {"broken"})
+        self.assertEqual(buf.getvalue(), "", "silent — nothing was checked")
+
+
+class AmbientPathDeterminismTests(unittest.TestCase):
+    """REGRESSION: wiring output must not depend on the ambient environment.
+
+    The first cut of the missing-binary check called shutil.which against
+    whatever PATH the process happened to carry. Wiring then varied by machine:
+    in a dev container serena/mcp-remote/codebase-memory-mcp exist so every
+    server wired and the golden fixtures matched, while on the CI runner they
+    do not exist, the check dropped them, and test_golden_parity failed with
+    "full: file bytes changed: home/.claude.json".
+
+    A test asserting the CONTRACT (no path -> no check) can still pass if
+    someone reintroduces an ambient fallback inside _command_missing, so pin
+    the OBSERVABLE property instead: same payload in, same bytes out, whatever
+    is or isn't installed.
+    """
+
+    PAYLOAD = {
+        "agents": [_agent("ag", config_path=".ag/mcp.json")],
+        "plugin_mcp_entries": [
+            # 'sh' exists everywhere; the other cannot exist anywhere. If
+            # ambient PATH ever leaks back in, these two diverge between runs.
+            {"real-bin": {"command": "sh", "args": ["-c", "true"]}},
+            {"absent-bin": {"command": "definitely-not-installed-xyz"}},
+        ],
+        "agent_servers": [],
+    }
+
+    def _wire_with_ambient_path(self, ambient):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        home = tmp / "home"
+        (home / ".ag").mkdir(parents=True)
+        before = os.environ.get("PATH")
+        os.environ["PATH"] = ambient
+        try:
+            with redirect_stdout(io.StringIO()):
+                # env carries no PATH — exactly how every existing test and any
+                # non-up.sh caller invokes run().
+                wire_plugins.run(self.PAYLOAD, str(home), str(tmp / "ws"), {})
+        finally:
+            if before is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = before
+        return (home / ".ag" / "mcp.json").read_bytes()
+
+    def test_wiring_is_byte_identical_across_ambient_paths(self):
+        rich = self._wire_with_ambient_path(os.defpath + ":/usr/local/bin")
+        bare = self._wire_with_ambient_path("/nonexistent-path-for-this-test")
+        self.assertEqual(rich, bare,
+                         "wiring changed with ambient PATH — the missing-binary "
+                         "check must only run on a caller-supplied PATH")
+
+    def test_unchecked_wiring_keeps_every_server(self):
+        """And the deterministic result is 'wire everything', not 'drop it'."""
+        written = json.loads(self._wire_with_ambient_path(os.defpath))
+        self.assertEqual(set(written["mcpServers"]), {"real-bin", "absent-bin"})
 
 
 class ImagePathContractTests(unittest.TestCase):
