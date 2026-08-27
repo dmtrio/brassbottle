@@ -31,7 +31,17 @@ case "${1:-}" in
         shift
         if [ "${1:-}" = "--watch" ]; then
             shift
-            exec python3 "$SCRIPT_DIR/src/egress_watch.py" "$@"
+            # Source common.sh and hand the resolved home to Python in the
+            # environment, exactly as backup.sh does. Without this the watcher
+            # falls back to its own guess ($SCRIPT_DIR/.djinn), because the
+            # Python side reads only the DJINN_HOME *variable* and never
+            # ./.env — so a DJINN_HOME set there would leave the watcher
+            # polling an empty queue that nothing writes to, looking perfectly
+            # healthy while every container got a 401 on a token it could not
+            # match. Sourced late, so the usage/error paths above stay free of
+            # any ./.env dependency.
+            . "$SCRIPT_DIR/src/common.sh"
+            exec env DJINN_HOME="$BASE_PATH" python3 "$SCRIPT_DIR/src/egress_watch.py" "$@"
         fi
         exec "$SCRIPT_DIR/bin/allow-egress.sh" "$@"
         ;;
