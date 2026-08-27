@@ -81,6 +81,7 @@ symlink into someone's dotfiles — the old `cat >` behavior).
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -398,6 +399,57 @@ def _render_named_env_ref_server(spec, requires, env_ref_field, server_name, bin
     rendered["headers"] = rendered_headers
     rendered[env_ref_field] = slot
     return rendered
+
+
+def _command_missing(spec, path=None):
+    """True when a LOCAL server's command does not resolve on PATH.
+
+    Only meaningful CONTAINER-side: --build-payload runs on the host, where
+    none of these binaries exist, so calling this there would report every
+    local plugin missing.
+
+    PATH matters here. Node-based binaries (mcp-remote and any other
+    `npm install -g`) live under ~/.fnm/aliases/default/bin, which the image's
+    `ENV PATH` includes precisely so non-login processes like `docker exec`
+    resolve them. tests/test_wire_plugins.py pins that PATH entry — without it
+    this check silently reports every node plugin as missing and, under
+    skip-with-warning, quietly drops working servers.
+    """
+    cmd = spec.get("command")
+    if not isinstance(cmd, str) or not cmd:
+        return True
+    # Resolve against the caller's PATH when given (the container-side env),
+    # falling back to this process's. Threading it explicitly keeps the check
+    # from depending on ambient state and lets tests supply real stub binaries
+    # instead of bypassing the check altogether.
+    return shutil.which(cmd, path=path or os.environ.get("PATH")) is None
+
+
+def _drop_missing_local(servers, where, path=None):
+    """Local servers whose binary is present, warning loudly for each dropped.
+
+    Skip-with-warning rather than raise. `manifest.py` only validates that a
+    local plugin DECLARES an install: block — never that the install produced
+    anything, and some installs are deliberately failure-tolerant
+    (plugins/gear360/install.sh: "a broken upstream must not brick the build of
+    containers that have nothing to do with 360 video"). So a missing binary is
+    an expected state, not corruption, and it must not cost every other server
+    its wiring.
+
+    Without this the failure was invisible: the server wired fine and surfaced
+    later as an agent's MCP server that would not start, with nothing in the
+    up.sh output pointing at the cause.
+    """
+    kept = {}
+    for name, spec in servers.items():
+        if "command" in spec and _command_missing(spec, path):
+            print(f"  ⚠ {where}: MCP server '{name}' NOT wired — its command "
+                  f"{spec.get('command')!r} is not on PATH. Its plugin's "
+                  "install: did not produce it (or the binary was removed). "
+                  "Every other server still wired.")
+            continue
+        kept[name] = spec
+    return kept
 
 
 def _local_plugins(plugins):
@@ -839,6 +891,22 @@ def run(payload, home, workspace, env):
     plugins = merge_plugin_entries(payload.get("plugin_mcp_entries") or [])
     agent_servers = _parse_agent_servers_payload(payload.get("agent_servers"))
 
+    # Drop local servers whose binary never made it into the image, ONCE and up
+    # front, so every downstream path (local_for, ref_required_by_agent, the
+    # uniform local set) inherits the same filtered view rather than each
+    # re-deciding. Container-side only — see _command_missing.
+    exec_path = env.get("PATH") if isinstance(env, dict) else None
+    plugins = _drop_missing_local(plugins, "plugins", exec_path)
+    kept_servers = []
+    for s in agent_servers:
+        if "command" in s["spec"] and _command_missing(s["spec"], exec_path):
+            print(f"  ⚠ agent-scoped MCP server {s['name']!r} NOT wired for any "
+                  f"agent — its command {s['spec'].get('command')!r} is not on "
+                  "PATH. Every other server still wired.")
+            continue
+        kept_servers.append(s)
+    agent_servers = kept_servers
+
     agents_by_binary = {agent["binary"]: agent for agent in agents}
 
     # Resolve agent-scoped servers to per-agent final entries up front so each
@@ -1015,22 +1083,27 @@ def build_payload(env):
                 if isinstance(agent["env_refs"], str) and not is_local:
                     # Closed contract: a named env_refs field (e.g.
                     # bearerTokenEnvVar) is only legal for the single-slot
-                    # bearer-header remote shape. Validate HOST-side so
-                    # unsupported descriptors fail before container wiring.
-                    # ACCEPTED TRADEOFF: this raises for the whole payload
-                    # build (up.sh runs under `set -e`, so ANY agent bound
-                    # here with a bad descriptor/plugin combo — e.g. a future
-                    # multi-slot remote — aborts wiring for every agent, not
-                    # just this one). That is the existing behavior for every
-                    # named-ref agent (kimi already carries it); codex now
-                    # shares it too. Fail LOUD and early over silently
-                    # dropping the server is the whole point of this
-                    # validation, and every current remote plugin
-                    # (obsidian-annotated, browser) is single-slot, so this
-                    # is latent, not active.
-                    _render_named_env_ref_server(
-                        sd["spec"], requires, agent["env_refs"], name, binary
-                    )
+                    # bearer-header remote shape. Checked HOST-side so an
+                    # unsupported descriptor/plugin pairing is reported before
+                    # container wiring.
+                    #
+                    # SKIP, don't raise. This used to abort the entire payload
+                    # build (up.sh runs under `set -e`), so ONE plugin whose
+                    # auth scheme ONE agent cannot express took wiring down for
+                    # EVERY agent. That fired for real: the browser plugin's
+                    # `X-API-Key` against kimi's `bearerTokenEnvVar` aborted
+                    # `djinn up` outright, costing claude/cursor/codex their MCP
+                    # config over a plugin none of them needed. An agent that
+                    # cannot express a server's auth simply does not get that
+                    # server; every other agent still wires.
+                    try:
+                        _render_named_env_ref_server(
+                            sd["spec"], requires, agent["env_refs"], name, binary
+                        )
+                    except WireError as exc:
+                        print(f"  ⚠ {exc}\n    → skipped for {binary} only; "
+                              "other agents are unaffected.")
+                        continue
                 e["ref"].append(binary)
                 continue
             if is_local:
