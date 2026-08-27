@@ -422,7 +422,11 @@ def _command_missing(spec, path=None):
     # falling back to this process's. Threading it explicitly keeps the check
     # from depending on ambient state and lets tests supply real stub binaries
     # instead of bypassing the check altogether.
-    return shutil.which(cmd, path=path or os.environ.get("PATH")) is None
+    # `is not None`, not `or`: an EMPTY PATH means "nothing is on PATH", a
+    # real answer. Treating it as falsy would fall through to ambient state and
+    # reintroduce machine-dependent wiring past the callers' `is None` guard.
+    return shutil.which(
+        cmd, path=path if path is not None else os.environ.get("PATH")) is None
 
 
 def _drop_missing_local(servers, where, path=None):
@@ -430,15 +434,24 @@ def _drop_missing_local(servers, where, path=None):
 
     Skip-with-warning rather than raise. `manifest.py` only validates that a
     local plugin DECLARES an install: block — never that the install produced
-    anything, and some installs are deliberately failure-tolerant
+    anything, and installs here are allowed to be failure-tolerant by design
     (plugins/gear360/install.sh: "a broken upstream must not brick the build of
-    containers that have nothing to do with 360 video"). So a missing binary is
-    an expected state, not corruption, and it must not cost every other server
-    its wiring.
+    containers that have nothing to do with 360 video" — gear360 ships no mcp:
+    block itself, but the same tolerance is open to any plugin). A download
+    that 404s or an `npm install -g` that fails leaves a plugin declaring a
+    server it cannot start. That is an expected state, not corruption, and it
+    must not cost every other server its wiring.
 
     Without this the failure was invisible: the server wired fine and surfaced
     later as an agent's MCP server that would not start, with nothing in the
     up.sh output pointing at the cause.
+
+    LIMIT, worth knowing before trusting this: it resolves spec["command"], so
+    it only covers plugins that exec a bare binary (mcp-remote,
+    codebase-memory-mcp). A plugin whose command is an interpreter with the
+    real payload in args — `command: bash` (serena, archex, rhinomcp) or
+    `command: python3` (egress) — always resolves and is NOT protected. Closing
+    that needs a declared binary/health hint rather than guessing from argv.
     """
     if path is None:
         # No PATH from the caller means we cannot know what is installed, so
@@ -1112,8 +1125,13 @@ def build_payload(env):
                             sd["spec"], requires, agent["env_refs"], name, binary
                         )
                     except WireError as exc:
+                        # STDERR, never stdout: main() prints the payload JSON
+                        # to stdout and up.sh captures it into $PAYLOAD, which
+                        # is piped to the container half. A warning on stdout
+                        # corrupts that JSON and aborts `djinn up` anyway —
+                        # re-breaking the very bug this skip exists to fix.
                         print(f"  ⚠ {exc}\n    → skipped for {binary} only; "
-                              "other agents are unaffected.")
+                              "other agents are unaffected.", file=sys.stderr)
                         continue
                 e["ref"].append(binary)
                 continue

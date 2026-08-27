@@ -302,6 +302,11 @@ def wire(agent_dir_name: str, *, remote_server=True, local_server=True,
     stub_bin = scratch / "stub-bin"
     stub_bin.mkdir(parents=True)
     for spec in _local_command_names(payload):
+        # basename only: `stub_bin / "/usr/bin/foo"` resolves to /usr/bin/foo,
+        # which would write a stub OUTSIDE the scratch dir. No fixture does
+        # this today; a future `command: /opt/x/bin/y` would.
+        if os.sep in spec:
+            continue
         stub = stub_bin / spec
         stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         stub.chmod(0o755)
