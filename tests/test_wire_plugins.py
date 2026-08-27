@@ -1579,7 +1579,7 @@ class TestBuildPayload(unittest.TestCase):
         # SKIP, don't raise: an unsupported pairing costs kimi this one
         # server, never the whole container's wiring (see build_payload).
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stderr(buf):
             payload = wire_plugins.build_payload(env)
         self.assertEqual(payload["agent_servers"], [],
                          "no agent could take it, so the server drops out")
@@ -1600,7 +1600,7 @@ class TestBuildPayload(unittest.TestCase):
             "AGENT_SECRETS": "kimi\tOBSIDIAN_ANNOTATED_KEY\tSRC\n",
         }
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stderr(buf):
             payload = wire_plugins.build_payload(env)
         self.assertEqual(payload["agent_servers"], [])
         out = buf.getvalue()

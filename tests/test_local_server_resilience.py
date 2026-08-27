@@ -17,10 +17,11 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -55,10 +56,12 @@ class NonBearerRemoteSkipsOneAgentTests(unittest.TestCase):
             "PLUGIN_MCP_ENTRIES": "",
             "IDENTITY_SECRETS": "",
         }
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        # The skip warning goes to STDERR — stdout is reserved for the payload
+        # JSON that up.sh captures (see PayloadStdoutIsJsonOnlyTests).
+        err = io.StringIO()
+        with redirect_stderr(err):
             payload = wire_plugins.build_payload(env)
-        return payload, buf.getvalue()
+        return payload, err.getvalue()
 
     def test_xapikey_remote_skips_named_ref_agent_only(self):
         """The exact shape that aborted `djinn up coding-brassbottle`."""
@@ -218,6 +221,45 @@ class AmbientPathDeterminismTests(unittest.TestCase):
         """And the deterministic result is 'wire everything', not 'drop it'."""
         written = json.loads(self._wire_with_ambient_path(os.defpath))
         self.assertEqual(set(written["mcpServers"]), {"real-bin", "absent-bin"})
+
+
+class PayloadStdoutIsJsonOnlyTests(unittest.TestCase):
+    """REGRESSION: --build-payload's stdout IS the payload. Nothing else.
+
+    main() prints the payload JSON to stdout; up.sh captures it into $PAYLOAD
+    and pipes it to the container half. The first cut of the skip warning went
+    to stdout, so the JSON was preceded by a warning line, the container half
+    died on `invalid JSON payload on stdin`, and `djinn up` aborted under
+    set -e anyway — re-breaking the exact bug the skip exists to fix.
+
+    The in-process tests could not catch it: they call build_payload() directly
+    under redirect_stdout, which never exercises the stdout CONTRACT. This runs
+    the real subprocess entrypoint, so any future print() that forgets
+    file=sys.stderr fails here.
+    """
+
+    SRC = Path(__file__).parent.parent / "src" / "wire_plugins.py"
+
+    def test_stdout_stays_parseable_when_a_pairing_is_skipped(self):
+        env = dict(
+            os.environ,
+            AGENTS_MCP_JSON=json.dumps([_agent("kimi", env_refs="bearerTokenEnvVar")]),
+            AGENT_SERVERS_JSON=json.dumps(
+                {"browser": {"spec": REMOTE_XAPIKEY, "requires": ["BROWSER_KEY"]}}),
+            AGENT_SECRETS="kimi\tBROWSER_KEY\tSRC",
+            PLUGIN_MCP_ENTRIES="",
+            IDENTITY_SECRETS="",
+        )
+        proc = subprocess.run(
+            [sys.executable, str(self.SRC), "--build-payload"],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # The whole point: stdout parses, with the warning nowhere in it.
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["agent_servers"], [])
+        self.assertNotIn("⚠", proc.stdout)
+        # ...and the warning was still emitted, just on the right stream.
+        self.assertIn("kimi", proc.stderr)
 
 
 class ImagePathContractTests(unittest.TestCase):
