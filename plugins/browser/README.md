@@ -2,7 +2,8 @@
 
 A watchable desktop browser the agent drives (for research containers).
 Host HTTP bridge on the Mac; containers reach it via a **local** `mcp-remote`
-stdio proxy (baked at image build).
+stdio proxy (a base tool, installed once by the `Dockerfile` — this plugin has
+no `install:` block).
 
 ```yaml
 plugins: [browser]

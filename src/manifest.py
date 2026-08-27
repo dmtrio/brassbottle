@@ -81,6 +81,23 @@ REF_RE = re.compile(r"^[A-Za-z0-9_]+\Z")
 # specs.
 HOST_PORT_REF = "${HOST_PORT}"
 
+# Binaries the BASE image provides, so a plugin whose local server execs one
+# needs no install: block — nothing installs bash either. Today: mcp-remote,
+# the stdio↔HTTP bridge (Dockerfile, ARG MCP_REMOTE_VERSION), which three
+# plugins run and each used to install itself into the same global npm prefix,
+# so bumping one pin silently retargeted the others.
+#
+# Deliberately NOT bash/sh/python3, though the image obviously ships those. An
+# entry here means "exec'ing this IS the whole server", which is true of
+# mcp-remote and false of an interpreter: `command: bash` is a wrapper whose
+# real payload sits in args, and excusing it from install: would let a plugin
+# declare a server that execs something nothing ever installed. The rule below
+# would then pass exactly the case it exists to catch.
+#
+# Keep in step with the Dockerfile; tests/test_manifest.py asserts every name
+# here appears in it.
+BASE_IMAGE_BINS = frozenset({"mcp-remote"})
+
 
 def _host_port_ref_fields(spec):
     """The string fields of an mcp server spec that may carry ${HOST_PORT}:
@@ -1107,6 +1124,12 @@ def derive(manifest, plugin_files, agent_files, env):
             raise ManifestError(f"plugin '{p}' mcp must be a map of MCP servers")
         has_local = False
         has_remote = False
+        # has_local says "this plugin has a local server"; has_local_to_bake
+        # says "…one whose binary nothing else provides", which is what the
+        # install: rule is actually about. Per SERVER: a plugin running
+        # mcp-remote for one server and its own binary for another still has to
+        # bake the second.
+        has_local_to_bake = False
         for n, spec in mcp.items():
             if not NAME_RE.match(n):
                 raise ManifestError(
@@ -1135,6 +1158,8 @@ def derive(manifest, plugin_files, agent_files, env):
                     f"plugin '{p}' mcp server '{n}': requires unknown secret slot(s): {', '.join(unknown)}")
             if is_local:
                 has_local = True
+                if spec.get("command") not in BASE_IMAGE_BINS:
+                    has_local_to_bake = True
                 if not isinstance(spec.get("command"), str):
                     raise ManifestError(
                         f"plugin '{p}' mcp server '{n}': command must be a string (local stdio server)")
@@ -1161,9 +1186,13 @@ def derive(manifest, plugin_files, agent_files, env):
             seen_server_names.add(n)
 
         install = doc.get("install")
-        if has_local and (_falsy(install) or not isinstance(install, str) or not install.strip()):
+        if (has_local_to_bake
+                and (_falsy(install) or not isinstance(install, str)
+                     or not install.strip())):
             raise ManifestError(
-                f"plugin '{p}': a local (command:) server needs an install: block (baked into the image)")
+                f"plugin '{p}': a local (command:) server needs an install: block "
+                "(baked into the image), unless it execs a base tool "
+                f"({', '.join(sorted(BASE_IMAGE_BINS))})")
 
         # ── volumes: state that must outlive a container recreate ────────────
         # A per-container named volume, mounted at a path the plugin names.

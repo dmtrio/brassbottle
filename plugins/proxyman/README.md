@@ -2,7 +2,8 @@
 
 Bridges [Proxyman](https://proxyman.io)'s stdio MCP server over HTTP for
 containers (traffic capture). Host HTTP bridge on port **8813**; containers
-reach it via a **local** `mcp-remote` stdio proxy (baked at image build).
+reach it via a **local** `mcp-remote` stdio proxy (a base tool, installed once
+by the `Dockerfile` — this plugin has no `install:` block).
 
 ```yaml
 plugins: [proxyman]

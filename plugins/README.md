@@ -60,9 +60,9 @@ one** of `command:` (local) or `url:` (remote).
 
 | Key | Meaning |
 |---|---|
-| `mcp: {<server>: {command, args}}` | **Local** stdio server, runs in the container. Requires `install:`. |
+| `mcp: {<server>: {command, args}}` | **Local** stdio server, runs in the container. Requires `install:` unless `command` is a base tool (below). |
 | `mcp: {<server>: {url, headers}}` | **Remote** HTTP server, reached on the host or internet. |
-| `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists. |
+| `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists whose `command` is not a **base tool** — a binary the image already provides, listed in `BASE_IMAGE_BINS` (`src/manifest.py`) and installed by the `Dockerfile`. Today that is `mcp-remote` only. Checked per **server**: a plugin running `mcp-remote` for one server and its own binary for another still needs `install:` for the second. Interpreters (`bash`, `python3`) are deliberately **not** base tools — an entry means "exec'ing this *is* the whole server", which is false of a wrapper whose real payload sits in `args`. |
 | `host_port: <int>` | Opens the container firewall to `host.docker.internal:<port>`. Valid with a remote (`url:`) server **or** a local bridge that dials the host (`rhinomcp`); rejected with no MCP server, and a local-only plugin must reference `${HOST_PORT}` in the bridge's `command`/`args` (proof something dials the grant). `${HOST_PORT}` in a remote `url` or a local `command`/`args` resolves to it. A manifest `plugin_ports:` override replaces this default (see below). |
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
 | `volumes: {<name>: /container/path}` | Per-container named volume(s) for state that must outlive a container recreate — see below. Mounted only in containers that enable the plugin. |
@@ -223,7 +223,9 @@ warns and yields no binding.
 - **`djinn up`** (via `up.sh`) globs `plugins/*/plugin.yml` → `src/manifest.py --derive` validates
   and derives the wiring → `src/wire_plugins.py` (baked in the image) writes each
   agent's MCP config.
-- **`Dockerfile`** bakes every local plugin's `install:` block at build.
+- **`Dockerfile`** bakes every local plugin's `install:` block at build, plus
+  the base tools (`ARG MCP_REMOTE_VERSION`) that plugins are excused from
+  installing themselves.
 - **Compose** gets a generated overlay when an enabled plugin declares
   `volumes:` (`$BASE_PATH/compose/<container>.plugins.yml`, one more `-f`); the
   entrypoint chowns its mountpoints to coder.

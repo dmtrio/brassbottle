@@ -104,15 +104,51 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 # $USERNAME with the toolchain live — uv via ~/.local/bin, node/npm via the fnm
 # env eval — so installers land in the user's home like everything else. The
 # "install: required iff a local server" rule is enforced by src/manifest.py at
-# derive time (a local plugin missing install: fails up.sh), so here `yq -e`
-# non-zero simply means "no install: block → remote/config-only, skip"; set -e
-# still aborts on a failed install.
+# derive time (a local plugin missing install: fails up.sh — unless its server
+# execs a base tool like mcp-remote, see BASE_IMAGE_BINS and the layer below),
+# so here `yq -e` non-zero simply means "no install: block → remote,
+# config-only, or base-tool; skip"; set -e still aborts on a failed install.
 # yq is pinned and installed HERE, next to its only build-time consumer, so a
 # version bump doesn't invalidate the toolchain layers above.
 ARG YQ_VERSION=v4.44.3
 RUN sudo curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_$(dpkg --print-architecture)" \
         -o /usr/local/bin/yq \
     && sudo chmod +x /usr/local/bin/yq
+# ── mcp-remote: a base tool, like bash or python3 ────────────────────────────
+# The stdio↔HTTP bridge that lets a remote MCP service reach EVERY agent rather
+# than only Claude (a remote `url:` spec can't be wired into cursor/pi). Three
+# plugins run it — axiom, browser, proxyman — and each used to carry an
+# identical `npm install -g 'mcp-remote@^0.1.38'` in its own install: block.
+# That read as harmless duplication and was a trap: all three write into the
+# SAME global npm prefix, so whichever install ran last decided the version for
+# all of them, and bumping one pin would silently retarget the other two while
+# their comments went on claiming a version they no longer got.
+#
+# So it is installed here instead, once, and src/manifest.py treats it as a
+# base-image binary (BASE_IMAGE_BINS) — a plugin whose server execs it needs no
+# install: block, the same way nothing installs bash. One ARG is the only place
+# the version is stated.
+#
+# Why the floor matters (the behaviour the pin protects): mcp-remote
+# substitutes ${VAR} in a --header value from its OWN process.env at connect
+# time (verified in 0.1.38 — the header regex tolerates the space in
+# "Bearer ${AXIOM_TOKEN}"). That is what keeps the secret out of every MCP
+# config file AND off the command line: argv holds the literal "${AXIOM_TOKEN}",
+# never the value. Regress below that floor and the literal ships to the server
+# and every agent 401s — with, per mcp-remote's own behaviour, only a warning.
+#
+# Unconditional, unlike the PLUGINS_ENABLED-gated loop below, because "base
+# tool" has to mean always: BASE_IMAGE_BINS excuses a plugin from installing it,
+# so a gated install would leave that excuse resting on a condition. Costs ~8M
+# in every image. Exec'd directly rather than via `npx` so server startup never
+# reaches for the registry — it runs offline behind the egress firewall. Placed
+# next to its consumers, like yq above, so a bump doesn't invalidate the
+# toolchain layers.
+ARG MCP_REMOTE_VERSION=^0.1.38
+RUN eval "$(fnm env)" \
+    && npm install -g "mcp-remote@${MCP_REMOTE_VERSION}" \
+    && npm cache clean --force
+
 COPY --chown=$USERNAME:$USERNAME plugins /opt/plugins
 RUN set -e; \
     eval "$(fnm env)"; \

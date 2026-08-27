@@ -15,10 +15,12 @@ Axiom is a **remote** HTTP MCP on a real internet host. A raw remote server
 `${VAR}` in remote headers. So instead this plugin runs Axiom's documented
 bridge, `mcp-remote https://mcp.axiom.co/mcp` (a stdio↔HTTP proxy), as a **local
 command server**. Local servers wire into every agent identically, so all agents
-get Axiom through the ordinary local-plugin path. `mcp-remote` is baked into the
-image at build time (the `install:` block) and the server execs that baked
-binary directly (not `npx`), so startup never reaches for the npm registry — it
-runs fully offline behind the egress firewall.
+get Axiom through the ordinary local-plugin path. `mcp-remote` is a **base
+tool**: the `Dockerfile` installs it once (`ARG MCP_REMOTE_VERSION`) and
+`src/manifest.py` lists it in `BASE_IMAGE_BINS`, so this plugin carries no
+`install:` block of its own — the same way nothing installs `bash`. The server
+execs that baked binary directly (not `npx`), so startup never reaches for the
+npm registry — it runs fully offline behind the egress firewall.
 
 ## Secret model — common default with per-agent overrides
 

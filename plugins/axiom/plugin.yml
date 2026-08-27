@@ -1,7 +1,10 @@
 # axiom — Axiom's official MCP, bridged to LOCAL stdio via `mcp-remote` so EVERY
 # agent (claude, cursor, codex; pi once its adapter is installed) reaches
-# it uniformly, not just Claude. mcp-remote (baked into the image by the install:
-# block) is a stdio↔HTTP proxy to mcp.axiom.co; being a local command server it
+# it uniformly, not just Claude. mcp-remote is a BASE TOOL — installed once by
+# the Dockerfile and treated like bash by src/manifest.py (BASE_IMAGE_BINS), so
+# this plugin carries no install: block of its own; the version and the reason
+# for its floor live there. It is a stdio↔HTTP proxy to mcp.axiom.co; being a
+# local command server it
 # wires into every agent through the ordinary local-plugin path — no per-agent
 # remote-header injection. Axiom documents exactly this bridge (mcp-remote <url>).
 # See ./README.md.
@@ -20,16 +23,6 @@
 #
 # The server execs the baked `mcp-remote` binary directly (not `npx`), so process
 # startup never reaches for the npm registry — it runs fully offline.
-
-install: |
-  # Bake the stdio↔remote bridge at build time (full network) so it runs offline
-  # behind the runtime egress firewall. node/npm come from the fnm env eval.
-  # Floor the version: mcp-remote substitutes ${VAR} in --header from its own
-  # process.env (verified in 0.1.38, dist/chunk — the header regex tolerates the
-  # space in "Bearer ${AXIOM_TOKEN}"). Pinning >=0.1.38 keeps that behavior from
-  # regressing out on a future install; without it the literal ${AXIOM_TOKEN}
-  # could ship and every agent would 401.
-  npm install -g 'mcp-remote@^0.1.38'
 
 secrets:
   AXIOM_TOKEN: {hint: "axiom (an Axiom API token — Settings → API tokens; a scoped token 'xaat-…' is simplest)"}
