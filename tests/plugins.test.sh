@@ -297,6 +297,16 @@ printf '%s' "$AGENT_SECRETS" \
     | grep -qF "$(printf 'cursor-agent\tMCP_GATEWAY_TOKEN\tMCP_GATEWAY_TOKEN')" \
     && pass "gateway common default resolves into agent credentials" \
     || fail "AGENT_SECRETS missing gateway default: '$AGENT_SECRETS'"
+# AGENT_SERVER_REMOTE_SLOTS is the subset of required slots feeding a REMOTE
+# server — the only slots up.sh puts on the `docker exec` argv, and the only
+# reason an agent ever gets a key baked into its config file. gateway was the
+# last shipped plugin on that path; with it bridged through mcp-remote, no
+# shipped plugin can populate this. Asserted on a manifest that enables the
+# ONE plugin that used to, so re-adding a remote requires: server anywhere
+# fails here rather than quietly reinstating literal keys on disk.
+[ -z "$AGENT_SERVER_REMOTE_SLOTS" ] \
+    && pass "no shipped plugin feeds the remote agent-scoped path" \
+    || fail "AGENT_SERVER_REMOTE_SLOTS should be empty, got: '$AGENT_SERVER_REMOTE_SLOTS'"
 # Literal-key agents (a literal dialect with env_refs false) are the ones whose
 # keys travel as IDENTITY_KEY_n on the exec env. Derived from the descriptors so
 # adding or retiring an agent needs no edit here.

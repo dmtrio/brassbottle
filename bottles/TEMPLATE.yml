@@ -85,7 +85,7 @@ capabilities:
 # service you start once with ./service.sh <name>. See plugins/README.md for the
 # schema, and each plugins/<name>/README.md for what a plugin does + its token.
 #
-#   plugins: [serena, gateway, obsidian-annotated]   # serena/obsidian: local; gateway: remote
+#   plugins: [serena, gateway, obsidian-annotated]   # all local; see plugins/README.md
 plugins: []
 
 # Optional egress plugin — agent-facing request/check MCP tools plus the

@@ -1,7 +1,29 @@
-# gateway — headless Playwright MCP gateway. Remote HTTP host service on 8811.
-# See ./README.md (what it is, how to start it, security). Config only; nothing baked.
+# gateway — headless Playwright MCP gateway. A remote HTTP host service on 8811,
+# bridged to LOCAL stdio via `mcp-remote` so every bound agent reaches it through
+# the ordinary local-plugin path. mcp-remote is a BASE TOOL — installed once by
+# the Dockerfile and treated like bash by src/manifest.py (BASE_IMAGE_BINS) — so
+# this plugin bakes nothing of its own.
+#
+# Why local rather than the remote url:/headers: shape it used to have: agents
+# that cannot expand ${VAR} inside a remote header (cursor-agent, pi) had the
+# gateway token BAKED LITERALLY into their config files on disk, and up.sh had
+# to hand the value to the wiring exec on the `docker exec` argv to put it
+# there. Under mcp-remote the token is substituted from each agent's own process
+# env at connect time: no config file, and no argv (which holds the literal
+# "${MCP_GATEWAY_TOKEN}"). Same property axiom and obsidian-annotated have.
+#
+# Plaintext http:// to the Docker host is fine — mcp-remote does not require TLS
+# (verified 0.1.49: full initialize + tools/list round trip over http://). The
+# firewall grant below is what makes host.docker.internal:8811 reachable at all.
+#
+# The server execs the baked `mcp-remote` binary directly (not `npx`), so
+# startup never reaches for the npm registry. See ./README.md.
 
-host_port: 8811                        # firewall grant → HOST_MCP_PORTS
+# The bridge dials ${HOST_PORT}, not a hardcoded 8811: a local-only plugin has
+# to reference the grant it declares (manifest.py enforces this), and it keeps a
+# manifest `plugin_ports: {gateway: N}` override from moving the firewall grant
+# while the URL still points at 8811.
+host_port: 8811                        # firewall grant → HOST_MCP_PORTS, and ${HOST_PORT}
 
 # A common default can be overridden or disabled for individual agents.
 secrets:
@@ -9,6 +31,6 @@ secrets:
 
 mcp:
   coding:
-    url: http://host.docker.internal:8811/mcp
-    headers: {Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"}
+    command: mcp-remote
+    args: ["http://host.docker.internal:${HOST_PORT}/mcp", "--header", "Authorization: Bearer ${MCP_GATEWAY_TOKEN}"]
     requires: [MCP_GATEWAY_TOKEN]
