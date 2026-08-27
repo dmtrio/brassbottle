@@ -91,8 +91,12 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 # run.sh). Every plugin.yml is baked into the shared image here. A LOCAL (stdio)
 # plugin carries an `install:` block that runs at build time (full network) so
 # the binary is present offline behind the runtime egress firewall. A REMOTE
-# plugin (gateway/proxyman/browser — url: config, no binary) has no install:
-# and is skipped here; nothing is baked, it's pure config wired by up.sh.
+# plugin (a bare `url:` spec, no binary) has no install: and is skipped here;
+# nothing is baked, it's pure config wired by up.sh. Which plugins fall in
+# which camp is not fixed — a remote HTTP service is often better reached via
+# a LOCAL `mcp-remote` stdio bridge, because a remote `url:` spec only reaches
+# Claude while a local one reaches every agent (see plugins/axiom, browser,
+# proxyman). Read the plugin.yml rather than trusting a list here.
 # The host-only run.sh launchers are excluded from the image via .dockerignore.
 # Which containers actually USE a plugin is a separate, per-container decision:
 # up.sh wires mcp + egress only for the names in that manifest's `plugins:`
