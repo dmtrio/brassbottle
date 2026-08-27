@@ -134,8 +134,10 @@ RUN set -e; \
 # included) or a changed AGENTS_ENABLED invalidates the COPY below and re-runs
 # every enabled agent's install (~minutes, network-bound). Accepted per the PLN
 # — the loop sits late so the expensive toolchain layers above stay cached; a
-# single npm cache purge at the end of this RUN keeps the layer lean without
-# a BuildKit cache mount.
+# BuildKit npm cache mount is still the documented mitigation if the rebuild
+# cost proves annoying. (The npm/pip purges at the end of this RUN address a
+# different problem — image SIZE, not rebuild speed. Neither makes the other
+# unnecessary.)
 COPY --chown=$USERNAME:$USERNAME agents /opt/agents
 RUN set -e; \
     eval "$(fnm env)"; \
