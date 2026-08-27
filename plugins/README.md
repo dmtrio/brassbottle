@@ -41,7 +41,7 @@ opinion.
 | [`serena`](serena/) | local (stdio, baked) | — | [README](serena/README.md) |
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
 | [`codebase-memory`](codebase-memory/) | local (stdio, baked) | — | [README](codebase-memory/README.md) |
-| [`gateway`](gateway/) | remote HTTP | `./djinn service gateway` | [README](gateway/README.md) |
+| [`gateway`](gateway/) | local (stdio bridge → host :8811, baked) | `./djinn service gateway` | [README](gateway/README.md) |
 | [`proxyman`](proxyman/) | local (stdio bridge → host :8813, baked) | `./djinn service proxyman` | [README](proxyman/README.md) |
 | [`browser`](browser/) | local (stdio bridge → host :8814, baked) | `./djinn service browser <container>` | [README](browser/README.md) |
 | [`obsidian-annotated`](obsidian-annotated/) | local (stdio bridge → mcp-obsidian.dmetr.io, baked) | — | [README](obsidian-annotated/README.md) |
@@ -80,7 +80,22 @@ mcp:
 egress: [blob.core.windows.net]
 ```
 
-**Remote example** (`gateway`):
+**Remote example** (`cordyceps`) — no secret, so no `requires:`, so the same
+entry for everyone. A remote server reaches Claude only; the other agents cannot
+expand `${VAR}` inside a remote header:
+
+```yaml
+host_port: 26929
+mcp:
+  cordyceps:
+    url: http://host.docker.internal:${HOST_PORT}/mcp
+```
+
+**Bridged example** (`gateway`) — an HTTP endpoint reached through `mcp-remote`
+so it wires into *every* bound agent, not just Claude. `requires:` makes it
+agent-scoped: only agents with an effective `MCP_GATEWAY_TOKEN` get the entry,
+and each one's own key is substituted from its own process env at connect time,
+so no config file or command line carries it:
 
 ```yaml
 host_port: 8811
@@ -88,8 +103,9 @@ secrets:
   MCP_GATEWAY_TOKEN: {hint: "gateway (run ./djinn service gateway once)"}
 mcp:
   coding:
-    url: http://host.docker.internal:8811/mcp
-    headers: {Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"}
+    command: mcp-remote
+    args: ["http://host.docker.internal:${HOST_PORT}/mcp", "--header",
+           "Authorization: Bearer ${MCP_GATEWAY_TOKEN}"]
     requires: [MCP_GATEWAY_TOKEN]
 ```
 
