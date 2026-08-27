@@ -63,14 +63,25 @@ for f in plugins/*/plugin.yml; do
         && pass "$name: passes manifest.py validation" \
         || fail "$name: rejected by manifest.py: $(printf '%s' "$OUT" | head -3)"
 
-    # install: is required iff the plugin has a LOCAL (command:) server — those
-    # bake a binary. Remote (url:) and egress-only plugins carry no install:.
-    has_local=$(yq -r '[(.mcp // {})[] | select(has("command"))] | length' "$f")
+    # install: is required iff the plugin has a LOCAL (command:) server that
+    # BAKES something. Remote (url:) and egress-only plugins carry no install:,
+    # and neither does a local server whose command is a BASE TOOL — a binary
+    # the image already provides (mcp-remote), which for this rule behaves like
+    # a remote: nothing to bake. The set comes from manifest.py rather than
+    # being restated here, because this check drifting from the code it mirrors
+    # is exactly how it came to claim "manifest.py fails derive" about three
+    # plugins derive accepts.
+    base_tools=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print("\n".join(sorted(manifest.BASE_IMAGE_BINS)))')
+    # grep -v exits 1 when everything is filtered out, which under set -e would
+    # abort the run; `|| true` keeps an all-base-tools plugin a pass, not a
+    # crash. wc then reports 0 and the branch below is skipped.
+    to_bake=$(yq -r '(.mcp // {})[] | select(has("command")) | .command' "$f" \
+        | { grep -vxF "$base_tools" || true; } | wc -l | tr -d ' ')
     install=$(yq -r '.install // ""' "$f")
-    if [ "${has_local:-0}" != "0" ] && { [ -z "$install" ] || [ "$install" = "null" ]; }; then
-        fail "$name: local (command:) server needs an install: block (manifest.py fails derive)"
+    if [ "${to_bake:-0}" != "0" ] && { [ -z "$install" ] || [ "$install" = "null" ]; }; then
+        fail "$name: local (command:) server bakes a binary but has no install: block"
     else
-        pass "$name: install present iff local server"
+        pass "$name: install present iff a local server bakes something"
     fi
 done
 [ "$found" = 1 ] || fail "no plugin files found under plugins/"
