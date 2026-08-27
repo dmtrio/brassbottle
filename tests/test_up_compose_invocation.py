@@ -25,6 +25,7 @@ COMPOSE_LOCAL = REPO_ROOT / "compose" / "docker-compose.local.yml"
 REQUIRED_PREFIXES = [
     "CONTAINER_NAME",
     "AGENTS_ENABLED",
+    "PLUGINS_ENABLED",
     "ARTIFACTS_PATH",
     "BROWSER_TMP_PATH",
     "KEYS_PATH",
@@ -94,6 +95,15 @@ class TestComposeInvocation(unittest.TestCase):
             'AGENTS_ENABLED: "${AGENTS_ENABLED-}"',
             compose_text,
             "compose default must be empty unless AGENTS_ENABLED is explicitly exported "
+            "(up.sh always sets it from manifest derive)",
+        )
+
+    def test_compose_plugins_enabled_default_is_fail_closed(self):
+        compose_text = COMPOSE_LOCAL.read_text()
+        self.assertIn(
+            'PLUGINS_ENABLED: "${PLUGINS_ENABLED-}"',
+            compose_text,
+            "compose default must be empty unless PLUGINS_ENABLED is explicitly exported "
             "(up.sh always sets it from manifest derive)",
         )
 

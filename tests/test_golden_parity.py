@@ -346,7 +346,7 @@ class TestGoldenParity(unittest.TestCase):
         full_derived = (FIXTURES / "full.derived.txt").read_text()
         full_vars = parse_derived(full_derived)
         for var in (
-            "AGENTS_ENABLED", "AGENTS_MCP_JSON", "PLUGINS", "PLUGIN_MCP_ENTRIES",
+            "AGENTS_ENABLED", "AGENTS_MCP_JSON", "PLUGINS", "PLUGINS_ENABLED", "PLUGIN_MCP_ENTRIES",
             "AGENT_SECRETS",
         ):
             self.assertIn(var, full_vars, msg=f"full.derived.txt missing {var}")

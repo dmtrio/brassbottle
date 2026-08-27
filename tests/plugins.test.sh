@@ -121,7 +121,7 @@ echo ",$EGRESS_ALL," | grep -qF ",blob.core.windows.net," \
 # full emitted variable set. grep first: quoted multi-line values (e.g.
 # PLUGIN_MCP_ENTRIES) have continuation lines that are not assignments.
 EMITTED=$(printf '%s\n' "$ALL_DERIVED" | grep -oE '^[A-Z_]+=' | tr -d = | LC_ALL=C sort | tr '\n' ' ')
-EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS ENABLE_EGRESS_BROKER FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS LITERAL_KEY_AGENTS MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES PLUGIN_SERVICES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
+EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS ENABLE_EGRESS_BROKER FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS LITERAL_KEY_AGENTS MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGINS_ENABLED PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES PLUGIN_SERVICES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
 [ "$EMITTED" = "$EXPECTED" ] \
     && pass "--derive emits exactly the variable set up.sh consumes" \
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
@@ -470,6 +470,12 @@ grep -qF -- "yq -e -r '.install'" Dockerfile \
 grep -qF -- 'ARG AGENTS_ENABLED=""' Dockerfile \
     && pass "Dockerfile AGENTS_ENABLED default is fail-closed (empty)" \
     || fail "Dockerfile AGENTS_ENABLED default is no longer empty"
+grep -qF -- 'ARG PLUGINS_ENABLED=""' Dockerfile \
+    && pass "Dockerfile PLUGINS_ENABLED default is fail-closed (empty)" \
+    || fail "Dockerfile PLUGINS_ENABLED default is no longer empty"
+grep -qF -- 'plugin install (disabled):' Dockerfile \
+    && pass "Dockerfile plugin bake loop logs disabled plugins" \
+    || fail "Dockerfile plugin bake loop no longer logs disabled plugins"
 grep -qF -- "config-only, nothing to bake" Dockerfile \
     && pass "Dockerfile bake skips remote (no-install) plugins instead of failing the build" \
     || fail "Dockerfile bake no longer skips no-install plugins (remote plugins would break the build)"

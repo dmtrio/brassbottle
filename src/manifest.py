@@ -947,6 +947,7 @@ def derive(manifest, plugin_files, agent_files, env):
         raise ManifestError(
             "manifest plugins failed validation:\n" + "\n".join(plugin_errors))
     out["PLUGINS"] = " ".join(plugins)
+    out["PLUGINS_ENABLED"] = " ".join(sorted(plugins))
 
     # ── plugin_ports: per-container host port for a host-service plugin ──
     # Host ports are exclusive, so two containers running the same host-service

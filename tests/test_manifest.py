@@ -282,6 +282,7 @@ class TestYqSemanticsPins(unittest.TestCase):
     def test_alternative_operator_fires_on_false(self):
         d = derive({"plugins": False, "repos": False, "memory": False, "agents": False})
         self.assertEqual(d["PLUGINS"], "")
+        self.assertEqual(d["PLUGINS_ENABLED"], "")
         self.assertEqual(d["REPOS"], "")
         self.assertEqual(d["MEM_LIMIT"], "2g")
         self.assertEqual(d["AGENTS_ENABLED"], " ".join(sorted(AGENT_FILES)))  # default tool set
@@ -325,6 +326,7 @@ class TestYqSemanticsPins(unittest.TestCase):
         d = derive({"capabilities": {"gateway": "yes", "proxyman": 1, "browser": True}},
                    plugin_files=files)
         self.assertEqual(d["PLUGINS"], "browser")          # only browser: true
+        self.assertEqual(d["PLUGINS_ENABLED"], "browser")
         self.assertEqual(d["HOST_MCP_PORTS"], "8814,8816")      # browser's host_port + broker
         # the retired CAP_* variables are gone from the derived set
         self.assertNotIn("CAP_GATEWAY", d)
@@ -1288,10 +1290,12 @@ class TestHybridSchemaRules(unittest.TestCase):
     def test_capabilities_sugar_dedups_with_explicit_plugin(self):
         d = self._d({"plugins": ["gateway"], "capabilities": {"gateway": True}})
         self.assertEqual(d["PLUGINS"], "gateway")            # not "gateway gateway"
+        self.assertEqual(d["PLUGINS_ENABLED"], "gateway")
 
     def test_capabilities_sugar_appends_after_explicit(self):
         d = self._d({"plugins": ["serena"], "capabilities": {"browser": True, "gateway": True}})
         self.assertEqual(d["PLUGINS"], "serena gateway browser")
+        self.assertEqual(d["PLUGINS_ENABLED"], "browser gateway serena")
 
 
 class TestUniversalHybridSecrets(unittest.TestCase):
