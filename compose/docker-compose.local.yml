@@ -18,6 +18,12 @@ services:
         # up.sh always sets this from manifest.py; direct `docker compose` runs
         # must export AGENTS_ENABLED explicitly (unset defaults fail-closed).
         AGENTS_ENABLED: "${AGENTS_ENABLED-}"
+        # ${VAR-default}, NOT ${VAR:-default}: up.sh always sets this, possibly
+        # to the EMPTY set (a manifest whose plugins: enables none), and the
+        # :- form would silently swap that explicit empty set for all plugins.
+        # up.sh always sets this from manifest.py; direct `docker compose` runs
+        # must export PLUGINS_ENABLED explicitly (unset defaults fail-closed).
+        PLUGINS_ENABLED: "${PLUGINS_ENABLED-}"
     # Per-container tag: each container builds/uses its own image tag
     image: djinn:${IMAGE_TAG:-local}
 

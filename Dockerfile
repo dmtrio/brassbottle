@@ -10,6 +10,7 @@ ARG USER_GID=1000
 # Fail-closed default for direct `docker build .`; up.sh always passes the
 # manifest-derived set explicitly.
 ARG AGENTS_ENABLED=""
+ARG PLUGINS_ENABLED=""
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
@@ -114,6 +115,10 @@ RUN set -e; \
     for f in /opt/plugins/*/plugin.yml; do \
         [ -e "$f" ] || continue; \
         name="$(basename "$(dirname "$f")")"; \
+        case " $PLUGINS_ENABLED " in \
+            *" $name "*) ;; \
+            *) echo "── plugin install (disabled): $name"; continue ;; \
+        esac; \
         if ! yq -e -r '.install' "$f" > /tmp/plugin-install.sh 2>/dev/null; then \
             echo "── plugin (config-only, nothing to bake): $name"; \
             continue; \
