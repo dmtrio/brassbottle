@@ -1,7 +1,8 @@
 # browser
 
 A watchable desktop browser the agent drives (for research containers).
-**Remote** HTTP server on the Mac host. Nothing is baked.
+Host HTTP bridge on the Mac; containers reach it via a **local** `mcp-remote`
+stdio proxy (baked at image build).
 
 ```yaml
 plugins: [browser]

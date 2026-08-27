@@ -1,8 +1,8 @@
 # proxyman
 
 Bridges [Proxyman](https://proxyman.io)'s stdio MCP server over HTTP for
-containers (traffic capture). **Remote** HTTP server on the Mac host, port
-**8813**. Nothing is baked.
+containers (traffic capture). Host HTTP bridge on port **8813**; containers
+reach it via a **local** `mcp-remote` stdio proxy (baked at image build).
 
 ```yaml
 plugins: [proxyman]

@@ -32,17 +32,22 @@ GATEWAY = {"host_port": 8811,
            "mcp": {"coding": {"url": "http://host.docker.internal:8811/mcp",
                               "headers": {"Authorization": "Bearer ${MCP_GATEWAY_TOKEN}"},
                               "requires": ["MCP_GATEWAY_TOKEN"]}}}
+MCP_REMOTE_INSTALL = "npm install -g 'mcp-remote@^0.1.38'"
 PROXYMAN = {"host_port": 8813,
+            "install": MCP_REMOTE_INSTALL,
             "secrets": {"PROXYMAN_BRIDGE_KEY": {
                         "hint": "proxyman (run ./service.sh proxyman once)"}},
-            "mcp": {"proxyman": {"url": "http://host.docker.internal:8813/mcp",
-                                 "headers": {"X-API-Key": "${PROXYMAN_BRIDGE_KEY}"},
+            "mcp": {"proxyman": {"command": "mcp-remote",
+                                 "args": ["http://host.docker.internal:${HOST_PORT}/mcp",
+                                          "--header", "X-API-Key: ${PROXYMAN_BRIDGE_KEY}"],
                                  "requires": ["PROXYMAN_BRIDGE_KEY"]}}}
 BROWSER = {"host_port": 8814,
+           "install": MCP_REMOTE_INSTALL,
            "secrets": {"RESEARCH_BROWSER_KEY": {
                        "hint": "browser (run ./service.sh browser once)"}},
-           "mcp": {"browser": {"url": "http://host.docker.internal:${HOST_PORT}/mcp",
-                               "headers": {"X-API-Key": "${RESEARCH_BROWSER_KEY}"},
+           "mcp": {"browser": {"command": "mcp-remote",
+                               "args": ["http://host.docker.internal:${HOST_PORT}/mcp",
+                                        "--header", "X-API-Key: ${RESEARCH_BROWSER_KEY}"],
                                "requires": ["RESEARCH_BROWSER_KEY"]}}}
 OBSIDIAN = {"secrets": {"OBSIDIAN_ANNOTATED_KEY": {}},
             "egress": ["mcp-obsidian.dmetr.io"],
@@ -1393,7 +1398,7 @@ class TestPluginPorts(unittest.TestCase):
         self.assertEqual(d["HOST_MCP_PORTS"], "8814,8816")
 
     # The browser server declares requires:, so it is only configured when its
-    # slot resolves — bind it and mark the source present to see the url.
+    # slot resolves — bind it and mark the source present to see substituted args.
     WIRED_ENV = {"PRESENT_SECRET_VARS": "RESEARCH_BROWSER_KEY",
                  "SECRETS_FILE": "/sec/secrets.env"}
     BOUND = {"RESEARCH_BROWSER_KEY": "RESEARCH_BROWSER_KEY"}
@@ -1401,7 +1406,7 @@ class TestPluginPorts(unittest.TestCase):
     def _wired(self, man):
         return derive({**man, "common_secrets": self.BOUND}, env=self.WIRED_ENV)
 
-    def test_host_port_substituted_in_server_url(self):
+    def test_host_port_substituted_in_server_args(self):
         d = self._wired({"plugins": ["browser"], "plugin_ports": {"browser": 8815}})
         self.assertIn("host.docker.internal:8815/mcp", d["AGENT_SERVERS_JSON"])
         self.assertNotIn("${HOST_PORT}", d["AGENT_SERVERS_JSON"])
@@ -1411,11 +1416,16 @@ class TestPluginPorts(unittest.TestCase):
         self.assertIn("host.docker.internal:8814/mcp", d["AGENT_SERVERS_JSON"])
         self.assertNotIn("${HOST_PORT}", d["AGENT_SERVERS_JSON"])
 
+    def test_browser_slot_not_in_remote_slots(self):
+        d = self._wired({"plugins": ["browser"]})
+        self.assertIn("RESEARCH_BROWSER_KEY", d["AGENT_SERVER_SLOTS"])
+        self.assertEqual(d["AGENT_SERVER_REMOTE_SLOTS"], "")
+
     def test_substitution_does_not_mutate_plugin_files(self):
         # PLUGIN_FILES is a module-level fixture shared by every test in this
         # file (and in production a plugin doc the caller still owns).
         derive({"plugins": ["browser"], "plugin_ports": {"browser": 8815}})
-        self.assertEqual(BROWSER["mcp"]["browser"]["url"],
+        self.assertEqual(BROWSER["mcp"]["browser"]["args"][0],
                          "http://host.docker.internal:${HOST_PORT}/mcp")
 
     LOCAL_BRIDGE = {"p": {"install": "x", "host_port": 1999,
