@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import manifest as m
 import wire_plugins
 
-MODULE = Path(__file__).parent.parent / "src" / "manifest.py"
+REPO = Path(__file__).parent.parent
+MODULE = REPO / "src" / "manifest.py"
 
 SERENA = {"install": "x", "mcp": {"serena": {"command": "bash", "args": ["-lc", "s"]}},
           "egress": ["blob.core.windows.net"]}
@@ -261,6 +262,87 @@ class TestErrorTable(unittest.TestCase):
                 with self.assertRaises(m.ManifestError) as cm:
                     derive({"plugins": ["p"]}, plugin_files=files)
                 self.assertEqual(str(cm.exception), message)
+
+    # ── BASE_IMAGE_BINS: the install: rule's one exemption ──────────────────
+    # mcp-remote used to be installed by three plugins at once, all into the
+    # same global npm prefix, so the last install decided the version for all
+    # of them and bumping one pin silently retargeted the others. It is now a
+    # base tool: the Dockerfile installs it, and a plugin that execs it needs
+    # no install: block, the same way nothing installs bash.
+
+    def test_local_server_still_needs_an_install_block(self):
+        files = {"p": {"mcp": {"srv": {"command": "some-binary"}}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertEqual(
+            str(cm.exception),
+            "plugin 'p': a local (command:) server needs an install: block "
+            "(baked into the image), unless it execs a base tool (mcp-remote)")
+
+    def test_base_tool_server_needs_no_install_block(self):
+        files = {"p": {"mcp": {"srv": {"command": "mcp-remote",
+                                       "args": ["https://x.test/mcp"]}}}}
+        derive({"plugins": ["p"]}, plugin_files=files)      # must not raise
+
+    def test_exemption_is_per_server_not_per_plugin(self):
+        """A plugin running a base tool AND its own binary still bakes the
+        second — otherwise one mcp-remote server would excuse the whole file."""
+        files = {"p": {"mcp": {
+            "bridge": {"command": "mcp-remote", "args": ["https://x.test/mcp"]},
+            "own": {"command": "some-binary"}}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"plugins": ["p"]}, plugin_files=files)
+        self.assertIn("needs an install: block", str(cm.exception))
+
+    def test_interpreters_are_not_base_tools(self):
+        """REGRESSION GUARD: bash/python3 must never join BASE_IMAGE_BINS.
+
+        The image ships them, so adding them looks harmless — but an entry
+        means "exec'ing this IS the whole server", and `command: bash` is a
+        wrapper whose real payload sits in args. Excusing it would let a plugin
+        declare a server that execs something nothing installed, passing
+        exactly the case this rule exists to catch.
+        """
+        for interp in ("bash", "sh", "python3", "python", "npx", "node"):
+            self.assertNotIn(interp, m.BASE_IMAGE_BINS)
+        files = {"p": {"mcp": {"srv": {
+            "command": "bash", "args": ["-c", "exec never-installed"]}}}}
+        with self.assertRaises(m.ManifestError):
+            derive({"plugins": ["p"]}, plugin_files=files)
+
+    def test_base_tools_are_actually_installed_by_the_dockerfile(self):
+        """The set and the image have to agree; nothing else checks it.
+
+        BASE_IMAGE_BINS is the reason three plugins stopped installing
+        mcp-remote. If the Dockerfile layer is ever dropped or renamed, that
+        exemption starts excusing a binary no image contains, and the failure
+        lands on whichever agent first calls the tool.
+        """
+        # Comment lines are stripped first. The Dockerfile explains
+        # mcp-remote at length, so a whole-file substring search stays green
+        # long after the install layer is gone — it would be matching the
+        # prose that describes the thing rather than the thing.
+        instructions = "\n".join(
+            line for line in (REPO / "Dockerfile").read_text().splitlines()
+            if not line.lstrip().startswith("#"))
+        for name in sorted(m.BASE_IMAGE_BINS):
+            self.assertTrue(
+                name in instructions,
+                f"BASE_IMAGE_BINS claims the image provides {name!r}, but no "
+                "Dockerfile instruction installs it (comments do not count)")
+
+    def test_no_plugin_re_pins_a_base_tool(self):
+        """REGRESSION: the trap this replaced — one pin per plugin, one prefix."""
+        offenders = [
+            path.parent.name
+            for path in sorted((REPO / "plugins").glob("*/plugin.yml"))
+            if any(f"{name}@" in path.read_text()
+                   for name in m.BASE_IMAGE_BINS)]
+        self.assertEqual(
+            offenders, [],
+            "these plugins pin a base tool themselves; the Dockerfile owns the "
+            "version, and a second install into the same npm prefix silently "
+            "wins over it")
 
     def test_bad_plugin_egress_domain(self):
         for bad in ("https://x.com", "x.com/path", "*.foo.com", "foo", "a b.com"):

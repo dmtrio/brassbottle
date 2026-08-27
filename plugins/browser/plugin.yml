@@ -1,6 +1,7 @@
 # browser — watchable desktop browser the agent drives. Bridged to LOCAL stdio
 # via `mcp-remote` so every agent (not just Claude) reaches the host HTTP
-# service on 8814. mcp-remote (baked by install:) is a stdio↔HTTP proxy;
+# service on 8814. mcp-remote is a stdio↔HTTP proxy and a BASE TOOL (installed
+# once by the Dockerfile, so no install: block here);
 # ${RESEARCH_BROWSER_KEY} is substituted into the X-API-Key header at connect
 # time from the agent shim env, not argv. See ./README.md.
 
@@ -8,9 +9,6 @@ host_port: 8814                        # firewall grant → HOST_MCP_PORTS
 
 secrets:
   RESEARCH_BROWSER_KEY: {hint: "browser (run ./service.sh browser once)"}
-
-install: |
-  npm install -g 'mcp-remote@^0.1.38'
 
 mcp:
   browser:

@@ -1,15 +1,13 @@
 # proxyman — Proxyman traffic-capture bridge. Bridged to LOCAL stdio via
 # `mcp-remote` so every agent (not just Claude) reaches the host HTTP service
-# on 8813. mcp-remote substitutes ${PROXYMAN_BRIDGE_KEY} into the X-API-Key
+# on 8813. mcp-remote is a BASE TOOL (installed once by the Dockerfile, so no
+# install: block here). It substitutes ${PROXYMAN_BRIDGE_KEY} into the X-API-Key
 # header at connect time from the agent shim env. See ./README.md.
 
 host_port: 8813                        # firewall grant → HOST_MCP_PORTS
 
 secrets:
   PROXYMAN_BRIDGE_KEY: {hint: "proxyman (run ./service.sh proxyman once)"}
-
-install: |
-  npm install -g 'mcp-remote@^0.1.38'
 
 mcp:
   proxyman:
