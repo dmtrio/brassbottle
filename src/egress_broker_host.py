@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -444,6 +445,37 @@ def read_daemon_endpoint(egress_root: Path) -> DaemonEndpoint | None:
         LOG.info("egress broker endpoint stale pid=%d", pid)
         return None
     return DaemonEndpoint(host=host, port=port, pid=pid)
+
+
+def address_family_for_host(bind_host: str) -> int:
+    """The socket family EgressBrokerHTTPServer must bind with for this host.
+
+    ThreadingHTTPServer hardcodes AF_INET, so an IPv6 bind host ("::",
+    "::1", a link-local VPN literal) fails at bind() with "Address family
+    for hostname not supported" — before daemon.json is ever written, which
+    is why the connect-address mapping in _connect_host_for_bind was
+    unreachable in practice. "" / "0.0.0.0" (all interfaces) stay IPv4;
+    a name is resolved, preferring IPv4 (the historical behaviour) and
+    falling back to IPv6 only when the name has no A record.
+    """
+    if bind_host in ("", "0.0.0.0"):
+        return socket.AF_INET
+    try:
+        return (
+            socket.AF_INET6
+            if ipaddress.ip_address(bind_host).version == 6
+            else socket.AF_INET
+        )
+    except ValueError:
+        pass
+    try:
+        families = {info[0] for info in socket.getaddrinfo(bind_host, None)}
+    except OSError:
+        # Unresolvable: let bind() raise the real error rather than guessing.
+        return socket.AF_INET
+    return socket.AF_INET if socket.AF_INET in families else (
+        socket.AF_INET6 if socket.AF_INET6 in families else socket.AF_INET
+    )
 
 
 def _connect_host_for_bind(bind_host: str) -> str:
@@ -1586,6 +1618,15 @@ class EgressBrokerHTTPServer(ThreadingHTTPServer):
         self.broker = broker
         self.token_store = token_store
         self.operator_token = operator_token
+        # Instance attribute, set BEFORE super().__init__ — socketserver reads
+        # self.address_family when it creates the socket.
+        self.address_family = address_family_for_host(server_address[0])
+        LOG.info(
+            "egress broker bind host=%s port=%d family=%s",
+            server_address[0],
+            server_address[1],
+            "AF_INET6" if self.address_family == socket.AF_INET6 else "AF_INET",
+        )
         super().__init__(server_address, EgressBrokerRequestHandler)
 
 
