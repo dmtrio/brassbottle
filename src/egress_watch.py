@@ -449,8 +449,10 @@ class EgressWatcher:
                         pass
                     return
 
-        def dialog_thread() -> None:
-            title, message = build_dialog_message(details)
+        def notification_thread() -> None:
+            # Independent of the dialog: a stalled Notification Center must
+            # never delay the dialog, so this runs on its own thread and is
+            # never joined (daemon; it logs its own completion).
             note_title, note_message = build_notification_message(details)
             notify_argv = build_notification_argv(
                 title=note_title,
@@ -464,8 +466,11 @@ class EgressWatcher:
                     self._run_notification(notify_argv, request_id=details.request_id)
             except Exception as exc:
                 LOG.warning("egress watch notification failed reason=%s", exc)
-            # The notification takes real time; if the terminal answered while
-            # it ran, spawning the dialog now would orphan it on screen.
+
+        def dialog_thread() -> None:
+            title, message = build_dialog_message(details)
+            # A terminal answer can land before this thread gets scheduled;
+            # spawning the dialog then would orphan it on screen.
             if resolved.is_set():
                 LOG.info(
                     "egress watch dialog skipped request_id=%s reason=already_resolved",
@@ -504,8 +509,14 @@ class EgressWatcher:
                     pass
 
         terminal = threading.Thread(target=terminal_thread, daemon=True)
+        notification = threading.Thread(
+            target=notification_thread,
+            name="egress-notify",
+            daemon=True,
+        )
         dialog = threading.Thread(target=dialog_thread, daemon=True)
         terminal.start()
+        notification.start()
         dialog.start()
         try:
             choice = choice_queue.get()
