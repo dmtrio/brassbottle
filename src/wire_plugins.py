@@ -27,11 +27,8 @@ Payload:
       "agent_servers": [
         {"name": "obsidian-annotated", "slot": "OBSIDIAN_ANNOTATED_KEY",
          "spec": {"url": ..., "headers": {...${SLOT}...}},
-         "ref":     ["claude", "kimi", "codex"],           # env-ref configs
-         "literal": [{"agent": "cursor-agent",
-                      "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}],
-         "warn":    [],                                    # REMOTE spec only
-         "local":   ["cursor-agent", ...]}                 # LOCAL spec only
+         "ref":   ["claude", "kimi", "codex"],   # env_refs truthy
+         "local": ["cursor-agent", ...]}         # everyone else
       ]
     }
 
@@ -121,8 +118,12 @@ AGENT_MCP_FIELDS = frozenset({
 AGENT_MCP_REQUIRED_FIELDS = AGENT_MCP_FIELDS - frozenset({"settings"})
 AGENT_MCP_FORMATS = frozenset({"json", "toml"})
 AGENT_MCP_STRATEGIES = frozenset({"claude_preapprove", "codex_managed_block"})
-LITERAL_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl"})
-AGENT_MCP_DIALECTS = LITERAL_DIALECTS | frozenset({"mcpServers"})
+# Dialects a descriptor may declare: the key an agent's REMOTE config carries
+# the URL under. Only ever consulted to render a remote entry for an agent that
+# could not hold a ${VAR} in a header — those take the mcp-remote shim now — so
+# the value is validated and otherwise unused. Kept so descriptors stay valid
+# unchanged; retiring the field is a separate change.
+AGENT_MCP_DIALECTS = frozenset({"url", "httpUrl", "type-http", "serverUrl", "mcpServers"})
 # Kept in lockstep with manifest.CODEX_MANAGED_BLOCK_ENV_REFS (parity-tested in
 # tests/test_wire_plugins.py): "bearer_token_env_var" is the only field name
 # _codex_block_body renders, so it is the only string manifest.py may accept.
@@ -288,36 +289,25 @@ def _parse_agent_servers_payload(value):
         ref = entry.get("ref")
         if not isinstance(ref, list) or not all(isinstance(agent, str) for agent in ref):
             raise WireError(f"{where}.ref must be a list of agent binaries")
-        warn = entry.get("warn")
-        if not isinstance(warn, list) or not all(isinstance(agent, str) for agent in warn):
-            raise WireError(f"{where}.warn must be a list of agent binaries")
         local = entry.get("local")
         if not isinstance(local, list) or not all(isinstance(agent, str) for agent in local):
             raise WireError(f"{where}.local must be a list of agent binaries")
-        literal = entry.get("literal")
-        if not isinstance(literal, list):
-            raise WireError(f"{where}.literal must be a list")
-        normalized_literal = []
-        for j, lit in enumerate(literal):
-            lit_where = f"{where}.literal[{j}]"
-            if not isinstance(lit, dict):
-                raise WireError(f"{lit_where} must be a JSON object")
-            if not isinstance(lit.get("agent"), str) or not lit.get("agent"):
-                raise WireError(f"{lit_where}.agent must be a non-empty string")
-            key_envs = lit.get("key_envs")
-            if not isinstance(key_envs, dict):
-                raise WireError(f"{lit_where}.key_envs must be a JSON object")
-            if not all(isinstance(slot, str) and isinstance(key_env, str)
-                       for slot, key_env in key_envs.items()):
-                raise WireError(f"{lit_where}.key_envs must map slot names to env-var names")
-            normalized_literal.append({"agent": lit["agent"], "key_envs": dict(key_envs)})
+        # `literal` and `warn` were the buckets for agents that could not hold a
+        # ${VAR} in a remote header: one baked the key into the config file, the
+        # other declined to wire at all. Both are gone — those agents take the
+        # mcp-remote shim through `local`. A payload still carrying them was
+        # built by an older host half; say so rather than wiring a subset.
+        for retired in ("literal", "warn"):
+            if entry.get(retired):
+                raise WireError(
+                    f"{where}.{retired} is no longer produced: agents that cannot "
+                    "hold a ${VAR} in a remote header take the mcp-remote shim. "
+                    "This payload was built by an older host half.")
         out.append({
             "name": entry["name"],
             "spec": entry["spec"],
             "requires": list(requires),
             "ref": list(ref),
-            "literal": normalized_literal,
-            "warn": list(warn),
             "local": list(local),
         })
     return out
@@ -641,28 +631,67 @@ def _merge_named_entry(path, name, entry):
     _write_atomic(path, _dump_json(data), mode=0o600)
 
 
-def _literal_agent_config(dialect, spec, keys):
-    """Render a required remote server for a literal-key dialect. Replace every
-    ${SLOT} header reference from the effective per-agent key map, then shape
-    by descriptor dialect (url/httpUrl/type-http/serverUrl)."""
-    def replace(value):
-        if not isinstance(value, str):
-            return value
-        for slot, key in keys.items():
-            value = value.replace("${" + slot + "}", key)
-        return value
+MCP_REMOTE_BIN = "mcp-remote"
 
-    headers = {k: replace(v)
-               for k, v in (spec.get("headers") or {}).items()}
-    if dialect == "httpUrl":
-        return {"httpUrl": spec.get("url"), "headers": headers}
-    if dialect == "type-http":
-        return {"type": "http", "url": spec.get("url"), "headers": headers}
-    if dialect == "url":
-        return {"url": spec.get("url"), "headers": headers}
-    if dialect == "serverUrl":
-        return {"serverUrl": spec.get("url"), "headers": headers}
-    raise WireError(f"literal MCP wiring requires dialect one of: {', '.join(sorted(LITERAL_DIALECTS))}")
+
+def _shim_remote_spec(spec):
+    """Render a REMOTE spec as a LOCAL mcp-remote invocation.
+
+    The compatibility shim, and the reason no wiring path writes a key to disk.
+    This REPLACED _literal_agent_config, which rendered a remote server for an
+    agent that cannot hold a ${VAR} inside a remote header by substituting the
+    resolved key into the header and shaping it per dialect — i.e. by baking the
+    secret into that agent's config file, and making up.sh carry the value on
+    the `docker exec` argv to get it there.
+
+    mcp-remote dials the URL and substitutes ${SLOT} into each --header from ITS
+    OWN process env at connect time, so the ref survives into the config file
+    and the value stays in the agent's shim env. It also expresses ANY header,
+    where a dialect rendering only ever expressed the ones its agent understood.
+
+    This is the ecosystem's own rule of thumb — a client whose config takes only
+    command/args needs the bridge, one that takes url/serverUrl connects
+    directly — so the shim is chosen per agent and drops away the moment an
+    agent gains native support, rather than being baked into every plugin's
+    declaration.
+
+    Header order follows the spec's, so rendering is deterministic and goldens
+    are stable.
+    """
+    args = [spec["url"]]
+    for name, value in (spec.get("headers") or {}).items():
+        args += ["--header", f"{name}: {value}"]
+    return {"command": MCP_REMOTE_BIN, "args": args}
+
+
+def _render_for_agent(spec, requires, agent, server_name):
+    """The per-agent transport decision, in one place.
+
+    Local specs pass through. For a REMOTE spec:
+      env_refs truthy  → native, when the agent's own shape can express it
+      otherwise        → the mcp-remote shim
+    No key is resolved on either branch.
+    """
+    if "command" in spec:
+        return spec
+    env_refs = agent["env_refs"]
+    if env_refs:
+        if isinstance(env_refs, str):
+            try:
+                return _render_named_env_ref_server(
+                    spec, requires, env_refs, server_name, agent["binary"])
+            except WireError as exc:
+                # NOT fatal, and no longer a skip either. A named env_refs field
+                # is bearer-only, so an X-API-Key remote cannot be rendered
+                # natively for kimi — which once aborted the whole payload build
+                # under `set -e`, costing every other agent its MCP config, and
+                # was then narrowed to dropping the server for that agent. The
+                # shim expresses any header, so the agent simply gets the server.
+                print(f"  · {server_name}: {agent['binary']} takes the mcp-remote "
+                      f"bridge ({exc})", file=sys.stderr)
+                return _shim_remote_spec(spec)
+        return _claude_server(spec)
+    return _shim_remote_spec(spec)
 
 
 def write_agent_server(binary, config_path, name, entry, home):
@@ -670,15 +699,6 @@ def write_agent_server(binary, config_path, name, entry, home):
     path = _home_config_path(home, binary, config_path)
     _merge_named_entry(path, name, entry)
     print(f"  ✓ {binary} MCP config for {name}{_agent_note_suffix(binary)}")
-
-
-def warn_agent_server(binary, config_path, name, slots):
-    """A managed-block agent with remote-MCP pending support warns only."""
-    if isinstance(slots, str):
-        slots = [slots]
-    print(f"  ⚠ {binary} agent-scoped server '{name}' not yet wired into ~/{config_path} "
-          "(pending verification of this agent's remote-MCP config format). The key(s) "
-          f"{', '.join(slots)} are available to {binary} processes via its shim.")
 
 
 def _delete_named_servers(path, names):
@@ -935,31 +955,17 @@ def run(payload, home, workspace, env):
 
     # Resolve agent-scoped servers to per-agent final entries up front so each
     # strategy loop can stay descriptor-driven and side-effect free.
+    # Every agent-scoped entry goes through one per-agent transport decision
+    # (_render_for_agent): native remote where the agent supports it, the
+    # mcp-remote shim where it does not, a local spec verbatim.
     ref_required_by_agent = {}      # binary -> {name: rendered entry}
-    literal_required_by_agent = {}  # binary -> {name: rendered entry}
     for s in agent_servers:
         for binary in s["ref"]:
             agent = agents_by_binary.get(binary)
             if agent is None:
                 continue
-            env_refs = agent["env_refs"]
-            if isinstance(env_refs, str) and "command" not in s["spec"]:
-                rendered = _render_named_env_ref_server(
-                    s["spec"], s["requires"], env_refs, s["name"], binary
-                )
-            else:
-                rendered = _claude_server(s["spec"])
-            ref_required_by_agent.setdefault(binary, {})[s["name"]] = rendered
-        for lit in s["literal"]:
-            binary = lit["agent"]
-            agent = agents_by_binary.get(binary)
-            if agent is None:
-                continue
-            keys = {slot: env.get(key_env, "")
-                    for slot, key_env in lit["key_envs"].items()}
-            literal_required_by_agent.setdefault(binary, {})[s["name"]] = _literal_agent_config(
-                agent["dialect"], s["spec"], keys
-            )
+            ref_required_by_agent.setdefault(binary, {})[s["name"]] = _render_for_agent(
+                s["spec"], s["requires"], agent, s["name"])
 
     # Runs for every installed agent even with no plugins enabled, so entries
     # from a plugin removed from the manifest are cleaned up, not orphaned
@@ -971,9 +977,13 @@ def run(payload, home, workspace, env):
 
     def local_for(binary):
         d = dict(local)
+        agent = agents_by_binary.get(binary)
         for s in agent_servers:
-            if binary in s["local"]:
-                d[s["name"]] = s["spec"]
+            if binary in s["local"] and agent is not None:
+                # A remote spec arrives here as an mcp-remote shim: a stdio
+                # entry like any other local plugin, ${SLOT} ref intact.
+                d[s["name"]] = _render_for_agent(
+                    s["spec"], s["requires"], agent, s["name"])
         return d
 
     for agent in agents:
@@ -995,9 +1005,6 @@ def run(payload, home, workspace, env):
 
         path = _home_config_path(home, binary, config_path)
         if strategy == "codex_managed_block":
-            for s in agent_servers:
-                if binary in s["warn"]:
-                    warn_agent_server(binary, config_path, s["name"], s["requires"])
             codex_servers = local_for(binary)
             codex_servers.update(ref_required_by_agent.get(binary, {}))
             wire_codex_toml(path, codex_servers, agent["settings"])
@@ -1007,15 +1014,19 @@ def run(payload, home, workspace, env):
             raise WireError(
                 f"agent '{binary}' has unsupported non-strategy MCP format '{fmt}'")
 
-        literal_dialect = (not env_refs and dialect in LITERAL_DIALECTS)
-        if not literal_dialect and dialect != "mcpServers":
-            raise WireError(
-                f"agent '{binary}' has unsupported MCP descriptor combination "
-                f"(format={fmt!r}, dialect={dialect!r}, env_refs={env_refs!r}, strategy={strategy!r})")
-
-        required = (literal_required_by_agent.get(binary, {})
-                    if literal_dialect else
-                    ref_required_by_agent.get(binary, {}))
+        # `dialect` no longer selects a rendering. It named the key an agent's
+        # REMOTE config carries the URL under (url / httpUrl / type-http /
+        # serverUrl), which only mattered while a non-ref agent got a remote
+        # entry with the key baked in. Those agents take the mcp-remote shim
+        # now — a stdio entry, same shape for everyone — so the value is
+        # validated against AGENT_MCP_DIALECTS and otherwise unused.
+        #
+        # reconcile_agent_servers stays even though `required` is empty for a
+        # non-ref agent: it is what DELETES the stale entry — and with it the
+        # raw key — that a pre-shim run wrote into this config. Removing it
+        # would strand that key on disk in every container that has not run
+        # `up` since. Do not "simplify" it away.
+        required = ref_required_by_agent.get(binary, {})
         reconcile_agent_servers(binary, config_path, required, home)
         wire_plugin_servers_json(path, local_for(binary))
         if binary in _AGENT_SYNC_NOTES:
@@ -1036,11 +1047,11 @@ def build_payload(env):
     Required servers are assembled from three inputs:
       AGENT_SERVERS_JSON — {name: {"spec": ..., "requires": [SLOT, ...]}}
       AGENT_SECRETS      — resolved "agent<TAB>slot<TAB>source" records
-      IDENTITY_SECRETS   — "agent:key_env:slot" records for literal-key agents;
-                           the docker-exec environment supplies those values.
-    A server is present only where all of its required slots resolve. Role
-    routing is descriptor-driven: bool-ref env_refs, named-ref env_refs,
-    managed-block strategy, literal dialects, and local command servers.
+    A server is present only where all of its required slots resolve. There is
+    no third input: IDENTITY_SECRETS carried per-agent key ENV NAMES so a remote
+    server could be rendered for an agent with the key inlined. Those agents get
+    the mcp-remote shim instead, which reads ${SLOT} from their own env, so no
+    key name — and no key — reaches this half.
     """
     try:
         raw_agents = json.loads(env.get("AGENTS_MCP_JSON") or "[]")
@@ -1076,16 +1087,6 @@ def build_payload(env):
             raise WireError(f"AGENT_SECRETS has an invalid record: {line!r}")
         effective.add((agent, slot))
 
-    key_envs = {}
-    for triple in (env.get("IDENTITY_SECRETS") or "").split():
-        parts = triple.split(":")
-        agent = parts[0]
-        key_env = parts[1] if len(parts) > 1 else ""
-        slot = parts[2] if len(parts) > 2 else ""
-        if not (agent and key_env and slot):
-            raise WireError(f"IDENTITY_SECRETS has an invalid record: {triple!r}")
-        key_envs[(agent, slot)] = key_env
-
     agents_by_binary = {agent["binary"]: agent for agent in agents}
     agent_order = [agent["binary"] for agent in agents]
 
@@ -1097,62 +1098,33 @@ def build_payload(env):
         if not isinstance(requires, list) or not all(isinstance(slot, str) for slot in requires):
             raise WireError(f"agent server '{name}' requires must be a list of slots")
         e = {"name": name, "spec": sd["spec"], "requires": requires,
-             "ref": [], "literal": [], "warn": [], "local": []}
-        is_local = "command" in sd["spec"]
+             "ref": [], "local": []}
         for binary in agent_order:
             if not all((binary, slot) in effective for slot in requires):
                 continue
             agent = agents_by_binary[binary]
+            # Two roles, decided by env_refs alone. A `ref` agent (claude,
+            # codex, kimi) holds a ${SLOT} ref in its own config and is wired by
+            # its own strategy; everyone else takes the server through the
+            # ordinary local-plugin path. WHAT each receives — native remote, an
+            # mcp-remote shim, or a local spec verbatim — is decided by
+            # _render_for_agent container-side, which has the descriptor to hand.
+            #
+            # The role this replaced put the agent's RESOLVED KEY in its config
+            # file, for agents that cannot hold a ${VAR} in a remote header, and
+            # is gone. So is the skip that sat here: a spec a `ref` agent could
+            # not express natively (browser's X-API-Key against kimi's
+            # bearerTokenEnvVar) first aborted the whole payload build under
+            # `set -e` — costing claude, cursor and codex their MCP config over
+            # a plugin none of them needed — and was then narrowed to dropping
+            # that one server for that one agent. It now falls back to the shim
+            # and the agent simply gets the server. Nothing per-agent may fail
+            # in this loop; keep it that way.
             if agent["env_refs"]:
-                if isinstance(agent["env_refs"], str) and not is_local:
-                    # Closed contract: a named env_refs field (e.g.
-                    # bearerTokenEnvVar) is only legal for the single-slot
-                    # bearer-header remote shape. Checked HOST-side so an
-                    # unsupported descriptor/plugin pairing is reported before
-                    # container wiring.
-                    #
-                    # SKIP, don't raise. This used to abort the entire payload
-                    # build (up.sh runs under `set -e`), so ONE plugin whose
-                    # auth scheme ONE agent cannot express took wiring down for
-                    # EVERY agent. That fired for real: the browser plugin's
-                    # `X-API-Key` against kimi's `bearerTokenEnvVar` aborted
-                    # `djinn up` outright, costing claude/cursor/codex their MCP
-                    # config over a plugin none of them needed. An agent that
-                    # cannot express a server's auth simply does not get that
-                    # server; every other agent still wires.
-                    try:
-                        _render_named_env_ref_server(
-                            sd["spec"], requires, agent["env_refs"], name, binary
-                        )
-                    except WireError as exc:
-                        # STDERR, never stdout: main() prints the payload JSON
-                        # to stdout and up.sh captures it into $PAYLOAD, which
-                        # is piped to the container half. A warning on stdout
-                        # corrupts that JSON and aborts `djinn up` anyway —
-                        # re-breaking the very bug this skip exists to fix.
-                        print(f"  ⚠ {exc}\n    → skipped for {binary} only; "
-                              "other agents are unaffected.", file=sys.stderr)
-                        continue
                 e["ref"].append(binary)
-                continue
-            if is_local:
+            else:
                 e["local"].append(binary)
-                continue
-            if agent["strategy"] == "codex_managed_block":
-                e["warn"].append(binary)
-                continue
-            if agent["dialect"] in LITERAL_DIALECTS:
-                slots = {slot: key_envs.get((binary, slot), "") for slot in requires}
-                missing = [slot for slot, key_env in slots.items() if not key_env]
-                if missing:
-                    raise WireError(
-                        f"agent server '{name}' is missing literal key env for {binary}: {', '.join(missing)}")
-                e["literal"].append({"agent": binary, "key_envs": slots})
-                continue
-            raise WireError(
-                f"agent server '{name}' cannot be rendered for agent '{binary}' "
-                "(unsupported remote MCP dialect/strategy combination)")
-        if e["ref"] or e["literal"] or e["warn"] or e["local"]:
+        if e["ref"] or e["local"]:
             agent_servers.append(e)
 
     return {

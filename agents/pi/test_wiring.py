@@ -9,14 +9,18 @@ import agent_test_kit as kit
 
 
 class PiWiring(unittest.TestCase):
-    def test_literal_remote_type_http_dialect(self):
+    def test_remote_server_arrives_as_a_shim_with_no_baked_key(self):
         golden = Path(__file__).parent / "golden"
 
         def do_wire():
-            return kit.wire("pi", key_env_values={"IDENTITY_KEY_0": "PI_KEY"})
+            return kit.wire("pi")
 
         r = do_wire()
         path = r.home / ".pi" / "agent" / "mcp.json"
+        raw = path.read_text()
+        self.assertIn("${TEST_TOKEN}", raw)
+        self.assertNotIn("TEST_SECRET", raw)
+        self.assertIn("mcp-remote", raw)
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
         kit.assert_matches_golden(r, golden, wire_fn=do_wire)
 

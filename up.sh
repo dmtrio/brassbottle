@@ -445,42 +445,22 @@ echo "  ✓ skills linked (read-only; rules changes go via PR to the rules repo)
 # src/wire_plugins.py (baked into the image, unit-tested by
 # tests/test_wire_plugins.py). The SAME file also builds the JSON payload
 # (--build-payload, host python3), so the descriptor-driven schema and runtime
-# wiring rules live in one tested place; bash only routes env vars. Keys never enter the
-# payload: they travel as docker-exec env vars the payload references by name —
-# and only for descriptor-marked literal-key agents (their configs bake values).
-# Ref-style and managed-block roles keep ${SLOT} refs in config and must not get
-# an inline key on argv.
+# wiring rules live in one tested place; bash only routes env vars. Keys never
+# enter the payload, and no longer travel alongside it either.
 #
-# Build literal remote-agent inputs from resolved AGENT_SECRETS. Only slots
-# required by a REMOTE MCP server travel through docker exec; env-only slots and
-# LOCAL-server slots are already in the per-agent key file (a local server reads
-# ${SLOT} from its own process env, so putting the value on the `docker exec`
-# argv would only leak it into `ps`). Descriptor role decides which agents need
-# literal values at all: only binaries listed in LITERAL_KEY_AGENTS receive
-# IDENTITY_KEY_n for the wiring exec.
-IDENTITY_ENV=()
-IDENTITY_SECRETS=""
-i=0
-while IFS=$'\t' read -r agent slot source; do
-    [ -n "$agent" ] || continue
-    case " $AGENT_SERVER_REMOTE_SLOTS " in *" $slot "*) ;; *) continue ;; esac
-    case " $LITERAL_KEY_AGENTS " in
-        *" $agent "*)
-            IDENTITY_ENV+=(-e "IDENTITY_KEY_${i}=${!source}")
-            IDENTITY_SECRETS="${IDENTITY_SECRETS:+$IDENTITY_SECRETS }$agent:IDENTITY_KEY_$i:$slot"
-            i=$((i + 1)) ;;
-        *) ;;
-    esac
-done <<EOF
-$AGENT_SECRETS
-EOF
-
+# NO SECRET VALUE CROSSES THIS BOUNDARY. There used to be an IDENTITY_KEY_n loop
+# here: an agent that cannot hold a ${VAR} inside a remote MCP header needed the
+# resolved key inlined into its config file, so up.sh handed the VALUE to the
+# wiring exec on the `docker exec` argv — visible in `ps` on the host for the
+# life of the call. Those agents take the mcp-remote shim now, which expands
+# ${SLOT} from the agent's own process env, so the payload references nothing
+# the exec has to carry. Keep it that way: a future change that needs a key here
+# is reintroducing that leak.
 PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
     AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
-    IDENTITY_SECRETS="$IDENTITY_SECRETS" \
     "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py" --build-payload)
 
-printf '%s' "$PAYLOAD" | docker exec -i -u coder "${IDENTITY_ENV[@]}" "$CNAME" \
+printf '%s' "$PAYLOAD" | docker exec -i -u coder "$CNAME" \
     python3 /usr/local/lib/djinn/wire_plugins.py
 
 # ── Container freshness stamps (PLN - Container Freshness Readout) ────────────

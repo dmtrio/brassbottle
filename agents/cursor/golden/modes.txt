@@ -1,3 +1,2 @@
 home/.cursor/mcp.json 0600
 home/.cursor/mcp.json.djinn-plugins 0600
-home/.cursor/mcp.json.djinn-servers 0600

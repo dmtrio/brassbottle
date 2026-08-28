@@ -132,7 +132,7 @@ echo ",$EGRESS_ALL," | grep -qF ",blob.core.windows.net," \
 # full emitted variable set. grep first: quoted multi-line values (e.g.
 # PLUGIN_MCP_ENTRIES) have continuation lines that are not assignments.
 EMITTED=$(printf '%s\n' "$ALL_DERIVED" | grep -oE '^[A-Z_]+=' | tr -d = | LC_ALL=C sort | tr '\n' ' ')
-EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_REMOTE_SLOTS AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS ENABLE_EGRESS_BROKER FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS LITERAL_KEY_AGENTS MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGINS_ENABLED PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES PLUGIN_SERVICES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
+EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS ENABLE_EGRESS_BROKER FORGE GIT_ORG_IDENTITIES GIT_ORG_TOKENS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS MEM_LIMIT MOSH_PORTS MOSH_PORTS_DASH PLUGINS PLUGINS_ENABLED PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES PLUGIN_SERVICES REMOTE_MOSH REMOTE_NOTIFY REMOTE_TMUX REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
 [ "$EMITTED" = "$EXPECTED" ] \
     && pass "--derive emits exactly the variable set up.sh consumes" \
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
@@ -307,19 +307,12 @@ printf '%s' "$AGENT_SECRETS" \
 [ -z "$AGENT_SERVER_REMOTE_SLOTS" ] \
     && pass "no shipped plugin feeds the remote agent-scoped path" \
     || fail "AGENT_SERVER_REMOTE_SLOTS should be empty, got: '$AGENT_SERVER_REMOTE_SLOTS'"
-# Literal-key agents (a literal dialect with env_refs false) are the ones whose
-# keys travel as IDENTITY_KEY_n on the exec env. Derived from the descriptors so
-# adding or retiring an agent needs no edit here.
-LITERAL_DIALECT_RE=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest;
-print("^(" + "|".join(sorted(manifest.AGENT_MCP_LITERAL_DIALECTS)) + ")$")') \
-    || fail "could not read AGENT_MCP_LITERAL_DIALECTS from src/manifest.py"
-LITERAL_IDENTITY_SECRETS=$(i=0; for af in agents/*/agent.yml; do
-    yq -e ".mcp | select(.env_refs == false and (.dialect | test(\"$LITERAL_DIALECT_RE\")))" "$af" >/dev/null 2>&1 || continue
-    printf '%s:IDENTITY_KEY_%d:MCP_GATEWAY_TOKEN ' "$(yq -r .binary "$af")" "$i"; i=$((i + 1))
-done)
+# No key input: build_payload takes AGENT_SECRETS (bindings, not values) and
+# nothing else. The IDENTITY_KEY_n mapping this used to construct existed only
+# to inline a key into a remote agent-scoped config; those agents take the
+# mcp-remote shim now.
 PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" PLUGIN_MCP_ENTRIES="$PLUGIN_MCP_ENTRIES" \
     AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" \
-    IDENTITY_SECRETS="$LITERAL_IDENTITY_SECRETS" \
     python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero"
 # AGENTS_MCP_JSON is manifest.py's own mcp-capable projection, so this checks
@@ -344,41 +337,29 @@ eval "$A_DERIVED"
 [ "$AGENT_SERVER_SLOTS" = "OBSIDIAN_ANNOTATED_KEY" ] \
     && pass "obsidian-annotated derives a required server slot" \
     || fail "AGENT_SERVER_SLOTS wrong: '$AGENT_SERVER_SLOTS'"
-# up.sh's wiring loop: only descriptor-marked literal-key agents (the derived
-# LITERAL_KEY_AGENTS) get a literal-key env mapping; ref-style agents (claude,
-# kimi) retain the ${SLOT} reference from their shim env.
-A_IDA=""; A_IDENV=(); i=0
-while IFS=$'\t' read -r agent slot source; do
-    [ -n "$agent" ] || continue
-    case " $AGENT_SERVER_SLOTS " in *" $slot "*) ;; *) continue ;; esac
-    case " $LITERAL_KEY_AGENTS " in
-        *" $agent "*) A_IDENV+=(-e "IDENTITY_KEY_${i}=v$i"); A_IDA="${A_IDA:+$A_IDA }$agent:IDENTITY_KEY_$i:$slot"; i=$((i+1)) ;;
-        *) ;;
-    esac
-done <<AEOF
-$AGENT_SECRETS
-AEOF
-A_PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" IDENTITY_SECRETS="$A_IDA" python3 src/wire_plugins.py --build-payload) \
+A_PAYLOAD=$(AGENTS_MCP_JSON="$AGENTS_MCP_JSON" AGENT_SERVERS_JSON="$AGENT_SERVERS_JSON" AGENT_SECRETS="$AGENT_SECRETS" python3 src/wire_plugins.py --build-payload) \
     || fail "--build-payload exited non-zero on agent_servers"
+# claude holds a ${SLOT} ref natively; cursor-agent takes the local path, where
+# the container half renders the remote spec as an mcp-remote shim. The absence
+# of a `literal` bucket is the point — that is what put the raw key on disk.
 printf '%s' "$A_PAYLOAD" | jq -e '
     (.agent_servers | length) == 1
     and .agent_servers[0].name == "obsidian-annotated"
     and .agent_servers[0].ref == ["claude"]
     and .agent_servers[0].local == ["cursor-agent"]
-    and .agent_servers[0].literal == []' >/dev/null \
+    and (.agent_servers[0] | has("literal") | not)
+    and (.agent_servers[0] | has("warn") | not)' >/dev/null \
     && pass "hybrid overrides → build-payload yields per-agent obsidian wiring" \
     || fail "agent_servers payload wrong: $A_PAYLOAD"
-# literal == [] is the point of the mcp-remote bridge, not incidental: a literal
-# entry is what puts the raw key into cursor-agent's config file on disk. It is
-# empty because the spec is local (command:), so cursor-agent is routed through
-# `local` instead and mcp-remote substitutes the key from its own env. Assert it
-# against the REAL plugin.yml (read above), so reverting the plugin to a remote
-# url:/headers: shape fails here rather than silently reinstating the key.
+# Asserted against the REAL plugin.yml (read above): the plugin declares the
+# ENDPOINT and leaves the transport to the wiring layer. A plugin hand-writing
+# its own mcp-remote invocation would fail here — that is the shim leaking back
+# into the schema, and it costs claude/codex/kimi their native transport.
 printf '%s' "$A_PAYLOAD" | jq -e '
-    (.agent_servers[0].spec | has("command") and (.command == "mcp-remote"))
-    and (.agent_servers[0].spec | has("url") | not)' >/dev/null \
-    && pass "obsidian-annotated ships as a local mcp-remote bridge, not a remote spec" \
-    || fail "obsidian spec is not a local mcp-remote bridge: $A_PAYLOAD"
+    (.agent_servers[0].spec | has("url"))
+    and (.agent_servers[0].spec | has("command") | not)' >/dev/null \
+    && pass "obsidian-annotated ships as a remote endpoint declaration" \
+    || fail "obsidian spec is not a remote declaration: $A_PAYLOAD"
 
 echo "── python unit tests (src/manifest.py + src/wire_plugins.py)"
 UNIT_OUT=$(DJINN_SKIP_BACKUP_INTEGRATION=1 python3 -m unittest discover -s tests 2>&1) \

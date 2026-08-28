@@ -41,11 +41,11 @@ opinion.
 | [`serena`](serena/) | local (stdio, baked) | — | [README](serena/README.md) |
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
 | [`codebase-memory`](codebase-memory/) | local (stdio, baked) | — | [README](codebase-memory/README.md) |
-| [`gateway`](gateway/) | local (stdio bridge → host :8811, baked) | `./djinn service gateway` | [README](gateway/README.md) |
+| [`gateway`](gateway/) | remote HTTP | `./djinn service gateway` | [README](gateway/README.md) |
 | [`proxyman`](proxyman/) | local (stdio bridge → host :8813, baked) | `./djinn service proxyman` | [README](proxyman/README.md) |
 | [`browser`](browser/) | local (stdio bridge → host :8814, baked) | `./djinn service browser <container>` | [README](browser/README.md) |
-| [`obsidian-annotated`](obsidian-annotated/) | local (stdio bridge → mcp-obsidian.dmetr.io, baked) | — | [README](obsidian-annotated/README.md) |
-| [`axiom`](axiom/) | local (stdio bridge → mcp.axiom.co, baked) | — | [README](axiom/README.md) |
+| [`obsidian-annotated`](obsidian-annotated/) | remote HTTP (real host) | — | [README](obsidian-annotated/README.md) |
+| [`axiom`](axiom/) | remote HTTP (real host) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
 | [`ngrok`](ngrok/) | CLI binary + secret (no server) | — | [README](ngrok/README.md) |
 | [`rhinomcp-official`](rhinomcp-official/) | remote HTTP (in-Rhino server, official) | Rhino: `MCPStart` | [README](rhinomcp-official/README.md) |
@@ -58,16 +58,35 @@ opinion.
 No `type:` field — the entry shape decides. An `mcp:` entry carries **exactly
 one** of `command:` (local) or `url:` (remote).
 
+`url:` declares an **endpoint**, not a transport. How each agent reaches it is
+`src/wire_plugins.py`'s decision, made per agent from its descriptor: an agent
+that can hold a `${VAR}` inside a remote header (claude, codex, kimi) gets a
+native remote entry; one that cannot (cursor-agent, pi, antigravity-cli) gets an
+`mcp-remote` stdio shim carrying the same `${VAR}`. Neither writes a key to
+disk, and the shim drops away by itself the moment an agent gains native
+support. **Do not hand-write the bridge into a plugin** — a `command:
+mcp-remote` entry forces every agent onto the shim, including the three that
+don't need it.
+
+That axis is independent of `requires:`, which decides whether the server is
+*uniform* (same entry for everyone) or *agent-scoped* (wired per agent from that
+agent's own key):
+
+| | `requires:` — agent-scoped | no `requires:` — uniform |
+|---|---|---|
+| **local** (`command:`) | every bound agent | every agent |
+| **remote** (`url:`) | every bound agent, native or shimmed | Claude only |
+
 | Key | Meaning |
 |---|---|
 | `mcp: {<server>: {command, args}}` | **Local** stdio server, runs in the container. Requires `install:` unless `command` is a base tool (below). |
-| `mcp: {<server>: {url, headers}}` | **Remote** HTTP server, reached on the host or internet. |
+| `mcp: {<server>: {url, headers}}` | **Remote** HTTP endpoint, on the host or internet. With `requires:`, wiring renders it per agent (native or `mcp-remote` shim — see above); without, it reaches Claude only. |
 | `install: \|` | Bash run at **image build** (full network). Required iff a local `command:` entry exists whose `command` is not a **base tool** — a binary the image already provides, listed in `BASE_IMAGE_BINS` (`src/manifest.py`) and installed by the `Dockerfile`. Today that is `mcp-remote` only. Checked per **server**: a plugin running `mcp-remote` for one server and its own binary for another still needs `install:` for the second. Interpreters (`bash`, `python3`) are deliberately **not** base tools — an entry means "exec'ing this *is* the whole server", which is false of a wrapper whose real payload sits in `args`. |
 | `host_port: <int>` | Opens the container firewall to `host.docker.internal:<port>`. Valid with a remote (`url:`) server **or** a local bridge that dials the host (`rhinomcp`); rejected with no MCP server, and a local-only plugin must reference `${HOST_PORT}` in the bridge's `command`/`args` (proof something dials the grant). `${HOST_PORT}` in a remote `url` or a local `command`/`args` resolves to it. A manifest `plugin_ports:` override replaces this default (see below). |
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
 | `volumes: {<name>: /container/path}` | Per-container named volume(s) for state that must outlive a container recreate — see below. Mounted only in containers that enable the plugin. |
 | `services: {<name>: "<command>"}` | In-container process(es) started at `up` — see below. Mounted only for enabled plugins. |
-| `requires: [<SLOT>, …]` | Optional MCP-server field. The server is configured only for agents with every required slot; uncredentialed servers omit it. |
+| `requires: [<SLOT>, …]` | Optional MCP-server field making the server **agent-scoped**: configured only for agents holding every required slot, each from its own resolved key. The key stays a `${SLOT}` ref in every config file — a native entry's ref is expanded by the agent, a shim's by `mcp-remote` from the agent's own process env — so it reaches no file and no command line. |
 | `egress: [host, …]` | Bare hostnames added to this container's firewall allowlist. |
 
 **Local example** (`serena`):
@@ -81,8 +100,8 @@ egress: [blob.core.windows.net]
 ```
 
 **Remote example** (`cordyceps`) — no secret, so no `requires:`, so the same
-entry for everyone. A remote server reaches Claude only; the other agents cannot
-expand `${VAR}` inside a remote header:
+entry for everyone. Without a key to resolve per agent there is nothing to
+shim, and a uniform remote reaches Claude only:
 
 ```yaml
 host_port: 26929
@@ -91,11 +110,11 @@ mcp:
     url: http://host.docker.internal:${HOST_PORT}/mcp
 ```
 
-**Bridged example** (`gateway`) — an HTTP endpoint reached through `mcp-remote`
-so it wires into *every* bound agent, not just Claude. `requires:` makes it
-agent-scoped: only agents with an effective `MCP_GATEWAY_TOKEN` get the entry,
-and each one's own key is substituted from its own process env at connect time,
-so no config file or command line carries it:
+**Credentialed remote example** (`gateway`) — same `url:` shape, plus
+`requires:`, which makes it agent-scoped: only agents with an effective
+`MCP_GATEWAY_TOKEN` get it, each from its own key. Note there is no
+`mcp-remote` anywhere in the declaration — wiring adds the shim for the agents
+that need one, so this reaches *every* bound agent, not just Claude:
 
 ```yaml
 host_port: 8811
@@ -103,9 +122,8 @@ secrets:
   MCP_GATEWAY_TOKEN: {hint: "gateway (run ./djinn service gateway once)"}
 mcp:
   coding:
-    command: mcp-remote
-    args: ["http://host.docker.internal:${HOST_PORT}/mcp", "--header",
-           "Authorization: Bearer ${MCP_GATEWAY_TOKEN}"]
+    url: http://host.docker.internal:${HOST_PORT}/mcp
+    headers: {Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"}
     requires: [MCP_GATEWAY_TOKEN]
 ```
 

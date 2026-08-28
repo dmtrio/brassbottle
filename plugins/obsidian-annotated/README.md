@@ -1,10 +1,9 @@
 # obsidian-annotated
 
 The Annotated Obsidian MCP endpoint (`mcp-obsidian.dmetr.io`) — a remote HTTP
-server on a real internet host (reached via the egress allowlist, so no
-`host_port`, no host service), bridged to **local stdio** by `mcp-remote`. Its
-required secret resolves per agent, and the server is wired only where the
-manifest supplies an effective key.
+server on a real internet host, reached via the egress allowlist, so no
+`host_port` and no host service. Its required secret resolves per agent, and the
+server is wired only where the manifest supplies an effective key.
 
 ```yaml
 plugins: [obsidian-annotated]
@@ -13,24 +12,26 @@ agent_secrets:
   - {agent: cursor-agent, slot: OBSIDIAN_ANNOTATED_KEY, secret: OBSIDIAN_KEY_bot_cursor_agent}
 ```
 
-## Per-agent wiring
+## How each agent reaches it
 
-`djinn up` delivers each bound agent's key into its own `<agent>.env` and wires
-the server per agent. Because the spec is local (`command: mcp-remote`), every
-bound agent gets the **same** entry — a stdio command — through the ordinary
-local wiring path; `mcp-remote` substitutes `${OBSIDIAN_ANNOTATED_KEY}` into the
-`Authorization` header from its own process env at connect time. So no config
-file on disk carries the key, and no agent needs to understand remote-MCP
-headers.
+`djinn up` delivers each bound agent's key into its own `<agent>.env`, then
+wires the server per agent — the plugin declares the endpoint, the wiring layer
+picks the transport:
+
+- **claude, codex, kimi** — a native remote entry holding the `${SLOT}` ref (or,
+  for codex/kimi, the env var's *name* in their own `bearer_token_env_var` /
+  `bearerTokenEnvVar` field). No proxy.
+- **cursor-agent, pi, antigravity-cli** — cannot expand a `${VAR}` inside a
+  remote header, so they get an `mcp-remote` stdio shim with the same ref;
+  `mcp-remote` substitutes it from that agent's own process env at connect time.
+
+Either way the key is in **no config file and on no command line**, and an agent
+moves off the shim by itself if it gains native support. This replaced a design
+under which the second group had the raw key written into their config files.
 
 The per-agent key is what Annotated uses to attribute comment threads, and it is
-preserved: each agent's shim env holds its own resolved key, so each connects as
-itself.
-
-This replaced an earlier remote (`url:` + `headers:`) shape, under which
-cursor-agent and pi — which cannot expand `${VAR}` inside a remote header — had
-the literal key baked into their config files. `mcp-remote` is a base tool
-installed once by the Dockerfile; see `plugins/axiom/` for the same pattern.
+preserved on both paths: each agent's shim env holds its own resolved key, so
+each connects as itself.
 
 ## Access
 

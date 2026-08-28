@@ -431,49 +431,142 @@ class TestRenderNamedEnvRefServer(unittest.TestCase):
                 spec, [self.SLOT], "bearer_token_env_var", "srv", "codex")
 
 
-class TestWriteAgentServer(QuietTestCase):
-    """Tests for literal rendering and write_agent_server / warn_agent_server."""
+class TestShimRemoteSpec(unittest.TestCase):
+    """The compatibility shim: a remote spec rendered as an mcp-remote command.
+
+    Replaced _literal_agent_config, which rendered the same remote server for a
+    non-ref agent by substituting the RESOLVED KEY into the header and shaping
+    it per dialect. The distinguishing property of every test here is that the
+    ${SLOT} reference survives — no key is resolved.
+    """
 
     SPEC = {"url": "https://mcp-obsidian.dmetr.io/mcp",
             "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}
-    SLOT = "OBSIDIAN_ANNOTATED_KEY"
 
-    def test_cursor_agent_missing_file_creates_with_literal_key(self):
-        """cursor-agent on missing file → creates ~/.cursor/mcp.json mode 0600,
-        the ${SLOT} ref substituted with the literal key."""
+    def test_url_leads_and_each_header_becomes_a_header_flag(self):
+        self.assertEqual(wire_plugins._shim_remote_spec(self.SPEC), {
+            "command": "mcp-remote",
+            "args": ["https://mcp-obsidian.dmetr.io/mcp", "--header",
+                     "Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"],
+        })
+
+    def test_ref_survives_untouched(self):
+        rendered = json.dumps(wire_plugins._shim_remote_spec(self.SPEC))
+        self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", rendered)
+
+    def test_expresses_any_header_not_only_bearer(self):
+        """The reason this beats the native rendering it falls back from: a
+        named env_refs field is bearer-only, the shim is not."""
+        rendered = wire_plugins._shim_remote_spec(
+            {"url": "http://h.test/mcp", "headers": {"X-API-Key": "${K}"}})
+        self.assertEqual(rendered["args"], ["http://h.test/mcp", "--header", "X-API-Key: ${K}"])
+
+    def test_multiple_headers_keep_spec_order(self):
+        rendered = wire_plugins._shim_remote_spec({
+            "url": "http://h.test/mcp",
+            "headers": {"Authorization": "Bearer ${A}", "X-Trace": "${B}"}})
+        self.assertEqual(rendered["args"], [
+            "http://h.test/mcp",
+            "--header", "Authorization: Bearer ${A}",
+            "--header", "X-Trace: ${B}"])
+
+    def test_no_headers_is_just_the_url(self):
+        self.assertEqual(
+            wire_plugins._shim_remote_spec({"url": "http://h.test/mcp"}),
+            {"command": "mcp-remote", "args": ["http://h.test/mcp"]})
+
+
+class TestRenderForAgent(unittest.TestCase):
+    """The per-agent transport decision."""
+
+    REMOTE = {"url": "https://e.test/mcp", "headers": {"Authorization": "Bearer ${TOK}"}}
+    XAPIKEY = {"url": "https://e.test/mcp", "headers": {"X-API-Key": "${TOK}"}}
+    LOCAL = {"command": "bridge", "args": ["--stdio"]}
+
+    def _agent(self, binary, env_refs):
+        return {"binary": binary, "config_path": f".{binary}/mcp.json", "format": "json",
+                "dialect": "mcpServers", "env_refs": env_refs, "strategy": "", "settings": {}}
+
+    def test_bool_ref_agent_gets_native_remote(self):
+        out = wire_plugins._render_for_agent(
+            self.REMOTE, ["TOK"], self._agent("claude", True), "s")
+        self.assertEqual(out["type"], "http")
+        self.assertEqual(out["headers"]["Authorization"], "Bearer ${TOK}")
+
+    def test_named_ref_agent_gets_its_own_native_field(self):
+        out = wire_plugins._render_for_agent(
+            self.REMOTE, ["TOK"], self._agent("kimi", "bearerTokenEnvVar"), "s")
+        self.assertEqual(out["bearerTokenEnvVar"], "TOK")
+        self.assertEqual(out["headers"], {})
+
+    def test_non_ref_agent_gets_the_shim(self):
+        out = wire_plugins._render_for_agent(
+            self.REMOTE, ["TOK"], self._agent("cursor-agent", False), "s")
+        self.assertEqual(out["command"], "mcp-remote")
+
+    def test_named_ref_agent_falls_back_to_shim_when_not_bearer(self):
+        """The incident, fixed at the root.
+
+        browser's X-API-Key against kimi's bearerTokenEnvVar first aborted the
+        whole payload build, and was then narrowed to dropping the server for
+        kimi. kimi now simply gets it, over the shim.
+        """
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            out = wire_plugins._render_for_agent(
+                self.XAPIKEY, ["TOK"], self._agent("kimi", "bearerTokenEnvVar"), "browser")
+        self.assertEqual(out["command"], "mcp-remote")
+        self.assertIn("X-API-Key: ${TOK}", out["args"])
+        self.assertIn("kimi", buf.getvalue())
+
+    def test_multi_slot_remote_falls_back_to_shim(self):
+        out = wire_plugins._render_for_agent(
+            {"url": "https://e.test/mcp",
+             "headers": {"Authorization": "Bearer ${A}", "X-Trace": "${B}"}},
+            ["A", "B"], self._agent("kimi", "bearerTokenEnvVar"), "s")
+        self.assertEqual(out["command"], "mcp-remote")
+
+    def test_local_spec_passes_through_for_every_role(self):
+        for env_refs in (True, False, "bearerTokenEnvVar"):
+            with self.subTest(env_refs=env_refs):
+                self.assertEqual(
+                    wire_plugins._render_for_agent(
+                        self.LOCAL, ["TOK"], self._agent("x", env_refs), "s"),
+                    self.LOCAL)
+
+
+class TestWriteAgentServer(QuietTestCase):
+    """write_agent_server merges one rendered entry into an agent's config."""
+
+    ENTRY = {"command": "mcp-remote",
+             "args": ["https://mcp-obsidian.dmetr.io/mcp", "--header",
+                      "Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"]}
+
+    def test_missing_file_creates_config_0600(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             output = io.StringIO()
-            entry = wire_plugins._literal_agent_config("url", self.SPEC, {self.SLOT: "MYKEY123"})
             with contextlib.redirect_stdout(output):
                 wire_plugins.write_agent_server(
-                    "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", entry, home)
-
+                    "cursor-agent", ".cursor/mcp.json", "obsidian-annotated",
+                    self.ENTRY, home)
             mcp_path = home / ".cursor" / "mcp.json"
-            self.assertTrue(mcp_path.exists())
             self.assertEqual(os.stat(mcp_path).st_mode & 0o777, 0o600)
             data = json.loads(mcp_path.read_text())
-            self.assertEqual(
-                data["mcpServers"]["obsidian-annotated"],
-                {"url": "https://mcp-obsidian.dmetr.io/mcp",
-                 "headers": {"Authorization": "Bearer MYKEY123"}})
+            self.assertEqual(data["mcpServers"]["obsidian-annotated"], self.ENTRY)
+            self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", mcp_path.read_text())
             self.assertIn("cursor-agent MCP config for obsidian-annotated", output.getvalue())
 
-    def test_cursor_agent_existing_file_preserves_plugins(self):
-        """cursor-agent on existing file with plugin → plugin preserved."""
+    def test_existing_file_preserves_plugins(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             mcp_path = home / ".cursor" / "mcp.json"
             mcp_path.parent.mkdir(parents=True)
             mcp_path.write_text(json.dumps({"mcpServers": {"myserena": {"command": "bash"}}}))
-
-            entry = wire_plugins._literal_agent_config("url", self.SPEC, {self.SLOT: "KEY"})
             wire_plugins.write_agent_server(
-                "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", entry, home)
-
+                "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", self.ENTRY, home)
             data = json.loads(mcp_path.read_text())
-            self.assertIn("myserena", data["mcpServers"])
-            self.assertIn("obsidian-annotated", data["mcpServers"])
+            self.assertEqual(set(data["mcpServers"]), {"myserena", "obsidian-annotated"})
 
     def test_zero_byte_existing_file_takes_create_path(self):
         """Zero-byte existing file takes create path (pins empty-input jq bug)."""
@@ -482,85 +575,10 @@ class TestWriteAgentServer(QuietTestCase):
             mcp_path = home / ".cursor" / "mcp.json"
             mcp_path.parent.mkdir(parents=True)
             mcp_path.write_text("")  # Zero bytes
-
-            entry = wire_plugins._literal_agent_config("url", self.SPEC, {self.SLOT: "KEY"})
             wire_plugins.write_agent_server(
-                "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", entry, home)
-
+                "cursor-agent", ".cursor/mcp.json", "obsidian-annotated", self.ENTRY, home)
             data = json.loads(mcp_path.read_text())
             self.assertEqual(list(data["mcpServers"].keys()), ["obsidian-annotated"])
-
-    def test_httpurl_dialect_uses_httpurl_key(self):
-        """The httpUrl dialect renders key 'httpUrl', never 'url'. No shipped
-        agent uses it today (gemini, which did, was retired) — the dialect is
-        still supported, so it is pinned against a synthetic descriptor."""
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            entry = wire_plugins._literal_agent_config("httpUrl", self.SPEC, {self.SLOT: "GKEY"})
-            wire_plugins.write_agent_server(
-                "httpurl-agent", ".httpurl/settings.json", "obsidian-annotated", entry, home)
-
-            data = json.loads((home / ".httpurl" / "settings.json").read_text())
-            entry = data["mcpServers"]["obsidian-annotated"]
-            self.assertIn("httpUrl", entry)
-            self.assertNotIn("url", entry)
-            self.assertEqual(entry["httpUrl"], "https://mcp-obsidian.dmetr.io/mcp")
-            self.assertEqual(entry["headers"], {"Authorization": "Bearer GKEY"})
-
-    def test_pi_merges_http_entry_preserving_others(self):
-        """pi gets an explicit type: http entry, merged (not wholesale) so any
-        other servers survive; plugin entries are re-merged right after."""
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            pi_path = home / ".pi" / "agent" / "mcp.json"
-            pi_path.parent.mkdir(parents=True)
-            pi_path.write_text(json.dumps({"mcpServers": {"keepme": {"command": "x"}}}))
-
-            entry = wire_plugins._literal_agent_config("type-http", self.SPEC, {self.SLOT: "PIKEY"})
-            wire_plugins.write_agent_server(
-                "pi", ".pi/agent/mcp.json", "obsidian-annotated", entry, home)
-
-            data = json.loads(pi_path.read_text())
-            self.assertIn("keepme", data["mcpServers"])
-            entry = data["mcpServers"]["obsidian-annotated"]
-            self.assertEqual(entry["type"], "http")
-            self.assertEqual(entry["url"], "https://mcp-obsidian.dmetr.io/mcp")
-            self.assertEqual(entry["headers"], {"Authorization": "Bearer PIKEY"})
-
-    def test_serverurl_dialect_uses_serverurl_key(self):
-        """agy accepts only 'serverUrl' for a remote server — it rejects both
-        'url' and 'httpUrl' by name — and reads headers alongside it."""
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            entry = wire_plugins._literal_agent_config("serverUrl", self.SPEC, {self.SLOT: "AKEY"})
-            wire_plugins.write_agent_server(
-                "agy", ".gemini/config/mcp_config.json", "obsidian-annotated", entry, home)
-
-            data = json.loads((home / ".gemini" / "config" / "mcp_config.json").read_text())
-            entry = data["mcpServers"]["obsidian-annotated"]
-            self.assertIn("serverUrl", entry)
-            self.assertNotIn("url", entry)
-            self.assertNotIn("httpUrl", entry)
-            self.assertEqual(entry["serverUrl"], "https://mcp-obsidian.dmetr.io/mcp")
-            self.assertEqual(entry["headers"], {"Authorization": "Bearer AKEY"})
-
-    def test_codex_warns_writes_no_file(self):
-        """codex (warn_agent_server) prints a warning and writes no file."""
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                wire_plugins.warn_agent_server(
-                    "codex", ".codex/config.toml", "obsidian-annotated", self.SLOT)
-
-            self.assertIn("codex agent-scoped server 'obsidian-annotated' not yet wired",
-                          output.getvalue())
-            self.assertIn("OBSIDIAN_ANNOTATED_KEY", output.getvalue())
-            self.assertFalse((home / ".codex" / "config.toml").exists())
-
-    def test_literal_renderer_rejects_unknown_dialect(self):
-        with self.assertRaises(wire_plugins.WireError):
-            wire_plugins._literal_agent_config("mcpServers", self.SPEC, {self.SLOT: "x"})
 
 
 class TestHomeConfigPathGuards(QuietTestCase):
@@ -940,7 +958,7 @@ class TestRunIntegration(QuietTestCase):
         cls.AGENTS_ALL = descriptors
 
     def test_full_payload_all_agents_wired(self):
-        """Full payload: descriptors drive claude ref, literal trio, and codex ref/local."""
+        """Full payload: claude and codex natively, cursor over the shim."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             workspace = Path(tmp) / "workspace"
@@ -951,7 +969,7 @@ class TestRunIntegration(QuietTestCase):
             repo.mkdir()
             (repo / ".git").mkdir()
 
-            env = {"IDENTITY_KEY_0": "LITERALKEY"}
+            env = {}
             payload = {
                 "agents": list(self.AGENTS_ALL),
                 "plugin_mcp_entries": [
@@ -965,10 +983,7 @@ class TestRunIntegration(QuietTestCase):
                               "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},
                      "requires": ["OBSIDIAN_ANNOTATED_KEY"],
                      "ref": ["claude", "codex"],
-                     "literal": [{"agent": "cursor-agent",
-                                  "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}],
-                     "warn": [],
-                     "local": []},
+                     "local": ["cursor-agent"]},
                 ],
             }
 
@@ -988,17 +1003,17 @@ class TestRunIntegration(QuietTestCase):
             projects = json.loads((home / ".claude.json").read_text())["projects"]
             self.assertIn(str(repos_dir), projects)
             self.assertIn(str(repo), projects)
-            # cursor: obsidian (LITERAL key) + LOCAL plugin only (no remote coding)
+            # cursor: obsidian over the shim + LOCAL plugin only. The uniform
+            # REMOTE plugin (coding, no requires:) still reaches Claude alone.
             cursor_mcp = home / ".cursor" / "mcp.json"
             self.assertTrue(cursor_mcp.exists())
-            cursor_data = json.loads(cursor_mcp.read_text())
-            self.assertIn("obsidian-annotated", cursor_data["mcpServers"])
+            raw_cursor = cursor_mcp.read_text()
+            cursor_data = json.loads(raw_cursor)
             self.assertIn("myserena", cursor_data["mcpServers"])
             self.assertNotIn("coding", cursor_data["mcpServers"])
             self.assertEqual(
-                cursor_data["mcpServers"]["obsidian-annotated"]["headers"]["Authorization"],
-                "Bearer LITERALKEY"
-            )
+                cursor_data["mcpServers"]["obsidian-annotated"]["command"], "mcp-remote")
+            self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", raw_cursor)
             # codex managed block carries the local plugin AND the agent-scoped
             # remote (bearer_token_env_var), but not the ordinary remote plugin
             codex_toml = (home / ".codex" / "config.toml").read_text()
@@ -1202,9 +1217,11 @@ class TestRunIntegration(QuietTestCase):
                       home / ".codex" / "config.toml"):
                 self.assertIn("${AXIOM_TOKEN}", f.read_text())
 
-    def test_literal_remote_substitutes_multiple_slots(self):
-        """A literal-dialect remote server requiring two slots substitutes both
-        key envs when writing the agent config."""
+    def test_multi_slot_remote_shims_every_header_ref_intact(self):
+        """A two-slot remote for a non-ref agent: every header becomes a
+        --header flag with its ${SLOT} ref untouched. The predecessor of this
+        test asserted the opposite — that both keys were substituted INTO the
+        config file — which is the behaviour the shim exists to remove."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             workspace = Path(tmp) / "workspace"
@@ -1232,75 +1249,59 @@ class TestRunIntegration(QuietTestCase):
                     },
                     "requires": ["TOKEN_A", "TOKEN_B"],
                     "ref": [],
-                    "literal": [{
-                        "agent": "cursor-agent",
-                        "key_envs": {
-                            "TOKEN_A": "IDENTITY_KEY_0",
-                            "TOKEN_B": "IDENTITY_KEY_1",
-                        },
-                    }],
-                    "warn": [],
-                    "local": [],
+                    "local": ["cursor-agent"],
                 }],
             }
-            env = {"IDENTITY_KEY_0": "alpha", "IDENTITY_KEY_1": "beta"}
-            wire_plugins.run(payload, home, workspace, env)
+            # No key envs to supply — there is nothing to substitute here.
+            wire_plugins.run(payload, home, workspace, {})
 
-            cursor = json.loads((home / ".cursor" / "mcp.json").read_text())
-            entry = cursor["mcpServers"]["two-slot"]
-            self.assertEqual(entry["headers"]["Authorization"], "Bearer alpha")
-            self.assertEqual(entry["headers"]["X-Trace"], "beta:alpha")
+            raw = (home / ".cursor" / "mcp.json").read_text()
+            entry = json.loads(raw)["mcpServers"]["two-slot"]
+            self.assertEqual(entry, {"command": "mcp-remote", "args": [
+                "https://example.test/mcp",
+                "--header", "Authorization: Bearer ${TOKEN_A}",
+                "--header", "X-Trace: ${TOKEN_B}:${TOKEN_A}"]})
 
-    def test_disabled_remote_server_is_removed_from_literal_agent(self):
-        """A remote literal-key server (obsidian) wired for cursor on one run must
-        be REMOVED — entry and inline credential — when a later run drops it
-        (disabled: true / plugin removal), while hand-added and local-plugin
-        entries survive. Guards the upsert-only stale-config hole."""
+    def test_stale_remote_server_and_its_baked_key_are_pruned(self):
+        """A pre-shim config carrying a remote entry with the key INLINED must
+        be scrubbed on the next run.
+
+        This is why reconcile_agent_servers and the .djinn-servers sidecar
+        outlive the rendering path they belonged to: they are the only thing
+        that removes a key an older release wrote to disk, and a container that
+        has not run `up` since still has one. Hand-added and local-plugin
+        entries must survive the prune.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             workspace = Path(tmp) / "workspace"
             (workspace / "repos").mkdir(parents=True)
-            # Pre-seed cursor's config with a hand-added server that must survive.
-            (home / ".cursor").mkdir()
-            (home / ".cursor" / "mcp.json").write_text(
-                json.dumps({"mcpServers": {"hand-added": {"command": "keep-me"}}}))
+            cfg = home / ".cursor" / "mcp.json"
+            cfg.parent.mkdir()
+            cfg.write_text(json.dumps({"mcpServers": {
+                "hand-added": {"command": "keep-me"},
+                "obsidian-annotated": {
+                    "url": "https://mcp-obsidian.dmetr.io/mcp",
+                    "headers": {"Authorization": "Bearer sekret-token"}},
+            }}))
+            (cfg.parent / "mcp.json.djinn-servers").write_text('["obsidian-annotated"]\n')
 
-            spec = {"url": "https://mcp-obsidian.dmetr.io/mcp",
-                    "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}}
             cursor_only = [{
                 "binary": "cursor-agent", "config_path": ".cursor/mcp.json",
                 "format": "json", "dialect": "url", "env_refs": False, "strategy": "",
             }]
-            enabled = {
+            wire_plugins.run({
                 "agents": cursor_only,
                 "plugin_mcp_entries": [{"serena": {"command": "bash", "args": ["-lc", "s"]}}],
-                "agent_servers": [
-                    {"name": "obsidian-annotated", "spec": spec,
-                     "requires": ["OBSIDIAN_ANNOTATED_KEY"], "ref": [],
-                     "warn": [], "local": [],
-                     "literal": [{"agent": "cursor-agent",
-                                  "key_envs": {"OBSIDIAN_ANNOTATED_KEY": "IDENTITY_KEY_0"}}]},
-                ],
-            }
-            wire_plugins.run(enabled, home, workspace, {"IDENTITY_KEY_0": "sekret-token"})
+                "agent_servers": [],
+            }, home, workspace, {})
 
-            cfg = home / ".cursor" / "mcp.json"
-            cursor = json.loads(cfg.read_text())["mcpServers"]
-            self.assertEqual(cursor["obsidian-annotated"]["headers"]["Authorization"],
-                             "Bearer sekret-token")   # literal key substituted in
-            self.assertIn("serena", cursor)            # local plugin wired
-            self.assertIn("hand-added", cursor)        # hand-added preserved
-
-            # Rerun with the server disabled for cursor (no longer in agent_servers).
-            disabled = {"agents": cursor_only, "plugin_mcp_entries": [
-                {"serena": {"command": "bash", "args": ["-lc", "s"]}}], "agent_servers": []}
-            wire_plugins.run(disabled, home, workspace, {"IDENTITY_KEY_0": "sekret-token"})
-
-            cursor = json.loads(cfg.read_text())["mcpServers"]
+            raw = cfg.read_text()
+            cursor = json.loads(raw)["mcpServers"]
             self.assertNotIn("obsidian-annotated", cursor)   # stale server pruned
-            self.assertNotIn("sekret-token", cfg.read_text())  # inline credential gone
-            self.assertIn("serena", cursor)            # local plugin still wired
-            self.assertIn("hand-added", cursor)        # hand-added still preserved
+            self.assertNotIn("sekret-token", raw)            # inline credential gone
+            self.assertIn("serena", cursor)
+            self.assertIn("hand-added", cursor)
 
     def test_payload_not_dict_raises_wireerror(self):
         """Payload not a dict raises WireError."""
@@ -1655,57 +1656,47 @@ class TestBuildPayload(unittest.TestCase):
                 }])
             })
 
-    def test_named_env_refs_remote_requires_single_required_slot(self):
+    def test_named_env_refs_multi_slot_still_wires_via_shim(self):
+        """A named env_refs field carries exactly one bearer slot, so a two-slot
+        remote cannot be rendered natively for kimi. It is NOT dropped: kimi
+        lands in `ref` and the container half renders it as an mcp-remote shim."""
         env = {
             "AGENTS_MCP_JSON": json.dumps(self.KIMI_REF_AGENT, separators=(",", ":")),
             "AGENT_SERVERS_JSON": json.dumps({
                 "obsidian-annotated": {
                     "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
-                             "headers": {"Authorization": "Bearer ${TOKEN_A}"}},
+                             "headers": {"Authorization": "Bearer ${TOKEN_A}",
+                                         "X-Trace": "${TOKEN_B}"}},
                     "requires": ["TOKEN_A", "TOKEN_B"],
                 }
             }),
-            "AGENT_SECRETS": (
-                "kimi\tTOKEN_A\tSRC\n"
-                "kimi\tTOKEN_B\tSRC\n"
-            ),
+            "AGENT_SECRETS": "kimi\tTOKEN_A\tSRC\nkimi\tTOKEN_B\tSRC\n",
         }
-        # SKIP, don't raise: an unsupported pairing costs kimi this one
-        # server, never the whole container's wiring (see build_payload).
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
-            payload = wire_plugins.build_payload(env)
-        self.assertEqual(payload["agent_servers"], [],
-                         "no agent could take it, so the server drops out")
-        out = buf.getvalue()
-        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", out)
-        self.assertIn("exactly one required slot", out)
+        payload = wire_plugins.build_payload(env)
+        self.assertEqual(payload["agent_servers"][0]["ref"], ["kimi"])
 
-    def test_named_env_refs_remote_requires_bearer_header_reference(self):
+    def test_named_env_refs_non_bearer_still_wires_via_shim(self):
+        """The browser/kimi incident: X-API-Key is not a bearer header, so the
+        native rendering does not fit. kimi gets the server anyway, over the
+        shim, instead of the build aborting or the server being dropped."""
         env = {
             "AGENTS_MCP_JSON": json.dumps(self.KIMI_REF_AGENT, separators=(",", ":")),
             "AGENT_SERVERS_JSON": json.dumps({
-                "obsidian-annotated": {
-                    "spec": {"url": "https://mcp-obsidian.dmetr.io/mcp",
-                             "headers": {"Authorization": "Bearer STATIC_TOKEN"}},
-                    "requires": ["OBSIDIAN_ANNOTATED_KEY"],
+                "browser": {
+                    "spec": {"url": "http://host.docker.internal:8814/mcp",
+                             "headers": {"X-API-Key": "${BROWSER_KEY}"}},
+                    "requires": ["BROWSER_KEY"],
                 }
             }),
-            "AGENT_SECRETS": "kimi\tOBSIDIAN_ANNOTATED_KEY\tSRC\n",
+            "AGENT_SECRETS": "kimi\tBROWSER_KEY\tSRC\n",
         }
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
-            payload = wire_plugins.build_payload(env)
-        self.assertEqual(payload["agent_servers"], [])
-        out = buf.getvalue()
-        self.assertIn("agent server 'obsidian-annotated' cannot be rendered for agent 'kimi'", out)
-        self.assertIn("requires headers.Authorization", out)
-        self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", out)
+        payload = wire_plugins.build_payload(env)
+        self.assertEqual(payload["agent_servers"][0]["ref"], ["kimi"])
 
     def test_round_trips_through_run(self):
         """The payload build_payload emits is exactly what run() consumes: a
-        required remote server reaches claude (ref) and cursor (literal); a local
-        plugin reaches cursor too."""
+        required remote server reaches claude natively and cursor over the shim;
+        a local plugin reaches cursor too. Neither carries a key."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             home.mkdir()
@@ -1720,18 +1711,18 @@ class TestBuildPayload(unittest.TestCase):
                                 "headers": {"Authorization": "Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},
                        "requires": ["OBSIDIAN_ANNOTATED_KEY"]}}),
                    "AGENT_SECRETS": "claude\tOBSIDIAN_ANNOTATED_KEY\tSRC\n"
-                                    "cursor-agent\tOBSIDIAN_ANNOTATED_KEY\tSRC\n",
-                   "IDENTITY_SECRETS": "cursor-agent:K0:OBSIDIAN_ANNOTATED_KEY",
-                   "K0": "SECRET"}
+                                    "cursor-agent\tOBSIDIAN_ANNOTATED_KEY\tSRC\n"}
             payload = json.loads(json.dumps(wire_plugins.build_payload(env)))
             with contextlib.redirect_stdout(io.StringIO()):
                 wire_plugins.run(payload, home, workspace, env)
-            cursor = json.loads((home / ".cursor" / "mcp.json").read_text())
-            # cursor: local plugin + obsidian with the LITERAL key substituted
+            raw_cursor = (home / ".cursor" / "mcp.json").read_text()
+            cursor = json.loads(raw_cursor)
+            # cursor: local plugin + obsidian as an mcp-remote shim, ref intact
             self.assertIn("serena", cursor["mcpServers"])
-            self.assertEqual(
-                cursor["mcpServers"]["obsidian-annotated"]["headers"]["Authorization"],
-                "Bearer SECRET")
+            self.assertEqual(cursor["mcpServers"]["obsidian-annotated"]["command"],
+                             "mcp-remote")
+            self.assertIn("${OBSIDIAN_ANNOTATED_KEY}", raw_cursor)
+            self.assertNotIn("SECRET", raw_cursor)
             mcp = json.loads((repos / ".mcp.json").read_text())
             # claude: obsidian (ref, type:http) then the local plugin
             self.assertEqual(list(mcp["mcpServers"]), ["obsidian-annotated", "serena"])
@@ -1768,22 +1759,18 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
                 "alpha-ref\tTOKEN\tSRC\n"
                 "beta-managed\tTOKEN\tSRC\n"
                 "gamma-literal\tTOKEN\tSRC\n"),
-            "IDENTITY_SECRETS": "gamma-literal:K0:TOKEN",
         }
         payload = wire_plugins.build_payload(env)
         self.assertEqual([a["binary"] for a in payload["agents"]],
                          ["alpha-ref", "beta-managed", "gamma-literal"])
         servers = {entry["name"]: entry for entry in payload["agent_servers"]}
-        self.assertEqual(servers["remote"]["ref"], ["alpha-ref"])
-        self.assertEqual(servers["remote"]["warn"], ["beta-managed"])
-        self.assertEqual(
-            servers["remote"]["literal"],
-            [{"agent": "gamma-literal", "key_envs": {"TOKEN": "K0"}}],
-        )
-        self.assertEqual(servers["local"]["ref"], ["alpha-ref"])
-        self.assertEqual(servers["local"]["local"], ["beta-managed", "gamma-literal"])
-        self.assertEqual(servers["local"]["warn"], [])
-        self.assertEqual(servers["local"]["literal"], [])
+        # env_refs alone decides the bucket, for a remote spec and a local one
+        # alike. What each agent then RECEIVES differs (native / shim /
+        # verbatim), but that is _render_for_agent's job, not the payload's.
+        for name in ("remote", "local"):
+            self.assertEqual(servers[name]["ref"], ["alpha-ref"], name)
+            self.assertEqual(servers[name]["local"], ["beta-managed", "gamma-literal"], name)
+            self.assertEqual(set(servers[name]), {"name", "spec", "requires", "ref", "local"})
 
     def test_real_descriptor_round_trip_preserves_current_roles(self):
         import manifest
@@ -1812,25 +1799,15 @@ class TestDescriptorDrivenRoles(unittest.TestCase):
                 "codex\tTOKEN\tSRC\n"
                 "cursor-agent\tTOKEN\tSRC\n"
                 "pi\tTOKEN\tSRC\n"),
-            "IDENTITY_SECRETS": (
-                "cursor-agent:K0:TOKEN "
-                "pi:K1:TOKEN"),
         }
         payload = wire_plugins.build_payload(env)
         servers = {entry["name"]: entry for entry in payload["agent_servers"]}
-        self.assertEqual(servers["remote"]["ref"], ["claude", "codex"])
-        self.assertEqual(servers["remote"]["warn"], [])
-        self.assertEqual(
-            [lit["agent"] for lit in servers["remote"]["literal"]],
-            ["cursor-agent", "pi"],
-        )
-        # codex's env_refs is now a named string (bearer_token_env_var), so a
-        # bound LOCAL agent-scoped server routes through the same 'ref' bucket
-        # too (rendered verbatim — see run()'s ref handling) rather than 'local'.
-        self.assertEqual(servers["local"]["ref"], ["claude", "codex"])
-        self.assertEqual(servers["local"]["local"], ["cursor-agent", "pi"])
-        self.assertEqual(servers["local"]["warn"], [])
-        self.assertEqual(servers["local"]["literal"], [])
+        # claude (env_refs true) and codex (bearer_token_env_var, a truthy
+        # string) hold a ${SLOT} ref; cursor-agent and pi go through the local
+        # path — over the shim for the remote server, verbatim for the local one.
+        for name in ("remote", "local"):
+            self.assertEqual(servers[name]["ref"], ["claude", "codex"], name)
+            self.assertEqual(servers[name]["local"], ["cursor-agent", "pi"], name)
 
     def test_future_ref_agent_mcpservers_no_strategy(self):
         agents = [{

@@ -893,14 +893,15 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         self.assertIn("agents: 'retired-agent' has no agents/retired-agent/ directory",
                       err.getvalue())
 
-    def test_serverurl_dialect_accepted_as_literal_key(self):
-        """serverUrl is a literal-key dialect (agy): accepted with env_refs
-        false, and its binary lands in LITERAL_KEY_AGENTS."""
+    def test_serverurl_dialect_still_accepted(self):
+        """serverUrl (agy) stays a valid descriptor dialect with env_refs false
+        and travels in AGENTS_MCP_JSON. Nothing renders from it any more — the
+        agents it described take the mcp-remote shim — but descriptors are not
+        being churned in the same change."""
         agents = dict(AGENT_FILES)
         agents["cursor"] = dict(AGENT_FILES["cursor"])
         agents["cursor"]["mcp"] = dict(AGENT_FILES["cursor"]["mcp"], dialect="serverUrl")
         d = derive({"agents": ["cursor"]}, agent_files=agents)
-        self.assertIn("cursor-agent", d["LITERAL_KEY_AGENTS"])
         self.assertIn('"dialect":"serverUrl"', d["AGENTS_MCP_JSON"])
 
     def test_serverurl_dialect_with_env_refs_true_rejected(self):
@@ -1022,12 +1023,6 @@ class TestAgentDescriptorDerivation(unittest.TestCase):
         with self.assertRaises(m.ManifestError) as cm:
             derive({}, agent_files=agents)
         self.assertIn("illegal component '..'", str(cm.exception))
-
-    def test_literal_key_agents_emission(self):
-        d = derive({})
-        self.assertEqual(d["LITERAL_KEY_AGENTS"], "cursor-agent gemini pi")
-        d = derive({"agents": ["claude", "aider"]})
-        self.assertEqual(d["LITERAL_KEY_AGENTS"], "")
 
     def test_absolute_agent_state_path_is_rejected(self):
         agents = dict(AGENT_FILES)
@@ -1410,12 +1405,12 @@ class TestUniversalHybridSecrets(unittest.TestCase):
         self.assertEqual(servers["one"]["requires"], ["TOKEN"])
         self.assertEqual(servers["two"]["requires"], ["TOKEN", "SECOND"])
 
-    def test_remote_slots_excludes_local_command_servers(self):
-        # AGENT_SERVER_SLOTS lists every required slot; AGENT_SERVER_REMOTE_SLOTS
-        # is the subset feeding a REMOTE (no-command) server — the only slots
-        # up.sh may hand to the wiring exec. A LOCAL command server (like axiom's
-        # mcp-remote bridge) reads its ${SLOT} from the agent's own env, so its
-        # slot must NOT appear in REMOTE_SLOTS (else the value leaks onto argv).
+    def test_local_and_remote_required_servers_both_derive(self):
+        # Both spec shapes are legal with requires:. There is no longer a
+        # REMOTE_SLOTS subset, because no slot VALUE reaches the wiring exec on
+        # either path — a remote server is rendered natively (a ${SLOT} ref the
+        # agent expands) or through the mcp-remote shim (which expands it from
+        # the agent's own env).
         files = {"mix": {"install": "x",
                          "secrets": {"LOCAL_TOK": {}, "REMOTE_TOK": {}},
                          "mcp": {
@@ -1427,7 +1422,7 @@ class TestUniversalHybridSecrets(unittest.TestCase):
                      {"PRESENT_SECRET_VARS": "LOCAL_TOK REMOTE_TOK",
                       "SECRETS_FILE": "/sec/secrets.env"})
         self.assertEqual(set(d["AGENT_SERVER_SLOTS"].split()), {"LOCAL_TOK", "REMOTE_TOK"})
-        self.assertEqual(d["AGENT_SERVER_REMOTE_SLOTS"], "REMOTE_TOK")
+        self.assertNotIn("AGENT_SERVER_REMOTE_SLOTS", d)
 
     def test_override_and_disabled_take_precedence_over_default(self):
         d = self.derive(
@@ -1498,10 +1493,9 @@ class TestPluginPorts(unittest.TestCase):
         self.assertIn("host.docker.internal:8814/mcp", d["AGENT_SERVERS_JSON"])
         self.assertNotIn("${HOST_PORT}", d["AGENT_SERVERS_JSON"])
 
-    def test_browser_slot_not_in_remote_slots(self):
+    def test_browser_slot_is_an_agent_server_slot(self):
         d = self._wired({"plugins": ["browser"]})
         self.assertIn("RESEARCH_BROWSER_KEY", d["AGENT_SERVER_SLOTS"])
-        self.assertEqual(d["AGENT_SERVER_REMOTE_SLOTS"], "")
 
     def test_substitution_does_not_mutate_plugin_files(self):
         # PLUGIN_FILES is a module-level fixture shared by every test in this
