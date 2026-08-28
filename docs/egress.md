@@ -30,8 +30,12 @@ queue. Two guards enforce it:
 The self-dial case means a process has `http_proxy`/`https_proxy` pointed at
 `127.0.0.1:3128`. The broker is a *transparent* proxy — it reads the
 destination from the kernel via `SO_ORIGINAL_DST` — and takes no forward-proxy
-clients. Unset those variables in the bottle; with them set, every request the
-process makes arrives as an unanswerable IP-literal approval prompt.
+clients, so such a request cannot succeed: it is logged as `self_dial`, answered
+with a local `502` (or a TLS alert on :443), and closed without filing
+anything. Unset those variables in the bottle — until they are, every request
+the process makes fails this way, and the only record is the `self_dial` log
+line. Before this was refused at the socket the same request was *filed*, and
+surfaced as an IP-literal approval prompt no operator answer could clear.
 
 ## Notifications
 
