@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(TESTS_DIR))
+import egress_broker_host as broker_host  # noqa: E402
 import egress_denylist as dl  # noqa: E402
 from egress_test_sync import wait_for_tcp_listening  # noqa: E402
 
@@ -749,37 +751,20 @@ class CliDaemonFirstAddTests(unittest.TestCase):
         return server, thread, port
 
     def _seed_daemon(self, egress_root: Path, port: int, *, token: str = "secret") -> None:
+        """Seed operator.token + daemon.json (host 127.0.0.1, this test
+        process's own always-alive pid) — the single source of truth
+        _try_daemon_deny now reads via egress_broker_host.daemon_base_url,
+        replacing the old config.json {"port": ...} scheme."""
         egress_root.mkdir(parents=True, exist_ok=True)
         (egress_root / "operator.token").write_text(f"{token}\n", encoding="utf-8")
-        (egress_root / "config.json").write_text(json.dumps({"port": port}), encoding="utf-8")
+        broker_host.write_daemon_endpoint(egress_root, "127.0.0.1", port)
 
-    def test_load_config_port_falls_back_to_default_when_missing_or_corrupt(self):
-        """finding #9: _load_config_port reuses egress_broker_host._load_config
-        (same missing/corrupt/non-dict tolerance) rather than a second copy
-        of that parsing — proven directly, not just indirectly through a
-        real daemon POST."""
-        import egress_broker_host as broker_host
-
-        with tempfile.TemporaryDirectory() as tmp:
-            egress_root = Path(tmp)
-            # No config.json at all.
-            self.assertEqual(dl._load_config_port(egress_root), broker_host.DEFAULT_PORT)
-
-            # Corrupt config.json.
-            (egress_root / "config.json").write_text("{BROKEN", encoding="utf-8")
-            self.assertEqual(dl._load_config_port(egress_root), broker_host.DEFAULT_PORT)
-
-            # Valid config.json with a real port.
-            (egress_root / "config.json").write_text(
-                json.dumps({"port": 9999}), encoding="utf-8"
-            )
-            self.assertEqual(dl._load_config_port(egress_root), 9999)
-
-            # port present but not an int.
-            (egress_root / "config.json").write_text(
-                json.dumps({"port": "nine"}), encoding="utf-8"
-            )
-            self.assertEqual(dl._load_config_port(egress_root), broker_host.DEFAULT_PORT)
+    def _dead_pid(self) -> int:
+        """A pid guaranteed not to be alive — see the identical helper in
+        tests/test_egress_broker_host.py for why wait()-then-reuse is safe."""
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
 
     def test_try_daemon_deny_no_operator_token_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -796,8 +781,10 @@ class CliDaemonFirstAddTests(unittest.TestCase):
     def test_try_daemon_deny_unreachable_returns_none_and_logs_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             egress_root = Path(tmp)
-            (egress_root / "operator.token").write_text("tok\n", encoding="utf-8")
-            (egress_root / "config.json").write_text(json.dumps({"port": 1}), encoding="utf-8")
+            # daemon.json points at port 1 (guaranteed refused) — the
+            # single source of truth _try_daemon_deny reads now; config.json
+            # is no longer consulted at all.
+            self._seed_daemon(egress_root, 1)
             with self.assertLogs(dl.LOG, level="INFO") as captured:
                 result = dl._try_daemon_deny(
                     egress_root, zone="example.com", scope="global", container=None, reason=None
@@ -848,6 +835,52 @@ class CliDaemonFirstAddTests(unittest.TestCase):
                 for r in captured.records
             )
         )
+
+    def test_try_daemon_deny_targets_daemon_json_endpoint_not_a_hardcoded_default(self):
+        """finding (PR #85 review, daemon endpoint): _try_daemon_deny must
+        read $egress_root/daemon.json (via egress_broker_host.daemon_base_url)
+        rather than assuming 127.0.0.1:DEFAULT_PORT — proven by binding the
+        test server to an ephemeral, DEFINITELY-not-default port and only
+        pointing at it via daemon.json (never via config.json, which no
+        longer exists in this scheme)."""
+        received: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                received.append(json.loads(self.rfile.read(length).decode("utf-8")))
+                body = b'{"decided":[]}'
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server, thread, port = self._start_server(Handler)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                egress_root = Path(tmp)
+                egress_root.mkdir(parents=True, exist_ok=True)
+                (egress_root / "operator.token").write_text("tok\n", encoding="utf-8")
+                broker_host.write_daemon_endpoint(egress_root, "127.0.0.1", port)
+                result = dl._try_daemon_deny(
+                    egress_root,
+                    zone="daemon-json.example",
+                    scope="global",
+                    container=None,
+                    reason=None,
+                )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+        self.assertIsNotNone(result)
+        status, _body = result
+        self.assertEqual(status, 200)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["host"], "daemon-json.example")
 
     def test_add_success_via_daemon_prints_persisted_and_decided_no_local_write(self):
         received: list[dict] = []
@@ -1090,6 +1123,46 @@ class CliDaemonFirstAddTests(unittest.TestCase):
             self.assertIn("Denied: datadoghq.com (scope=global)", out)
             self.assertNotIn("Denied: datadoghq.com (scope=global) —", out)
             self.assertIn("daemon not reachable", err)
+            # finding (PR #85 review, daemon endpoint): the fallback message
+            # must name the exact address that was tried, sourced from
+            # daemon.json — not a silently-assumed default.
+            self.assertIn("daemon not reachable at http://127.0.0.1:1;", err)
+            self.assertIn("held requests were NOT swept", err)
+            self.assertTrue((egress_root / dl.DENYLIST_FILENAME).exists())
+
+    def test_add_stale_endpoint_file_falls_back_to_direct_write_and_names_url_tried(self):
+        """A daemon.json left behind by a crashed daemon (pid no longer
+        alive) must be treated as no endpoint at all: read_daemon_endpoint
+        returns None, daemon_base_url falls back to the default, and the
+        fallback message names THAT address — not the stale pid's port.
+
+        DEFAULT_PORT is patched to 1 (guaranteed refused, same rationale as
+        test_add_daemon_unreachable_falls_back_to_direct_write above) so
+        this never depends on whether the real default port happens to be
+        free on whatever host runs the suite.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._base(tmp)
+            egress_root = base / "run" / "egress"
+            egress_root.mkdir(parents=True, exist_ok=True)
+            (egress_root / "operator.token").write_text("tok\n", encoding="utf-8")
+            dead_pid = self._dead_pid()
+            (egress_root / broker_host.ENDPOINT_FILENAME).write_text(
+                json.dumps(
+                    {"version": 1, "host": "127.0.0.1", "port": 9321, "pid": dead_pid}
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(broker_host, "DEFAULT_PORT", 1):
+                rc, out, err = _run_main(
+                    ["add", "stale-endpoint.example", "--global", "--base-path", str(base)]
+                )
+            self.assertEqual(rc, 0)
+            self.assertIn("Denied: stale-endpoint.example (scope=global)", out)
+            self.assertIn("daemon not reachable at http://127.0.0.1:1;", err)
+            self.assertNotIn("9321", err)
+            self.assertIn("held requests were NOT swept", err)
             self.assertTrue((egress_root / dl.DENYLIST_FILENAME).exists())
 
     def test_add_no_operator_token_falls_back_to_direct_write(self):

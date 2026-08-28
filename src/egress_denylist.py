@@ -421,17 +421,6 @@ def _denylist_for(base_path: Path) -> tuple[DenyList, Path]:
 # ── operator-daemon POST (the daemon is the ONE place that writes an entry) ──
 
 
-def _load_config_port(egress_root: Path) -> int:
-    """The daemon's configured port, or DEFAULT_PORT — reuses
-    egress_broker_host._load_config (same missing/corrupt/non-dict
-    tolerance) rather than a second copy of that parsing."""
-    from egress_broker_host import CONFIG_FILENAME, DEFAULT_PORT, _load_config
-
-    config = _load_config(egress_root / CONFIG_FILENAME)
-    port = config.get("port", DEFAULT_PORT)
-    return port if isinstance(port, int) else DEFAULT_PORT
-
-
 def _try_daemon_deny(
     egress_root: Path,
     *,
@@ -454,7 +443,7 @@ def _try_daemon_deny(
     started), or a connection-level failure (refused, DNS, timeout) — the
     caller degrades to writing denylist.json directly in either case.
     """
-    from egress_broker_host import OPERATOR_TOKEN_FILENAME
+    from egress_broker_host import OPERATOR_TOKEN_FILENAME, daemon_base_url
 
     token_path = egress_root / OPERATOR_TOKEN_FILENAME
     if not token_path.is_file():
@@ -469,8 +458,7 @@ def _try_daemon_deny(
         LOG.info("egress denylist cli daemon skip reason=empty_token")
         return None
 
-    port = _load_config_port(egress_root)
-    base_url = f"http://127.0.0.1:{port}"
+    base_url = daemon_base_url(egress_root)
     payload: dict[str, Any] = {"decision": "deny", "scope": scope, "host": zone}
     if container is not None:
         payload["container"] = container
@@ -488,6 +476,7 @@ def _try_daemon_deny(
     )
 
     started = time.monotonic()
+    LOG.info("egress denylist cli daemon attempt url=%s", base_url)
     try:
         with urllib.request.urlopen(request, timeout=5.0) as response:
             raw = response.read()
@@ -497,7 +486,8 @@ def _try_daemon_deny(
         raw = exc.read()
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         LOG.info(
-            "egress denylist cli daemon done status=unreachable duration_ms=%d error=%s",
+            "egress denylist cli daemon done url=%s status=unreachable duration_ms=%d error=%s",
+            base_url,
             int((time.monotonic() - started) * 1000),
             exc,
         )
@@ -511,7 +501,8 @@ def _try_daemon_deny(
     if not isinstance(parsed, dict):
         parsed = {}
     LOG.info(
-        "egress denylist cli daemon done status=%d duration_ms=%d",
+        "egress denylist cli daemon done url=%s status=%d duration_ms=%d",
+        base_url,
         status,
         duration_ms,
     )
@@ -558,7 +549,7 @@ def _format_denied(zone: str, scope: str, reason: str | None) -> str:
 
 
 def _cmd_add(args: argparse.Namespace) -> int:
-    from egress_broker_host import TOKENS_DIRNAME
+    from egress_broker_host import TOKENS_DIRNAME, daemon_base_url
 
     base_path = resolve_base_path(args.base_path)
     denylist, egress_root = _denylist_for(base_path)
@@ -637,9 +628,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_CORRUPT
     print(_format_denied(entry.zone, entry.scope, entry.reason))
+    # Name the address that was tried (finding: an operator staring at "not
+    # reachable" has no way to tell WHICH endpoint was dead — a non-default
+    # --port/--host daemon.json, or just none running at all).
     print(
-        "daemon not reachable; entry written directly — held requests, if any, "
-        "will prompt once more",
+        f"daemon not reachable at {daemon_base_url(egress_root)}; wrote "
+        "denylist.json directly — held requests were NOT swept",
         file=sys.stderr,
     )
     return 0

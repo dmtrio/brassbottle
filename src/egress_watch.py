@@ -37,14 +37,17 @@ from egress_broker_host import (
     EgressBroker,
     EgressBrokerHostError,
     EgressBrokerHTTPServer,
+    _connect_host_for_bind,
     _load_config,
     _repo_root,
     _stale_sweep_loop,
     ensure_operator_token,
     is_ip_literal,
+    remove_daemon_endpoint,
     resolve_base_path,
     resolve_egress_root,
     undeny_hint,
+    write_daemon_endpoint,
 )
 from egress_denylist import DenyEntry, DenyList
 from egress_log import EgressLog
@@ -732,6 +735,8 @@ def run_watch(
         notifier=notifier,
     )
     server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
+    # DaemonLock is already held above, so only one watcher ever writes this.
+    write_daemon_endpoint(egress_root, host, server.server_address[1])
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
         target=_stale_sweep_loop,
@@ -748,6 +753,7 @@ def run_watch(
     server_thread.start()
 
     LOG.info("egress watch listening host=%s port=%d", host, server.server_address[1])
+    listen_url = f"http://{_connect_host_for_bind(host)}:{server.server_address[1]}"
 
     if settings is not None:
         notify_line = (
@@ -765,6 +771,7 @@ def run_watch(
     sys.stdout.write(
         f"Watching for egress requests on {host}:{server.server_address[1]}\n"
         f"  queue:  {egress_root}\n"
+        f"  listen: {listen_url}\n"
         f"  {format_denylist_status(broker.denylist)}\n"
         f"{notify_line}"
         f"  keys:   [a] allow (live)  [p] allow + persist  [d] deny  [D] deny always (bottle)  [G] deny always (global)  [s] skip\n"
@@ -781,6 +788,7 @@ def run_watch(
         stop_event.set()
         server.shutdown()
         server.server_close()
+        remove_daemon_endpoint(egress_root)
         lock.release()
 
 

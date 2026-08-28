@@ -426,6 +426,56 @@ else
     pass "daemon-invoked allow skips notify"
 fi
 
+# finding (PR #85 review, daemon endpoint): notify_egress_daemon must ask the
+# daemon where it actually bound (daemon.json via --print-endpoint) rather
+# than assuming the default port — a live daemon on a non-default --host/
+# --port used to be silently treated as unreachable. Stub egress_broker_host.py
+# so --print-endpoint reports a distinctive, non-default endpoint; confirm the
+# notify POST actually targets it when python3 works.
+cat > "$SBOX/src/egress_broker_host.py" <<'PYEOF'
+#!/usr/bin/env python3
+import sys
+if "--print-endpoint" in sys.argv:
+    print("http://127.0.0.1:19191")
+    sys.exit(0)
+sys.exit(1)
+PYEOF
+
+: > "$CURL_LOG"
+out=$(run_ae_notify mycontainer printed-endpoint.example.com --save none); rc=$?
+assert_rc "notify with printed endpoint rc 0" 0 "$rc"
+if grep -q '127.0.0.1:19191/decide' "$CURL_LOG"; then
+    pass "notify_egress_daemon targets the printed --print-endpoint address"
+else
+    fail "notify_egress_daemon should target the printed --print-endpoint address"
+fi
+
+# Same call, but python3 is broken: notify_egress_daemon must not re-probe
+# require_python3 (it reuses HAVE_PYTHON3 from the --check probe earlier in
+# the script) and must fall back to the env/default guess rather than ever
+# reaching the (stubbed) egress_broker_host.py above.
+run_ae_notify_no_python() {
+    ( cd "$SBOX" && env DJINN_HOME="$DJINN_HOME" BOTTLES_PATH="$WORK/no-such-manifests" \
+        MOCK_EXISTING_CONTAINERS="${MOCK_EXISTING_CONTAINERS-djinn-mycontainer}" \
+        EGRESS_BROKER_PORT="${EGRESS_BROKER_PORT:-8816}" \
+        PYTHON3=/nonexistent/python3 \
+        PATH="$WORK/curlbin:$WORK/aebin:$PATH" bash bin/allow-egress.sh "$@" ) 2>&1
+}
+
+: > "$CURL_LOG"
+out=$(run_ae_notify_no_python mycontainer no-python-fallback.example.com --save none); rc=$?
+assert_rc "notify with broken python3 still succeeds (env fallback) rc 0" 0 "$rc"
+if grep -q '127.0.0.1:8816/decide' "$CURL_LOG"; then
+    pass "notify_egress_daemon falls back to the env/default endpoint when python3 is broken"
+else
+    fail "notify_egress_daemon should fall back to the env/default endpoint when python3 is broken"
+fi
+if grep -q '19191' "$CURL_LOG"; then
+    fail "notify_egress_daemon must not reach the printed-endpoint stub when python3 is broken"
+else
+    pass "notify_egress_daemon does not call the printed-endpoint stub when python3 is broken"
+fi
+
 # An unknown container → a clear error naming the attempt, plus a ps -a hint.
 MOCK_EXISTING_CONTAINERS=""
 out=$(run_ae ghost cdn.playwright.dev --save none 2>&1); rc=$?

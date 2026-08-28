@@ -106,9 +106,11 @@ echo ""
 # approval, live or manifest, on a host with no working interpreter; a broken
 # python3 now only degrades this warning to "skipped".
 if require_python3; then
+    HAVE_PYTHON3=1
     DJINN_HOME="$BASE_PATH" "$PYTHON3" "$CDD_ROOT/src/egress_denylist.py" --check "$SHORT" "${DOMAINS[@]}" \
         || echo "⚠ deny-list check failed (exit $?)"
 else
+    HAVE_PYTHON3=0
     echo "⚠ deny-list check skipped: no working python3"
 fi
 
@@ -118,8 +120,16 @@ notify_egress_daemon() {
     [ "${DJINN_EGRESS_SKIP_NOTIFY:-}" = "1" ] && return 0
 
     local token_file="$RUN_PATH/egress/${OPERATOR_TOKEN_FILENAME:-operator.token}"
-    local broker_port="${EGRESS_BROKER_PORT:-8816}"
-    local broker_url="http://127.0.0.1:${broker_port}"
+    # The daemon may have bound a non-default --host/--port (e.g. a VPN ntfy
+    # bind, or --port 0) — ask it where it actually is via daemon.json rather
+    # than assuming 127.0.0.1:8816. Reuses HAVE_PYTHON3 from the --check probe
+    # above (do not re-probe); no working python3 at all falls back to the
+    # env/default guess, same as before this existed.
+    local broker_url=""
+    if [ "${HAVE_PYTHON3:-0}" = "1" ]; then
+        broker_url="$(DJINN_HOME="$BASE_PATH" "$PYTHON3" "$CDD_ROOT/src/egress_broker_host.py" --print-endpoint 2>/dev/null)" || true
+    fi
+    [ -n "$broker_url" ] || broker_url="http://127.0.0.1:${EGRESS_BROKER_PORT:-8816}"
     local token container="$CONTAINER"
 
     [ -f "$token_file" ] || return 0
