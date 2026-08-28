@@ -4,8 +4,9 @@ Two failure modes, both previously fatal or silent:
 
 1. An agent whose descriptor cannot express a server's auth scheme (kimi's
    `bearerTokenEnvVar` against an `X-API-Key` remote) used to raise out of
-   build_payload, aborting wiring for EVERY agent. It now skips that one
-   agent/server pair.
+   build_payload, aborting wiring for EVERY agent. It was then narrowed to
+   skipping that one agent/server pair; now it does not fail at all — the agent
+   takes the mcp-remote shim, which expresses any header.
 2. A local server whose binary never made it into the image used to wire
    anyway, surfacing later as an agent MCP server that would not start, with
    nothing in the up.sh output explaining why. It is now dropped with a
@@ -43,8 +44,8 @@ def _agent(binary, **over):
     return a
 
 
-class NonBearerRemoteSkipsOneAgentTests(unittest.TestCase):
-    """Fix 1: skip the pair, don't abort the container."""
+class NonBearerRemoteFallsBackToShimTests(unittest.TestCase):
+    """Fix 1, at the root: an unrenderable auth scheme costs nobody anything."""
 
     def _build(self, servers, agents, effective):
         env = {
@@ -54,46 +55,66 @@ class NonBearerRemoteSkipsOneAgentTests(unittest.TestCase):
             "AGENT_SECRETS": "\n".join(
                 f"{a}\t{s}\tKEY_{a.upper()}" for a, s in effective),
             "PLUGIN_MCP_ENTRIES": "",
-            "IDENTITY_SECRETS": "",
         }
-        # The skip warning goes to STDERR — stdout is reserved for the payload
-        # JSON that up.sh captures (see PayloadStdoutIsJsonOnlyTests).
         err = io.StringIO()
         with redirect_stderr(err):
             payload = wire_plugins.build_payload(env)
         return payload, err.getvalue()
 
-    def test_xapikey_remote_skips_named_ref_agent_only(self):
-        """The exact shape that aborted `djinn up coding-brassbottle`."""
-        payload, out = self._build(
+    def _wire(self, payload, agents):
+        """Render the payload for real — the fallback happens container-side."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home, ws = Path(tmp), Path(tmp) / "workspace"
+            (ws / "repos").mkdir(parents=True)
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                wire_plugins.run({**payload, "agents": agents}, home, ws, {})
+            return {a["binary"]: (home / a["config_path"]).read_text()
+                    for a in agents
+                    if (home / a["config_path"]).exists()}, err.getvalue()
+
+    def test_xapikey_remote_reaches_every_bound_agent(self):
+        """The exact shape that aborted `djinn up coding-brassbottle`.
+
+        X-API-Key is not a bearer header, so kimi's `bearerTokenEnvVar` cannot
+        express it — which is why the payload build died. kimi now gets the
+        server over the shim, and claude is unaffected either way.
+        """
+        agents = [_agent("kimi", env_refs="bearerTokenEnvVar"),
+                  _agent("cursor-agent", env_refs=False, dialect="url")]
+        payload, _ = self._build(
             {"browser": {"spec": REMOTE_XAPIKEY, "requires": ["BROWSER_KEY"]}},
-            [_agent("kimi", env_refs="bearerTokenEnvVar"),
-             _agent("claude", env_refs=True, strategy="claude_preapprove")],
-            [("kimi", "BROWSER_KEY"), ("claude", "BROWSER_KEY")],
+            agents, [("kimi", "BROWSER_KEY"), ("cursor-agent", "BROWSER_KEY")],
         )
         entry = next(s for s in payload["agent_servers"] if s["name"] == "browser")
-        self.assertNotIn("kimi", entry["ref"], "kimi cannot express X-API-Key")
-        self.assertIn("claude", entry["ref"], "claude must be unaffected")
-        self.assertIn("kimi", out)
-        self.assertIn("skipped", out.lower())
+        self.assertIn("kimi", entry["ref"])
+        self.assertIn("cursor-agent", entry["local"])
 
-    def test_bearer_remote_still_wires_for_named_ref_agent(self):
-        """The skip must be narrow — a legal bearer remote is unaffected."""
+        configs, err = self._wire(payload, agents)
+        for binary, raw in configs.items():
+            self.assertIn("mcp-remote", raw, binary)
+            self.assertIn("X-API-Key: ${BROWSER_KEY}", raw, binary)
+        self.assertIn("kimi", err, "the fallback is announced, not silent")
+
+    def test_bearer_remote_still_renders_natively(self):
+        """The fallback must be narrow — a legal bearer remote stays native."""
+        agents = [_agent("kimi", env_refs="bearerTokenEnvVar")]
         payload, _ = self._build(
             {"obs": {"spec": REMOTE_BEARER, "requires": ["TOK"]}},
-            [_agent("kimi", env_refs="bearerTokenEnvVar")],
-            [("kimi", "TOK")],
+            agents, [("kimi", "TOK")],
         )
-        entry = next(s for s in payload["agent_servers"] if s["name"] == "obs")
-        self.assertIn("kimi", entry["ref"])
+        configs, _ = self._wire(payload, agents)
+        raw = configs["kimi"]
+        self.assertIn('"bearerTokenEnvVar": "TOK"', raw)
+        self.assertNotIn("mcp-remote", raw)
 
-    def test_server_dropped_entirely_when_no_agent_can_take_it(self):
+    def test_no_agent_is_ever_dropped_for_an_auth_scheme(self):
         payload, _ = self._build(
             {"browser": {"spec": REMOTE_XAPIKEY, "requires": ["BROWSER_KEY"]}},
             [_agent("kimi", env_refs="bearerTokenEnvVar")],
             [("kimi", "BROWSER_KEY")],
         )
-        self.assertEqual(payload["agent_servers"], [])
+        self.assertEqual(payload["agent_servers"][0]["ref"], ["kimi"])
 
 
 class MissingLocalBinaryTests(unittest.TestCase):
@@ -240,7 +261,7 @@ class PayloadStdoutIsJsonOnlyTests(unittest.TestCase):
 
     SRC = Path(__file__).parent.parent / "src" / "wire_plugins.py"
 
-    def test_stdout_stays_parseable_when_a_pairing_is_skipped(self):
+    def test_stdout_stays_parseable_with_an_unrenderable_pairing(self):
         env = dict(
             os.environ,
             AGENTS_MCP_JSON=json.dumps([_agent("kimi", env_refs="bearerTokenEnvVar")]),
@@ -248,18 +269,16 @@ class PayloadStdoutIsJsonOnlyTests(unittest.TestCase):
                 {"browser": {"spec": REMOTE_XAPIKEY, "requires": ["BROWSER_KEY"]}}),
             AGENT_SECRETS="kimi\tBROWSER_KEY\tSRC",
             PLUGIN_MCP_ENTRIES="",
-            IDENTITY_SECRETS="",
         )
         proc = subprocess.run(
             [sys.executable, str(self.SRC), "--build-payload"],
             capture_output=True, text=True, env=env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        # The whole point: stdout parses, with the warning nowhere in it.
+        # The whole point: stdout parses, and carries the server.
         payload = json.loads(proc.stdout)
-        self.assertEqual(payload["agent_servers"], [])
+        self.assertEqual(payload["agent_servers"][0]["ref"], ["kimi"])
         self.assertNotIn("⚠", proc.stdout)
-        # ...and the warning was still emitted, just on the right stream.
-        self.assertIn("kimi", proc.stderr)
+        self.assertNotIn("·", proc.stdout)
 
 
 class ImagePathContractTests(unittest.TestCase):

@@ -34,13 +34,20 @@ class TestAgentTestKit(unittest.TestCase):
             self.skipTest("yq not available")
 
     def test_wire_run_env_never_inherits_host_identity_keys(self):
+        """The kit builds run_env from test values only, never os.environ.
+
+        IDENTITY_KEY_n carried a resolved secret into wiring so a remote server
+        could be rendered with the key inlined. Those agents take the mcp-remote
+        shim now, so the assertion is the stronger one: the var reaches neither
+        run_env nor any wired file, whatever the host has set.
+        """
         key = "IDENTITY_KEY_0"
         prior = os.environ.get(key)
         os.environ[key] = self.SENTINEL
         try:
             result = kit.wire("cursor")
             self.assertNotIn(self.SENTINEL, _tree_text(kit.AGENT_SCRATCH_ROOT))
-            self.assertEqual(result._run_env.get(key), "TEST_SECRET")
+            self.assertNotIn(key, result._run_env)
         finally:
             if prior is None:
                 os.environ.pop(key, None)

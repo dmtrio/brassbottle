@@ -1,28 +1,18 @@
-# axiom — Axiom's official MCP, bridged to LOCAL stdio via `mcp-remote` so EVERY
-# agent (claude, cursor, codex; pi once its adapter is installed) reaches
-# it uniformly, not just Claude. mcp-remote is a BASE TOOL — installed once by
-# the Dockerfile and treated like bash by src/manifest.py (BASE_IMAGE_BINS), so
-# this plugin carries no install: block of its own; the version and the reason
-# for its floor live there. It is a stdio↔HTTP proxy to mcp.axiom.co; being a
-# local command server it
-# wires into every agent through the ordinary local-plugin path — no per-agent
-# remote-header injection. Axiom documents exactly this bridge (mcp-remote <url>).
-# See ./README.md.
+# axiom — Axiom's official MCP at mcp.axiom.co. Declared as the remote HTTP
+# endpoint it is; the TRANSPORT is the wiring layer's business, not this file's.
+# src/wire_plugins.py renders it per agent: natively for agents that can hold a
+# ${VAR} in a remote header (claude, codex, kimi), and through an mcp-remote
+# stdio shim for those that cannot (cursor-agent, pi). Either way the token is
+# in NO MCP config file and never on a command line — the shim's argv holds the
+# literal "${AXIOM_TOKEN}", which mcp-remote expands from the agent's own env at
+# connect time. Axiom documents exactly this bridge for stdio-only clients.
 #
 # Hybrid secret resolution gates WHICH agents get axiom:
-#   • common_secrets: [AXIOM_TOKEN] → shared default for every enabled agent
-#   • agent_secrets override or disable individual agents
-# The resolved token is delivered into each bound agent's shim env (keyfiles.sh)
-# and
-# mcp-remote itself substitutes ${AXIOM_TOKEN} into the header at connect time.
-# So the secret is in NO MCP config file AND never on the process command line
-# (argv holds the literal "${AXIOM_TOKEN}", not the value). Bind it in a manifest:
 #   common_secrets: [AXIOM_TOKEN]               # shared default
 #   agent_secrets:                              # per-agent override / disable
 #     - {agent: cursor-agent, slot: AXIOM_TOKEN, secret: AXIOM_KEY_cursor}
 #
-# The server execs the baked `mcp-remote` binary directly (not `npx`), so process
-# startup never reaches for the npm registry — it runs fully offline.
+# See ./README.md.
 
 secrets:
   AXIOM_TOKEN: {hint: "axiom (an Axiom API token — Settings → API tokens; a scoped token 'xaat-…' is simplest)"}
@@ -32,6 +22,6 @@ egress:
 
 mcp:
   axiom:
-    command: mcp-remote
-    args: ["https://mcp.axiom.co/mcp", "--header", "Authorization: Bearer ${AXIOM_TOKEN}"]
+    url: https://mcp.axiom.co/mcp
+    headers: {Authorization: "Bearer ${AXIOM_TOKEN}"}
     requires: [AXIOM_TOKEN]

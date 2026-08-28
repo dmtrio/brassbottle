@@ -69,7 +69,7 @@ from golden_tree import (  # noqa: E402
 )
 
 # Bump and regenerate every agents/*/golden/ when ANY canonical scenario detail changes.
-SCENARIO_VERSION = 1
+SCENARIO_VERSION = 2
 
 DERIVE_ENV = {
     "PRESENT_SECRET_VARS": "TEST_SECRET",
@@ -137,30 +137,6 @@ def _load_all_agent_files() -> dict[str, dict]:
             if (AGENTS / name / "agent.yml").is_file()}
 
 
-def _identity_secrets(agent_secrets: str, remote_slots: str, literal_key_agents: str) -> tuple[str, int]:
-    """Replicate up.sh ~447–464 IDENTITY_SECRETS assembly."""
-    slots_set = f" {remote_slots} "
-    literal_set = f" {literal_key_agents} "
-    entries = []
-    i = 0
-    for line in agent_secrets.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        agent, slot, _source = parts
-        if not agent:
-            continue
-        if f" {slot} " not in slots_set:
-            continue
-        if f" {agent} " not in literal_set:
-            continue
-        entries.append(f"{agent}:IDENTITY_KEY_{i}:{slot}")
-        i += 1
-    return " ".join(entries), i
-
-
 def _scratch_path(agent_dir_name: str, *, remote_server, local_server,
                   extra_agents, key_env_values) -> Path:
     """Return the deterministic scratch dir for one wire() invocation."""
@@ -192,21 +168,19 @@ def _local_command_names(payload: dict) -> set:
     return {n for n in names if n}
 
 
-def _build_run_env(derived: dict, ident: str, count: int,
-                   key_env_values: dict | None) -> dict:
+def _build_run_env(derived: dict, key_env_values: dict | None) -> dict:
     """Build the container-side env for wire_plugins.run from test values only."""
     run_env = {
         "AGENTS_MCP_JSON": derived.get("AGENTS_MCP_JSON", ""),
         "PLUGIN_MCP_ENTRIES": derived.get("PLUGIN_MCP_ENTRIES", ""),
         "AGENT_SERVERS_JSON": derived.get("AGENT_SERVERS_JSON", ""),
         "AGENT_SECRETS": derived.get("AGENT_SECRETS", ""),
-        "IDENTITY_SECRETS": ident,
     }
+    # key_env_values only ever fed IDENTITY_KEY_n, the per-agent key names a
+    # remote server was rendered with. Nothing reads them now; the parameter
+    # stays so per-agent tests keep their distinct scratch dirs.
     if key_env_values:
         run_env.update(key_env_values)
-    else:
-        for i in range(count):
-            run_env[f"IDENTITY_KEY_{i}"] = "TEST_SECRET"
     return run_env
 
 
@@ -270,13 +244,7 @@ def wire(agent_dir_name: str, *, remote_server=True, local_server=True,
     }
 
     derived = manifest.derive(man, plugin_files, agent_files, DERIVE_ENV)
-    ident, count = _identity_secrets(
-        derived.get("AGENT_SECRETS", ""),
-        derived.get("AGENT_SERVER_REMOTE_SLOTS", ""),
-        derived.get("LITERAL_KEY_AGENTS", ""),
-    )
-
-    run_env = _build_run_env(derived, ident, count, key_env_values)
+    run_env = _build_run_env(derived, key_env_values)
 
     payload = wire_plugins.build_payload(run_env)
 

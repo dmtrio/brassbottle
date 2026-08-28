@@ -874,17 +874,6 @@ def derive(manifest, plugin_files, agent_files, env):
         sorted(agents[name]["binary"] for name in enabled_agent_dirs
                if agents[name]["mcp"] is not None)
     )
-    # The agents whose remote agent-scoped keys must travel as one-shot docker
-    # exec env (IDENTITY_KEY_n) because their configs bake literal values.
-    # Ref-style and managed-block agents get keys via their shim env instead —
-    # routing by descriptor role here keeps up.sh from ever shipping a
-    # ref-capable agent's secret on the exec environment unnecessarily.
-    out["LITERAL_KEY_AGENTS"] = " ".join(sorted(
-        agents[name]["binary"] for name in enabled_agent_dirs
-        if agents[name]["mcp"] is not None
-        and not agents[name]["mcp"]["env_refs"]
-        and agents[name]["mcp"]["dialect"] in AGENT_MCP_LITERAL_DIALECTS
-    ))
     out["AGENTS_MCP_JSON"] = json.dumps(
         [
             {
@@ -1083,7 +1072,6 @@ def derive(manifest, plugin_files, agent_files, env):
     secret_slots = {}      # SLOT -> (plugin, hint)
     servers_by_name = {}   # name -> {"spec": {...}, "requires": [SLOT, ...]}
     server_slots = []      # required slot names, first-seen order
-    remote_server_slots = []  # subset required by a REMOTE (no-command) server
     plugin_volumes = {}    # volume name -> container path (enabled plugins only)
     volume_owner = {}      # volume name -> plugin, for collision messages
     path_owner = {}        # container path -> plugin
@@ -1345,12 +1333,9 @@ def derive(manifest, plugin_files, agent_files, env):
             requires = spec.get("requires") or []
             if requires:
                 servers_by_name[n] = {"spec": config_spec, "requires": requires}
-                is_remote = "command" not in config_spec
                 for slot in requires:
                     if slot not in server_slots:
                         server_slots.append(slot)
-                    if is_remote and slot not in remote_server_slots:
-                        remote_server_slots.append(slot)
             else:
                 uniform[n] = config_spec
         # One line of compact JSON per uniform plugin — the --build-payload
@@ -1393,14 +1378,13 @@ def derive(manifest, plugin_files, agent_files, env):
     # Sorted + deduped so the firewall grant string is order-independent of the
     # plugin list and two plugins sharing a port don't double up the grant.
     out["HOST_MCP_PORTS"] = ",".join(str(p) for p in sorted(set(host_ports)))
-    # Required server definitions and the slots whose values must be handed to
-    # the wiring exec for literal remote-agent configs. Env-only slots are not
-    # included in AGENT_SERVER_SLOTS. AGENT_SERVER_REMOTE_SLOTS is the subset
-    # feeding a REMOTE server — the only slots up.sh puts on the `docker exec`
-    # argv, since a LOCAL server reads its ${SLOT} from the agent's own env.
+    # Required server definitions. Env-only slots are not included in
+    # AGENT_SERVER_SLOTS. No slot VALUE reaches the wiring exec: a remote
+    # agent-scoped server is rendered natively (a ${SLOT} ref the agent expands)
+    # or through the mcp-remote shim (which expands it from the agent's own
+    # env), so there is nothing to put on the `docker exec` argv.
     out["AGENT_SERVERS_JSON"] = json.dumps(servers_by_name, separators=(",", ":"), ensure_ascii=False)
     out["AGENT_SERVER_SLOTS"] = " ".join(server_slots)
-    out["AGENT_SERVER_REMOTE_SLOTS"] = " ".join(remote_server_slots)
 
     # ── Hybrid secret resolution ─────────────────────────────────────────────
     # common_secrets declares the optional default source for a slot. An

@@ -160,29 +160,6 @@ def parse_derived(text):
     return out
 
 
-def identity_secrets(agent_secrets, remote_slots):
-    """Replicate up.sh ~431–447 IDENTITY_SECRETS assembly."""
-    slots_set = f" {remote_slots} "
-    entries = []
-    i = 0
-    for line in agent_secrets.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        agent, slot, _source = parts
-        if not agent:
-            continue
-        if f" {slot} " not in slots_set:
-            continue
-        if agent in ("claude", "codex"):
-            continue
-        entries.append(f"{agent}:IDENTITY_KEY_{i}:{slot}")
-        i += 1
-    return " ".join(entries)
-
-
 def run_pipeline(manifest_name, env):
     """Run derive + build-payload; return (derived_stdout, payload_stdout)."""
     stdin = build_derive_stdin(FIXTURES / f"{manifest_name}.yml")
@@ -205,17 +182,15 @@ def run_pipeline(manifest_name, env):
             f"manifest.py --derive failed for {manifest_name}:\n{dr.stderr}")
 
     derived = parse_derived(dr.stdout)
-    ident = identity_secrets(
-        derived.get("AGENT_SECRETS", ""),
-        derived.get("AGENT_SERVER_REMOTE_SLOTS", ""),
-    )
+    # up.sh's IDENTITY_SECRETS assembly used to be replicated here: per-agent
+    # key ENV NAMES so a remote server could be rendered with the key inlined.
+    # Those agents take the mcp-remote shim now, so neither half handles a key.
     payload_env = {
         **env,
         "AGENTS_MCP_JSON": derived.get("AGENTS_MCP_JSON", ""),
         "PLUGIN_MCP_ENTRIES": derived.get("PLUGIN_MCP_ENTRIES", ""),
         "AGENT_SERVERS_JSON": derived.get("AGENT_SERVERS_JSON", ""),
         "AGENT_SECRETS": derived.get("AGENT_SECRETS", ""),
-        "IDENTITY_SECRETS": ident,
     }
     pr = subprocess.run(
         [sys.executable, str(WIRE_PLUGINS), "--build-payload"],

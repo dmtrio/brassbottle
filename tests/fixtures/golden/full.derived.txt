@@ -10,7 +10,6 @@ GIT_ORG_IDENTITIES=''
 MEM_LIMIT=4g
 AGENTS_ENABLED='aider claude codex cursor pi'
 SHIM_AGENTS='claude codex cursor-agent pi'
-LITERAL_KEY_AGENTS='cursor-agent pi'
 AGENTS_MCP_JSON='[{"binary":"claude","config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove","settings":{}},{"binary":"codex","config_path":".codex/config.toml","format":"toml","dialect":"","env_refs":"bearer_token_env_var","strategy":"codex_managed_block","settings":{"sandbox_mode":"danger-full-access"}},{"binary":"cursor-agent","config_path":".cursor/mcp.json","format":"json","dialect":"url","env_refs":false,"strategy":"","settings":{}},{"binary":"pi","config_path":".pi/agent/mcp.json","format":"json","dialect":"type-http","env_refs":false,"strategy":"","settings":{}}]'
 PLUGINS='axiom obsidian-annotated codebase-memory'
 PLUGINS_ENABLED='axiom codebase-memory obsidian-annotated'
@@ -57,9 +56,8 @@ volumes:
 PLUGIN_SERVICES=''
 HOST_MCP_PORTS='8816'
 ENABLE_EGRESS_BROKER=true
-AGENT_SERVERS_JSON='{"axiom":{"spec":{"command":"mcp-remote","args":["https://mcp.axiom.co/mcp","--header","Authorization: Bearer ${AXIOM_TOKEN}"]},"requires":["AXIOM_TOKEN"]},"obsidian-annotated":{"spec":{"command":"mcp-remote","args":["https://mcp-obsidian.dmetr.io/mcp","--header","Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"]},"requires":["OBSIDIAN_ANNOTATED_KEY"]}}'
+AGENT_SERVERS_JSON='{"axiom":{"spec":{"url":"https://mcp.axiom.co/mcp","headers":{"Authorization":"Bearer ${AXIOM_TOKEN}"}},"requires":["AXIOM_TOKEN"]},"obsidian-annotated":{"spec":{"url":"https://mcp-obsidian.dmetr.io/mcp","headers":{"Authorization":"Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},"requires":["OBSIDIAN_ANNOTATED_KEY"]}}'
 AGENT_SERVER_SLOTS='AXIOM_TOKEN OBSIDIAN_ANNOTATED_KEY'
-AGENT_SERVER_REMOTE_SLOTS=''
 AGENT_SECRETS='cursor-agent	AXIOM_TOKEN	AXIOM_KEY_cursor
 claude	OBSIDIAN_ANNOTATED_KEY	OBSIDIAN_KEY_claude
 cursor-agent	OBSIDIAN_ANNOTATED_KEY	OBSIDIAN_KEY_cursor

@@ -7,6 +7,6 @@ command = "codebase-memory-mcp"
 args = []
 
 [mcp_servers.axiom]
-command = "mcp-remote"
-args = ["https://mcp.axiom.co/mcp","--header","Authorization: Bearer ${AXIOM_TOKEN}"]
+url = "https://mcp.axiom.co/mcp"
+bearer_token_env_var = "AXIOM_TOKEN"
 # <<< djinn plugin MCP <<<

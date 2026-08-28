@@ -9,21 +9,22 @@ import agent_test_kit as kit
 
 
 class AntigravityWiring(unittest.TestCase):
-    def test_literal_remote_serverurl_dialect(self):
+    def test_remote_server_arrives_as_a_shim_with_no_baked_key(self):
         golden = Path(__file__).parent / "golden"
 
         def do_wire():
-            return kit.wire("antigravity-cli", key_env_values={"IDENTITY_KEY_0": "LITERAL_SECRET"})
+            return kit.wire("antigravity-cli")
 
         r = do_wire()
         mcp_path = r.home / ".gemini" / "config" / "mcp_config.json"
         raw = mcp_path.read_text()
-        # agy cannot expand refs: the key is baked, and the ref never survives.
-        self.assertNotIn("${TEST_TOKEN}", raw)
-        # url/httpUrl are rejected by agy — the remote must carry serverUrl.
-        self.assertIn("serverUrl", raw)
-        self.assertNotIn('"url"', raw)
-        self.assertNotIn("httpUrl", raw)
+        # agy cannot expand a ref inside a remote header, which is exactly why
+        # it used to get the key baked in. Over the shim the ref survives, and
+        # the dialect question (agy rejects url/httpUrl, wants serverUrl) does
+        # not arise at all — there is no remote entry to shape.
+        self.assertIn("${TEST_TOKEN}", raw)
+        self.assertNotIn("TEST_SECRET", raw)
+        self.assertNotIn("serverUrl", raw)
         self.assertEqual(os.stat(mcp_path).st_mode & 0o777, 0o600)
         kit.assert_matches_golden(r, golden, wire_fn=do_wire)
 

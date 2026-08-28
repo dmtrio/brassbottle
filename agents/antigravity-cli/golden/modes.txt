@@ -1,3 +1,2 @@
 home/.gemini/config/mcp_config.json 0600
 home/.gemini/config/mcp_config.json.djinn-plugins 0600
-home/.gemini/config/mcp_config.json.djinn-servers 0600
