@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(TESTS_DIR))
 import egress_broker_host as broker  # noqa: E402
 import egress_log  # noqa: E402
+import egress_notify  # noqa: E402
 from egress_test_sync import (  # noqa: E402
     join_thread_or_fail,
     wait_for_broker_open_request,
@@ -1372,6 +1373,109 @@ exit 0
     def test_notify_egress_daemon_curls_use_max_time(self):
         script = (REPO_ROOT / "bin" / "allow-egress.sh").read_text(encoding="utf-8")
         self.assertGreaterEqual(script.count("--max-time"), 2)
+
+    def test_file_request_invokes_notifier_once_per_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            recorded: list[egress_notify.EgressNotification] = []
+
+            def recorder(notification: egress_notify.EgressNotification) -> None:
+                recorded.append(notification)
+
+            b = broker.EgressBroker(
+                root,
+                repo_root=REPO_ROOT,
+                now_fn=clock.now,
+                hold_seconds_default=60,
+                notifier=recorder,
+            )
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+                kwargs={
+                    "uid": 1000,
+                    "comm": "curl",
+                    "reason": "npm install",
+                },
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            second_body, second_id = b.file_request(
+                "coding-brassbottle",
+                "neon.tech",
+                443,
+            )
+            self.assertEqual(second_id, request_id)
+            self.assertEqual(second_body["decision"], "pending")
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(recorded[0].request_id, request_id)
+            self.assertEqual(recorded[0].container, "coding-brassbottle")
+            self.assertEqual(recorded[0].host, "neon.tech")
+            self.assertEqual(recorded[0].port, 443)
+            self.assertEqual(recorded[0].uid, 1000)
+            self.assertEqual(recorded[0].comm, "curl")
+            self.assertEqual(recorded[0].reason, "npm install")
+            b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+
+    def test_notifier_exception_does_not_break_file_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+
+            def broken_notifier(_notification: egress_notify.EgressNotification) -> None:
+                raise RuntimeError("boom")
+
+            b = broker.EgressBroker(
+                root,
+                repo_root=REPO_ROOT,
+                now_fn=clock.now,
+                hold_seconds_default=60,
+                notifier=broken_notifier,
+            )
+            with self.assertLogs("egress_broker_host", level="WARNING") as captured:
+                thread = threading.Thread(
+                    target=b.file_request,
+                    args=("coding-brassbottle", "neon.tech", 443),
+                )
+                thread.start()
+                request_id = wait_for_broker_open_request(b)
+            self.assertTrue(any("notifier raised" in line for line in captured.output))
+            queue_state = b._log.fold_queue(now=clock.now())
+            self.assertIn(request_id, queue_state.open_requests)
+            b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+
+    def test_notifier_called_outside_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = broker.EgressBroker(
+                root,
+                repo_root=REPO_ROOT,
+                now_fn=clock.now,
+                hold_seconds_default=60,
+            )
+
+            acquired_during_notify: list[bool] = []
+
+            def lock_probe(_notification: egress_notify.EgressNotification) -> None:
+                acquired = b._lock.acquire(timeout=1)
+                acquired_during_notify.append(acquired)
+                if acquired:
+                    b._lock.release()
+
+            b._notifier = lock_probe
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            self.assertEqual(acquired_during_notify, [True])
+            b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
 
 
 if __name__ == "__main__":
