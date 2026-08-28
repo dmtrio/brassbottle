@@ -445,6 +445,111 @@ class InterceptedConnectionTests(unittest.TestCase):
         self.assertEqual(response, broker.TLS_ACCESS_DENIED_ALERT)
 
 
+class LoopbackDestinationTests(unittest.TestCase):
+    """Loopback is never egress and must never reach the operator queue."""
+
+    def test_classifies_loopback_addresses(self):
+        self.assertTrue(broker.is_loopback_destination("127.0.0.1"))
+        self.assertTrue(broker.is_loopback_destination("127.0.0.53"))
+        self.assertFalse(broker.is_loopback_destination("93.184.216.34"))
+        self.assertFalse(broker.is_loopback_destination("10.0.0.1"))
+
+    def test_unparseable_address_is_not_treated_as_loopback(self):
+        # Fail towards filing, never towards silently splicing an unknown
+        # destination straight through.
+        self.assertFalse(broker.is_loopback_destination("not-an-ip"))
+
+
+class LoopbackInterceptTests(unittest.TestCase):
+    """The 127.0.0.1:3128 prompt loop, at the two places it can start.
+
+    Borrows the two helpers rather than subclassing InterceptedConnectionTests,
+    which would re-run every one of its tests under this name too.
+    """
+
+    _config = InterceptedConnectionTests._config
+    _mock_client = InterceptedConnectionTests._mock_client
+
+    def test_self_dial_is_refused_without_filing(self):
+        # An app with http_proxy=http://127.0.0.1:3128 dials the broker port
+        # directly. No NAT happened, so SO_ORIGINAL_DST hands back the
+        # broker's own address and the pre-fix code filed 127.0.0.1:3128 with
+        # the operator — an IP literal that cannot be allowed.
+        client, feed = self._mock_client(
+            dst_ip="127.0.0.1", dst_port=3128, initial=b"GET / HTTP/1.1\r\n\r\n"
+        )
+        file_calls: list[dict[str, object]] = []
+
+        outcome = broker.handle_intercepted_connection(
+            client,
+            config=self._config(),
+            ipset_check=lambda _ip: False,
+            file_fn=lambda **kwargs: file_calls.append(kwargs) or (None, None),
+            connect_fn=lambda addr, timeout: self.fail(f"must not relay to {addr}"),
+        )
+        feed.close()
+
+        self.assertEqual(outcome.action, "self_dial")
+        self.assertEqual(file_calls, [], "a self-dial must never reach the operator")
+
+    def test_local_service_is_spliced_through_without_filing(self):
+        # Defence in depth behind the nat rule's ! -d 127.0.0.0/8: a local
+        # dev server on :80 keeps working rather than prompting the operator.
+        client, feed = self._mock_client(
+            dst_ip="127.0.0.1", dst_port=80, initial=b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        upstream_client, upstream = socket.socketpair()
+        file_calls: list[dict[str, object]] = []
+        ipset_calls: list[str] = []
+
+        def ipset_check(ip: str) -> bool:
+            ipset_calls.append(ip)
+            return False
+
+        def connect_fn(addr: tuple[str, int], timeout: float) -> socket.socket:
+            self.assertEqual(addr, ("127.0.0.1", 80))
+            return upstream
+
+        with mock.patch.object(broker, "relay_sockets"):
+            outcome = broker.handle_intercepted_connection(
+                client,
+                config=self._config(),
+                ipset_check=ipset_check,
+                file_fn=lambda **kwargs: file_calls.append(kwargs) or (None, None),
+                connect_fn=connect_fn,
+            )
+        feed.close()
+        upstream_client.close()
+
+        self.assertEqual(outcome.action, "fast_path")
+        self.assertEqual(file_calls, [], "loopback must never reach the operator")
+        self.assertEqual(ipset_calls, [], "loopback short-circuits before the ipset probe")
+
+    def test_a_real_destination_on_the_broker_port_still_files(self):
+        # The port alone must not trigger the self-dial branch: :3128 on a
+        # remote host is ordinary egress.
+        client, feed = self._mock_client(
+            dst_ip="93.184.216.34", dst_port=3128, initial=b"GET / HTTP/1.1\r\n\r\n"
+        )
+        file_calls: list[dict[str, object]] = []
+
+        def file_fn(**kwargs: object) -> tuple[dict[str, str], None]:
+            file_calls.append(kwargs)
+            return {"decision": "deny", "request_id": "req-remote"}, None
+
+        outcome = broker.handle_intercepted_connection(
+            client,
+            config=self._config(),
+            ipset_check=lambda _ip: False,
+            file_fn=file_fn,
+            connect_fn=lambda addr, timeout: self.fail("denied must not connect"),
+        )
+        feed.close()
+
+        self.assertNotEqual(outcome.action, "self_dial")
+        self.assertEqual(len(file_calls), 1)
+
+
 class IpsetHelperTests(unittest.TestCase):
     def test_ipset_allowed_invokes_ipset_test(self):
         calls: list[list[str]] = []

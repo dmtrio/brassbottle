@@ -7,8 +7,13 @@ set -euo pipefail
 BROKER_REDIRECT_PORT="${BROKER_REDIRECT_PORT:-3128}"
 
 # shellcheck disable=SC2128
+# ! -d 127.0.0.0/8: loopback is not egress. Without it a local service on
+# :80/:443 (a dev server, a sidecar) is REDIRECTed into the broker, which then
+# files 127.0.0.1 with the operator as an IP-literal request that cannot be
+# allowed. egress_broker.py refuses loopback a second time, at the socket.
 egress_broker_firewall_nat_rule() {
     echo -t nat -A OUTPUT -p tcp -m multiport --dports 80,443 \
+        ! -d 127.0.0.0/8 \
         -m set ! --match-set allowed-domains dst \
         -m owner ! --uid-owner djinnbroker \
         -j REDIRECT --to-ports "$BROKER_REDIRECT_PORT"
@@ -28,6 +33,7 @@ egress_broker_firewall_add() {
 egress_broker_firewall_remove() {
     # shellcheck disable=SC2046
     iptables -t nat -D OUTPUT -p tcp -m multiport --dports 80,443 \
+        ! -d 127.0.0.0/8 \
         -m set ! --match-set allowed-domains dst \
         -m owner ! --uid-owner djinnbroker \
         -j REDIRECT --to-ports "$BROKER_REDIRECT_PORT" 2>/dev/null || true

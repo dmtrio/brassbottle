@@ -16,6 +16,23 @@ queue and HTTP API without the interactive UI. Containers file requests via
 `POST /egress`; the operator answers through the watcher, CLI, or notification
 actions.
 
+## Loopback is never filed
+
+Traffic to `127.0.0.0/8` is local, not egress, and never reaches the operator
+queue. Two guards enforce it:
+
+- The nat REDIRECT rule carries `! -d 127.0.0.0/8`, so a local service on
+  :80/:443 is not intercepted at all.
+- The broker refuses a loopback destination at the socket. A dial to its own
+  listen port (`127.0.0.1:3128`) is logged as `self_dial` and closed; any other
+  loopback destination is spliced straight through.
+
+The self-dial case means a process has `http_proxy`/`https_proxy` pointed at
+`127.0.0.1:3128`. The broker is a *transparent* proxy — it reads the
+destination from the kernel via `SO_ORIGINAL_DST` — and takes no forward-proxy
+clients. Unset those variables in the bottle; with them set, every request the
+process makes arrives as an unanswerable IP-literal approval prompt.
+
 ## Notifications
 
 ### macOS banner / dialog

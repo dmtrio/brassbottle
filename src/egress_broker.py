@@ -10,6 +10,7 @@ the client until allow/deny/timeout. Stdlib only; runs as djinnbroker.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
@@ -131,6 +132,34 @@ class BrokerConfig:
     listen_port: int = BROKER_LISTEN_PORT
     peek_timeout: float = DEFAULT_PEEK_TIMEOUT
     max_peek_bytes: int = DEFAULT_MAX_PEEK_BYTES
+
+
+def is_loopback_destination(ip: str) -> bool:
+    """True when the recovered original destination is loopback.
+
+    Loopback is never egress, so it must never be filed with the operator.
+    Two ways a connection lands here with a 127.0.0.0/8 destination:
+
+      - A direct dial to the broker's own listen port. The companion filter
+        rule ACCEPTs 127.0.0.1:3128, so an app configured with
+        `http_proxy=http://127.0.0.1:3128` connects straight in. No NAT
+        happened, so SO_ORIGINAL_DST returns the socket's own address and the
+        broker files ITSELF as the destination — an IP-literal request the
+        operator cannot allow (IP literals need a manifest CIDR) and, until
+        the watcher's skip is fixed, cannot get rid of either. Observed as an
+        endless `Allow traffic to 127.0.0.1? … 127.0.0.1:3128` prompt.
+      - A local service on :80/:443. The nat rule now excludes 127.0.0.0/8,
+        but a rule installed before this fix (or removed by hand) would send
+        a local dev server's traffic through here.
+
+    Malformed input is not loopback: get_original_dst has already validated
+    the family, so anything unparseable here is treated as a real destination
+    rather than silently fast-pathed.
+    """
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
 
 
 def parse_original_dst_bytes(raw: bytes) -> OriginalDestination:
@@ -635,12 +664,39 @@ def handle_intercepted_connection(
         dst.port,
     )
 
-    if ipset_check(dst.ip):
-        LOG.info(
-            "egress broker fast_path conn_id=%s dst=%s:%d",
+    loopback = is_loopback_destination(dst.ip)
+    if loopback and dst.port == config.listen_port:
+        # Relaying would dial this same listener again. Refuse loudly instead:
+        # the cause is always a misconfigured client pointing an http_proxy at
+        # the broker, which is a TRANSPARENT proxy (it reads the destination
+        # from the kernel), not a forward proxy.
+        LOG.warning(
+            "egress broker self_dial conn_id=%s dst=%s:%d "
+            "(client has a proxy configured at the broker port; "
+            "the broker is transparent and takes no proxy clients)",
             conn_id,
             dst.ip,
             dst.port,
+        )
+        _emit_failure(
+            client,
+            dst.port,
+            host=dst.ip,
+            request_id="unknown",
+            bottle=config.container,
+            reason="daemon_error",
+        )
+        return ConnectionOutcome(action="self_dial", dst_ip=dst.ip, dst_port=dst.port)
+
+    # Loopback shares the allowlist fast path: it is local traffic, so it is
+    # spliced straight through and never filed.
+    if loopback or ipset_check(dst.ip):
+        LOG.info(
+            "egress broker fast_path conn_id=%s dst=%s:%d via=%s",
+            conn_id,
+            dst.ip,
+            dst.port,
+            "loopback" if loopback else "allowlist",
         )
         peek = peek_initial_bytes(
             client,
