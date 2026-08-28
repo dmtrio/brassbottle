@@ -269,6 +269,14 @@ ENV PATH="/home/$USERNAME/.agent-shims:/home/$USERNAME/.local/bin:/home/$USERNAM
 # blocked-egress request — so switch it off image-wide rather than per
 # ~/.claude/settings.json. Same ENV + /etc/environment pairing as PATH so
 # docker-exec, entrypoint AND SSH/mosh sessions all see it.
+#
+# Trade-off (Claude Code 2.1.x): this sets the client's privacy level to
+# "no-telemetry", which ALSO disables server feature-flag evaluation — so
+# `claude remote-control` / `/rc` refuses to start, and server-gated
+# features fall back to compiled defaults. Per-session escape:
+# `env -u DISABLE_TELEMETRY claude`. This is a stop-gap for the egress
+# broker lacking a persistent "never ask again for this host" deny; if
+# that lands, prefer it and drop this.
 ENV DISABLE_TELEMETRY=1
 RUN printf 'PATH=%s\nDISABLE_TELEMETRY=1\n' "$PATH" | sudo tee /etc/environment >/dev/null
 
