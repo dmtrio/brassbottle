@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import logging
+import subprocess
 import sys
 import tempfile
 import threading
@@ -128,40 +129,38 @@ class EgressWatchTests(unittest.TestCase):
             with b._lock:
                 self.assertIn(request_id, b._requests)
 
-    def test_osascript_argv_passes_hostname_as_argument_not_in_script(self):
+    def test_osascript_argv_passes_untrusted_fields_as_arguments_not_in_script(self):
         evil = 'evil" & do shell script "rm -rf /"'
-        argv = watch.build_osascript_argv(
-            title="title",
-            message="message",
-            hostname=evil,
-        )
+        details = self._details(host=evil)
+        _, message = watch.build_dialog_message(details)
+        argv = watch.build_osascript_argv(title=evil, message=message)
         self.assertIn(evil, argv)
+        self.assertIn(message, argv)
         dash = argv.index("--")
         self.assertGreater(dash, 0)
-        self.assertEqual(argv[dash + 1], evil)
+        self.assertEqual(argv[dash + 1], message)
+        self.assertEqual(argv[dash + 2], evil)
         for arg in argv[1:dash]:
             if arg == "-e":
                 continue
             self.assertNotIn(evil, arg)
             self.assertNotIn("evil", arg)
 
-    def test_osascript_argv_activates_inside_system_events_before_dialog(self):
+    def test_dialog_script_activates_self_and_defaults_to_deny(self):
         argv = watch.build_osascript_argv(
             title="title",
             message="message",
-            hostname="docs.stripe.com",
         )
         script_lines = [arg for i, arg in enumerate(argv) if i > 0 and argv[i - 1] == "-e"]
-        tell_idx = script_lines.index('tell application "System Events"')
         activate_idx = script_lines.index("activate")
         dialog_idx = next(
             i for i, line in enumerate(script_lines) if "display dialog" in line
         )
-        end_tell_idx = script_lines.index("end tell")
-        self.assertLess(tell_idx, activate_idx)
         self.assertLess(activate_idx, dialog_idx)
-        self.assertLess(dialog_idx, end_tell_idx)
+        self.assertIn('default button "Deny"', script_lines[dialog_idx])
         self.assertIn("with icon caution", script_lines[dialog_idx])
+        for line in script_lines:
+            self.assertNotIn("System Events", line)
 
     def test_notification_argv_passes_fields_as_arguments_not_in_script(self):
         evil_host = 'evil" & do shell script "rm -rf /"'
@@ -169,14 +168,12 @@ class EgressWatchTests(unittest.TestCase):
         argv = watch.build_notification_argv(
             title="title",
             message=evil_msg,
-            hostname=evil_host,
         )
-        self.assertIn(evil_host, argv)
         self.assertIn(evil_msg, argv)
         dash = argv.index("--")
         self.assertGreater(dash, 0)
-        self.assertEqual(argv[dash + 1], evil_host)
-        self.assertEqual(argv[dash + 2], evil_msg)
+        self.assertEqual(argv[dash + 1], evil_msg)
+        self.assertEqual(argv[dash + 2], "title")
         for arg in argv[1:dash]:
             if arg == "-e":
                 continue
@@ -209,6 +206,9 @@ class EgressWatchTests(unittest.TestCase):
         proc = mock.Mock()
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        terminal_gate = threading.Event()
 
         def notify_runner(argv: list[str]) -> None:
             notify_argvs.append(argv)
@@ -218,10 +218,14 @@ class EgressWatchTests(unittest.TestCase):
             popen_calls.append(list(args[0]))
             return proc
 
+        def input_fn(_prompt: str) -> str:
+            terminal_gate.wait()
+            return "a"
+
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
             egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=lambda _p: "",
+            input_fn=input_fn,
             output=io.StringIO(),
             platform="darwin",
             popen_factory=popen_factory,
@@ -233,7 +237,7 @@ class EgressWatchTests(unittest.TestCase):
         self.assertTrue(notified.wait(timeout=5), "notification never dispatched")
         self.assertEqual(len(notify_argvs), 1)
         dash = notify_argvs[0].index("--")
-        self.assertEqual(notify_argvs[0][dash + 1], details.host)
+        self.assertEqual(notify_argvs[0][dash + 1], watch.build_notification_message(details)[1])
         self.assertEqual(len(popen_calls), 1)
         self.assertTrue(any("display dialog" in a for a in popen_calls[0]))
 
@@ -243,14 +247,21 @@ class EgressWatchTests(unittest.TestCase):
         proc = mock.Mock()
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        terminal_gate = threading.Event()
 
         def notify_runner(_argv: list[str]) -> None:
             release.wait(timeout=10)
 
+        def input_fn(_prompt: str) -> str:
+            terminal_gate.wait()
+            return "a"
+
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
             egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=lambda _p: "",
+            input_fn=input_fn,
             output=io.StringIO(),
             platform="darwin",
             popen_factory=lambda *args, **kwargs: proc,
@@ -276,6 +287,8 @@ class EgressWatchTests(unittest.TestCase):
         proc.poll.return_value = None
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
         real_terminate = watch._terminate_process
         real_message = watch.build_dialog_message
 
@@ -333,14 +346,21 @@ class EgressWatchTests(unittest.TestCase):
         proc = mock.Mock()
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        terminal_gate = threading.Event()
 
         def notify_runner(_argv: list[str]) -> None:
             raise OSError("notification unavailable")
 
+        def input_fn(_prompt: str) -> str:
+            terminal_gate.wait()
+            return "a"
+
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
             egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=lambda _p: "",
+            input_fn=input_fn,
             output=io.StringIO(),
             platform="darwin",
             popen_factory=lambda *args, **kwargs: proc,
@@ -349,13 +369,47 @@ class EgressWatchTests(unittest.TestCase):
         choice = watcher._prompt_with_dialog(self._details())
         self.assertEqual(choice.action, "allow_live")
 
-    def test_default_notify_runner_swallows_missing_osascript(self):
+    def test_run_notification_timeout_is_logged_as_timeout(self):
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
             egress_log.EgressLog(Path(tempfile.mkdtemp())),
             platform="darwin",
         )
-        watcher._run_notification(["/nonexistent/osascript"])
+        argv = ["osascript", "-e", "display notification"]
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 5)
+
+        with self.assertLogs(watch.LOG, level="INFO") as captured:
+            watcher._run_notification(argv, request_id="r1", run_fn=fake_run)
+        warnings = [r for r in captured.records if r.levelno == logging.WARNING]
+        infos = [r for r in captured.records if r.levelno == logging.INFO]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("notification failed", warnings[0].getMessage())
+        done = [r for r in infos if "notification done" in r.getMessage()]
+        self.assertEqual(len(done), 1)
+        self.assertIn("status=timeout", done[0].getMessage())
+
+    def test_run_notification_oserror_is_logged_as_error(self):
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            platform="darwin",
+        )
+        argv = ["osascript", "-e", "display notification"]
+
+        def fake_run(*args, **kwargs):
+            raise OSError("boom")
+
+        with self.assertLogs(watch.LOG, level="INFO") as captured:
+            watcher._run_notification(argv, request_id="r1", run_fn=fake_run)
+        warnings = [r for r in captured.records if r.levelno == logging.WARNING]
+        infos = [r for r in captured.records if r.levelno == logging.INFO]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("notification failed", warnings[0].getMessage())
+        done = [r for r in infos if "notification done" in r.getMessage()]
+        self.assertEqual(len(done), 1)
+        self.assertIn("status=error", done[0].getMessage())
 
     def test_non_darwin_skips_dialog_and_terminal_still_works(self):
         out = io.StringIO()
@@ -462,9 +516,13 @@ class EgressWatchTests(unittest.TestCase):
         proc = mock.Mock()
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        gate = threading.Event()
 
         def input_fn(_prompt: str) -> str:
-            return ""
+            gate.wait()
+            return "a"
 
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
@@ -483,6 +541,8 @@ class EgressWatchTests(unittest.TestCase):
         proc = mock.Mock()
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
 
         def input_fn(_prompt: str) -> str:
             gate.wait()
@@ -505,6 +565,8 @@ class EgressWatchTests(unittest.TestCase):
         proc.poll.return_value = None
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
 
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
@@ -523,6 +585,8 @@ class EgressWatchTests(unittest.TestCase):
         proc = mock.Mock()
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
         threads: list[threading.Thread] = []
         real_thread = threading.Thread
 
@@ -544,9 +608,178 @@ class EgressWatchTests(unittest.TestCase):
         for thread in threads:
             join_thread_or_fail(thread, label="prompt worker")
 
+    def test_dialog_nonzero_exit_with_empty_output_is_logged(self):
+        dialog_done = threading.Event()
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("")
+        proc.stderr = io.StringIO(
+            "execution error: Not authorized to send Apple events to System Events. (-1743)\n"
+        )
+        proc.wait.return_value = 1
+        proc.returncode = 1
+        real_warning = watch.LOG.warning
 
-if __name__ == "__main__":
-    unittest.main()
+        def warning_hook(msg, *args, **kwargs):
+            formatted = msg % args if args else msg
+            if "gave no answer" in formatted:
+                dialog_done.set()
+            return real_warning(msg, *args, **kwargs)
+
+        def popen_factory(*args, **kwargs) -> mock.Mock:
+            return proc
+
+        def input_fn(_prompt: str) -> str:
+            dialog_done.wait(timeout=5)
+            return "s"
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=input_fn,
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=popen_factory,
+            notify_runner=lambda _argv: None,
+        )
+
+        with mock.patch.object(watch.LOG, "warning", warning_hook):
+            with self.assertLogs(watch.LOG, level="WARNING") as captured:
+                choice = watcher._prompt_with_dialog(self._details())
+        warnings = [r for r in captured.records if r.levelno == logging.WARNING]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("gave no answer", warnings[0].getMessage())
+        self.assertIn("-1743", warnings[0].getMessage())
+        self.assertEqual(choice.action, "skip")
+
+    def test_dialog_user_cancel_is_logged_at_info(self):
+        dialog_done = threading.Event()
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("")
+        proc.stderr = io.StringIO("execution error: User canceled. (-128)\n")
+        proc.wait.return_value = 1
+        proc.returncode = 1
+        real_info = watch.LOG.info
+
+        def info_hook(msg, *args, **kwargs):
+            formatted = msg % args if args else msg
+            if "dialog dismissed" in formatted:
+                dialog_done.set()
+            return real_info(msg, *args, **kwargs)
+
+        def popen_factory(*args, **kwargs) -> mock.Mock:
+            return proc
+
+        def input_fn(_prompt: str) -> str:
+            dialog_done.wait(timeout=5)
+            return "s"
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=input_fn,
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=popen_factory,
+            notify_runner=lambda _argv: None,
+        )
+
+        with mock.patch.object(watch.LOG, "info", info_hook):
+            with self.assertLogs(watch.LOG, level="INFO") as captured:
+                choice = watcher._prompt_with_dialog(self._details())
+        self.assertEqual(choice.action, "skip")
+        dismissed = [
+            r for r in captured.records
+            if r.levelno == logging.INFO and "dialog dismissed" in r.getMessage()
+        ]
+        self.assertEqual(len(dismissed), 1)
+        warnings = [r for r in captured.records if r.levelno == logging.WARNING]
+        self.assertEqual(warnings, [])
+
+    def test_notification_skipped_when_already_resolved(self):
+        resolved_pass = threading.Event()
+        notify_argvs: list[list[str]] = []
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("Allow\n")
+        proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        real_terminate = watch._terminate_process
+        real_build_notification_message = watch.build_notification_message
+
+        def recording_terminate(p) -> None:
+            resolved_pass.set()
+            real_terminate(p)
+
+        def stalled_notification_message(details):
+            resolved_pass.wait(timeout=5)
+            return real_build_notification_message(details)
+
+        def notify_runner(argv: list[str]) -> None:
+            notify_argvs.append(argv)
+
+        def input_fn(_prompt: str) -> str:
+            return "d"
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=input_fn,
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: proc,
+            notify_runner=notify_runner,
+        )
+
+        with mock.patch.object(watch, "_terminate_process", recording_terminate), \
+                mock.patch.object(
+                    watch,
+                    "build_notification_message",
+                    stalled_notification_message,
+                ), \
+                self.assertLogs(watch.LOG, level="INFO") as captured:
+            choice = watcher._prompt_with_dialog(self._details())
+            # The skip is logged on the un-joined notification thread; wait
+            # for it (bounded) rather than sleeping a fixed interval.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not any(
+                "notification skipped" in r.getMessage() for r in captured.records
+            ):
+                time.sleep(0.01)
+        self.assertEqual(choice.action, "deny")
+        self.assertEqual(notify_argvs, [])
+        skipped = [
+            r for r in captured.records
+            if "notification skipped" in r.getMessage()
+        ]
+        self.assertEqual(len(skipped), 1)
+
+    def test_terminal_thread_exits_quietly_on_eof(self):
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("Allow\n")
+        proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+
+        def input_fn(_prompt: str) -> str:
+            raise EOFError
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=input_fn,
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: proc,
+            notify_runner=lambda _argv: None,
+        )
+        with self.assertLogs(watch.LOG, level="INFO") as captured:
+            choice = watcher._prompt_with_dialog(self._details())
+        self.assertEqual(choice.action, "allow_live")
+        closed = [
+            r for r in captured.records
+            if "terminal input closed" in r.getMessage()
+        ]
+        self.assertEqual(len(closed), 1)
 
 
 class WatcherStartupSurfaceTests(unittest.TestCase):
@@ -629,3 +862,7 @@ class WatcherStartupSurfaceTests(unittest.TestCase):
             egress_root = watch.resolve_egress_root(base)
             self.assertTrue(egress_root.is_dir())
             self.assertTrue((egress_root / watch.TOKENS_DIRNAME).is_dir())
+
+
+if __name__ == "__main__":
+    unittest.main()
