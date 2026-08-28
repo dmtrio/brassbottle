@@ -146,10 +146,14 @@ def build_osascript_argv(
         "set hostName to item 1 of argv",
         "set dialogMessage to item 2 of argv",
         "set dialogTitle to item 3 of argv",
+        'tell application "System Events"',
+        "activate",
         (
             'set userChoice to button returned of (display dialog dialogMessage '
-            'with title dialogTitle buttons {"Deny", "Allow"} default button "Allow")'
+            'with title dialogTitle buttons {"Deny", "Allow"} default button "Allow" '
+            'with icon caution)'
         ),
+        "end tell",
         "return userChoice",
         "end run",
     ]
@@ -158,6 +162,37 @@ def build_osascript_argv(
         argv.extend(["-e", line])
     argv.extend(["--", hostname, message, title])
     return argv
+
+
+def build_notification_argv(
+    *,
+    title: str,
+    message: str,
+    hostname: str,
+) -> list[str]:
+    """osascript argv for a Notification Center banner; untrusted fields after --."""
+    script_lines = [
+        "on run argv",
+        "set hostName to item 1 of argv",
+        "set noteMessage to item 2 of argv",
+        "set noteTitle to item 3 of argv",
+        'display notification noteMessage with title noteTitle sound name "Ping"',
+        "end run",
+    ]
+    argv = ["osascript"]
+    for line in script_lines:
+        argv.extend(["-e", line])
+    argv.extend(["--", hostname, message, title])
+    return argv
+
+
+def build_notification_message(details: RequestDetails) -> tuple[str, str]:
+    """Return (title, message) for the macOS notification banner."""
+    title = "Egress approval"
+    note_message = f"{details.container} wants {details.host}:{details.port}"
+    if details.reason:
+        note_message += f" — {details.reason}"
+    return title, note_message
 
 
 def build_dialog_message(details: RequestDetails) -> tuple[str, str]:
@@ -307,6 +342,7 @@ class EgressWatcher:
         poll_interval: float = 0.5,
         platform: str | None = None,
         popen_factory: PopenFactory | None = None,
+        notify_runner: Callable[[list[str]], None] | None = None,
     ) -> None:
         self._broker = broker
         self._log = log
@@ -315,8 +351,36 @@ class EgressWatcher:
         self._poll_interval = poll_interval
         self._platform = platform if platform is not None else sys.platform
         self._popen_factory = popen_factory or subprocess.Popen
+        self._notify_runner = notify_runner
         self._deferred: set[str] = set()
         self._stop = threading.Event()
+
+    def _run_notification(self, argv: list[str], *, request_id: str = "") -> None:
+        LOG.info("egress watch notification dispatch request_id=%s", request_id)
+        start = time.monotonic()
+        status: str | int
+        try:
+            result = subprocess.run(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            status = result.returncode
+        except OSError as exc:
+            LOG.warning("egress watch notification failed reason=%s", exc)
+            status = "error"
+        except subprocess.TimeoutExpired:
+            LOG.warning("egress watch notification failed reason=%s", "timeout")
+            status = "timeout"
+        duration_ms = int((time.monotonic() - start) * 1000)
+        LOG.info(
+            "egress watch notification done request_id=%s status=%s duration_ms=%d",
+            request_id,
+            status,
+            duration_ms,
+        )
 
     def stop(self) -> None:
         self._stop.set()
@@ -372,6 +436,7 @@ class EgressWatcher:
     def _prompt_with_dialog(self, details: RequestDetails) -> OperatorChoice:
         choice_queue: queue.Queue[OperatorChoice] = queue.Queue(maxsize=1)
         dialog_proc: list[subprocess.Popen[str] | None] = [None]
+        resolved = threading.Event()
 
         def terminal_thread() -> None:
             while True:
@@ -386,6 +451,27 @@ class EgressWatcher:
 
         def dialog_thread() -> None:
             title, message = build_dialog_message(details)
+            note_title, note_message = build_notification_message(details)
+            notify_argv = build_notification_argv(
+                title=note_title,
+                message=note_message,
+                hostname=details.host,
+            )
+            try:
+                if self._notify_runner is not None:
+                    self._notify_runner(notify_argv)
+                else:
+                    self._run_notification(notify_argv, request_id=details.request_id)
+            except Exception as exc:
+                LOG.warning("egress watch notification failed reason=%s", exc)
+            # The notification takes real time; if the terminal answered while
+            # it ran, spawning the dialog now would orphan it on screen.
+            if resolved.is_set():
+                LOG.info(
+                    "egress watch dialog skipped request_id=%s reason=already_resolved",
+                    details.request_id,
+                )
+                return
             argv = build_osascript_argv(
                 title=title,
                 message=message,
@@ -401,6 +487,11 @@ class EgressWatcher:
             except OSError:
                 return
             dialog_proc[0] = proc
+            # Re-check after publishing the handle: either the main thread sees
+            # the process and terminates it, or this thread sees `resolved`.
+            if resolved.is_set():
+                _terminate_process(proc)
+                return
             try:
                 stdout = proc.stdout.read() if proc.stdout is not None else ""
             except (OSError, ValueError):
@@ -420,6 +511,7 @@ class EgressWatcher:
             choice = choice_queue.get()
         except Exception:
             choice = OperatorChoice("skip")
+        resolved.set()
         _terminate_process(dialog_proc[0])
         terminal.join(timeout=2)
         dialog.join(timeout=2)
