@@ -63,9 +63,54 @@ class StripIPv6LinesTest(unittest.TestCase):
             "192.168.65.254\tgateway host.docker.internal\n"
             "fdc4::254\tgateway HOST.DOCKER.INTERNAL\n"
         )
-        out, dropped = hosts_ipv4.strip_ipv6_lines(text, ["host.docker.internal"])
-        self.assertEqual(len(dropped), 1)
+        out, changed = hosts_ipv4.strip_ipv6_lines(text, ["host.docker.internal"])
+        self.assertEqual(len(changed), 1)
+        # Only the target name goes; `gateway` was never asked about and is
+        # left exactly as the file had it.
+        self.assertNotIn("HOST.DOCKER.INTERNAL", out)
+        self.assertIn("fdc4::254\tgateway\n", out)
+
+    def test_an_ipv6_only_alias_sharing_the_line_survives(self):
+        # Whole-line removal would take gateway.internal with it, and it has
+        # no IPv4 entry of its own — the exact "never make a name
+        # unresolvable" guarantee this module claims.
+        text = (
+            "192.168.65.254\thost.docker.internal\n"
+            "fdc4::254\thost.docker.internal gateway.internal\n"
+        )
+        out, changed = hosts_ipv4.strip_ipv6_lines(text, ["host.docker.internal"])
+        self.assertEqual(changed, ["fdc4::254\thost.docker.internal gateway.internal"])
+        self.assertIn("fdc4::254\tgateway.internal\n", out)
+        self.assertIn("192.168.65.254\thost.docker.internal\n", out)
+        self.assertNotIn("::254\thost.docker.internal", out)
+
+    def test_a_line_of_only_target_names_is_dropped_outright(self):
+        text = (
+            "192.168.65.254\thost.docker.internal\n"
+            "fdc4::254\thost.docker.internal\n"
+        )
+        out, changed = hosts_ipv4.strip_ipv6_lines(text, ["host.docker.internal"])
+        self.assertEqual(len(changed), 1)
         self.assertNotIn("fdc4::254", out)
+
+    def test_an_edited_line_keeps_its_trailing_comment(self):
+        text = (
+            "192.168.65.254\thost.docker.internal\n"
+            "fdc4::254 host.docker.internal gateway.internal  # docker desktop\n"
+        )
+        out, _ = hosts_ipv4.strip_ipv6_lines(text, ["host.docker.internal"])
+        self.assertIn("gateway.internal", out)
+        self.assertIn("# docker desktop", out)
+        self.assertTrue(out.endswith("\n"))
+
+    def test_an_alias_with_no_ipv4_entry_is_never_removed(self):
+        # gateway.internal is a target here, but has no surviving A record.
+        text = "fdc4::254\thost.docker.internal gateway.internal\n"
+        out, changed = hosts_ipv4.strip_ipv6_lines(
+            text, ["host.docker.internal", "gateway.internal"]
+        )
+        self.assertEqual(changed, [])
+        self.assertEqual(out, text)
 
     def test_ignores_comments_and_blank_lines(self):
         text = "# fdc4::254 host.docker.internal\n\n192.168.65.254 host.docker.internal\n"
