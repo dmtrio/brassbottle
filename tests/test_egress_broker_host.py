@@ -6,12 +6,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.client import HTTPConnection
@@ -2826,6 +2828,69 @@ exit 0
             self.assertEqual(acquired_during_notify, [True])
             b.decide(request_id, "deny")
             join_thread_or_fail(thread, label="file_request")
+
+
+class IPv6BindTests(unittest.TestCase):
+    """PR #85 review (Codex P2): _connect_host_for_bind maps "::"/IPv6
+    literals to a connect address, but ThreadingHTTPServer hardcodes
+    AF_INET, so binding one of those hosts died at bind() with "Address
+    family for hostname not supported" — before daemon.json was ever
+    written. See egress_broker_host.address_family_for_host."""
+
+    def test_address_family_for_host_table(self):
+        cases = [
+            ("", socket.AF_INET),
+            ("0.0.0.0", socket.AF_INET),
+            ("127.0.0.1", socket.AF_INET),
+            ("10.8.0.5", socket.AF_INET),
+            ("::", socket.AF_INET6),
+            ("::1", socket.AF_INET6),
+            ("fd00::5", socket.AF_INET6),
+            # A name that will not resolve: fall through to AF_INET so bind()
+            # raises the real resolution error instead of a guessed family.
+            ("no-such-host.invalid", socket.AF_INET),
+        ]
+        for host, family in cases:
+            with self.subTest(host=host):
+                self.assertEqual(broker.address_family_for_host(host), family)
+
+    @unittest.skipUnless(socket.has_ipv6, "no IPv6 support on this host")
+    def test_server_binds_and_serves_over_ipv6(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = broker.EgressBroker(
+                egress_root,
+                repo_root=REPO_ROOT,
+                now_fn=FakeClock(NOW).now,
+                hold_seconds_default=1,
+            )
+            store = broker.BottleTokenStore(tokens_dir)
+            try:
+                server = broker.EgressBrokerHTTPServer(
+                    ("::1", 0), b, store, "operator-test-token"
+                )
+            except OSError as exc:  # pragma: no cover - IPv6 loopback absent
+                self.skipTest(f"IPv6 loopback unavailable: {exc}")
+            self.assertEqual(server.address_family, socket.AF_INET6)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address[0], server.server_address[1]
+            wait_for_tcp_listening(host, port)
+            try:
+                # The connect address the endpoint file would advertise for
+                # this bind must actually be reachable, brackets and all.
+                broker.write_daemon_endpoint(egress_root, host, port)
+                url = broker.daemon_base_url(egress_root)
+                self.assertEqual(url, f"http://[::1]:{port}")
+                with urllib.request.urlopen(url + "/health", timeout=5) as resp:
+                    self.assertEqual(resp.status, HTTPStatus.OK)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
 
 class DaemonEndpointFileTests(unittest.TestCase):
