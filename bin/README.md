@@ -62,3 +62,7 @@ request-egress --check api.stripe.com
 Exit codes: **0** allowed, **1** denied (or broker error), **2** timed out still
 queued. Operator approval remains host-side (`./djinn allow` / `./djinn allow
 --watch`).
+
+On macOS, `./djinn allow --watch` posts a Notification Center banner (it
+appears as coming from **Script Editor**; allow it once in System Settings →
+Notifications) and brings the approval dialog to the front.
