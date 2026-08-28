@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -123,6 +124,25 @@ class DenyList:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock_path = path.with_name(DENYLIST_LOCK_FILENAME)
+        # Guards every read/write of self._entries/_mtime (and the diagnosis
+        # fields derived from them) against concurrent THREADS in the same
+        # process — e.g. egress_watch's main thread (via
+        # format_denylist_status -> load()) and a broker HTTP handler thread
+        # (matches(), persist_deny -> add()+load()) sharing this one
+        # instance (finding #1). This is independent of _file_lock's fcntl
+        # flock below: flock is associated with the OPEN FILE DESCRIPTION,
+        # so two threads in the SAME process each os.open()-ing the lock
+        # file get two independent descriptions and do NOT exclude each
+        # other — only cross-PROCESS callers (the daemon vs. a `./djinn
+        # deny` CLI invocation) are serialized by that. Without this RLock,
+        # _reload could set self._mtime before self._entries (the exact bug
+        # here): a watcher thread's stale read could win the race and get
+        # cached under the NEWER mtime, so the entry a handler thread just
+        # persisted would not be enforced again until the file next changes.
+        # RLock (not Lock): add()/remove() call _reload()/_persist() while
+        # already holding it themselves — must be reentrant for the same
+        # thread.
+        self._lock = threading.RLock()
         self._entries: list[DenyEntry] = []
         self._mtime: float | None = None
         self._loaded = False
@@ -173,51 +193,72 @@ class DenyList:
         every consult, corrupt/missing file is never fatal to READ (matches()
         just treats it as empty) — but add()/remove() refuse to write over a
         diagnosed-corrupt file; see self.corrupt.
+
+        Whole body under self._lock (finding #1): self._entries and
+        self._mtime must be updated as one atomic step from another thread's
+        point of view, never observed half-updated (mtime already the new
+        value, entries still the old list, or vice versa).
         """
-        mtime = self._current_mtime()
-        if not force and self._loaded and mtime == self._mtime:
-            return
-        self._mtime = mtime
-        self._loaded = True
-        self._corrupt = None
-        if mtime is None:
-            self._entries = []
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            self._corrupt = str(exc)
-            LOG.info(
-                "egress denylist unreadable path=%s error=%s",
+        with self._lock:
+            mtime = self._current_mtime()
+            if not force and self._loaded and mtime == self._mtime:
+                return
+            self._mtime = mtime
+            self._loaded = True
+            self._corrupt = None
+            if mtime is None:
+                self._entries = []
+                return
+            try:
+                raw = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                self._corrupt = str(exc)
+                # INFO, not WARNING: this is the load-time diagnosis, gated
+                # only by mtime-changed-since-last-_reload (i.e. it can fire
+                # on every distinct corrupt edit). matches() below has its
+                # OWN louder WARNING for the same condition, gated to once
+                # per distinct mtime via self._corrupt_warned_mtime — this
+                # line staying at INFO avoids double-logging the same event
+                # at WARNING through two independently-gated paths.
+                LOG.info(
+                    "egress denylist unreadable path=%s error=%s",
+                    self._path.name,
+                    exc,
+                )
+                self._entries = []
+                return
+            if not isinstance(raw, dict):
+                self._corrupt = "not a JSON object"
+                LOG.info(
+                    "egress denylist unreadable path=%s reason=not_an_object",
+                    self._path.name,
+                )
+                self._entries = []
+                return
+            entries: list[DenyEntry] = []
+            for item in raw.get("entries") or []:
+                entry = _parse_entry(item)
+                if entry is not None:
+                    entries.append(entry)
+            self._entries = entries
+            # DEBUG, not INFO (finding #6): this runs on every consult
+            # (matches() reloads on every egress request), so at INFO it
+            # floods the daemon's -v output and, worse, main()'s old
+            # INFO-by-default made every `./djinn allow`/`deny`/`undeny`
+            # print this line to the terminal for no operator-relevant
+            # reason. A corrupt/unreadable file (above) stays loud —
+            # unlike a routine successful load, that IS worth surfacing.
+            LOG.debug(
+                "egress denylist load enter path=%s count=%d",
                 self._path.name,
-                exc,
+                len(self._entries),
             )
-            self._entries = []
-            return
-        if not isinstance(raw, dict):
-            self._corrupt = "not a JSON object"
-            LOG.info(
-                "egress denylist unreadable path=%s reason=not_an_object",
-                self._path.name,
-            )
-            self._entries = []
-            return
-        entries: list[DenyEntry] = []
-        for item in raw.get("entries") or []:
-            entry = _parse_entry(item)
-            if entry is not None:
-                entries.append(entry)
-        self._entries = entries
-        LOG.info(
-            "egress denylist load enter path=%s count=%d",
-            self._path.name,
-            len(self._entries),
-        )
 
     def load(self) -> list[DenyEntry]:
         """Force a fresh read and return all entries (CLI `list`)."""
-        self._reload(force=True)
-        return list(self._entries)
+        with self._lock:
+            self._reload(force=True)
+            return list(self._entries)
 
     def matches(self, container: str, host: str) -> DenyEntry | None:
         """Return the best-matching entry for (container, host), or None.
@@ -233,32 +274,33 @@ class DenyList:
         INFO load-time diagnosis — since a corrupt denylist silently means
         "nothing is denied any more".
         """
-        self._reload()
-        if self._corrupt is not None:
-            if self._mtime != self._corrupt_warned_mtime:
-                LOG.warning(
-                    "egress denylist matches against corrupt file path=%s error=%s "
-                    "— treating as empty (nothing is denylisted until it is fixed)",
-                    self._path.name,
-                    self._corrupt,
-                )
-                self._corrupt_warned_mtime = self._mtime
-            return None
-        best: DenyEntry | None = None
-        for entry in self._entries:
-            if entry.scope != "global" and entry.scope != container:
-                continue
-            if not host_covered_by_zone(host, entry.zone):
-                continue
-            if best is None or len(entry.zone) > len(best.zone):
-                best = entry
-            elif (
-                len(entry.zone) == len(best.zone)
-                and best.scope == "global"
-                and entry.scope != "global"
-            ):
-                best = entry
-        return best
+        with self._lock:
+            self._reload()
+            if self._corrupt is not None:
+                if self._mtime != self._corrupt_warned_mtime:
+                    LOG.warning(
+                        "egress denylist matches against corrupt file path=%s error=%s "
+                        "— treating as empty (nothing is denylisted until it is fixed)",
+                        self._path.name,
+                        self._corrupt,
+                    )
+                    self._corrupt_warned_mtime = self._mtime
+                return None
+            best: DenyEntry | None = None
+            for entry in self._entries:
+                if entry.scope != "global" and entry.scope != container:
+                    continue
+                if not host_covered_by_zone(host, entry.zone):
+                    continue
+                if best is None or len(entry.zone) > len(best.zone):
+                    best = entry
+                elif (
+                    len(entry.zone) == len(best.zone)
+                    and best.scope == "global"
+                    and entry.scope != "global"
+                ):
+                    best = entry
+            return best
 
     def _refuse_if_corrupt(self) -> None:
         if self._corrupt is not None:
@@ -268,31 +310,32 @@ class DenyList:
             )
 
     def _persist(self, entries: list[DenyEntry]) -> None:
-        payload = {
-            "version": DENYLIST_VERSION,
-            "entries": [e.to_dict() for e in entries],
-        }
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_name(f".{self._path.name}.tmp-{os.getpid()}")
-        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-        try:
-            tmp_path.write_text(text, encoding="utf-8")
-            os.replace(tmp_path, self._path)
-        except OSError:
+        with self._lock:
+            payload = {
+                "version": DENYLIST_VERSION,
+                "entries": [e.to_dict() for e in entries],
+            }
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._path.with_name(f".{self._path.name}.tmp-{os.getpid()}")
+            text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
             try:
-                tmp_path.unlink()
+                tmp_path.write_text(text, encoding="utf-8")
+                os.replace(tmp_path, self._path)
             except OSError:
-                pass
-            raise
-        self._entries = entries
-        self._mtime = self._current_mtime()
-        self._loaded = True
-        self._corrupt = None
-        LOG.info(
-            "egress denylist save exit path=%s count=%d",
-            self._path.name,
-            len(entries),
-        )
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                raise
+            self._entries = entries
+            self._mtime = self._current_mtime()
+            self._loaded = True
+            self._corrupt = None
+            LOG.info(
+                "egress denylist save exit path=%s count=%d",
+                self._path.name,
+                len(entries),
+            )
 
     def add(
         self,
@@ -310,7 +353,7 @@ class DenyList:
         the caller's to handle (egress_broker_host.decide()/persist_deny()
         catch and degrade to a one-shot deny; the CLI reports and exits 1).
         """
-        with self._file_lock():
+        with self._lock, self._file_lock():
             self._reload(force=True)
             self._refuse_if_corrupt()
             entry = DenyEntry(
@@ -337,7 +380,7 @@ class DenyList:
 
         Same corrupt-file refusal as add() — see its docstring.
         """
-        with self._file_lock():
+        with self._lock, self._file_lock():
             self._reload(force=True)
             self._refuse_if_corrupt()
             remaining = [
@@ -476,7 +519,15 @@ def _try_daemon_deny(
     )
 
     started = time.monotonic()
-    LOG.info("egress denylist cli daemon attempt url=%s", base_url)
+    # Boundary-out log with the request size (finding #10) — paired with the
+    # "done" line below (boundary-in), which adds resp_bytes once a response
+    # (or HTTPError body) actually comes back. Pattern: NtfyNotifier.send in
+    # egress_notify.py.
+    LOG.info(
+        "egress denylist cli daemon dispatch url=%s bytes=%d",
+        base_url,
+        len(body),
+    )
     try:
         with urllib.request.urlopen(request, timeout=5.0) as response:
             raw = response.read()
@@ -501,10 +552,12 @@ def _try_daemon_deny(
     if not isinstance(parsed, dict):
         parsed = {}
     LOG.info(
-        "egress denylist cli daemon done url=%s status=%d duration_ms=%d",
+        "egress denylist cli daemon done url=%s status=%d duration_ms=%d req_bytes=%d resp_bytes=%d",
         base_url,
         status,
         duration_ms,
+        len(body),
+        len(raw),
     )
     return status, parsed
 
@@ -772,9 +825,44 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _extract_verbosity(argv: list[str]) -> tuple[int, list[str]]:
+    """Pull every -v/--verbose (bundled short form -vv/-vvv/... included) out
+    of argv; return (count, argv with those flags removed).
+
+    Done up front, before EITHER dispatch path below (the bare `--check`
+    bypass, which has its own argparse with no -v of its own, and
+    build_parser()'s subcommands) — so -v works regardless of where the
+    caller puts it, and so the log level is set before the first DenyList()
+    construction, which logs on load (finding #6).
+    """
+    count = 0
+    rest: list[str] = []
+    for arg in argv:
+        if arg == "-v" or arg == "--verbose":
+            count += 1
+        elif len(arg) > 1 and arg[0] == "-" and set(arg[1:]) == {"v"}:
+            count += len(arg) - 1
+        else:
+            rest.append(arg)
+    return count, rest
+
+
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    verbosity, raw_argv = _extract_verbosity(raw_argv)
+    # Default WARNING, not INFO (finding #6): `./djinn allow` (via
+    # bin/allow-egress.sh's --check probe) and `./djinn deny`/`undeny` used
+    # to print every LOG.info line (route loads, add/remove/save
+    # bookkeeping) to the terminal for no operator-relevant reason. Mirrors
+    # egress_watch's own -v/-vv convention.
+    level = (
+        logging.DEBUG
+        if verbosity > 1
+        else logging.INFO
+        if verbosity == 1
+        else logging.WARNING
+    )
+    logging.basicConfig(level=level, format="%(message)s")
 
     if raw_argv and raw_argv[0] == "--check":
         return _cmd_check(raw_argv[1:])

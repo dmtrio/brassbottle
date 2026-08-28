@@ -298,6 +298,75 @@ class DenyListCoreTests(unittest.TestCase):
             entries = {e.zone for e in dl.DenyList(path).load()}
             self.assertEqual(entries, {"a.example.com", "b.example.com"})
 
+    def test_reload_and_add_are_serialized_by_instance_lock(self):
+        """finding #1: DenyList had no lock guarding self._entries/_mtime —
+        _reload() used to set self._mtime BEFORE self._entries, so a watcher
+        thread's matches()->_reload() could interleave with a handler
+        thread's add()->_reload()+_persist() on the SAME instance (exactly
+        the shape egress_watch's main thread and a broker HTTP handler
+        thread share). A stale read winning that race gets cached under the
+        NEWER mtime, so the entry the handler thread just persisted is not
+        enforced again until the file next changes.
+
+        Proven the same way as the flock test above
+        (test_denylist_add_is_serialized_across_two_instances_by_flock):
+        force one thread's _reload() to pause mid-read (inside what must now
+        be the RLock's critical section) and show a concurrent add() from a
+        second thread genuinely blocks on the SAME instance, rather than
+        racing ahead and reading/assigning half-updated state.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "denylist.json"
+            path.write_text('{"version": 1, "entries": []}', encoding="utf-8")
+            d = dl.DenyList(path)
+
+            entered_critical_section = threading.Event()
+            release_reader = threading.Event()
+            triggered = threading.Event()
+            real_read_text = Path.read_text
+
+            def slow_read_text(self_path, *a, **kw):
+                if self_path == path and not triggered.is_set():
+                    triggered.set()
+                    entered_critical_section.set()
+                    release_reader.wait(timeout=5)
+                return real_read_text(self_path, *a, **kw)
+
+            # Touch the file so its mtime differs from what __init__ already
+            # loaded — otherwise matches() below would short-circuit before
+            # ever reaching the (patched) read.
+            time.sleep(0.01)
+            path.write_text('{"version": 1, "entries": []}', encoding="utf-8")
+
+            with mock.patch.object(Path, "read_text", slow_read_text):
+                t1 = threading.Thread(
+                    target=lambda: d.matches("any-bottle", "example.com")
+                )
+                t1.start()
+                self.assertTrue(entered_critical_section.wait(timeout=5))
+
+                t2 = threading.Thread(
+                    target=lambda: d.add(zone="example.com", scope="global")
+                )
+                t2.start()
+                time.sleep(0.2)
+                self.assertTrue(
+                    t2.is_alive(),
+                    "add() must block on the instance lock while matches() "
+                    "is mid-reload, not race ahead on the same DenyList",
+                )
+
+                release_reader.set()
+                t1.join(timeout=5)
+                t2.join(timeout=5)
+
+            # Post-race: the entry add() persisted while t1 was blocked must
+            # be enforced — not silently lost to the stale interleaving F1
+            # describes.
+            entry = d.matches("any-bottle", "example.com")
+            self.assertIsNotNone(entry)
+            self.assertEqual(entry.zone, "example.com")
+
     def test_non_object_json_treated_as_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "denylist.json"
@@ -677,6 +746,78 @@ class DenyListCliTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("datadoghq.com", out)
 
+    def test_check_does_not_emit_load_lines_at_info(self):
+        """finding #6: `./djinn allow` (via bin/allow-egress.sh's --check
+        probe) used to print "egress denylist load enter ..." to the
+        terminal on every routine, non-corrupt load — DenyList logged every
+        successful load at INFO, and main() defaulted logging to INFO.
+        Routine loads now log at DEBUG, so a normal (non-corrupt) --check
+        run emits nothing at INFO or louder at all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._base(tmp)
+            _run_main(["add", "datadoghq.com", "--global", "--base-path", str(base)])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                with self.assertNoLogs(dl.LOG, level="INFO"):
+                    rc = dl._cmd_check(
+                        [
+                            "any-bottle",
+                            "us5.datadoghq.com",
+                            "example.com",
+                            "--base-path",
+                            str(base),
+                        ]
+                    )
+            self.assertEqual(rc, 0)
+            self.assertIn("datadoghq.com", out.getvalue())
+
+    def test_extract_verbosity_counts_v_and_verbose_and_strips_them(self):
+        """finding #6: main() gets -v/--verbose -> INFO, default WARNING
+        (mirrors egress_watch's -v/-vv convention), extracted BEFORE either
+        dispatch path (the bare --check bypass or build_parser()'s
+        subcommands) so it works regardless of where the flag appears and
+        the log level is set before the first DenyList() construction."""
+        self.assertEqual(dl._extract_verbosity([]), (0, []))
+        self.assertEqual(
+            dl._extract_verbosity(["add", "x.com", "--global"]),
+            (0, ["add", "x.com", "--global"]),
+        )
+        self.assertEqual(
+            dl._extract_verbosity(["-v", "add", "x.com", "--global"]),
+            (1, ["add", "x.com", "--global"]),
+        )
+        self.assertEqual(
+            dl._extract_verbosity(["add", "x.com", "--verbose", "--global"]),
+            (1, ["add", "x.com", "--global"]),
+        )
+        self.assertEqual(
+            dl._extract_verbosity(["-vv", "list"]),
+            (2, ["list"]),
+        )
+        self.assertEqual(
+            dl._extract_verbosity(["-v", "--check", "b", "d.com", "-v"]),
+            (2, ["--check", "b", "d.com"]),
+        )
+
+    def test_main_default_level_is_warning_verbose_flag_raises_it(self):
+        out = io.StringIO()
+        with mock.patch.object(dl.logging, "basicConfig") as basic_config:
+            with tempfile.TemporaryDirectory() as tmp:
+                base = self._base(tmp)
+                with contextlib.redirect_stdout(out):
+                    dl.main(["list", "--base-path", str(base)])
+            basic_config.assert_called_once()
+            self.assertEqual(basic_config.call_args.kwargs["level"], logging.WARNING)
+
+        with mock.patch.object(dl.logging, "basicConfig") as basic_config:
+            with tempfile.TemporaryDirectory() as tmp:
+                base = self._base(tmp)
+                with contextlib.redirect_stdout(out):
+                    dl.main(["-v", "list", "--base-path", str(base)])
+            basic_config.assert_called_once()
+            self.assertEqual(basic_config.call_args.kwargs["level"], logging.INFO)
+
     def test_exit_codes_are_pairwise_distinct_for_usage_vs_not_found(self):
         """Cleanup: EXIT_USAGE_ERROR and EXIT_NOT_FOUND used to both be 1,
         so a bare `./djinn undeny X --bottle Y` (nonexistent entry) and a
@@ -835,6 +976,67 @@ class CliDaemonFirstAddTests(unittest.TestCase):
                 for r in captured.records
             )
         )
+
+    def test_try_daemon_deny_logs_dispatch_line_and_byte_counts(self):
+        """finding #10: boundary logging both ways — a pre-urlopen "dispatch"
+        line naming the request size (paired with the existing "done" line
+        below, which now also carries req_bytes/resp_bytes), mirroring
+        NtfyNotifier.send in egress_notify.py."""
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                body = b'{"decided":[],"persisted":{"zone":"x.com","scope":"global"}}'
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server, thread, port = self._start_server(Handler)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                egress_root = Path(tmp)
+                self._seed_daemon(egress_root, port)
+                with self.assertLogs(dl.LOG, level="INFO") as captured:
+                    result = dl._try_daemon_deny(
+                        egress_root,
+                        zone="x.com",
+                        scope="global",
+                        container=None,
+                        reason=None,
+                    )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+        self.assertIsNotNone(result)
+        messages = [r.getMessage() for r in captured.records]
+
+        dispatch_lines = [m for m in messages if "cli daemon dispatch" in m]
+        self.assertEqual(len(dispatch_lines), 1)
+        self.assertIn("url=", dispatch_lines[0])
+        self.assertIn("bytes=", dispatch_lines[0])
+        # bytes=0 would silently look identical to a boundary log that
+        # forgot to fill in the size — assert an actual positive payload
+        # size was recorded, not just the literal substring.
+        dispatch_bytes = int(dispatch_lines[0].rsplit("bytes=", 1)[1])
+        self.assertGreater(dispatch_bytes, 0)
+
+        done_lines = [m for m in messages if "cli daemon done" in m and "status=200" in m]
+        self.assertEqual(len(done_lines), 1)
+        self.assertIn("req_bytes=", done_lines[0])
+        self.assertIn("resp_bytes=", done_lines[0])
+        self.assertEqual(
+            int(done_lines[0].split("req_bytes=", 1)[1].split(" ", 1)[0]),
+            dispatch_bytes,
+        )
+        resp_bytes = int(done_lines[0].rsplit("resp_bytes=", 1)[1])
+        self.assertGreater(resp_bytes, 0)
 
     def test_try_daemon_deny_targets_daemon_json_endpoint_not_a_hardcoded_default(self):
         """finding (PR #85 review, daemon endpoint): _try_daemon_deny must

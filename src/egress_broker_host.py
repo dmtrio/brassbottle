@@ -120,6 +120,21 @@ class PersistDenyResult:
     error: str | None
 
 
+@dataclass
+class _DenylistHitState:
+    """Coalesce-window bookkeeping for one (container, matched zone) key hit
+    by the denylist short-circuit (finding #8).
+
+    Replaces a pair of dicts (_denylist_hit_last / _denylist_suppressed)
+    that were always mutated in lockstep at every site that touched either
+    — one object per key instead of two parallel ones keeping the same key
+    space in sync by convention.
+    """
+
+    last: datetime
+    suppressed: int = 0
+
+
 def undeny_hint(zone: str, scope: str) -> str:
     """The `./djinn undeny ...` command that lifts a persisted deny entry.
 
@@ -517,14 +532,12 @@ class EgressBroker:
         self._requests: dict[str, OpenRequestState] = {}
         self._key_index: dict[tuple[str, str, int], str] = {}
         # Coalesce window for denylist short-circuit audit pairs, keyed by
-        # (container, host) — not by request id, since a denylist hit never
-        # opens a held request. See _denylist_short_circuit.
-        self._denylist_hit_last: dict[tuple[str, str], datetime] = {}
-        # Hits suppressed (no audit pair, no LOG.info) inside the current
-        # coalesce window per key — surfaced as suppressed=N on the NEXT
-        # logged hit, so a hot retry loop doesn't also flood LOG.info at the
-        # same rate it would have flooded the audit log.
-        self._denylist_suppressed: dict[tuple[str, str], int] = {}
+        # (container, matched zone) — not by request id, since a denylist
+        # hit never opens a held request. See _denylist_short_circuit.
+        # finding #8: one dict of _DenylistHitState instead of two parallel
+        # dicts (last-hit timestamp / suppressed count) mutated in lockstep
+        # at every site that touched either.
+        self._denylist_hits: dict[tuple[str, str], _DenylistHitState] = {}
         self._rebuild_from_log()
 
     @property
@@ -689,17 +702,16 @@ class EgressBroker:
         just discarding it.
         """
         cutoff = now - timedelta(seconds=HIT_COALESCE_SECONDS)
-        stale = [k for k, ts in self._denylist_hit_last.items() if ts < cutoff]
+        stale = [k for k, hit in self._denylist_hits.items() if hit.last < cutoff]
         for k in stale:
-            del self._denylist_hit_last[k]
-            suppressed = self._denylist_suppressed.pop(k, 0)
-            if suppressed > 0:
+            hit = self._denylist_hits.pop(k)
+            if hit.suppressed > 0:
                 container, zone = k
                 LOG.info(
                     "egress broker denylist suppressed_evict container=%s zone=%s suppressed=%d",
                     container,
                     zone,
-                    suppressed,
+                    hit.suppressed,
                 )
 
     def _denylist_short_circuit(
@@ -739,21 +751,35 @@ class EgressBroker:
             return None
 
         key = (container, entry.zone)
-        last = self._denylist_hit_last.get(key)
-        should_log = last is None or (now - last).total_seconds() >= HIT_COALESCE_SECONDS
+        hit = self._denylist_hits.get(key)
+        should_log = hit is None or (now - hit.last).total_seconds() >= HIT_COALESCE_SECONDS
         if should_log:
-            suppressed = self._denylist_suppressed.pop(key, 0)
-            self._denylist_hit_last[key] = now
+            suppressed = hit.suppressed if hit is not None else 0
+            self._denylist_hits[key] = _DenylistHitState(last=now)
             self._prune_denylist_hit_last(now)
             self._log.append("requested", request_id, ts=now, **fields)
-            self._log.append(
-                "denied",
-                request_id,
-                ts=now,
-                reason="denylist",
-                zone=entry.zone,
-                scope=entry.scope,
-            )
+            # Audit schema (finding #5): `via`/`zone`/`denylist_scope` name
+            # the denylist entry that caused this — the same three keys the
+            # persist_deny sweep closure below (_close_request's
+            # denylist_zone/denylist_scope branch) writes, so a reader of
+            # the audit log has ONE shape for "a denylist entry denied
+            # this", not two. `scope` is deliberately NOT set here: on a
+            # plain deny it means the request's own once/bottle/global
+            # intent, which does not exist for an automatic short-circuit
+            # (nobody called /decide for this one). `reason` carries the
+            # entry's own operator free text (if any were given when it was
+            # added) — never the literal string "denylist"; that literal
+            # stays confined to the HTTP response body returned below,
+            # which egress_broker.py/egress_request.py read on the
+            # container side and which must not change shape.
+            denied_fields: dict[str, Any] = {
+                "via": "denylist",
+                "zone": entry.zone,
+                "denylist_scope": entry.scope,
+            }
+            if entry.reason is not None:
+                denied_fields["reason"] = entry.reason
+            self._log.append("denied", request_id, ts=now, **denied_fields)
             # LOG.info gated to the same coalesce window as the audit pair
             # above — at INFO on every hit this floods just as badly as the
             # audit log did (telemetry flushes every few seconds). Hits
@@ -768,13 +794,79 @@ class EgressBroker:
                 suppressed,
             )
         else:
-            self._denylist_suppressed[key] = self._denylist_suppressed.get(key, 0) + 1
+            hit.suppressed += 1
         return {
             "decision": "deny",
             "reason": "denylist",
             "zone": entry.zone,
             "scope": entry.scope,
         }
+
+    def _open_new_request(
+        self,
+        container: str,
+        host: str,
+        port: int,
+        now: datetime,
+        request_id: str,
+        fields: dict[str, Any],
+        *,
+        host_is_ip: bool,
+        uid: int | None,
+        comm: str | None,
+        reason: str | None,
+    ) -> tuple[OpenRequestState | None, dict[str, Any] | None, EgressNotification | None]:
+        """File a brand-new request — no coalesce match exists for it yet.
+
+        Shared by file_request's two branches (client-supplied request_id
+        vs. a freshly-minted one) — finding #7: both used to carry an
+        identical copy of this block (denylist short-circuit check,
+        OpenRequestState construction, "requested" audit append,
+        _notify_operator call). Called under self._lock, same as both call
+        sites were already doing.
+
+        Returns (None, denylist_body, None) when the denylist
+        short-circuited it — the caller returns denylist_body immediately,
+        there is no state and nothing to notify. Otherwise returns (state,
+        None, notification); the caller dispatches `notification` via
+        self._dispatch_notifier OUTSIDE self._lock, exactly as before.
+        """
+        denylist_body = self._denylist_short_circuit(
+            container, host, port, now, request_id, fields
+        )
+        if denylist_body is not None:
+            return None, denylist_body, None
+
+        state = OpenRequestState(
+            request_id=request_id,
+            container=container,
+            host=host,
+            port=port,
+            opened_at=now,
+            host_is_ip=host_is_ip,
+        )
+        self._log.append("requested", request_id, ts=now, **fields)
+        notification = self._notify_operator(
+            request_id,
+            now,
+            container=container,
+            host=host,
+            port=port,
+            host_is_ip=host_is_ip,
+            uid=uid,
+            comm=comm,
+            reason=reason,
+        )
+        self._requests[request_id] = state
+        self._key_index[_request_key(container, host, port)] = request_id
+        LOG.info(
+            "egress broker request filed request_id=%s container=%s host=%s port=%d",
+            request_id,
+            container,
+            host,
+            port,
+        )
+        return state, None, notification
 
     def file_request(
         self,
@@ -841,40 +933,21 @@ class EgressBroker:
                             body = self._decision_body(state.decision)
                             return body, request_id
                     else:
-                        denylist_body = self._denylist_short_circuit(
-                            container, host, port, now, request_id, fields
-                        )
-                        if denylist_body is not None:
-                            return denylist_body, request_id
-                        state = OpenRequestState(
-                            request_id=request_id,
-                            container=container,
-                            host=host,
-                            port=port,
-                            opened_at=now,
-                            host_is_ip=host_is_ip,
-                        )
-                        self._log.append("requested", request_id, ts=now, **fields)
-                        pending_notification = self._notify_operator(
-                            request_id,
+                        state, denylist_body, notification = self._open_new_request(
+                            container,
+                            host,
+                            port,
                             now,
-                            container=container,
-                            host=host,
-                            port=port,
+                            request_id,
+                            fields,
                             host_is_ip=host_is_ip,
                             uid=uid,
                             comm=comm,
                             reason=reason,
                         )
-                        self._requests[request_id] = state
-                        self._key_index[key] = request_id
-                        LOG.info(
-                            "egress broker request filed request_id=%s container=%s host=%s port=%d",
-                            request_id,
-                            container,
-                            host,
-                            port,
-                        )
+                        if denylist_body is not None:
+                            return denylist_body, request_id
+                        pending_notification = notification
                         if state.decision is not None:
                             body = self._decision_body(state.decision)
                             return body, request_id
@@ -893,40 +966,21 @@ class EgressBroker:
                     )
                 else:
                     request_id = uuid4().hex
-                    denylist_body = self._denylist_short_circuit(
-                        container, host, port, now, request_id, fields
-                    )
-                    if denylist_body is not None:
-                        return denylist_body, request_id
-                    state = OpenRequestState(
-                        request_id=request_id,
-                        container=container,
-                        host=host,
-                        port=port,
-                        opened_at=now,
-                        host_is_ip=host_is_ip,
-                    )
-                    self._log.append("requested", request_id, ts=now, **fields)
-                    pending_notification = self._notify_operator(
-                        request_id,
+                    state, denylist_body, notification = self._open_new_request(
+                        container,
+                        host,
+                        port,
                         now,
-                        container=container,
-                        host=host,
-                        port=port,
+                        request_id,
+                        fields,
                         host_is_ip=host_is_ip,
                         uid=uid,
                         comm=comm,
                         reason=reason,
                     )
-                    self._requests[request_id] = state
-                    self._key_index[key] = request_id
-                    LOG.info(
-                        "egress broker request filed request_id=%s container=%s host=%s port=%d",
-                        request_id,
-                        container,
-                        host,
-                        port,
-                    )
+                    if denylist_body is not None:
+                        return denylist_body, request_id
+                    pending_notification = notification
 
                 if state.decision is not None:
                     body = self._decision_body(state.decision)
@@ -1118,10 +1172,24 @@ class EgressBroker:
                     # "denylist" — and the denylist context lives in its own
                     # fields instead, mirroring the short-circuit path's
                     # denied event.
+                    #
+                    # Audit schema (finding #5): `fields["scope"]` was being
+                    # overwritten here with the denylist entry's scope (a
+                    # bottle NAME, or "global") — losing whether the /decide
+                    # call that triggered persist_deny() asked for
+                    # scope=bottle vs scope=global (both collapse to
+                    # indistinguishable values once scope=="global" also
+                    # equals entry.scope=="global"). `scope` now keeps
+                    # meaning request intent only (once|bottle|global,
+                    # already set above from resolved_scope); the entry's
+                    # own scope goes in the separate `denylist_scope` key,
+                    # matching the short-circuit path's key set.
                     entry_zone, entry_scope = denylist_zone, denylist_scope
-                    fields["scope"] = entry_scope if entry_scope is not None else resolved_scope
                     fields["via"] = "denylist"
                     fields["zone"] = entry_zone
+                    fields["denylist_scope"] = (
+                        entry_scope if entry_scope is not None else resolved_scope
+                    )
                 if persist_failed:
                     # persist_deny()'s own DenyList.add() raised: nothing was
                     # written, so this decide() call degrades to a plain
@@ -1631,7 +1699,14 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
                 return
         else:
             scope = payload.get("scope", "once")
-            if scope not in VALID_DECIDE_SCOPES:
+            # isinstance check FIRST (finding #3): VALID_DECIDE_SCOPES is a
+            # frozenset, and `x not in frozenset` hashes x — an unhashable
+            # payload["scope"] (a list or dict, both valid JSON) raises
+            # TypeError instead of a 400, which escapes this handler thread
+            # with no response sent at all. The "allow" branch above is safe
+            # as-is: `in` against a tuple does equality comparisons, never a
+            # hash lookup.
+            if not isinstance(scope, str) or scope not in VALID_DECIDE_SCOPES:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid scope"})
                 return
             # Presence, not value: JSON null is a supplied (invalid) reason,

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -1207,6 +1208,76 @@ class EgressBrokerHostTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=5)
 
+    def test_decide_endpoint_deny_unhashable_scope_returns_400_not_a_crash(self):
+        """finding #3: `scope not in VALID_DECIDE_SCOPES` hashes scope
+        (VALID_DECIDE_SCOPES is a frozenset) — an unhashable JSON value
+        (a list or an object) used to raise TypeError instead of producing a
+        400, which escapes the handler thread with no response sent at all.
+        Assert BOTH a clean 400 for the bad request AND that the daemon
+        keeps serving normally afterward (the handler thread surviving, not
+        just this one connection)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                for bad_scope in (["bottle"], {}):
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/decide",
+                        json.dumps(
+                            {
+                                "container": "coding-brassbottle",
+                                "host": "stripe.com",
+                                "decision": "deny",
+                                "scope": bad_scope,
+                            }
+                        ),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(body["error"], "invalid scope")
+                    conn.close()
+
+                # The daemon must still serve the NEXT request normally —
+                # proof the handler thread didn't crash/hang on the
+                # unhashable value.
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/decide",
+                    json.dumps(
+                        {
+                            "container": "coding-brassbottle",
+                            "host": "stripe.com",
+                            "decision": "deny",
+                            "scope": "once",
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                    },
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.OK)
+                conn.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
     def test_decide_endpoint_deny_scope_validation_matrix(self):
         """once/bottle/global are all accepted; bottle/global additionally
         persist the CALLER-NAMED zone to disk even with no open request
@@ -2218,7 +2289,7 @@ exit 0
 
             thread = threading.Thread(target=waiter)
             thread.start()
-            request_id = wait_for_broker_open_request(b)
+            wait_for_broker_open_request(b)
             persist_result = b.persist_deny(
                 "neon.tech", "bottle", container="coding-brassbottle", reason="noisy"
             )
@@ -2238,10 +2309,15 @@ exit 0
             self.assertEqual(len(denied), 1)
             # The operator's free-text reason survives untouched...
             self.assertEqual(denied[0].get("reason"), "noisy")
-            # ...and the denylist context lives in its own fields.
+            # ...and the denylist context lives in its own fields (finding
+            # #5: `scope` keeps meaning request intent — the /decide call
+            # that triggered persist_deny asked for scope=bottle — while
+            # the entry's own scope, the bottle NAME it was written under,
+            # goes in the separate `denylist_scope` key).
             self.assertEqual(denied[0].get("via"), "denylist")
             self.assertEqual(denied[0].get("zone"), "neon.tech")
-            self.assertEqual(denied[0].get("scope"), "coding-brassbottle")
+            self.assertEqual(denied[0].get("scope"), "bottle")
+            self.assertEqual(denied[0].get("denylist_scope"), "coding-brassbottle")
 
     def test_decide_deny_once_response_body_stays_generic(self):
         """A plain scope=once deny (no denylist write) keeps the old bare
@@ -2290,9 +2366,18 @@ exit 0
             denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
             self.assertEqual(len(requested), 1)
             self.assertEqual(len(denied), 1)
-            self.assertEqual(denied[0].get("reason"), "denylist")
+            # finding #5: the audit event's `reason` is the entry's own
+            # operator free text ("telemetry", set on add() above) — the
+            # literal "denylist" stays confined to the response body
+            # (asserted above), which the container-side reader depends on
+            # unchanged. `via`/`denylist_scope` mirror persist_deny's own
+            # sweep-closure schema exactly; `scope` (request intent) is
+            # absent — there was no /decide call for this short-circuit.
+            self.assertEqual(denied[0].get("reason"), "telemetry")
+            self.assertEqual(denied[0].get("via"), "denylist")
             self.assertEqual(denied[0].get("zone"), "datadoghq.com")
-            self.assertEqual(denied[0].get("scope"), "global")
+            self.assertEqual(denied[0].get("denylist_scope"), "global")
+            self.assertNotIn("scope", denied[0])
             # finding #6: the audit pair and the id returned to the caller
             # must be the SAME id, not two independently-minted ones.
             self.assertEqual(requested[0]["request_id"], request_id)
@@ -2301,6 +2386,65 @@ exit 0
             # never resurrected as open after a daemon restart.
             folded = egress_log.EgressLog(root).fold_queue(now=NOW)
             self.assertEqual(folded.open_requests, {})
+
+    def test_denylist_caused_denied_events_share_the_same_denylist_key_set(self):
+        """finding #5: unify the audit schema for BOTH denylist-caused
+        "denied" events — the immediate short-circuit path
+        (_denylist_short_circuit) and persist_deny's sweep-closure path
+        (_close_request's denylist_zone/denylist_scope branch) — so a
+        reader of the audit log has ONE shape for "a denylist entry denied
+        this", not two subtly different ones. Drive both paths in the same
+        test and assert they carry the identical set of denylist-context
+        keys (`scope` is deliberately excluded from the comparison: it
+        keeps meaning request intent on the sweep-closure path, and simply
+        does not exist on the short-circuit path, which is not a /decide
+        call at all)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._touch_token(root, "coding-brassbottle")
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+
+            # Path 1: short-circuit — the zone is ALREADY denylisted, so
+            # this deny never opens a held request at all.
+            b._denylist.add(zone="datadoghq.com", scope="global", reason="telemetry")
+            body1, _rid1 = b.file_request("coding-brassbottle", "datadoghq.com", 443)
+            self.assertEqual(body1["decision"], "deny")
+
+            # Path 2: persist_deny's sweep closure — an OPEN request that a
+            # brand-new denylist entry then covers and closes.
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "neon.tech", 443)
+                result["body"] = body
+
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            wait_for_broker_open_request(b)
+            persist_result = b.persist_deny(
+                "neon.tech", "bottle", container="coding-brassbottle", reason="noisy"
+            )
+            self.assertIsNone(persist_result.error)
+            join_thread_or_fail(thread, label="file_request")
+
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(denied), 2)
+            short_circuit_denied = next(r for r in denied if r.get("zone") == "datadoghq.com")
+            sweep_denied = next(r for r in denied if r.get("zone") == "neon.tech")
+
+            denylist_schema_keys = {"via", "zone", "denylist_scope"}
+            sc_keys = denylist_schema_keys & short_circuit_denied.keys()
+            sw_keys = denylist_schema_keys & sweep_denied.keys()
+            self.assertEqual(sc_keys, denylist_schema_keys)
+            self.assertEqual(sw_keys, denylist_schema_keys)
+            self.assertEqual(short_circuit_denied["via"], "denylist")
+            self.assertEqual(sweep_denied["via"], "denylist")
+            # And `reason` on BOTH is free text, never the literal
+            # "denylist" — that literal is confined to the HTTP response
+            # body (a separate assertion, covered by the two tests above).
+            self.assertEqual(short_circuit_denied.get("reason"), "telemetry")
+            self.assertEqual(sweep_denied.get("reason"), "noisy")
 
     def test_denylist_short_circuit_requested_event_carries_full_fields(self):
         """finding #7: the "requested" audit event a denylist short-circuit
@@ -2456,11 +2600,11 @@ exit 0
             denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
             self.assertEqual(len(requested), 1)
             self.assertEqual(len(denied), 1)
-            self.assertEqual(len(b._denylist_hit_last), 1)
-            self.assertIn(("coding-brassbottle", "datadoghq.com"), b._denylist_hit_last)
+            self.assertEqual(len(b._denylist_hits), 1)
+            self.assertIn(("coding-brassbottle", "datadoghq.com"), b._denylist_hits)
 
     def test_denylist_hit_last_prunes_stale_keys_on_insert(self):
-        """Cleanup: _denylist_hit_last must not grow without bound — a stale
+        """Cleanup: _denylist_hits must not grow without bound — a stale
         entry (older than HIT_COALESCE_SECONDS) is dropped the next time any
         key is inserted, not just the one that expired."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2471,15 +2615,15 @@ exit 0
             b._denylist.add(zone="new-zone.example.com", scope="global")
 
             b.file_request("coding-brassbottle", "old-zone.example.com", 443)
-            self.assertEqual(len(b._denylist_hit_last), 1)
+            self.assertEqual(len(b._denylist_hits), 1)
 
             clock.advance(broker.HIT_COALESCE_SECONDS + 1)
             b.file_request("coding-brassbottle", "new-zone.example.com", 443)
             # The stale old-zone key must be gone, not just the new one added.
-            self.assertEqual(len(b._denylist_hit_last), 1)
-            self.assertIn(("coding-brassbottle", "new-zone.example.com"), b._denylist_hit_last)
+            self.assertEqual(len(b._denylist_hits), 1)
+            self.assertIn(("coding-brassbottle", "new-zone.example.com"), b._denylist_hits)
             self.assertNotIn(
-                ("coding-brassbottle", "old-zone.example.com"), b._denylist_hit_last
+                ("coding-brassbottle", "old-zone.example.com"), b._denylist_hits
             )
 
     def test_denylist_suppressed_evicted_hits_are_logged_not_dropped_silently(self):
@@ -2488,7 +2632,11 @@ exit 0
         key — but a key can be evicted by _prune_denylist_hit_last before
         any next hit ever arrives for it, and the suppressed count used to
         just vanish with it (bare dict.pop, no log). Now eviction with a
-        nonzero suppressed count logs one INFO line naming the count."""
+        nonzero suppressed count logs one INFO line naming the count.
+
+        finding #8: last-hit-timestamp and suppressed-count now live on one
+        _DenylistHitState per key (b._denylist_hits) instead of two parallel
+        dicts kept in sync by convention."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             clock = FakeClock(NOW)
@@ -2501,7 +2649,7 @@ exit 0
             b.file_request("coding-brassbottle", "old-zone.example.com", 443)
             b.file_request("coding-brassbottle", "old-zone.example.com", 443)
             self.assertEqual(
-                b._denylist_suppressed[("coding-brassbottle", "old-zone.example.com")], 1
+                b._denylist_hits[("coding-brassbottle", "old-zone.example.com")].suppressed, 1
             )
 
             clock.advance(broker.HIT_COALESCE_SECONDS + 1)
@@ -2518,7 +2666,7 @@ exit 0
             self.assertIn("zone=old-zone.example.com", evict_lines[0])
             self.assertIn("suppressed=1", evict_lines[0])
             self.assertNotIn(
-                ("coding-brassbottle", "old-zone.example.com"), b._denylist_suppressed
+                ("coding-brassbottle", "old-zone.example.com"), b._denylist_hits
             )
 
     def test_open_request_not_short_circuited_by_a_later_denylist_entry(self):
@@ -2668,6 +2816,13 @@ exit 0
             )
             thread.start()
             request_id = wait_for_broker_open_request(b)
+            # The request is registered under the lock and the notifier is
+            # (by design) called only AFTER it is released, so the open
+            # request becoming visible does not mean the probe has run yet —
+            # wait for the callback itself, not for the state it follows.
+            deadline = time.monotonic() + 10.0
+            while not acquired_during_notify and time.monotonic() < deadline:
+                time.sleep(0.01)
             self.assertEqual(acquired_during_notify, [True])
             b.decide(request_id, "deny")
             join_thread_or_fail(thread, label="file_request")
