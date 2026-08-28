@@ -38,6 +38,7 @@ DEFAULT_HOLD_SECONDS = 45
 STALE_HOURS = 24
 HIT_COALESCE_SECONDS = 60
 STALE_SWEEP_INTERVAL_SECONDS = 300
+DECIDE_REASON_MAX_CHARS = 200
 
 TOKENS_DIRNAME = "tokens"
 LOCK_FILENAME = "daemon.lock"
@@ -700,6 +701,16 @@ class EgressBroker:
         )
         return allow_error
 
+    def _open_request_ids_for_zone(self, container: str, zone: str) -> list[str]:
+        with self._lock:
+            return [
+                state.request_id
+                for state in self._requests.values()
+                if state.decision is None
+                and state.container == container
+                and host_covered_by_zone(state.host, zone)
+            ]
+
     def decide_allow_for_zone(
         self,
         container: str,
@@ -709,18 +720,30 @@ class EgressBroker:
     ) -> list[str]:
         """Release open requests whose host falls under domain (host-side only)."""
         zone = normalize_host(domain)
-        with self._lock:
-            candidates = [
-                state.request_id
-                for state in self._requests.values()
-                if state.decision is None
-                and state.container == container
-                and host_covered_by_zone(state.host, zone)
-            ]
+        candidates = self._open_request_ids_for_zone(container, zone)
         decided: list[str] = []
         for request_id in candidates:
             try:
                 self.decide(request_id, "allow", scope=scope)
+            except EgressBrokerHostError:
+                continue
+            decided.append(request_id)
+        return decided
+
+    def decide_deny_for_zone(
+        self,
+        container: str,
+        domain: str,
+        *,
+        reason: str | None = None,
+    ) -> list[str]:
+        """Deny every open request whose host falls under domain (host-side only)."""
+        zone = normalize_host(domain)
+        candidates = self._open_request_ids_for_zone(container, zone)
+        decided: list[str] = []
+        for request_id in candidates:
+            try:
+                self.decide(request_id, "deny", reason=reason)
             except EgressBrokerHostError:
                 continue
             decided.append(request_id)
@@ -925,14 +948,50 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
             return
 
         decision = payload.get("decision")
-        if decision != "allow":
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "decision must be allow"})
+        if decision not in ("allow", "deny"):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "decision must be allow or deny"},
+            )
             return
 
-        scope = payload.get("scope", "live")
-        if scope not in ("live", "manifest"):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid scope"})
-            return
+        scope = "live"
+        reason: str | None = None
+
+        if decision == "allow":
+            if "reason" in payload:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "reason only applies to deny"},
+                )
+                return
+            scope = payload.get("scope", "live")
+            if scope not in ("live", "manifest"):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid scope"})
+                return
+        else:
+            if "scope" in payload:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "scope only applies to allow"},
+                )
+                return
+            raw_reason = payload.get("reason")
+            if raw_reason is not None:
+                if (
+                    not isinstance(raw_reason, str)
+                    or len(raw_reason) > DECIDE_REASON_MAX_CHARS
+                ):
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": (
+                                "reason must be a string of at most 200 characters"
+                            ),
+                        },
+                    )
+                    return
+                reason = raw_reason
 
         try:
             normalize_host(host_raw)
@@ -940,12 +999,28 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid host"})
             return
 
+        reason_len = len(reason) if reason is not None else 0
+        LOG.info(
+            "egress broker decide zone container=%s host=%s decision=%s reason_len=%d",
+            container,
+            host_raw,
+            decision,
+            reason_len,
+        )
+
         try:
-            decided = self.server.broker.decide_allow_for_zone(
-                container,
-                host_raw,
-                scope=scope,
-            )
+            if decision == "allow":
+                decided = self.server.broker.decide_allow_for_zone(
+                    container,
+                    host_raw,
+                    scope=scope,
+                )
+            else:
+                decided = self.server.broker.decide_deny_for_zone(
+                    container,
+                    host_raw,
+                    reason=reason,
+                )
         except EgressBrokerHostError as exc:
             LOG.info("egress broker decide error reason=%s", exc)
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

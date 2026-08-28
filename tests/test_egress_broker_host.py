@@ -929,6 +929,281 @@ class EgressBrokerHostTests(unittest.TestCase):
             waiter_thread.join(timeout=5)
             self.assertEqual(result["body"], {"decision": "allow", "scope": "live"})
 
+    def test_decide_deny_for_zone_releases_matching_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            results: dict[str, dict[str, object]] = {}
+
+            def waiter(container: str, host: str, key: str) -> None:
+                body, _ = b.file_request(container, host, 443)
+                results[key] = body
+
+            threads = [
+                threading.Thread(
+                    target=waiter,
+                    args=("coding-brassbottle", "docs.stripe.com", "docs.stripe.com"),
+                ),
+                threading.Thread(
+                    target=waiter,
+                    args=("coding-brassbottle", "api.stripe.com", "api.stripe.com"),
+                ),
+                threading.Thread(
+                    target=waiter,
+                    args=("coding-brassbottle", "example.com", "example.com"),
+                ),
+                threading.Thread(
+                    target=waiter,
+                    args=("other-container", "docs.stripe.com", "other-container"),
+                ),
+            ]
+            for thread in threads:
+                thread.start()
+            wait_for_broker_open_request(b, count=4)
+            with b._lock:
+                ids_by_key = {
+                    (state.container, state.host): rid
+                    for rid, state in b._requests.items()
+                }
+            decided = b.decide_deny_for_zone(
+                "coding-brassbottle",
+                "stripe.com",
+                reason="not needed",
+            )
+            threads[0].join(timeout=5)
+            threads[1].join(timeout=5)
+            self.assertEqual(
+                set(decided),
+                {
+                    ids_by_key[("coding-brassbottle", "docs.stripe.com")],
+                    ids_by_key[("coding-brassbottle", "api.stripe.com")],
+                },
+            )
+            self.assertEqual(
+                results["docs.stripe.com"],
+                {"decision": "deny"},
+            )
+            self.assertEqual(
+                results["api.stripe.com"],
+                {"decision": "deny"},
+            )
+            with b._lock:
+                open_hosts = [
+                    (state.container, state.host) for state in b._requests.values()
+                ]
+            self.assertIn(("coding-brassbottle", "example.com"), open_hosts)
+            self.assertIn(("other-container", "docs.stripe.com"), open_hosts)
+            denied = [
+                r
+                for r in self._log_records(root)
+                if r.get("kind") == "denied" and r.get("request_id") in decided
+            ]
+            self.assertEqual(len(denied), 2)
+            for record in denied:
+                self.assertEqual(record.get("reason"), "not needed")
+            for rid, state in list(b._requests.items()):
+                b.decide(rid, "deny")
+            for thread in threads:
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_deny_releases_open_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("bottle-tok\n", encoding="utf-8")
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "docs.stripe.com", 443)
+                result["body"] = body
+
+            waiter_thread = threading.Thread(target=waiter)
+            waiter_thread.start()
+            wait_for_broker_open_request(b)
+            try:
+                with mock.patch("subprocess.run") as mocked:
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/decide",
+                        json.dumps(
+                            {
+                                "container": "coding-brassbottle",
+                                "host": "stripe.com",
+                                "decision": "deny",
+                                "reason": "typo host",
+                            }
+                        ),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp.status, HTTPStatus.OK)
+                    self.assertEqual(len(body["decided"]), 1)
+                    mocked.assert_not_called()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            waiter_thread.join(timeout=5)
+            self.assertEqual(result["body"], {"decision": "deny"})
+
+    def test_decide_endpoint_rejects_unknown_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/decide",
+                    json.dumps(
+                        {
+                            "container": "coding-brassbottle",
+                            "host": "stripe.com",
+                            "decision": "maybe",
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                    },
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(body["error"], "decision must be allow or deny")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_deny_rejects_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/decide",
+                    json.dumps(
+                        {
+                            "container": "coding-brassbottle",
+                            "host": "stripe.com",
+                            "decision": "deny",
+                            "scope": "live",
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                    },
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(body["error"], "scope only applies to allow")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_allow_rejects_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/decide",
+                    json.dumps(
+                        {
+                            "container": "coding-brassbottle",
+                            "host": "stripe.com",
+                            "decision": "allow",
+                            "reason": "x",
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                    },
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(body["error"], "reason only applies to deny")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_deny_rejects_long_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            error_text = "reason must be a string of at most 200 characters"
+            try:
+                for reason in ("x" * 201, 123):
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/decide",
+                        json.dumps(
+                            {
+                                "container": "coding-brassbottle",
+                                "host": "stripe.com",
+                                "decision": "deny",
+                                "reason": reason,
+                            }
+                        ),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(body["error"], error_text)
+                    conn.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
     def test_apply_allow_sets_skip_notify_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
