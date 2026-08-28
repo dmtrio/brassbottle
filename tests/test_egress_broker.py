@@ -480,6 +480,8 @@ class LoopbackInterceptTests(unittest.TestCase):
         )
         file_calls: list[dict[str, object]] = []
 
+        self.addCleanup(client.close)
+        self.addCleanup(feed.close)
         outcome = broker.handle_intercepted_connection(
             client,
             config=self._config(),
@@ -487,7 +489,6 @@ class LoopbackInterceptTests(unittest.TestCase):
             file_fn=lambda **kwargs: file_calls.append(kwargs) or (None, None),
             connect_fn=lambda addr, timeout: self.fail(f"must not relay to {addr}"),
         )
-        feed.close()
 
         self.assertEqual(outcome.action, "self_dial")
         self.assertEqual(file_calls, [], "a self-dial must never reach the operator")
@@ -499,6 +500,10 @@ class LoopbackInterceptTests(unittest.TestCase):
             dst_ip="127.0.0.1", dst_port=80, initial=b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
         )
         upstream_client, upstream = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(feed.close)
+        self.addCleanup(upstream.close)
+        self.addCleanup(upstream_client.close)
         file_calls: list[dict[str, object]] = []
         ipset_calls: list[str] = []
 
@@ -518,8 +523,6 @@ class LoopbackInterceptTests(unittest.TestCase):
                 file_fn=lambda **kwargs: file_calls.append(kwargs) or (None, None),
                 connect_fn=connect_fn,
             )
-        feed.close()
-        upstream_client.close()
 
         self.assertEqual(outcome.action, "fast_path")
         self.assertEqual(file_calls, [], "loopback must never reach the operator")
@@ -537,6 +540,8 @@ class LoopbackInterceptTests(unittest.TestCase):
             file_calls.append(kwargs)
             return {"decision": "deny", "request_id": "req-remote"}, None
 
+        self.addCleanup(client.close)
+        self.addCleanup(feed.close)
         outcome = broker.handle_intercepted_connection(
             client,
             config=self._config(),
@@ -544,7 +549,6 @@ class LoopbackInterceptTests(unittest.TestCase):
             file_fn=file_fn,
             connect_fn=lambda addr, timeout: self.fail("denied must not connect"),
         )
-        feed.close()
 
         self.assertNotEqual(outcome.action, "self_dial")
         self.assertEqual(len(file_calls), 1)
