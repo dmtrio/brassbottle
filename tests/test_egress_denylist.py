@@ -800,6 +800,21 @@ class DenyListCliTests(unittest.TestCase):
             (2, ["--check", "b", "d.com"]),
         )
 
+    def test_extract_verbosity_leaves_option_values_alone(self):
+        """A token that is the VALUE of a value-taking option is data, not a
+        flag: `--reason -v` must survive verbatim, or argparse either fails
+        with "expected one argument" or silently steals a later token."""
+        for opt in ("--reason", "--bottle", "--base-path"):
+            self.assertEqual(
+                dl._extract_verbosity(["add", "x.com", opt, "-v", "--global"]),
+                (0, ["add", "x.com", opt, "-v", "--global"]),
+            )
+        # ...and a real -v elsewhere in the same argv is still extracted.
+        self.assertEqual(
+            dl._extract_verbosity(["-v", "add", "x.com", "--reason", "-vv"]),
+            (1, ["add", "x.com", "--reason", "-vv"]),
+        )
+
     def test_main_default_level_is_warning_verbose_flag_raises_it(self):
         out = io.StringIO()
         with mock.patch.object(dl.logging, "basicConfig") as basic_config:

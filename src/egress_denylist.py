@@ -835,10 +835,19 @@ def _extract_verbosity(argv: list[str]) -> tuple[int, list[str]]:
     caller puts it, and so the log level is set before the first DenyList()
     construction, which logs on load (finding #6).
     """
+    # Options that consume the next token: a value of "-v" (e.g.
+    # `--reason -v`) is data, not a verbosity flag, and swallowing it would
+    # make argparse fail with "expected one argument" or silently steal an
+    # unrelated later token as the value.
+    value_taking = {"--reason", "--bottle", "--base-path"}
     count = 0
     rest: list[str] = []
+    prev = ""
     for arg in argv:
-        if arg == "-v" or arg == "--verbose":
+        takes_value, prev = prev in value_taking, arg
+        if takes_value:
+            rest.append(arg)
+        elif arg == "-v" or arg == "--verbose":
             count += 1
         elif len(arg) > 1 and arg[0] == "-" and set(arg[1:]) == {"v"}:
             count += len(arg) - 1

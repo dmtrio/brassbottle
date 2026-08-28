@@ -127,7 +127,10 @@ notify_egress_daemon() {
     # env/default guess, same as before this existed.
     local broker_url=""
     if [ "${HAVE_PYTHON3:-0}" = "1" ]; then
-        broker_url="$(DJINN_HOME="$BASE_PATH" "$PYTHON3" "$CDD_ROOT/src/egress_broker_host.py" --print-endpoint 2>/dev/null)" || true
+        # exit 3 = "no live daemon.json, this is just the hardcoded default":
+        # discard it so the EGRESS_BROKER_PORT guess below still wins, as it
+        # did before endpoint discovery existed.
+        broker_url="$(DJINN_HOME="$BASE_PATH" "$PYTHON3" "$CDD_ROOT/src/egress_broker_host.py" --print-endpoint 2>/dev/null)" || broker_url=""
     fi
     [ -n "$broker_url" ] || broker_url="http://127.0.0.1:${EGRESS_BROKER_PORT:-8816}"
     local token container="$CONTAINER"

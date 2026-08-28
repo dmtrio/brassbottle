@@ -73,8 +73,9 @@ and only a **Deny** button.
 `./djinn deny <zone> --bottle NAME|--global` writes an entry to
 `$DJINN_HOME/run/egress/denylist.json` that short-circuits future requests for
 that zone before an operator is ever prompted; `./djinn undeny` removes one.
-`./djinn deny --list` (or `./djinn deny <zone> --check <bottle> <domain>...`
-via `bin/allow-egress.sh`) reads the same file.
+`./djinn deny --list` reads the same file; so does `bin/allow-egress.sh`
+internally, via `egress_denylist.py --check <bottle> <domain>...` (a bare
+bypass with no `./djinn` front-end — it is not a `deny` flag).
 
 ### Audit log fields for a denylist-caused denial
 
