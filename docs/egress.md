@@ -67,3 +67,35 @@ Button behavior:
 IP-literal destinations (for example `192.0.2.55:5432`) cannot be allowed via
 `/decide` (they require a manifest CIDR grant). Those pushes show a warning tag
 and only a **Deny** button.
+
+## Persistent deny list
+
+`./djinn deny <zone> --bottle NAME|--global` writes an entry to
+`$DJINN_HOME/run/egress/denylist.json` that short-circuits future requests for
+that zone before an operator is ever prompted; `./djinn undeny` removes one.
+`./djinn deny --list` (or `./djinn deny <zone> --check <bottle> <domain>...`
+via `bin/allow-egress.sh`) reads the same file.
+
+### Audit log fields for a denylist-caused denial
+
+A `denied` event in the audit log (`$DJINN_HOME/run/egress/*.jsonl`) can be
+caused by a persisted deny-list entry in two ways: an already-denylisted zone
+short-circuits the request outright (no hold, no operator prompt), or a
+brand-new entry (`./djinn deny` / the watcher's D/G keys / `/decide` with
+`scope=bottle|global`) sweeps closed any request it now covers. Both cases
+write the same three fields to name the entry that caused the denial:
+
+- `via` — always the literal string `"denylist"`.
+- `zone` — the entry's zone (the value that was persisted, not necessarily
+  the exact host that triggered the check — a zone covers its subdomains).
+- `denylist_scope` — the entry's own scope as written to disk: a bottle name,
+  or `"global"`.
+
+`scope` on a `denied` event keeps its plain-deny meaning — the *request's*
+own scope (`once`/`bottle`/`global`), i.e. what was asked for, not what the
+matched entry is scoped to — and is absent entirely on a short-circuited
+denial, since no `/decide` call ever happened for it. `reason` stays free
+text throughout: the operator's own explanation (from `./djinn deny --reason
+...` or the matched entry's own `reason`, if either was given), never the
+literal string `"denylist"` — that literal is confined to the HTTP response
+body a still-held container sees, not the audit event.
