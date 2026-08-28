@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -1187,6 +1188,43 @@ class WatcherStartupSurfaceTests(unittest.TestCase):
         # explicitly, not leave it to be inferred from the key legend.
         self.assertIn("D/G are uppercase on purpose", out)
         self.assertIn("./djinn undeny", out)
+
+    def test_run_watch_prints_the_listen_line(self):
+        """finding (PR #85 review, daemon endpoint): the banner must say what
+        address ./djinn deny will target — otherwise a --host bind (e.g. the
+        documented ntfy VPN bind from #84) is invisible to the operator."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            buf = io.StringIO()
+            with mock.patch.object(watch.EgressWatcher, "run_forever",
+                                   return_value=None), \
+                 mock.patch.object(sys, "stdout", buf):
+                watch.run_watch(base, host="127.0.0.1", port=0)
+            out = buf.getvalue()
+
+        self.assertIn("  listen: http://127.0.0.1:", out)
+
+    def test_run_watch_writes_and_removes_daemon_endpoint(self):
+        """run_watch writes $egress_root/daemon.json with the real bound
+        port right after constructing the server, and removes it in its
+        finally block, before the singleton lock is released."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            egress_root = watch.resolve_egress_root(base)
+            captured: dict[str, object] = {}
+
+            def fake_run_forever(self) -> None:
+                captured["endpoint"] = broker.read_daemon_endpoint(egress_root)
+
+            with mock.patch.object(watch.EgressWatcher, "run_forever", fake_run_forever), \
+                 mock.patch.object(sys, "stdout", io.StringIO()):
+                watch.run_watch(base, host="127.0.0.1", port=0)
+
+            endpoint = captured.get("endpoint")
+            self.assertIsNotNone(endpoint)
+            self.assertEqual(endpoint.host, "127.0.0.1")
+            self.assertEqual(endpoint.pid, os.getpid())
+            self.assertFalse((egress_root / broker.ENDPOINT_FILENAME).exists())
 
     def test_run_watch_creates_the_run_directory(self):
         """RUN_PATH is a side-effect-free derivation; the daemon creates it.

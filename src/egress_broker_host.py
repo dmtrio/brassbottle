@@ -41,7 +41,7 @@ from egress_denylist import (
     resolve_egress_root,
     validate_bottle_scope,
 )
-from egress_log import EgressLog, EgressLogError, _utc_now
+from egress_log import EgressLog, EgressLogError, _iso_ts, _utc_now
 from egress_notify import (
     EgressNotification,
     NtfyNotifier,
@@ -62,6 +62,8 @@ TOKENS_DIRNAME = "tokens"
 LOCK_FILENAME = "daemon.lock"
 CONFIG_FILENAME = "config.json"
 OPERATOR_TOKEN_FILENAME = "operator.token"
+ENDPOINT_FILENAME = "daemon.json"
+EGRESS_BROKER_URL_ENV = "EGRESS_BROKER_URL"
 DAEMON_SKIP_NOTIFY_ENV = "DJINN_EGRESS_SKIP_NOTIFY"
 
 IP_APPLY_FAILED_REASON = (
@@ -301,6 +303,167 @@ def _load_config(config_path: Path) -> dict[str, Any]:
         LOG.info("egress broker config unreadable path=%s", config_path.name)
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+@dataclass(frozen=True)
+class DaemonEndpoint:
+    """The daemon's actual bind address, as recorded in daemon.json."""
+
+    host: str
+    port: int
+    pid: int
+
+
+def write_daemon_endpoint(egress_root: Path, host: str, port: int) -> Path:
+    """Persist the daemon's actual bind address after the HTTP server is
+    constructed — the single source of truth every host-side CLI/script
+    reads to find a daemon that bound to a non-default host/port (a VPN
+    --host for ntfy, or --port 0). Atomic write (tmp + os.replace); mode
+    0o644 — host/port/pid are not secrets, the operator token still guards
+    the actual API.
+    """
+    egress_root.mkdir(parents=True, exist_ok=True)
+    path = egress_root / ENDPOINT_FILENAME
+    payload = {
+        "version": 1,
+        "host": host,
+        "port": port,
+        "pid": os.getpid(),
+        "started_at": _iso_ts(None),
+    }
+    tmp_path = path.with_name(f".{ENDPOINT_FILENAME}.tmp-{os.getpid()}")
+    text = json.dumps(payload, separators=(",", ":")) + "\n"
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, path)
+    except OSError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    LOG.info(
+        "egress broker endpoint write path=%s host=%s port=%d",
+        path,
+        host,
+        port,
+    )
+    return path
+
+
+def remove_daemon_endpoint(egress_root: Path) -> None:
+    """Remove daemon.json on clean shutdown. Tolerates it already being
+    gone (a crash, or a second run_daemon() that never wrote one this
+    session) — never raises."""
+    path = egress_root / ENDPOINT_FILENAME
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        LOG.info("egress broker endpoint remove failed path=%s error=%s", path, exc)
+        return
+    LOG.info("egress broker endpoint remove path=%s", path)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort liveness probe via signal 0. Never raises."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Owned by another user but the pid slot is occupied — alive.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def read_daemon_endpoint(egress_root: Path) -> DaemonEndpoint | None:
+    """Read daemon.json; None (never raises) when missing, corrupt, the
+    wrong shape, or the recorded pid is no longer alive (a daemon that
+    crashed without cleaning up after itself)."""
+    path = egress_root / ENDPOINT_FILENAME
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        LOG.warning("egress broker endpoint unreadable path=%s error=%s", path, exc)
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        LOG.warning("egress broker endpoint unreadable path=%s error=%s", path, exc)
+        return None
+    if not isinstance(payload, dict):
+        LOG.warning(
+            "egress broker endpoint unreadable path=%s error=%s",
+            path,
+            "not a JSON object",
+        )
+        return None
+    host = payload.get("host")
+    port = payload.get("port")
+    pid = payload.get("pid")
+    # "" is a legitimate bind-all-interfaces host (see _connect_host_for_bind),
+    # not a missing value — only reject when the key is absent/non-string.
+    if not isinstance(host, str):
+        LOG.warning(
+            "egress broker endpoint unreadable path=%s error=%s", path, "missing/invalid host"
+        )
+        return None
+    if not isinstance(port, int) or isinstance(port, bool):
+        LOG.warning(
+            "egress broker endpoint unreadable path=%s error=%s", path, "missing/invalid port"
+        )
+        return None
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        LOG.warning(
+            "egress broker endpoint unreadable path=%s error=%s", path, "missing/invalid pid"
+        )
+        return None
+    if not _pid_alive(pid):
+        LOG.info("egress broker endpoint stale pid=%d", pid)
+        return None
+    return DaemonEndpoint(host=host, port=port, pid=pid)
+
+
+def _connect_host_for_bind(bind_host: str) -> str:
+    """Map a daemon's bind host to the address a client should connect to.
+
+    0.0.0.0/"" (all interfaces) -> 127.0.0.1; "::" (all IPv6 interfaces) ->
+    [::1]; any other IPv6 literal bracketed as-is; anything else (a
+    hostname, or a specific IPv4/VPN literal like 10.8.0.5) used verbatim.
+    """
+    if bind_host in ("0.0.0.0", ""):
+        return "127.0.0.1"
+    if bind_host == "::":
+        return "[::1]"
+    try:
+        ipaddress.IPv6Address(bind_host)
+    except ValueError:
+        return bind_host
+    return f"[{bind_host}]"
+
+
+def daemon_base_url(egress_root: Path) -> str:
+    """The address a host-side CLI/script should POST to reach the running
+    daemon. EGRESS_BROKER_URL is the highest-precedence override (documented
+    escape hatch) — checked before daemon.json is even read. Otherwise reads
+    $egress_root/daemon.json (the single source of truth the daemon itself
+    wrote after binding — see write_daemon_endpoint); falls back to
+    http://127.0.0.1:{DEFAULT_PORT} when there is no live endpoint file.
+    """
+    env_override = os.environ.get(EGRESS_BROKER_URL_ENV, "").strip()
+    if env_override:
+        return env_override
+    endpoint = read_daemon_endpoint(egress_root)
+    if endpoint is not None:
+        return f"http://{_connect_host_for_bind(endpoint.host)}:{endpoint.port}"
+    return f"http://127.0.0.1:{DEFAULT_PORT}"
 
 
 def _request_key(container: str, host: str, port: int) -> tuple[str, str, int]:
@@ -1730,6 +1893,8 @@ def run_daemon(
         notifier=notifier,
     )
     server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
+    # DaemonLock is already held above, so only one daemon ever writes this.
+    write_daemon_endpoint(egress_root, host, server.server_address[1])
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
         target=_stale_sweep_loop,
@@ -1745,6 +1910,7 @@ def run_daemon(
     finally:
         stop_event.set()
         server.server_close()
+        remove_daemon_endpoint(egress_root)
         lock.release()
 
 
@@ -1762,7 +1928,26 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BOTTLE",
         help="print (creating if needed) the per-bottle bearer token and exit",
     )
+    parser.add_argument(
+        "--print-endpoint",
+        action="store_true",
+        help=(
+            "print the base URL a client should use to reach the running daemon "
+            "(EGRESS_BROKER_URL env override, else the live daemon.json endpoint, "
+            "else the default) and exit; exit 0 when that came from a live "
+            "endpoint file or the env override, exit 3 when it is the default "
+            "fallback (i.e. no daemon appears to be running)"
+        ),
+    )
     return parser
+
+
+def _print_endpoint(egress_root: Path) -> int:
+    url = daemon_base_url(egress_root)
+    env_override = os.environ.get(EGRESS_BROKER_URL_ENV, "").strip()
+    live = bool(env_override) or read_daemon_endpoint(egress_root) is not None
+    print(url)
+    return 0 if live else 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1770,6 +1955,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     base_path = resolve_base_path(args.base_path)
+    if args.print_endpoint:
+        return _print_endpoint(resolve_egress_root(base_path))
     if args.ensure_bottle_token:
         print(ensure_bottle_token(base_path, args.ensure_bottle_token))
         return 0

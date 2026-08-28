@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -2669,6 +2671,194 @@ exit 0
             self.assertEqual(acquired_during_notify, [True])
             b.decide(request_id, "deny")
             join_thread_or_fail(thread, label="file_request")
+
+
+class DaemonEndpointFileTests(unittest.TestCase):
+    """$egress_root/daemon.json — the single source of truth host-side CLIs
+    read to find a daemon that bound to a non-default --host/--port. See
+    egress_broker_host.write_daemon_endpoint/read_daemon_endpoint/
+    daemon_base_url and the PR #85 review finding this fixes."""
+
+    def _dead_pid(self) -> int:
+        """A pid guaranteed not to be alive: spawn a trivial subprocess and
+        wait() it — wait() reaps it, so os.kill(pid, 0) afterwards raises
+        ProcessLookupError, same as any other daemon that crashed without
+        cleaning up after itself."""
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def test_write_read_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            path = broker.write_daemon_endpoint(egress_root, "127.0.0.1", 9123)
+            self.assertEqual(path, egress_root / broker.ENDPOINT_FILENAME)
+            self.assertTrue(path.is_file())
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["host"], "127.0.0.1")
+            self.assertEqual(payload["port"], 9123)
+            self.assertEqual(payload["pid"], os.getpid())
+            self.assertEqual(payload["version"], 1)
+            self.assertIn("started_at", payload)
+
+            endpoint = broker.read_daemon_endpoint(egress_root)
+            self.assertIsNotNone(endpoint)
+            self.assertEqual(endpoint.host, "127.0.0.1")
+            self.assertEqual(endpoint.port, 9123)
+            self.assertEqual(endpoint.pid, os.getpid())
+
+    def test_remove_daemon_endpoint_tolerates_missing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            broker.remove_daemon_endpoint(egress_root)  # must not raise
+            broker.write_daemon_endpoint(egress_root, "127.0.0.1", 9123)
+            broker.remove_daemon_endpoint(egress_root)
+            self.assertFalse((egress_root / broker.ENDPOINT_FILENAME).exists())
+
+    def test_read_missing_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(broker.read_daemon_endpoint(Path(tmp)))
+
+    def test_read_corrupt_json_logs_warning_and_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            (egress_root / broker.ENDPOINT_FILENAME).write_text("{BROKEN", encoding="utf-8")
+            with self.assertLogs("egress_broker_host", level="WARNING") as captured:
+                result = broker.read_daemon_endpoint(egress_root)
+            self.assertIsNone(result)
+            self.assertTrue(any("endpoint unreadable" in line for line in captured.output))
+
+    def test_read_wrong_shape_logs_warning_and_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            (egress_root / broker.ENDPOINT_FILENAME).write_text(
+                json.dumps({"version": 1, "host": "127.0.0.1"}), encoding="utf-8"
+            )
+            with self.assertLogs("egress_broker_host", level="WARNING") as captured:
+                result = broker.read_daemon_endpoint(egress_root)
+            self.assertIsNone(result)
+            self.assertTrue(any("endpoint unreadable" in line for line in captured.output))
+
+    def test_read_not_a_json_object_logs_warning_and_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            (egress_root / broker.ENDPOINT_FILENAME).write_text("[1,2,3]", encoding="utf-8")
+            with self.assertLogs("egress_broker_host", level="WARNING") as captured:
+                result = broker.read_daemon_endpoint(egress_root)
+            self.assertIsNone(result)
+            self.assertTrue(any("endpoint unreadable" in line for line in captured.output))
+
+    def test_read_stale_pid_logs_info_and_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            dead_pid = self._dead_pid()
+            (egress_root / broker.ENDPOINT_FILENAME).write_text(
+                json.dumps(
+                    {"version": 1, "host": "127.0.0.1", "port": 8816, "pid": dead_pid}
+                ),
+                encoding="utf-8",
+            )
+            with self.assertLogs("egress_broker_host", level="INFO") as captured:
+                result = broker.read_daemon_endpoint(egress_root)
+            self.assertIsNone(result)
+            self.assertTrue(
+                any(
+                    "endpoint stale" in line and f"pid={dead_pid}" in line
+                    for line in captured.output
+                )
+            )
+
+    def test_daemon_base_url_matrix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+
+            # No endpoint file at all → default fallback.
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(broker.EGRESS_BROKER_URL_ENV, None)
+                self.assertEqual(
+                    broker.daemon_base_url(egress_root),
+                    f"http://127.0.0.1:{broker.DEFAULT_PORT}",
+                )
+
+            table = [
+                ("0.0.0.0", "http://127.0.0.1:9001"),
+                ("", "http://127.0.0.1:9001"),
+                ("::", "http://[::1]:9001"),
+                ("fe80::1", "http://[fe80::1]:9001"),
+                ("10.8.0.5", "http://10.8.0.5:9001"),
+            ]
+            for bind_host, expected in table:
+                with self.subTest(bind_host=bind_host):
+                    broker.write_daemon_endpoint(egress_root, bind_host, 9001)
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        os.environ.pop(broker.EGRESS_BROKER_URL_ENV, None)
+                        self.assertEqual(broker.daemon_base_url(egress_root), expected)
+
+            # EGRESS_BROKER_URL wins over a live endpoint file.
+            with mock.patch.dict(
+                os.environ, {broker.EGRESS_BROKER_URL_ENV: "http://10.9.9.9:1234"}
+            ):
+                self.assertEqual(
+                    broker.daemon_base_url(egress_root), "http://10.9.9.9:1234"
+                )
+
+    def test_run_daemon_writes_real_bound_port_and_removes_on_shutdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            egress_root = broker.resolve_egress_root(base)
+            captured: dict[str, object] = {}
+
+            def fake_serve_forever(self) -> None:
+                captured["port"] = self.server_address[1]
+                captured["endpoint"] = broker.read_daemon_endpoint(egress_root)
+
+            with mock.patch.object(
+                broker.EgressBrokerHTTPServer, "serve_forever", fake_serve_forever
+            ):
+                broker.run_daemon(base, host="127.0.0.1", port=0, repo_root=REPO_ROOT)
+
+            self.assertIsNotNone(captured.get("endpoint"))
+            self.assertNotEqual(captured["port"], 0)
+            self.assertEqual(captured["endpoint"].port, captured["port"])
+            self.assertEqual(captured["endpoint"].pid, os.getpid())
+            # Cleaned up in run_daemon's finally, before the lock is released.
+            self.assertFalse((egress_root / broker.ENDPOINT_FILENAME).exists())
+
+    def test_print_endpoint_default_fallback_exits_3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(broker.EGRESS_BROKER_URL_ENV, None)
+                with mock.patch("sys.stdout", out):
+                    rc = broker.main(["--print-endpoint", "--base-path", str(base)])
+            self.assertEqual(rc, 3)
+            self.assertEqual(out.getvalue().strip(), f"http://127.0.0.1:{broker.DEFAULT_PORT}")
+
+    def test_print_endpoint_live_endpoint_exits_0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            egress_root = broker.resolve_egress_root(base)
+            broker.write_daemon_endpoint(egress_root, "10.8.0.5", 9999)
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(broker.EGRESS_BROKER_URL_ENV, None)
+                with mock.patch("sys.stdout", out):
+                    rc = broker.main(["--print-endpoint", "--base-path", str(base)])
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.getvalue().strip(), "http://10.8.0.5:9999")
+
+    def test_print_endpoint_env_override_exits_0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            out = io.StringIO()
+            with mock.patch.dict(
+                os.environ, {broker.EGRESS_BROKER_URL_ENV: "http://example.internal:7000"}
+            ):
+                with mock.patch("sys.stdout", out):
+                    rc = broker.main(["--print-endpoint", "--base-path", str(base)])
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.getvalue().strip(), "http://example.internal:7000")
 
 
 if __name__ == "__main__":
