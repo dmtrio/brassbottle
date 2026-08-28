@@ -450,6 +450,27 @@ else
     fail "notify_egress_daemon should target the printed --print-endpoint address"
 fi
 
+# ...but exit 3 from --print-endpoint means "no live daemon.json, this is the
+# hardcoded default": the printed URL must be discarded so an operator-set
+# EGRESS_BROKER_PORT still wins, as it did before endpoint discovery existed.
+cat > "$SBOX/src/egress_broker_host.py" <<'PYEOF'
+#!/usr/bin/env python3
+import sys
+if "--print-endpoint" in sys.argv:
+    print("http://127.0.0.1:8816")
+    sys.exit(3)
+sys.exit(1)
+PYEOF
+
+: > "$CURL_LOG"
+out=$(EGRESS_BROKER_PORT=19292 run_ae_notify mycontainer stale-endpoint.example.com --save none); rc=$?
+assert_rc "notify with stale endpoint (exit 3) rc 0" 0 "$rc"
+if grep -q '127.0.0.1:19292/decide' "$CURL_LOG"; then
+    pass "notify_egress_daemon honours EGRESS_BROKER_PORT when --print-endpoint exits 3"
+else
+    fail "notify_egress_daemon should fall back to EGRESS_BROKER_PORT on --print-endpoint exit 3"
+fi
+
 # Same call, but python3 is broken: notify_egress_daemon must not re-probe
 # require_python3 (it reuses HAVE_PYTHON3 from the --check probe earlier in
 # the script) and must fall back to the env/default guess rather than ever
