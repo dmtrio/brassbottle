@@ -73,6 +73,7 @@ Prefer the IDE? Attach with VS Code or Cursor:
 | Secrets and per-agent identity | [`docs/secrets.md`](docs/secrets.md) |
 | Host commands (`djinn allow`, `djinn keys`) | [`bin/README.md`](bin/README.md) |
 | Remote hosts and phone access | [`docs/remote.md`](docs/remote.md) |
+| Disk usage and volume cleanup | [`docs/disk.md`](docs/disk.md) |
 | Compose overlays | [`compose/README.md`](compose/README.md) |
 | Internal implementation modules | [`src/README.md`](src/README.md) |
 | Longer guides and container workspace contract | [`docs/README.md`](docs/README.md) |

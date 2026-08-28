@@ -12,6 +12,9 @@ user to a working container; this directory holds the extra context.
 - `secrets.md` explains secret values, per-agent shim env files, and per-org
   Git identity routing.
 - `remote.md` explains SSH, tmux, mosh, and ntfy-driven remote access.
+- `disk.md` explains where Docker disk goes (images vs. volumes), how to
+  audit a workspace volume for unpushed work before deleting it, and how to
+  reclaim space safely.
 - `backup.md` documents the singleton artifact backup service (restic lifecycle,
   Backrest browse-only UI, paths, retention, restore, and disaster-recovery checks).
 - `workspace.CLAUDE.md` is copied into containers as `/workspace/CLAUDE.md` and
