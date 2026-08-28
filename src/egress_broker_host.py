@@ -976,8 +976,10 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
                     {"error": "scope only applies to allow"},
                 )
                 return
-            raw_reason = payload.get("reason")
-            if raw_reason is not None:
+            # Presence, not value: JSON null is a supplied (invalid) reason,
+            # not an omitted one.
+            if "reason" in payload:
+                raw_reason = payload["reason"]
                 if (
                     not isinstance(raw_reason, str)
                     or len(raw_reason) > DECIDE_REASON_MAX_CHARS

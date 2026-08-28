@@ -1165,7 +1165,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=5)
 
-    def test_decide_endpoint_deny_rejects_long_reason(self):
+    def test_decide_endpoint_deny_rejects_long_or_non_string_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
             egress_root = Path(tmp)
             tokens_dir = egress_root / broker.TOKENS_DIRNAME
@@ -1177,7 +1177,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             host, port = server.server_address
             error_text = "reason must be a string of at most 200 characters"
             try:
-                for reason in ("x" * 201, 123):
+                for reason in ("x" * 201, 123, None):
                     conn = HTTPConnection(host, port, timeout=5)
                     conn.request(
                         "POST",
