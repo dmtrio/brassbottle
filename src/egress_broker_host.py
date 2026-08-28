@@ -30,6 +30,12 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from egress_log import EgressLog, EgressLogError
+from egress_notify import (
+    EgressNotification,
+    NtfyNotifier,
+    load_ntfy_settings,
+    ntfy_server_hostname,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -281,11 +287,13 @@ class EgressBroker:
         repo_root: Path | None = None,
         now_fn: NowFn | None = None,
         hold_seconds_default: int = DEFAULT_HOLD_SECONDS,
+        notifier: Callable[[EgressNotification], object] | None = None,
     ) -> None:
         self._root = root.expanduser().resolve()
         self._repo_root = (repo_root or _repo_root()).resolve()
         self._now_fn = now_fn or (lambda: _utc_now())
         self._hold_seconds_default = hold_seconds_default
+        self._notifier = notifier
         self._log = EgressLog(self._root)
         self._lock = threading.RLock()
         self._requests: dict[str, OpenRequestState] = {}
@@ -356,9 +364,43 @@ class EgressBroker:
             len(self._key_index),
         )
 
-    def _notify_operator(self, request_id: str, now: datetime) -> None:
+    def _notify_operator(
+        self,
+        request_id: str,
+        now: datetime,
+        *,
+        container: str,
+        host: str,
+        port: int,
+        host_is_ip: bool = False,
+        uid: int | None = None,
+        comm: str | None = None,
+        reason: str | None = None,
+    ) -> EgressNotification:
         LOG.info("egress broker notify dispatch request_id=%s", request_id)
         self._log.append("notified", request_id, ts=now)
+        return EgressNotification(
+            request_id=request_id,
+            container=container,
+            host=host,
+            port=port,
+            host_is_ip=host_is_ip,
+            uid=uid,
+            comm=comm,
+            reason=reason,
+        )
+
+    def _dispatch_notifier(self, notification: EgressNotification) -> None:
+        if self._notifier is None:
+            return
+        try:
+            self._notifier(notification)
+        except Exception as exc:
+            LOG.warning(
+                "egress broker notifier raised request_id=%s reason=%s",
+                notification.request_id,
+                exc.__class__.__name__,
+            )
 
     def _log_hit(self, state: OpenRequestState, now: datetime, count: int) -> None:
         self._log.append("hit", state.request_id, ts=now, count=count)
@@ -415,6 +457,7 @@ class EgressBroker:
         key = _request_key(container, host, port)
         hold = hold_seconds if hold_seconds is not None else self._hold_seconds_default
         now = self.now()
+        pending_notification: EgressNotification | None = None
 
         with self._lock:
             if request_id is not None:
@@ -472,7 +515,17 @@ class EgressBroker:
                         if reason is not None:
                             fields["reason"] = reason
                         self._log.append("requested", request_id, ts=now, **fields)
-                        self._notify_operator(request_id, now)
+                        pending_notification = self._notify_operator(
+                            request_id,
+                            now,
+                            container=container,
+                            host=host,
+                            port=port,
+                            host_is_ip=host_is_ip,
+                            uid=uid,
+                            comm=comm,
+                            reason=reason,
+                        )
                         self._requests[request_id] = state
                         self._key_index[key] = request_id
                         LOG.info(
@@ -522,7 +575,17 @@ class EgressBroker:
                     if reason is not None:
                         fields["reason"] = reason
                     self._log.append("requested", request_id, ts=now, **fields)
-                    self._notify_operator(request_id, now)
+                    pending_notification = self._notify_operator(
+                        request_id,
+                        now,
+                        container=container,
+                        host=host,
+                        port=port,
+                        host_is_ip=host_is_ip,
+                        uid=uid,
+                        comm=comm,
+                        reason=reason,
+                    )
                     self._requests[request_id] = state
                     self._key_index[key] = request_id
                     LOG.info(
@@ -536,6 +599,9 @@ class EgressBroker:
                 if state.decision is not None:
                     body = self._decision_body(state.decision)
                     return body, request_id
+
+        if pending_notification is not None:
+            self._dispatch_notifier(pending_notification)
 
         decision = self._wait_for_decision(state, hold)
         if decision is None:
@@ -1181,12 +1247,32 @@ def run_daemon(
     lock = DaemonLock(egress_root / LOCK_FILENAME)
     lock.acquire()
 
+    operator_token = ensure_operator_token(egress_root)
+    settings = load_ntfy_settings(
+        base_path,
+        os.environ,
+        broker_host=host,
+        broker_port=port,
+        operator_token=operator_token,
+    )
+    notifier: Callable[[EgressNotification], object] | None = None
+    if settings is not None:
+        ntfy_notifier = NtfyNotifier(settings)
+        notifier = ntfy_notifier.send_async
+        LOG.info(
+            "egress broker notify ntfy server=%s actions=%s",
+            ntfy_server_hostname(settings.url),
+            "on" if settings.broker_url else "off",
+        )
+    else:
+        LOG.info("egress broker notify ntfy=off")
+
     broker = EgressBroker(
         egress_root,
         repo_root=repo_root,
         hold_seconds_default=hold_default,
+        notifier=notifier,
     )
-    operator_token = ensure_operator_token(egress_root)
     server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
     stop_event = threading.Event()
     sweep_thread = threading.Thread(

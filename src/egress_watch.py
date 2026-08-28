@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import queue
 import subprocess
 import sys
@@ -44,6 +45,13 @@ from egress_broker_host import (
 )
 from egress_log import EgressLog
 
+from egress_notify import (
+    NtfyNotifier,
+    allow_prompt_line,
+    load_ntfy_settings,
+    ntfy_server_hostname,
+)
+
 LOG = logging.getLogger(__name__)
 
 InputFn = Callable[[str], str]
@@ -69,16 +77,6 @@ class OperatorChoice:
     """Terminal or dialog selection for one request."""
 
     action: str  # allow_live | allow_manifest | deny | skip
-
-
-def allow_prompt_line(host: str, *, host_is_ip: bool = False) -> str:
-    """Question line stating zone/subdomain coverage semantics."""
-    if host_is_ip:
-        return (
-            f"Allow traffic to {host}? "
-            "(requires ALLOWED_CIDRS in the bottle manifest — not allow-egress.sh)"
-        )
-    return f"Allow {host} (and everything under it)?"
 
 
 def format_request_block(details: RequestDetails) -> str:
@@ -608,12 +606,25 @@ def run_watch(
     lock = DaemonLock(egress_root / LOCK_FILENAME)
     lock.acquire()
 
+    operator_token = ensure_operator_token(egress_root)
+    settings = load_ntfy_settings(
+        base_path,
+        os.environ,
+        broker_host=host,
+        broker_port=port,
+        operator_token=operator_token,
+    )
+    notifier = None
+    if settings is not None:
+        ntfy_notifier = NtfyNotifier(settings)
+        notifier = ntfy_notifier.send_async
+
     broker = EgressBroker(
         egress_root,
         repo_root=repo_root or _repo_root(),
         hold_seconds_default=hold_default,
+        notifier=notifier,
     )
-    operator_token = ensure_operator_token(egress_root)
     server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
@@ -632,12 +643,23 @@ def run_watch(
 
     LOG.info("egress watch listening host=%s port=%d", host, server.server_address[1])
 
+    if settings is not None:
+        notify_line = (
+            f"  notify: ntfy → {ntfy_server_hostname(settings.url)} "
+            f"(actions {'on' if settings.broker_url else 'off'} — bind {host})\n"
+        )
+    else:
+        notify_line = (
+            "  notify: terminal only (set NTFY_URL in secrets.env for push)\n"
+        )
+
     # Written to the output stream, not the logger: with logging at WARNING the
     # watcher is otherwise completely silent while idle, which reads as hung.
     # This is the operator's only confirmation that approvals will reach them.
     sys.stdout.write(
         f"Watching for egress requests on {host}:{server.server_address[1]}\n"
         f"  queue:  {egress_root}\n"
+        f"{notify_line}"
         f"  keys:   [a] allow (live)  [p] allow + persist  [d] deny  [s] skip\n"
         f"  Ctrl-C to stop. -v for boundary logs.\n\n"
     )
