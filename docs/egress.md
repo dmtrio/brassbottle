@@ -24,6 +24,19 @@ On macOS, each new request triggers a `display dialog` prompt alongside the
 terminal UI. The dialog offers Allow and Deny; the terminal supports live
 allow, persist-to-manifest, deny, and skip.
 
+The Notification Center **banner** is fired by the poll loop as soon as a
+request appears, once per request, for every open request — not by the prompt.
+The watcher prompts one request at a time, so a banner welded to the prompt
+could not fire for anything queued behind an unanswered request. ntfy push is
+unaffected: it is dispatched daemon-side when the request is filed.
+
+### Skipping and IP-literal requests
+
+`[s]` defers a request for the rest of the session; the deferral is released
+when the queue drains. `[a]` on an **IP-literal** destination cannot install a
+rule (IP grants come from the manifest's `capabilities.egress_cidrs`), so the
+watcher prints what to edit and defers the request rather than re-prompting.
+
 ### Push (ntfy)
 
 When `NTFY_URL` is set, every new egress request also publishes one ntfy push.

@@ -66,13 +66,29 @@ class EgressWatchTests(unittest.TestCase):
         base.update(overrides)
         return watch.RequestDetails(**base)  # type: ignore[arg-type]
 
-    def _file_request(self, b: broker.EgressBroker, container: str = "coding-brassbottle") -> str:
+    def _file_request(
+        self,
+        b: broker.EgressBroker,
+        container: str = "coding-brassbottle",
+        *,
+        already: set[str] | None = None,
+    ) -> str:
+        """File one request and return its id.
+
+        `already` names the ids this test has filed before: the sync helper
+        returns an ARBITRARY open id, so without it a second call can hand back
+        the first request's id — and cleanup then denies the wrong one, leaving
+        the second file_request thread blocked until its hold expires.
+        """
+        already = already or set()
         thread = threading.Thread(
             target=b.file_request,
             args=(container, "docs.stripe.com", 443),
         )
         thread.start()
-        request_id = wait_for_broker_open_request(b)
+        wait_for_broker_open_request(b, count=len(already) + 1)
+        with b._lock:
+            request_id = next(iter(set(b._requests) - already))
 
         def cleanup() -> None:
             if thread.is_alive():
@@ -535,7 +551,7 @@ class EgressWatchTests(unittest.TestCase):
             "coding-brassbottle wants docs.stripe.com:443 — npm install",
         )
 
-    def test_dialog_prompt_dispatches_notification_and_dialog(self):
+    def test_dialog_prompt_dispatches_dialog_only(self):
         notified = threading.Event()
         notify_argvs: list[list[str]] = []
         popen_calls: list[list[str]] = []
@@ -570,46 +586,42 @@ class EgressWatchTests(unittest.TestCase):
         details = self._details()
         choice = watcher._prompt_with_dialog(details)
         self.assertEqual(choice.action, "allow_live")
-        self.assertTrue(notified.wait(timeout=5), "notification never dispatched")
-        self.assertEqual(len(notify_argvs), 1)
-        dash = notify_argvs[0].index("--")
-        self.assertEqual(notify_argvs[0][dash + 1], watch.build_notification_message(details)[1])
         self.assertEqual(len(popen_calls), 1)
         self.assertTrue(any("display dialog" in a for a in popen_calls[0]))
+        # The banner moved to run_once: welded to the prompt it could not fire
+        # for request B until request A had been answered.
+        self.assertFalse(notified.is_set())
+        self.assertEqual(notify_argvs, [])
 
-    def test_stalled_notification_does_not_delay_dialog(self):
-        """Notification Center hanging must not hold the dialog back (review P2)."""
+    def test_stalled_notification_does_not_delay_the_poll(self):
+        """Notification Center hanging must not hold up the operator (review P2).
+
+        The banner moved from the dialog prompt to run_once, so this now pins
+        the same property one level up: a wedged osascript must not stop
+        run_once from reaching the prompt.
+        """
         release = threading.Event()
-        proc = mock.Mock()
-        proc.stdout = io.StringIO("Allow\n")
-        proc.stderr = io.StringIO("")
-        proc.wait.return_value = 0
-        proc.returncode = 0
-        terminal_gate = threading.Event()
+        self.addCleanup(release.set)
 
         def notify_runner(_argv: list[str]) -> None:
             release.wait(timeout=10)
 
-        def input_fn(_prompt: str) -> str:
-            terminal_gate.wait()
-            return "a"
-
-        watcher = watch.EgressWatcher(
-            self._broker(Path(tempfile.mkdtemp())),
-            egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=input_fn,
-            output=io.StringIO(),
-            platform="darwin",
-            popen_factory=lambda *args, **kwargs: proc,
-            notify_runner=notify_runner,
-        )
-        start = time.monotonic()
-        try:
-            choice = watcher._prompt_with_dialog(self._details())
-        finally:
-            release.set()
-        self.assertEqual(choice.action, "allow_live")
-        self.assertLess(time.monotonic() - start, 5.0, "dialog waited on the notification")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            self._file_request(b)
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=lambda _p: "s",
+                output=io.StringIO(),
+                platform="darwin",
+                notify_runner=notify_runner,
+            )
+            start = time.monotonic()
+            self.assertTrue(watcher.run_once())
+            elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 5.0, "poll waited on the notification")
 
     def _orphan_guard_watcher(self, *, stall: str):
         """Build a watcher whose dialog thread is held at `stall` ("before_spawn"
@@ -781,6 +793,98 @@ class EgressWatchTests(unittest.TestCase):
             self.assertTrue(watcher.run_once())
             with b._lock:
                 self.assertIn(request_id, b._requests)
+
+    def test_skip_survives_the_next_poll(self):
+        # run_once used to clear _deferred whenever every open request was
+        # deferred, so [s] lasted exactly one 0.5s poll and the operator was
+        # re-prompted immediately — unescapable for a request that could not
+        # be decided any other way.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            request_id = self._file_request(b)
+            prompts: list[str] = []
+
+            def input_fn(_prompt: str) -> str:
+                prompts.append("prompted")
+                return "s"
+
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=input_fn,
+                output=io.StringIO(),
+                platform="linux",
+            )
+            self.assertTrue(watcher.run_once())
+            self.assertFalse(watcher.run_once(), "a skipped request must go quiet")
+            self.assertFalse(watcher.run_once())
+            self.assertEqual(len(prompts), 1, "skipped request was re-prompted")
+            with b._lock:
+                self.assertIn(request_id, b._requests)
+
+    def test_a_new_request_still_prompts_while_another_is_skipped(self):
+        # Deferring must silence one request, not the whole queue.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            first = self._file_request(b, container="bottle-one")
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=lambda _p: "s",
+                output=io.StringIO(),
+                platform="linux",
+            )
+            self.assertTrue(watcher.run_once())
+            self.assertFalse(watcher.run_once())
+            self._file_request(b, container="bottle-two", already={first})
+            self.assertTrue(watcher.run_once(), "a newly filed request must prompt")
+
+    def test_allow_on_an_ip_request_does_not_reprompt_forever(self):
+        # decide() cannot install a rule for an IP literal (it needs a manifest
+        # CIDR) and leaves the request OPEN. Without deferring it here, the
+        # next poll re-prompts the same id: the 127.0.0.1:3128 loop, where
+        # neither [a] nor [s] could clear the prompt.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "127.0.0.1", 3128),
+                kwargs={"host_is_ip": True},
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+
+            def cleanup() -> None:
+                if thread.is_alive():
+                    with b._lock:
+                        still_open = request_id in b._requests
+                    if still_open:
+                        b.decide(request_id, "deny")
+                join_thread_or_fail(thread, label="file_request")
+
+            self.addCleanup(cleanup)
+
+            prompts: list[str] = []
+
+            def input_fn(_prompt: str) -> str:
+                prompts.append("prompted")
+                return "a"
+
+            out = io.StringIO()
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=input_fn,
+                output=out,
+                platform="linux",
+            )
+            self.assertTrue(watcher.run_once())
+            self.assertIn("ALLOWED_CIDRS", out.getvalue())
+            self.assertFalse(watcher.run_once(), "IP allow must not re-prompt")
+            self.assertEqual(len(prompts), 1)
 
     def test_watcher_run_once_apply_failure_surfaces_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1031,63 +1135,82 @@ class EgressWatchTests(unittest.TestCase):
         warnings = [r for r in captured.records if r.levelno == logging.WARNING]
         self.assertEqual(warnings, [])
 
-    def test_notification_skipped_when_already_resolved(self):
-        resolved_pass = threading.Event()
+    def test_banner_fires_once_per_request_across_polls(self):
+        # The old code suppressed the banner when the operator answered inside
+        # the scheduling gap. Announcing on first sight replaces that: fire
+        # exactly once per request, however many times the poll comes round.
         notify_argvs: list[list[str]] = []
-        proc = mock.Mock()
-        proc.stdout = io.StringIO("Allow\n")
-        proc.stderr = io.StringIO("")
-        proc.wait.return_value = 0
-        proc.returncode = 0
-        real_terminate = watch._terminate_process
-        real_build_notification_message = watch.build_notification_message
-
-        def recording_terminate(p) -> None:
-            resolved_pass.set()
-            real_terminate(p)
-
-        def stalled_notification_message(details):
-            resolved_pass.wait(timeout=5)
-            return real_build_notification_message(details)
+        fired = threading.Event()
 
         def notify_runner(argv: list[str]) -> None:
             notify_argvs.append(argv)
+            fired.set()
 
-        def input_fn(_prompt: str) -> str:
-            return "d"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            self._file_request(b)
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=lambda _p: "s",
+                output=io.StringIO(),
+                platform="darwin",
+                notify_runner=notify_runner,
+            )
+            watcher.run_once()
+            self.assertTrue(fired.wait(timeout=5), "banner never dispatched")
+            watcher.run_once()
+            watcher.run_once()
 
-        watcher = watch.EgressWatcher(
-            self._broker(Path(tempfile.mkdtemp())),
-            egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=input_fn,
-            output=io.StringIO(),
-            platform="darwin",
-            popen_factory=lambda *args, **kwargs: proc,
-            notify_runner=notify_runner,
-        )
+        self.assertEqual(len(notify_argvs), 1)
 
-        with mock.patch.object(watch, "_terminate_process", recording_terminate), \
-                mock.patch.object(
-                    watch,
-                    "build_notification_message",
-                    stalled_notification_message,
-                ), \
-                self.assertLogs(watch.LOG, level="INFO") as captured:
-            choice = watcher._prompt_with_dialog(self._details())
-            # The skip is logged on the un-joined notification thread; wait
-            # for it (bounded) rather than sleeping a fixed interval.
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and not any(
-                "notification skipped" in r.getMessage() for r in captured.records
-            ):
-                time.sleep(0.01)
-        self.assertEqual(choice.action, "deny")
+    def test_banner_is_not_blocked_by_an_unanswered_earlier_request(self):
+        # The bug this fixes: with the banner welded to the prompt, a request
+        # the operator had not answered suppressed the banner for every
+        # request behind it. run_once prompts one request but announces all.
+        seen: list[str] = []
+        both = threading.Event()
+
+        def notify_runner(argv: list[str]) -> None:
+            seen.append(argv[-1])
+            if len(seen) >= 2:
+                both.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            first = self._file_request(b, container="bottle-one")
+            self._file_request(b, container="bottle-two", already={first})
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=lambda _p: "s",
+                output=io.StringIO(),
+                platform="darwin",
+                notify_runner=notify_runner,
+            )
+            watcher.run_once()
+            self.assertTrue(both.wait(timeout=5), f"only announced {seen}")
+
+    def test_no_banner_on_a_non_darwin_host(self):
+        # There is no Notification Center to talk to; ntfy push is dispatched
+        # daemon-side at file time and is unaffected.
+        notify_argvs: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            self._file_request(b)
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=lambda _p: "s",
+                output=io.StringIO(),
+                platform="linux",
+                notify_runner=notify_argvs.append,
+            )
+            watcher.run_once()
         self.assertEqual(notify_argvs, [])
-        skipped = [
-            r for r in captured.records
-            if "notification skipped" in r.getMessage()
-        ]
-        self.assertEqual(len(skipped), 1)
 
     def test_terminal_thread_exits_quietly_on_eof(self):
         proc = mock.Mock()

@@ -444,6 +444,7 @@ class EgressWatcher:
         self._popen_factory = popen_factory or subprocess.Popen
         self._notify_runner = notify_runner
         self._deferred: set[str] = set()
+        self._notified: set[str] = set()
         self._stop = threading.Event()
 
     def _run_notification(
@@ -489,7 +490,29 @@ class EgressWatcher:
         open_ids = sorted(queue.open_requests)
         if not open_ids:
             self._deferred.clear()
+            self._notified.clear()
             return False
+
+        # Forget state for requests that are no longer open, so a host that is
+        # deferred, decided, and then re-filed prompts again — and neither set
+        # grows without bound across a long watch.
+        still_open = set(open_ids)
+        self._deferred &= still_open
+        self._notified &= still_open
+
+        # Announce EVERY open request as soon as it appears. This used to live
+        # inside _prompt_with_dialog, which meant the banner for request B did
+        # not fire until the operator had answered request A — and an
+        # unanswerable request (an IP literal) suppressed every banner behind
+        # it indefinitely.
+        for request_id in open_ids:
+            if request_id in self._notified:
+                continue
+            details = request_details_from_log(self._log, request_id, now=when)
+            if details is None:
+                continue
+            self._notified.add(request_id)
+            self._notify_operator_banner(details)
 
         for request_id in open_ids:
             if request_id in self._deferred:
@@ -519,19 +542,62 @@ class EgressWatcher:
             if apply_error is not None:
                 self._output.write(format_apply_failure(apply_error) + "\n")
                 self._output.flush()
+                if apply_error == IP_REQUIRES_CIDR_REASON:
+                    # decide() logs apply_failed and leaves the request OPEN,
+                    # because an IP literal can only be granted by editing the
+                    # manifest. Without this the next 0.5s poll re-prompts the
+                    # same id, forever: neither [a] nor [s] could clear an IP
+                    # request. Defer it — the operator has been told what to
+                    # edit, and the request is answerable again after a
+                    # restart or once it is decided some other way.
+                    self._deferred.add(request_id)
+                    self._output.flush()
+                    return True
             if persisted_entry is not None:
                 self._output.write(format_denylist_ack(persisted_entry) + "\n")
                 self._output.flush()
             self._deferred.discard(request_id)
             return True
 
-        self._deferred.clear()
+        # Every open request is deferred: go quiet and let the poll idle.
+        # This used to clear _deferred first, which made [s] last exactly one
+        # 0.5s poll — the skipped request was re-prompted immediately and the
+        # operator could not get out of it. Deferrals are released instead
+        # when the queue drains, at the top of this method.
         return False
 
     def run_forever(self) -> None:
         while not self._stop.is_set():
             if not self.run_once():
                 time.sleep(self._poll_interval)
+
+    def _notify_operator_banner(self, details: RequestDetails) -> None:
+        """Fire the macOS Notification Center banner for one open request.
+
+        Runs on its own daemon thread and is never joined: a stalled
+        Notification Center must not hold up the poll loop or the prompt.
+        Non-darwin hosts have no banner to show, so this is a no-op there
+        (ntfy push is dispatched daemon-side at file time, independent of
+        this watcher — see EgressBroker._dispatch_notifier).
+        """
+        if self._platform != "darwin":
+            return
+
+        def run() -> None:
+            note_title, note_message = build_notification_message(details)
+            notify_argv = build_notification_argv(
+                title=note_title,
+                message=note_message,
+            )
+            try:
+                if self._notify_runner is not None:
+                    self._notify_runner(notify_argv)
+                else:
+                    self._run_notification(notify_argv, request_id=details.request_id)
+            except Exception as exc:
+                LOG.warning("egress watch notification failed reason=%s", exc)
+
+        threading.Thread(target=run, name="egress-notify", daemon=True).start()
 
     def _prompt_operator(self, details: RequestDetails) -> OperatorChoice:
         self._output.write(format_denylist_status(self._broker.denylist) + "\n")
@@ -567,30 +633,6 @@ class EgressWatcher:
                     except queue.Full:
                         pass
                     return
-
-        def notification_thread() -> None:
-            # Independent of the dialog: a stalled Notification Center must
-            # never delay the dialog, so this runs on its own thread and is
-            # never joined (daemon; it logs its own completion).
-            note_title, note_message = build_notification_message(details)
-            # Cheap check: the operator may have answered in the scheduling gap.
-            if resolved.is_set():
-                LOG.info(
-                    "egress watch notification skipped request_id=%s reason=already_resolved",
-                    details.request_id,
-                )
-                return
-            notify_argv = build_notification_argv(
-                title=note_title,
-                message=note_message,
-            )
-            try:
-                if self._notify_runner is not None:
-                    self._notify_runner(notify_argv)
-                else:
-                    self._run_notification(notify_argv, request_id=details.request_id)
-            except Exception as exc:
-                LOG.warning("egress watch notification failed reason=%s", exc)
 
         def dialog_thread() -> None:
             title, message = build_dialog_message(details)
@@ -672,14 +714,8 @@ class EgressWatcher:
                     )
 
         terminal = threading.Thread(target=terminal_thread, daemon=True)
-        notification = threading.Thread(
-            target=notification_thread,
-            name="egress-notify",
-            daemon=True,
-        )
         dialog = threading.Thread(target=dialog_thread, daemon=True)
         terminal.start()
-        notification.start()
         dialog.start()
         try:
             choice = choice_queue.get()
