@@ -279,6 +279,19 @@ assert_eq "bundled flag clear for \$BASE_PATH/bottles" "0" "$(cbundled "$dah" ''
 assert_eq "bundled flag clear for a BOTTLES_PATH override" "0" "$(cbundled "$dah" /my/private/bottles)"
 assert_eq "bundled flag clear for a deprecated CONTAINERS_PATH" "0" "$(cbundled '' '' /legacy/manifests)"
 
+# require_python3: prefers the SYSTEM interpreter, proves it runs, and sets
+# $PYTHON3 for the caller — a broken pyenv/brew shim on PATH must not win
+# silently. env -i so no ambient PYTHON3/PATH from this shell leaks in.
+rp3_out() { env -i PYTHON3="${1-}" bash -c '. "$1"; require_python3 && echo "PYTHON3=$PYTHON3"' _ "$cfg/src/common.sh"; }
+rp3_rc()  { env -i PYTHON3="${1-}" bash -c '. "$1"; require_python3 >/dev/null 2>&1; echo $?' _ "$cfg/src/common.sh"; }
+rp3_err() { env -i PYTHON3="${1-}" bash -c '. "$1"; require_python3' _ "$cfg/src/common.sh" 2>&1 1>/dev/null; }
+
+assert_eq "PYTHON3=/nonexistent → require_python3 fails (rc 1)" "1" "$(rp3_rc /nonexistent/python3)"
+assert_contains "…with the broken-interpreter diagnostic" "$(rp3_err /nonexistent/python3)" \
+    "no working python3 (tried /usr/bin/python3 and PATH"
+assert_eq "empty PYTHON3 → falls back to a working interpreter (rc 0)" "0" "$(rp3_rc '')"
+assert_contains "…and sets \$PYTHON3 to the one it found" "$(rp3_out '')" "PYTHON3=/"
+
 # ────────────────────────────────────────────────────────────────────────────
 echo "── allow-egress.sh ──"
 run_ae() { ( cd "$SBOX" && env BOTTLES_PATH="$WORK/no-such-manifests" \
@@ -420,6 +433,59 @@ assert_rc "unknown container → rc 1" 1 "$rc"
 assert_contains "error names the container it looked for" "$out" "no container named 'djinn-ghost'"
 assert_contains "not-found hint lists djinn- containers" "$out" "Existing djinn containers:"
 unset MOCK_EXISTING_CONTAINERS
+
+# ────────────────────────────────────────────────────────────────────────────
+echo "── allow-egress.sh --check: deny-list probe invocation ──"
+# finding #10: allow-egress.sh's --check line is bash glue ONLY now — all
+# matching logic AND the operator-facing output (the three-arm coverage:
+# covered / not covered / corrupt file) moved into
+# src/egress_denylist.py's own --check probe and its Python unit tests
+# (tests/test_egress_denylist.py). This is bash's whole remaining
+# responsibility: invoke it once with every domain, and turn a nonzero
+# exit (a genuine crash — --check itself exits 0 for every case it
+# handles) into one named failure line. Stub the script in the sandbox to
+# prove exactly that, without a real denylist.json. CDD_ROOT resolves to
+# $SBOX (common.sh's dirname-of-self/.. from $SBOX/src/common.sh), so
+# allow-egress.sh finds this stub at "$CDD_ROOT/src/egress_denylist.py"
+# exactly like the real one.
+cat > "$SBOX/src/egress_denylist.py" <<'PYEOF'
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+Path(__file__).with_name("check_argv.log").write_text(" ".join(sys.argv[1:]))
+if any("crashy" in a for a in sys.argv[1:]):
+    print("boom: simulated crash", file=sys.stderr)
+    sys.exit(127)
+sys.exit(0)
+PYEOF
+
+out=$(run_ae mycontainer domain-a.example.com domain-b.example.com --save none); rc=$?
+assert_rc "--check invocation still succeeds overall" 0 "$rc"
+argv="$(cat "$SBOX/src/check_argv.log")"
+assert_eq "--check is invoked once with the bottle and every domain" \
+    "--check mycontainer domain-a.example.com domain-b.example.com" "$argv"
+
+out=$(run_ae mycontainer crashy.example.com --save none); rc=$?
+assert_rc "--check crash (genuine failure) still succeeds overall" 0 "$rc"
+assert_contains "--check nonzero exit prints the failure line" "$out" \
+    "⚠ deny-list check failed (exit 127)"
+
+# finding #1: a host with no working python3 must degrade the --check probe
+# to a warning, never hard-fail the allow itself — this same script is what
+# the daemon's operator-approve path (EgressBroker._apply_allow) shells out
+# to, so a broken interpreter used to fail EVERY approval. PYTHON3 points at
+# a nonexistent binary so require_python3 (src/common.sh) fails without ever
+# reaching the --check invocation.
+run_ae_no_python() { ( cd "$SBOX" && env BOTTLES_PATH="$WORK/no-such-manifests" \
+    MOCK_EXISTING_CONTAINERS="${MOCK_EXISTING_CONTAINERS-djinn-mycontainer}" \
+    PYTHON3=/nonexistent/python3 \
+    PATH="$WORK/aebin:$PATH" bash bin/allow-egress.sh "$@" ) 2>&1; }
+out=$(run_ae_no_python mycontainer skipped-check.example.com --save none); rc=$?
+assert_rc "no working python3 → allow still proceeds (rc 0)" 0 "$rc"
+assert_contains "no working python3 → deny-list check skipped, not failed" "$out" \
+    "⚠ deny-list check skipped: no working python3"
+assert_absent "no working python3 → --check is never invoked" "$out" \
+    "deny-list check failed"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── update-agent-keys.sh ──"

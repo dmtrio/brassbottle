@@ -26,6 +26,7 @@ from egress_broker_host import (
     CONFIG_FILENAME,
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PORT,
+    DENYLIST_PERSIST_FAILED_REASON,
     IP_APPLY_FAILED_REASON,
     IP_REQUIRES_CIDR_REASON,
     LOCK_FILENAME,
@@ -34,6 +35,7 @@ from egress_broker_host import (
     DaemonAlreadyRunning,
     DaemonLock,
     EgressBroker,
+    EgressBrokerHostError,
     EgressBrokerHTTPServer,
     _load_config,
     _repo_root,
@@ -42,7 +44,9 @@ from egress_broker_host import (
     is_ip_literal,
     resolve_base_path,
     resolve_egress_root,
+    undeny_hint,
 )
+from egress_denylist import DenyEntry, DenyList
 from egress_log import EgressLog
 
 from egress_notify import (
@@ -76,7 +80,19 @@ class RequestDetails:
 class OperatorChoice:
     """Terminal or dialog selection for one request."""
 
-    action: str  # allow_live | allow_manifest | deny | skip
+    action: str  # allow_live | allow_manifest | deny | deny_bottle | deny_global | skip
+
+
+# Shared by both branches of format_request_block below (finding: cleanup)
+# — the IP and non-IP prompts differ only in their [a]/[p] lead-in, so the
+# [d]/[D]/[G]/[s] tail must stay in exactly one place or the two branches
+# can silently drift apart.
+_DENY_KEYS_LINE = (
+    "[d] deny   "
+    "[D] deny always: this host, this bottle   "
+    "[G] deny always: this host, all bottles   "
+    "[s] skip"
+)
 
 
 def format_request_block(details: RequestDetails) -> str:
@@ -102,15 +118,12 @@ def format_request_block(details: RequestDetails) -> str:
     if host_is_ip:
         lines.append(
             "[a] allow (records approval; add CIDR to manifest manually)   "
-            "[d] deny   "
-            "[s] skip"
+            + _DENY_KEYS_LINE
         )
     else:
         lines.append(
             "[a] allow (live only)   "
-            "[p] allow + persist to manifest   "
-            "[d] deny   "
-            "[s] skip"
+            "[p] allow + persist to manifest   " + _DENY_KEYS_LINE
         )
     return "\n".join(lines)
 
@@ -134,18 +147,29 @@ def _osascript_argv(script_lines: list[str], *untrusted: str) -> list[str]:
 
 
 def parse_terminal_choice(raw: str) -> OperatorChoice | None:
-    """Map one keypress to an operator choice; None means re-prompt."""
-    key = raw.strip().lower()
-    if not key:
+    """Map one keypress to an operator choice; None means re-prompt.
+
+    d/D is the only case-sensitive pair — there is no lowercase g: `d` is
+    the narrow, reversible action (deny this one, once); `D` is the wider,
+    harder-to-undo "deny always: this host, this bottle"; `G` (uppercase
+    only) is wider still, "deny always: this host, all bottles". a/p/s stay
+    case-insensitive since they have no such split.
+    """
+    stripped = raw.strip()
+    if not stripped:
         return None
-    ch = key[0]
-    if ch == "a":
+    ch = stripped[0]
+    if ch in ("a", "A"):
         return OperatorChoice("allow_live")
-    if ch == "p":
+    if ch in ("p", "P"):
         return OperatorChoice("allow_manifest")
     if ch == "d":
         return OperatorChoice("deny")
-    if ch == "s":
+    if ch == "D":
+        return OperatorChoice("deny_bottle")
+    if ch == "G":
+        return OperatorChoice("deny_global")
+    if ch in ("s", "S"):
         return OperatorChoice("skip")
     return None
 
@@ -163,8 +187,8 @@ def build_osascript_argv(
         "activate",
         (
             'set userChoice to button returned of (display dialog dialogMessage '
-            'with title dialogTitle buttons {"Deny", "Allow"} default button "Deny" '
-            'with icon caution)'
+            'with title dialogTitle buttons {"Deny", "Deny always", "Allow"} '
+            'default button "Deny" with icon caution)'
         ),
         "return userChoice",
         "end run",
@@ -196,12 +220,18 @@ def build_notification_message(details: RequestDetails) -> tuple[str, str]:
     return DIALOG_TITLE, note_message
 
 
+DENY_ALWAYS_SCOPE_LINE = (
+    "Deny always = this host, this bottle (persistent; undo with ./djinn undeny)"
+)
+
+
 def build_dialog_message(details: RequestDetails) -> tuple[str, str]:
     """Return (title, message) for the macOS dialog."""
     host_is_ip = is_ip_literal(details.host)
     message = (
         f"{_request_summary(details)}\n"
-        f"{allow_prompt_line(details.host, host_is_ip=host_is_ip)}"
+        f"{allow_prompt_line(details.host, host_is_ip=host_is_ip)}\n\n"
+        f"{DENY_ALWAYS_SCOPE_LINE}"
     )
     if host_is_ip:
         message += f"\n\nOn approve: {IP_APPLY_FAILED_REASON}"
@@ -277,37 +307,95 @@ def apply_operator_choice(
     broker: EgressBroker,
     request_id: str,
     choice: OperatorChoice,
-) -> str | None:
-    """Invoke broker.decide() for the operator choice (skip is a no-op).
+    details: RequestDetails,
+) -> tuple[str | None, DenyEntry | None]:
+    """Invoke broker.decide()/persist_deny() for the operator choice.
 
-    Returns an error reason when allow could not be applied; None on success.
+    Returns (error, persisted_entry). error is set when an allow could not
+    be applied, or a persistent deny's write failed (unchanged single-value
+    contract otherwise — format_apply_failure renders either case).
+    persisted_entry is set only for deny_bottle/deny_global on success, so
+    the caller can print an acknowledgment naming what was written.
     """
     if choice.action == "skip":
-        return None
+        return None, None
     if choice.action == "deny":
         broker.decide(request_id, "deny")
-        return None
+        return None, None
+    if choice.action in ("deny_bottle", "deny_global"):
+        # Routed through persist_deny (not decide(request_id, ..., scope=...)
+        # directly): it writes the entry for details.host regardless of
+        # what else is open, then sweeps every open request it now covers —
+        # this one included — across every container for deny_global, just
+        # details.container for deny_bottle. See EgressBroker.persist_deny.
+        scope = "bottle" if choice.action == "deny_bottle" else "global"
+        # details.reason is the requesting AGENT's justification for why it
+        # wants the host — not the operator's. persist_deny's `reason` is an
+        # operator free-text field (kept distinct from denylist_zone/scope
+        # in the audit — see decide()'s docstring); passing the agent's text
+        # through as if the operator wrote it would misattribute it in the
+        # audit log, so this always passes reason=None from the watcher.
+        result = broker.persist_deny(
+            details.host,
+            scope,
+            container=details.container,
+            reason=None,
+            trigger_request_id=request_id,
+        )
+        return result.error, result.entry
     if choice.action == "allow_live":
-        return broker.decide(request_id, "allow", scope="live")
+        return broker.decide(request_id, "allow", scope="live"), None
     if choice.action == "allow_manifest":
-        return broker.decide(request_id, "allow", scope="manifest")
+        return broker.decide(request_id, "allow", scope="manifest"), None
     raise ValueError(f"unknown operator action {choice.action!r}")
 
 
 def format_apply_failure(reason: str) -> str:
-    """Operator-facing line when allow-egress.sh did not install a rule."""
+    """Operator-facing line when allow-egress.sh did not install a rule, or
+    a scope=bottle|global deny's denylist write itself failed."""
     if reason == IP_REQUIRES_CIDR_REASON:
         return (
             "Egress rule NOT applied: destination is an IP address — "
             f"{IP_APPLY_FAILED_REASON}"
         )
+    if reason == DENYLIST_PERSIST_FAILED_REASON:
+        return (
+            f"Denied once; deny-list entry NOT written ({reason}) — "
+            "check $DJINN_HOME/run/egress"
+        )
     return f"Egress rule NOT applied ({reason}) — request remains open for retry"
+
+
+def format_denylist_ack(entry: DenyEntry) -> str:
+    """Operator-facing acknowledgment after ANY persistent deny (watcher
+    D/G, or /decide with scope!=once) actually writes an entry."""
+    return (
+        f"Deny-list entry written: zone={entry.zone} scope={entry.scope}"
+        f" — undo with: {undeny_hint(entry.zone, entry.scope)}"
+    )
+
+
+def format_denylist_status(denylist: DenyList) -> str:
+    """One-line deny-list status for the startup banner and each prompt
+    block (finding #8b): a corrupt denylist.json must never fail silently —
+    entries stop being applied (every request resumes prompting, exactly as
+    if the deny list were empty) and this is the one place that says so,
+    right where the operator is already looking."""
+    entries = denylist.load()
+    if denylist.corrupt is not None:
+        return f"Deny list: CORRUPT ({denylist.corrupt}) — entries NOT applied, prompts will resume"
+    return f"Deny list: {len(entries)} entries"
 
 
 def _dialog_choice_from_output(output: str) -> OperatorChoice | None:
     text = output.strip()
     if text == "Allow":
         return OperatorChoice("allow_live")
+    if text == "Deny always":
+        # osascript's three-button ceiling: "always" here means this bottle
+        # only. Global denylist entries stay a terminal/CLI-only gesture,
+        # deliberately the harder one (PLN "Operator surfaces").
+        return OperatorChoice("deny_bottle")
     if text == "Deny":
         return OperatorChoice("deny")
     return None
@@ -410,9 +498,26 @@ class EgressWatcher:
             if choice.action == "skip":
                 self._deferred.add(request_id)
                 return True
-            apply_error = apply_operator_choice(self._broker, request_id, choice)
+            try:
+                apply_error, persisted_entry = apply_operator_choice(
+                    self._broker, request_id, choice, details
+                )
+            except EgressBrokerHostError as exc:
+                # finding #4: e.g. a request whose container is literally
+                # "global" hitting D/G — persist_deny's own
+                # validate_bottle_scope call raises before writing anything,
+                # so nothing was decided: the request stays open (it will be
+                # re-prompted on the next poll) rather than the watcher
+                # crashing on an uncaught exception.
+                self._output.write(f"Error: {exc}\n")
+                self._output.flush()
+                self._deferred.discard(request_id)
+                return True
             if apply_error is not None:
                 self._output.write(format_apply_failure(apply_error) + "\n")
+                self._output.flush()
+            if persisted_entry is not None:
+                self._output.write(format_denylist_ack(persisted_entry) + "\n")
                 self._output.flush()
             self._deferred.discard(request_id)
             return True
@@ -426,6 +531,7 @@ class EgressWatcher:
                 time.sleep(self._poll_interval)
 
     def _prompt_operator(self, details: RequestDetails) -> OperatorChoice:
+        self._output.write(format_denylist_status(self._broker.denylist) + "\n")
         self._output.write(format_request_block(details) + "\n> ")
         self._output.flush()
         if self._platform == "darwin":
@@ -659,8 +765,10 @@ def run_watch(
     sys.stdout.write(
         f"Watching for egress requests on {host}:{server.server_address[1]}\n"
         f"  queue:  {egress_root}\n"
+        f"  {format_denylist_status(broker.denylist)}\n"
         f"{notify_line}"
-        f"  keys:   [a] allow (live)  [p] allow + persist  [d] deny  [s] skip\n"
+        f"  keys:   [a] allow (live)  [p] allow + persist  [d] deny  [D] deny always (bottle)  [G] deny always (global)  [s] skip\n"
+        f"  D/G are uppercase on purpose: they write a deny-list entry (undo: ./djinn undeny)\n"
         f"  Ctrl-C to stop. -v for boundary logs.\n\n"
     )
     sys.stdout.flush()

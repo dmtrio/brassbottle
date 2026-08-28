@@ -88,6 +88,30 @@ echo "Container: $CONTAINER"
 echo "Domains:   ${DOMAINS[*]}"
 echo ""
 
+# ── Warn (never remove) when a domain is covered by a persistent deny-list
+# entry — the firewall wins anyway, so this doesn't block the allow, but a
+# silent removal would be exactly the kind of state change that should stay
+# visible. Bash stays glue: all matching logic AND the operator-facing
+# output lives in egress_denylist.py's --check probe (finding #10) — it
+# takes every domain in one call and prints its own "⚠ ... is covered ..."
+# lines (or a corrupt-file failure line), exiting 0 in every case it
+# handles. Only a genuine crash (broken interpreter, traceback) exits
+# nonzero here, and `||` turns that into one named failure line rather than
+# aborting the script under `set -e` or reading as a silent "not covered".
+#
+# A missing/broken python3 on the host must never block the allow itself —
+# this probe is advisory (the firewall is the real authority either way), and
+# this same script is what the daemon's operator-approve path shells out to
+# (EgressBroker._apply_allow). A hard `exit 1` here used to fail EVERY
+# approval, live or manifest, on a host with no working interpreter; a broken
+# python3 now only degrades this warning to "skipped".
+if require_python3; then
+    DJINN_HOME="$BASE_PATH" "$PYTHON3" "$CDD_ROOT/src/egress_denylist.py" --check "$SHORT" "${DOMAINS[@]}" \
+        || echo "⚠ deny-list check failed (exit $?)"
+else
+    echo "⚠ deny-list check skipped: no working python3"
+fi
+
 # Best-effort: release held broker connections when a host-side daemon is up.
 notify_egress_daemon() {
     # Daemon-invoked runs already release the request; notify is for manual ./djinn allow.

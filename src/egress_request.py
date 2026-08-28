@@ -189,7 +189,12 @@ def request_host(
     if decision == "allow":
         return HostRequestResult(target.host, target.port, "allowed", body.get("scope", "live"))
     if decision == "deny":
-        return HostRequestResult(target.host, target.port, "denied", "")
+        detail = ""
+        if body.get("reason") == "denylist":
+            zone = body.get("zone", "")
+            scope = body.get("scope", "")
+            detail = f"denylist: zone={zone} scope={scope}"
+        return HostRequestResult(target.host, target.port, "denied", detail)
     if decision == "pending":
         return HostRequestResult(target.host, target.port, "pending", "")
     return HostRequestResult(target.host, target.port, "error", f"unexpected body: {body!r}")
