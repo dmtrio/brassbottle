@@ -262,7 +262,15 @@ ENV PATH="/home/$USERNAME/.agent-shims:/home/$USERNAME/.local/bin:/home/$USERNAM
 # PAM and ignores it — so SSH sessions (incl. non-interactive `ssh host
 # 'claude -p'`) need the PATH in /etc/environment, which pam_env applies to
 # every SSH session type. $PATH here is the resolved ENV value set above.
-RUN echo "PATH=$PATH" | sudo tee /etc/environment >/dev/null
+#
+# DISABLE_TELEMETRY: Claude Code ships usage metrics to Datadog
+# (http-intake.logs.us5.datadoghq.com) unless told not to. That traffic is
+# pure noise behind the egress firewall — every session re-files the same
+# blocked-egress request — so switch it off image-wide rather than per
+# ~/.claude/settings.json. Same ENV + /etc/environment pairing as PATH so
+# docker-exec, entrypoint AND SSH/mosh sessions all see it.
+ENV DISABLE_TELEMETRY=1
+RUN printf 'PATH=%s\nDISABLE_TELEMETRY=1\n' "$PATH" | sudo tee /etc/environment >/dev/null
 
 # Auth/state mountpoints are pre-created from enabled agents' state_dirs so the
 # first mount of those named volumes inherits coder ownership.
