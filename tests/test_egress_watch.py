@@ -8,6 +8,7 @@ import logging
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -201,17 +202,20 @@ class EgressWatchTests(unittest.TestCase):
             "coding-brassbottle wants docs.stripe.com:443 — npm install",
         )
 
-    def test_dialog_thread_sends_notification_before_dialog(self):
-        events: list[tuple[str, list[str]]] = []
+    def test_dialog_prompt_dispatches_notification_and_dialog(self):
+        notified = threading.Event()
+        notify_argvs: list[list[str]] = []
+        popen_calls: list[list[str]] = []
         proc = mock.Mock()
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
 
         def notify_runner(argv: list[str]) -> None:
-            events.append(("notify", argv))
+            notify_argvs.append(argv)
+            notified.set()
 
         def popen_factory(*args, **kwargs) -> mock.Mock:
-            events.append(("dialog", list(args[0])))
+            popen_calls.append(list(args[0]))
             return proc
 
         watcher = watch.EgressWatcher(
@@ -226,21 +230,45 @@ class EgressWatchTests(unittest.TestCase):
         details = self._details()
         choice = watcher._prompt_with_dialog(details)
         self.assertEqual(choice.action, "allow_live")
-        self.assertEqual(len(events), 2)
-        self.assertEqual(events[0][0], "notify")
-        self.assertEqual(events[1][0], "dialog")
-        notify_argv = events[0][1]
-        dash = notify_argv.index("--")
-        self.assertEqual(notify_argv[dash + 1], details.host)
+        self.assertTrue(notified.wait(timeout=5), "notification never dispatched")
+        self.assertEqual(len(notify_argvs), 1)
+        dash = notify_argvs[0].index("--")
+        self.assertEqual(notify_argvs[0][dash + 1], details.host)
+        self.assertEqual(len(popen_calls), 1)
+        self.assertTrue(any("display dialog" in a for a in popen_calls[0]))
 
-    def test_dialog_not_orphaned_when_terminal_answers_during_notification(self):
-        """A terminal keypress during the (slow) notification must not leave a
-        dialog on screen that nobody will ever terminate.
+    def test_stalled_notification_does_not_delay_dialog(self):
+        """Notification Center hanging must not hold the dialog back (review P2)."""
+        release = threading.Event()
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("Allow\n")
+        proc.stderr = io.StringIO("")
 
-        Deterministic on purpose: the fake notification does not return until
-        the main thread has already resolved the prompt and made its terminate
-        pass (observed via the patched ``_terminate_process``). Only then does
-        the dialog thread get to decide whether to spawn — and it must not.
+        def notify_runner(_argv: list[str]) -> None:
+            release.wait(timeout=10)
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: "",
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: proc,
+            notify_runner=notify_runner,
+        )
+        start = time.monotonic()
+        try:
+            choice = watcher._prompt_with_dialog(self._details())
+        finally:
+            release.set()
+        self.assertEqual(choice.action, "allow_live")
+        self.assertLess(time.monotonic() - start, 5.0, "dialog waited on the notification")
+
+    def _orphan_guard_watcher(self, *, stall: str):
+        """Build a watcher whose dialog thread is held at `stall` ("before_spawn"
+        or "after_spawn") until the main thread has resolved the prompt and made
+        its terminate pass (observed via the patched ``_terminate_process``).
+        Returns (run, proc, popen_calls); run() executes the prompt.
         """
         resolved_pass = threading.Event()
         popen_calls: list[list[str]] = []
@@ -249,33 +277,57 @@ class EgressWatchTests(unittest.TestCase):
         proc.stdout = io.StringIO("Allow\n")
         proc.stderr = io.StringIO("")
         real_terminate = watch._terminate_process
+        real_message = watch.build_dialog_message
 
         def recording_terminate(p) -> None:
             resolved_pass.set()
             real_terminate(p)
 
-        def notify_runner(_argv: list[str]) -> None:
-            resolved_pass.wait(timeout=5)
+        def stalled_message(details):
+            if stall == "before_spawn":
+                resolved_pass.wait(timeout=5)
+            return real_message(details)
 
         def popen_factory(*args, **kwargs) -> mock.Mock:
+            if stall == "after_spawn":
+                resolved_pass.wait(timeout=5)
             popen_calls.append(list(args[0]))
             return proc
 
-        with mock.patch.object(watch, "_terminate_process", recording_terminate):
-            watcher = watch.EgressWatcher(
-                self._broker(Path(tempfile.mkdtemp())),
-                egress_log.EgressLog(Path(tempfile.mkdtemp())),
-                input_fn=lambda _p: "d",
-                output=io.StringIO(),
-                platform="darwin",
-                popen_factory=popen_factory,
-                notify_runner=notify_runner,
-            )
-            choice = watcher._prompt_with_dialog(self._details())
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: "d",
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=popen_factory,
+            notify_runner=lambda _argv: None,
+        )
+
+        def run():
+            with mock.patch.object(watch, "_terminate_process", recording_terminate), \
+                    mock.patch.object(watch, "build_dialog_message", stalled_message):
+                choice = watcher._prompt_with_dialog(self._details())
+            self.assertTrue(resolved_pass.is_set())
+            return choice
+
+        return run, proc, popen_calls
+
+    def test_dialog_not_spawned_when_terminal_answers_first(self):
+        """Terminal answers before the dialog thread reaches its spawn: no dialog."""
+        run, proc, popen_calls = self._orphan_guard_watcher(stall="before_spawn")
+        choice = run()
         self.assertEqual(choice.action, "deny")
-        self.assertTrue(resolved_pass.is_set())
         self.assertEqual(popen_calls, [], "dialog spawned after the prompt was resolved")
         proc.terminate.assert_not_called()
+
+    def test_dialog_terminated_when_terminal_answers_during_spawn(self):
+        """Terminal answers while Popen is in flight: the dialog is torn down."""
+        run, proc, popen_calls = self._orphan_guard_watcher(stall="after_spawn")
+        choice = run()
+        self.assertEqual(choice.action, "deny")
+        self.assertEqual(len(popen_calls), 1)
+        proc.terminate.assert_called()
 
     def test_notification_failure_does_not_block_dialog(self):
         proc = mock.Mock()
