@@ -381,6 +381,23 @@ class BindReachabilityTests(unittest.TestCase):
         self.assertIsNone(settings.broker_url)
         self.assertTrue(any("bind_loopback" in r.getMessage() for r in logs.records))
 
+    def test_ipv6_bind_is_bracketed_in_action_url(self):
+        settings = self._settings("fd00::1")
+        self.assertEqual(settings.broker_url, "http://[fd00::1]:3129")
+        self.assertEqual(settings.operator_token, "op-sentinel")
+        payload = notify.build_ntfy_payload(
+            notify.EgressNotification("r1", "coding-brassbottle", "docs.stripe.com", 443),
+            settings,
+        )
+        self.assertEqual(
+            {a["url"] for a in payload["actions"]},
+            {"http://[fd00::1]:3129/decide"},
+        )
+
+    def test_ipv4_bind_is_not_bracketed(self):
+        settings = self._settings("10.8.0.1")
+        self.assertEqual(settings.broker_url, "http://10.8.0.1:3129")
+
     def test_hostname_bind_enables_actions(self):
         settings = self._settings("wg-host.internal")
         self.assertEqual(settings.broker_url, "http://wg-host.internal:3129")

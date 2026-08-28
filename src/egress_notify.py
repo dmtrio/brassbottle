@@ -96,6 +96,16 @@ def _bind_unreachable_reason(host: str) -> str | None:
     return None
 
 
+def _url_authority_host(host: str) -> str:
+    """Host as it appears in a URL authority: IPv6 literals are bracketed."""
+    try:
+        if ipaddress.ip_address(host).version == 6:
+            return f"[{host}]"
+    except ValueError:
+        pass
+    return host
+
+
 def ntfy_server_hostname(url: str) -> str:
     """Return the hostname from an ntfy origin URL (for logging only)."""
     return urlparse(url).hostname or ""
@@ -132,7 +142,7 @@ def load_ntfy_settings(
     op_token: str | None = None
     unreachable = _bind_unreachable_reason(broker_host)
     if unreachable is None:
-        broker_url = f"http://{broker_host}:{broker_port}"
+        broker_url = f"http://{_url_authority_host(broker_host)}:{broker_port}"
         op_token = operator_token
     else:
         LOG.info("egress notify actions off reason=bind_%s", unreachable)
