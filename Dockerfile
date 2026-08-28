@@ -350,6 +350,7 @@ COPY src/egress_broker_host.py /usr/local/lib/djinn/egress_broker_host.py
 COPY src/egress_broker.py /usr/local/lib/djinn/egress_broker.py
 COPY src/egress_nflog.py /usr/local/lib/djinn/egress_nflog.py
 COPY src/egress_request.py /usr/local/lib/djinn/egress_request.py
+COPY src/hosts_ipv4.py /usr/local/lib/djinn/hosts_ipv4.py
 RUN chmod 644 /usr/local/lib/djinn/egress_log.py \
     /usr/local/lib/djinn/egress_denylist.py \
     /usr/local/lib/djinn/egress_notify.py \

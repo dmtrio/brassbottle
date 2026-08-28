@@ -53,6 +53,15 @@ done
 set +f
 unset _vol_path _p
 
+# ── Host gateway resolves over IPv4 only ─────────────────────────────────────
+# Docker Desktop writes host.docker.internal twice, A and AAAA. The container
+# has no route to that IPv6 ULA, but getaddrinfo() sorts it first, so every
+# in-container client that resolves the name by hand (request-egress and the
+# NFLOG reader filing with the broker) failed with "Network is unreachable"
+# while the broker sat reachable on the v4 address. Non-fatal: without it
+# resolution is slow-and-broken for those clients, not the whole container.
+python3 /usr/local/lib/djinn/hosts_ipv4.py || true
+
 # ── Egress firewall (default ON — fail loud, never run open) ─────────────────
 if [ "${ENABLE_FIREWALL:-true}" = "true" ]; then
     if /usr/local/bin/init-firewall.sh; then
