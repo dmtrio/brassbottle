@@ -17,6 +17,9 @@ Usage: ./djinn <subcommand> [args...]
   backup   <cmd> [args...]     singleton artifact backup (start/stop/status/.../browser)
   allow    --watch                  interactive egress approval watcher
   allow    <container> <domain...>  add domains to a running container's egress allowlist
+  deny     <zone> (--bottle <name> | --global) [--reason "..."]   persist a deny entry
+  deny     --list                                                 list deny entries
+  undeny   <zone> (--bottle <name> | --global)                    remove a deny entry
   keys     <container> ...     edit one container's agent MCP credentials
   help                         show this message
 EOF
@@ -44,6 +47,25 @@ case "${1:-}" in
             exec env DJINN_HOME="$BASE_PATH" python3 "$SCRIPT_DIR/src/egress_watch.py" "$@"
         fi
         exec "$SCRIPT_DIR/bin/allow-egress.sh" "$@"
+        ;;
+    deny)
+        shift
+        # Same DJINN_HOME resolution as `allow --watch`: source common.sh
+        # late (usage/error paths stay ./.env-free) and hand BASE_PATH to
+        # Python via the environment, never guessed by the Python side.
+        . "$SCRIPT_DIR/src/common.sh"
+        require_python3 || exit 1
+        if [ "${1:-}" = "--list" ]; then
+            shift
+            exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/egress_denylist.py" list "$@"
+        fi
+        exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/egress_denylist.py" add "$@"
+        ;;
+    undeny)
+        shift
+        . "$SCRIPT_DIR/src/common.sh"
+        require_python3 || exit 1
+        exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/egress_denylist.py" remove "$@"
         ;;
     keys)    shift; exec "$SCRIPT_DIR/bin/update-agent-keys.sh" "$@" ;;
     help|-h|--help) usage; exit 0 ;;

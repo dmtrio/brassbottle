@@ -55,6 +55,44 @@ class EgressRequestTests(unittest.TestCase):
         self.assertEqual(code, er.EXIT_PENDING)
         self.assertEqual(results[0].decision, "pending")
 
+    def test_request_hosts_denylist_denied_surfaces_zone_and_scope(self):
+        def fake_file(**_kwargs):
+            return (
+                {
+                    "decision": "deny",
+                    "reason": "denylist",
+                    "zone": "datadoghq.com",
+                    "scope": "global",
+                },
+                None,
+            )
+
+        results, code = er.request_hosts(
+            ["us5.datadoghq.com"],
+            container="demo",
+            broker_url="http://127.0.0.1:8816",
+            broker_token="tok",
+            file_fn=fake_file,
+        )
+        self.assertEqual(code, er.EXIT_DENIED)
+        self.assertEqual(results[0].decision, "denied")
+        self.assertEqual(results[0].detail, "denylist: zone=datadoghq.com scope=global")
+
+    def test_request_hosts_plain_denied_has_no_denylist_detail(self):
+        def fake_file(**_kwargs):
+            return {"decision": "deny"}, None
+
+        results, code = er.request_hosts(
+            ["docs.stripe.com"],
+            container="demo",
+            broker_url="http://127.0.0.1:8816",
+            broker_token="tok",
+            file_fn=fake_file,
+        )
+        self.assertEqual(code, er.EXIT_DENIED)
+        self.assertEqual(results[0].decision, "denied")
+        self.assertEqual(results[0].detail, "")
+
     def test_check_host_allowed_when_ipset_matches(self):
         runner = mock.Mock(return_value=mock.Mock(returncode=0))
         with mock.patch.object(er, "resolve_ipv4", return_value=["93.184.216.34"]):

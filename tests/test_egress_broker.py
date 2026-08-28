@@ -184,6 +184,38 @@ class FailureSurfaceTests(unittest.TestCase):
         payload = broker.build_http_403("denied.example.com", "req-deny")
         self.assertIn("HTTP/1.1 403 Egress denied: denied.example.com (req req-deny)", payload.decode("latin-1"))
 
+    def test_http_403_names_denylist_zone_scope_and_undeny_hint(self):
+        payload = broker.build_http_403(
+            "us5.datadoghq.com",
+            "req-deny",
+            denylist_zone="datadoghq.com",
+            denylist_scope="global",
+        )
+        text = payload.decode("latin-1")
+        self.assertIn("persistent deny list", text)
+        self.assertIn("zone datadoghq.com", text)
+        self.assertIn("scope global", text)
+        self.assertIn("./djinn undeny datadoghq.com --global", text)
+
+    def test_http_403_bottle_scope_undeny_hint(self):
+        payload = broker.build_http_403(
+            "example.net",
+            "req-deny",
+            denylist_zone="example.net",
+            denylist_scope="coding-hank",
+        )
+        text = payload.decode("latin-1")
+        self.assertIn("./djinn undeny example.net --bottle coding-hank", text)
+
+    def test_decision_outcome_denylist_body_still_maps_to_deny(self):
+        body = {
+            "decision": "deny",
+            "reason": "denylist",
+            "zone": "datadoghq.com",
+            "scope": "global",
+        }
+        self.assertEqual(broker._decision_outcome(body), "deny")
+
     def test_http_502_for_daemon_fault(self):
         payload = broker.build_http_502()
         self.assertIn("HTTP/1.1 502 Egress broker unreachable", payload.decode("latin-1"))
@@ -343,6 +375,38 @@ class InterceptedConnectionTests(unittest.TestCase):
         feed.close()
         self.assertEqual(outcome.action, "deny")
         self.assertIn(b"HTTP/1.1 403", response)
+        self.assertNotIn(b"persistent deny list", response)
+
+    def test_denylist_deny_emits_403_naming_zone_and_scope(self):
+        client, feed = self._mock_client(
+            dst_ip="93.184.216.34",
+            dst_port=80,
+            initial=_http_request("us5.datadoghq.com"),
+        )
+
+        outcome = broker.handle_intercepted_connection(
+            client,
+            config=self._config(),
+            ipset_check=lambda _ip: False,
+            file_fn=lambda **kwargs: (
+                {
+                    "decision": "deny",
+                    "reason": "denylist",
+                    "zone": "datadoghq.com",
+                    "scope": "global",
+                },
+                None,
+            ),
+        )
+        response = feed.recv(4096)
+        feed.close()
+        self.assertEqual(outcome.action, "deny")
+        text = response.decode("latin-1")
+        self.assertIn("HTTP/1.1 403", text)
+        self.assertIn("persistent deny list", text)
+        self.assertIn("zone datadoghq.com", text)
+        self.assertIn("scope global", text)
+        self.assertIn("./djinn undeny datadoghq.com --global", text)
 
     def test_daemon_fault_emits_502(self):
         client, feed = self._mock_client(

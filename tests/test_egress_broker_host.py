@@ -844,6 +844,76 @@ class EgressBrokerHostTests(unittest.TestCase):
             )
             self.assertEqual(results["api.github.com"], {"decision": "deny"})
 
+    def test_decide_allow_for_zone_skip_is_logged_not_swallowed(self):
+        """finding #5: decide_allow_for_zone's sweep used to swallow a
+        per-candidate EgressBrokerHostError with a bare `except: continue` —
+        now it logs one INFO line naming the request and the reason before
+        moving on. A synthetic OpenRequestState is injected directly (no
+        real file_request/thread needed) so decide() can be mocked to raise
+        deterministically."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            state = broker.OpenRequestState(
+                request_id="deadbeef",
+                container="coding-brassbottle",
+                host="neon.tech",
+                port=443,
+                opened_at=NOW,
+            )
+            with b._lock:
+                b._requests["deadbeef"] = state
+                b._key_index[("coding-brassbottle", "neon.tech", 443)] = "deadbeef"
+
+            with mock.patch.object(
+                b, "decide", side_effect=broker.EgressBrokerHostError("already decided")
+            ):
+                with self.assertLogs(broker.LOG, level="INFO") as captured:
+                    decided = b.decide_allow_for_zone("coding-brassbottle", "neon.tech")
+
+            self.assertEqual(decided, [])
+            skip_lines = [
+                r.getMessage()
+                for r in captured.records
+                if "decide_allow_for_zone skip" in r.getMessage()
+            ]
+            self.assertEqual(len(skip_lines), 1)
+            self.assertIn("request_id=deadbeef", skip_lines[0])
+            self.assertIn("reason=already decided", skip_lines[0])
+
+    def test_decide_deny_for_zone_skip_is_logged_not_swallowed(self):
+        """finding #5: same fix as decide_allow_for_zone, mirrored for the
+        deny sweep."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            state = broker.OpenRequestState(
+                request_id="deadbeef",
+                container="coding-brassbottle",
+                host="neon.tech",
+                port=443,
+                opened_at=NOW,
+            )
+            with b._lock:
+                b._requests["deadbeef"] = state
+                b._key_index[("coding-brassbottle", "neon.tech", 443)] = "deadbeef"
+
+            with mock.patch.object(
+                b, "decide", side_effect=broker.EgressBrokerHostError("already decided")
+            ):
+                with self.assertLogs(broker.LOG, level="INFO") as captured:
+                    decided = b.decide_deny_for_zone("coding-brassbottle", "neon.tech")
+
+            self.assertEqual(decided, [])
+            skip_lines = [
+                r.getMessage()
+                for r in captured.records
+                if "decide_deny_for_zone skip" in r.getMessage()
+            ]
+            self.assertEqual(len(skip_lines), 1)
+            self.assertIn("request_id=deadbeef", skip_lines[0])
+            self.assertIn("reason=already decided", skip_lines[0])
+
     def test_decide_endpoint_requires_operator_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             egress_root = Path(tmp)
@@ -1094,12 +1164,123 @@ class EgressBrokerHostTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=5)
 
-    def test_decide_endpoint_deny_rejects_scope(self):
+    def test_decide_endpoint_deny_rejects_invalid_scope(self):
+        # "live"/"manifest" are allow-only scopes; deny's vocabulary is
+        # once/bottle/global (deviation #6: per-decision validation replaces
+        # the old blanket "scope only applies to allow" rejection).
         with tempfile.TemporaryDirectory() as tmp:
             egress_root = Path(tmp)
             tokens_dir = egress_root / broker.TOKENS_DIRNAME
             tokens_dir.mkdir(parents=True)
             b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                for bad_scope in ("live", "manifest", "banana"):
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/decide",
+                        json.dumps(
+                            {
+                                "container": "coding-brassbottle",
+                                "host": "stripe.com",
+                                "decision": "deny",
+                                "scope": bad_scope,
+                            }
+                        ),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(body["error"], "invalid scope")
+                    conn.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_deny_scope_validation_matrix(self):
+        """once/bottle/global are all accepted; bottle/global additionally
+        persist the CALLER-NAMED zone to disk even with no open request
+        covering it (finding #2: persist_deny writes unconditionally, not
+        only as an open-request side effect) — assert the file content, not
+        just the HTTP status.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "coding-brassbottle.token").write_text("tok\n", encoding="utf-8")
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                for good_scope, expect_persisted_scope, domain in (
+                    ("once", None, "once.example.com"),
+                    ("bottle", "coding-brassbottle", "bottle.example.com"),
+                    ("global", "global", "global.example.com"),
+                ):
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/decide",
+                        json.dumps(
+                            {
+                                "container": "coding-brassbottle",
+                                "host": domain,
+                                "decision": "deny",
+                                "scope": good_scope,
+                            }
+                        ),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp.status, HTTPStatus.OK)
+                    # No open requests match any of these hosts, so nothing
+                    # gets released either way.
+                    self.assertEqual(body["decided"], [])
+                    conn.close()
+
+                    if expect_persisted_scope is None:
+                        self.assertNotIn("persisted", body)
+                        self.assertIsNone(b._denylist.matches("coding-brassbottle", domain))
+                        continue
+
+                    self.assertEqual(
+                        body["persisted"], {"zone": domain, "scope": expect_persisted_scope}
+                    )
+                    on_disk = b._denylist.matches("coding-brassbottle", domain)
+                    self.assertIsNotNone(on_disk, f"{domain} not written to denylist.json")
+                    self.assertEqual(on_disk.zone, domain)
+                    self.assertEqual(on_disk.scope, expect_persisted_scope)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_deny_scope_bottle_ip_literal_zone(self):
+        """finding #4: the deny path accepts IP literals — normalize_host()
+        alone would 400 these; the handler must use normalize_destination()
+        for deny so ./djinn deny 93.184.216.34 --global round-trips through
+        /decide (notify_daemon_deny posts exactly this shape)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=5)
             server = self._http_server(egress_root, b, tokens_dir)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -1112,9 +1293,9 @@ class EgressBrokerHostTests(unittest.TestCase):
                     json.dumps(
                         {
                             "container": "coding-brassbottle",
-                            "host": "stripe.com",
+                            "host": "93.184.216.34",
                             "decision": "deny",
-                            "scope": "live",
+                            "scope": "global",
                         }
                     ),
                     {
@@ -1124,8 +1305,201 @@ class EgressBrokerHostTests(unittest.TestCase):
                 )
                 resp = conn.getresponse()
                 body = json.loads(resp.read().decode("utf-8"))
-                self.assertEqual(resp.status, HTTPStatus.BAD_REQUEST)
-                self.assertEqual(body["error"], "scope only applies to allow")
+                self.assertEqual(resp.status, HTTPStatus.OK, body)
+                self.assertEqual(
+                    body["persisted"], {"zone": "93.184.216.34", "scope": "global"}
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            entry = b._denylist.matches("any-bottle", "93.184.216.34")
+            self.assertIsNotNone(entry)
+            self.assertEqual(entry.zone, "93.184.216.34")
+
+    def _post_decide(self, host: str, port: int, payload: dict) -> tuple[int, dict]:
+        conn = HTTPConnection(host, port, timeout=5)
+        conn.request(
+            "POST",
+            "/decide",
+            json.dumps(payload),
+            {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+            },
+        )
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode("utf-8"))
+        conn.close()
+        return resp.status, body
+
+    def test_decide_endpoint_deny_ip_literal_scope_once_no_thread_traceback(self):
+        """finding #1: an IP-literal host with scope=once must produce a
+        clean HTTP response, not a broken connection from an unhandled
+        exception on the handler thread (decide_deny_for_zone used to call
+        normalize_host(), which rejects IPs outright)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                status, body = self._post_decide(
+                    host,
+                    port,
+                    {
+                        "container": "coding-brassbottle",
+                        "host": "93.184.216.34",
+                        "decision": "deny",
+                        "scope": "once",
+                    },
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            self.assertEqual(status, HTTPStatus.OK, body)
+            self.assertEqual(body["decided"], [])
+
+    def test_decide_endpoint_deny_ip_literal_scope_global_no_thread_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                status, body = self._post_decide(
+                    host,
+                    port,
+                    {
+                        "host": "93.184.216.34",
+                        "decision": "deny",
+                        "scope": "global",
+                    },
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            self.assertEqual(status, HTTPStatus.OK, body)
+            self.assertEqual(body["persisted"], {"zone": "93.184.216.34", "scope": "global"})
+
+    def test_decide_endpoint_deny_container_optional_for_global_scope(self):
+        """The CLI relies on this: `./djinn deny <zone> --global` posts no
+        `container` field at all — persist_deny(scope="global") sweeps
+        every container itself and never needs one told to it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                status, body = self._post_decide(
+                    host, port, {"host": "datadoghq.com", "decision": "deny", "scope": "global"}
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            self.assertEqual(status, HTTPStatus.OK, body)
+            self.assertEqual(body["persisted"], {"zone": "datadoghq.com", "scope": "global"})
+
+    def test_decide_endpoint_deny_container_required_for_once_and_bottle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                for scope in ("once", "bottle"):
+                    status, body = self._post_decide(
+                        host, port, {"host": "x.example.com", "decision": "deny", "scope": scope}
+                    )
+                    self.assertEqual(status, HTTPStatus.BAD_REQUEST, (scope, body))
+                    self.assertEqual(body["error"], "container is required")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_decide_endpoint_deny_scope_bottle_unknown_bottle_returns_400(self):
+        """finding #1: a typo'd bottle must never produce a dead entry — the
+        HTTP handler turns persist_deny's EgressBrokerHostError into a 400,
+        and nothing lands on disk."""
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                status, body = self._post_decide(
+                    host,
+                    port,
+                    {
+                        "container": "ghost-bottle",
+                        "host": "x.example.com",
+                        "decision": "deny",
+                        "scope": "bottle",
+                    },
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST, body)
+            self.assertIn("unknown bottle", body["error"])
+            self.assertFalse((egress_root / broker.DENYLIST_FILENAME).exists())
+
+    def test_decide_endpoint_deny_scope_global_persist_failure_returns_500(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            try:
+                with mock.patch.object(
+                    b._denylist, "add", side_effect=OSError("disk full")
+                ):
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/decide",
+                        json.dumps(
+                            {
+                                "container": "coding-brassbottle",
+                                "host": "failure.example.com",
+                                "decision": "deny",
+                                "scope": "global",
+                            }
+                        ),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp.status, HTTPStatus.INTERNAL_SERVER_ERROR)
+                    self.assertEqual(body["error"], broker.DENYLIST_PERSIST_FAILED_REASON)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -1373,6 +1747,825 @@ exit 0
     def test_notify_egress_daemon_curls_use_max_time(self):
         script = (REPO_ROOT / "bin" / "allow-egress.sh").read_text(encoding="utf-8")
         self.assertGreaterEqual(script.count("--max-time"), 2)
+
+    # ── persistent deny list ────────────────────────────────────────────
+
+    def test_decide_deny_scope_once_does_not_write_denylist_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+            self.assertIsNone(b._denylist.matches("coding-brassbottle", "neon.tech"))
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(denied), 1)
+            self.assertEqual(denied[0].get("scope"), "once")
+
+    def test_decide_deny_scope_bottle_no_longer_writes_an_entry(self):
+        """Consolidation (finding #2/#3/#5): decide()'s deny path never
+        persists any more — ONLY EgressBroker.persist_deny() writes a
+        denylist entry. A bare decide(..., scope="bottle") with no
+        denylist_zone/denylist_scope is a plain one-shot deny of just this
+        request; `scope` is recorded on the audit event for the record, but
+        nothing is written to disk and no other request is swept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            result = b.decide(request_id, "deny", scope="bottle", reason="noisy")
+            join_thread_or_fail(thread, label="file_request")
+
+            self.assertIsNone(result)
+            self.assertIsNone(b._denylist.matches("coding-brassbottle", "neon.tech"))
+
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(denied), 1)
+            self.assertEqual(denied[0].get("scope"), "bottle")
+            self.assertEqual(denied[0].get("reason"), "noisy")
+            self.assertNotIn("zone", denied[0])
+            self.assertNotIn("via", denied[0])
+
+    def test_decide_deny_scope_global_no_longer_writes_an_entry(self):
+        """Same consolidation as above, scope=global."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "datadoghq.com", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            b.decide(request_id, "deny", scope="global")
+            join_thread_or_fail(thread, label="file_request")
+
+            self.assertIsNone(b._denylist.matches("coding-brassbottle", "datadoghq.com"))
+            self.assertIsNone(b._denylist.matches("any-other-bottle", "datadoghq.com"))
+
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(denied[0].get("scope"), "global")
+            self.assertNotIn("zone", denied[0])
+
+    def test_decide_deny_invalid_scope_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            with self.assertRaises(broker.EgressBrokerHostError):
+                b.decide(request_id, "deny", scope="banana")
+            b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+
+    def test_decide_deny_for_zone_no_longer_accepts_scope(self):
+        """decide_deny_for_zone is scope=once only now — a persistent deny
+        goes through EgressBroker.persist_deny (finding #2)."""
+        b = broker.EgressBroker(
+            Path(tempfile.mkdtemp()), repo_root=REPO_ROOT, now_fn=FakeClock(NOW).now,
+        )
+        with self.assertRaises(TypeError):
+            b.decide_deny_for_zone("coding-brassbottle", "stripe.com", scope="global")  # type: ignore[call-arg]
+
+    def _touch_token(self, root: Path, bottle: str) -> None:
+        tokens_dir = root / broker.TOKENS_DIRNAME
+        tokens_dir.mkdir(parents=True, exist_ok=True)
+        (tokens_dir / f"{bottle}.token").write_text("tok\n", encoding="utf-8")
+
+    def test_persist_deny_writes_caller_named_zone_even_with_no_open_request(self):
+        """finding #2: unlike the old per-request-host behaviour, persist_deny
+        writes the exact zone the caller asked for, regardless of whether
+        anything is currently open under it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            result = b.persist_deny("datadoghq.com", "global", reason="telemetry")
+            self.assertIsNone(result.error)
+            self.assertEqual(result.decided, [])
+            self.assertEqual(result.entry.zone, "datadoghq.com")
+            self.assertEqual(result.entry.scope, "global")
+            on_disk = b._denylist.matches("any-bottle", "us5.datadoghq.com")
+            self.assertIsNotNone(on_disk)
+            self.assertEqual(on_disk.zone, "datadoghq.com")
+
+    def test_persist_deny_bottle_scope_requires_container(self):
+        b = broker.EgressBroker(
+            Path(tempfile.mkdtemp()), repo_root=REPO_ROOT, now_fn=FakeClock(NOW).now,
+        )
+        with self.assertRaises(broker.EgressBrokerHostError):
+            b.persist_deny("example.com", "bottle")
+
+    def test_persist_deny_bottle_scope_rejects_unknown_bottle(self):
+        """finding #1: a typo'd bottle must never produce a dead entry —
+        validate_bottle_scope (ported from egress_denylist.py) runs BEFORE
+        any write, and nothing lands on disk when it fails."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            with self.assertRaises(broker.EgressBrokerHostError) as ctx:
+                b.persist_deny("example.com", "bottle", container="ghost-bottle")
+            self.assertIn("unknown bottle", str(ctx.exception))
+            self.assertFalse((root / broker.DENYLIST_FILENAME).exists())
+
+    def test_persist_deny_bottle_scope_rejects_container_named_global(self):
+        """finding #4: a bottle literally named "global" must be rejected
+        everywhere — here via persist_deny's own validate_bottle_scope call
+        (scope=bottle, container="global"), so it can never collide with a
+        true scope=global entry. Nothing is written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            with self.assertRaises(broker.EgressBrokerHostError) as ctx:
+                b.persist_deny("example.com", "bottle", container="global")
+            self.assertIn("reserved", str(ctx.exception))
+            self.assertFalse((root / broker.DENYLIST_FILENAME).exists())
+
+    def test_persist_deny_bottle_scope_sweeps_only_that_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._touch_token(root, "coding-brassbottle")
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            results: dict[str, dict] = {}
+
+            def waiter(container: str, key: str) -> None:
+                body, _ = b.file_request(container, "docs.stripe.com", 443)
+                results[key] = body
+
+            t_a = threading.Thread(target=waiter, args=("coding-brassbottle", "a"))
+            t_b = threading.Thread(target=waiter, args=("other-bottle", "b"))
+            t_a.start()
+            t_b.start()
+            wait_for_broker_open_request(b, count=2)
+
+            result = b.persist_deny(
+                "docs.stripe.com", "bottle", container="coding-brassbottle"
+            )
+            self.assertIsNone(result.error)
+            self.assertEqual(len(result.decided), 1)
+            self.assertEqual(result.entry.scope, "coding-brassbottle")
+
+            t_a.join(timeout=5)
+            self.assertEqual(
+                results["a"],
+                {"decision": "deny", "reason": "denylist", "zone": "docs.stripe.com",
+                 "scope": "coding-brassbottle"},
+            )
+            # The other bottle's open request must NOT be swept by a
+            # bottle-scoped entry — it stays open until decided separately.
+            with b._lock:
+                still_open = [s.container for s in b._requests.values() if s.decision is None]
+            self.assertEqual(still_open, ["other-bottle"])
+            for rid, state in list(b._requests.items()):
+                b.decide(rid, "deny")
+            t_b.join(timeout=5)
+
+    def test_persist_deny_global_scope_sweeps_every_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            results: dict[str, dict] = {}
+
+            def waiter(container: str, key: str) -> None:
+                body, _ = b.file_request(container, "docs.stripe.com", 443)
+                results[key] = body
+
+            t_a = threading.Thread(target=waiter, args=("coding-brassbottle", "a"))
+            t_b = threading.Thread(target=waiter, args=("other-bottle", "b"))
+            t_a.start()
+            t_b.start()
+            wait_for_broker_open_request(b, count=2)
+
+            result = b.persist_deny("docs.stripe.com", "global")
+            self.assertIsNone(result.error)
+            self.assertEqual(len(result.decided), 2)  # persist_deny sweeps synchronously
+            t_a.join(timeout=5)
+            t_b.join(timeout=5)
+            for key in ("a", "b"):
+                self.assertEqual(
+                    results[key],
+                    {"decision": "deny", "reason": "denylist", "zone": "docs.stripe.com",
+                     "scope": "global"},
+                )
+
+    def test_persist_deny_invalid_scope_raises(self):
+        b = broker.EgressBroker(
+            Path(tempfile.mkdtemp()), repo_root=REPO_ROOT, now_fn=FakeClock(NOW).now,
+        )
+        with self.assertRaises(broker.EgressBrokerHostError):
+            b.persist_deny("example.com", "once")
+
+    def test_persist_deny_accepts_ip_literal_zone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            result = b.persist_deny("93.184.216.34", "global")
+            self.assertIsNone(result.error)
+            self.assertEqual(result.entry.zone, "93.184.216.34")
+            self.assertIsNotNone(b._denylist.matches("any-bottle", "93.184.216.34"))
+            self.assertIsNone(b._denylist.matches("any-bottle", "93.184.216.35"))
+
+    def test_persist_deny_write_happens_outside_lock_then_reloads_under_it(self):
+        """finding #2: DenyList.add() (its own flock + parse + write +
+        os.replace) must run OUTSIDE self._lock — holding the broker-wide
+        lock for that whole duration would stall every other handler
+        thread's file_request/decide for as long as a slow disk write, or a
+        concurrent `./djinn undeny` CLI process holding the SAME flock,
+        takes. Proven two ways on the same call: (1) another thread CAN
+        acquire self._lock while add() is in flight; (2) immediately after
+        add() returns, persist_deny takes self._lock again just long enough
+        to force self._denylist to reload — proven by showing self._lock is
+        HELD (another thread cannot acquire it) for the duration of that
+        reload, so a concurrent matches() (always called under self._lock
+        too) cannot race it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            original_add = b._denylist.add
+            original_load = b._denylist.load
+            observed: dict[str, bool | None] = {}
+
+            def _lock_free_from_another_thread() -> bool | None:
+                acquired: list[bool] = []
+
+                def attempt() -> None:
+                    got = b._lock.acquire(blocking=False)
+                    acquired.append(got)
+                    if got:
+                        b._lock.release()
+
+                t = threading.Thread(target=attempt)
+                t.start()
+                t.join(timeout=2)
+                return acquired[0] if acquired else None
+
+            def spy_add(*args, **kwargs):
+                observed["lock_was_free_during_add"] = _lock_free_from_another_thread()
+                return original_add(*args, **kwargs)
+
+            def spy_load(*args, **kwargs):
+                observed["lock_was_free_during_reload"] = _lock_free_from_another_thread()
+                return original_load(*args, **kwargs)
+
+            with mock.patch.object(b._denylist, "add", side_effect=spy_add), \
+                    mock.patch.object(b._denylist, "load", side_effect=spy_load):
+                result = b.persist_deny("example.com", "global")
+            self.assertIsNone(result.error)
+            self.assertTrue(
+                observed["lock_was_free_during_add"],
+                "self._lock must NOT be held while DenyList.add() runs",
+            )
+            self.assertFalse(
+                observed["lock_was_free_during_reload"],
+                "self._lock must be held while the post-write DenyList reload runs",
+            )
+
+    def test_persist_deny_write_failure_returns_reason_and_sweeps_nothing(self):
+        """No trigger_request_id here: a bare write failure sweeps nothing
+        and leaves any open request untouched — see
+        test_persist_deny_trigger_request_id_closed_on_write_failure below
+        for the case that DOES carry one (watcher D/G, /decide with a live
+        held connection)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "docs.stripe.com", 443),
+            )
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+
+            with mock.patch.object(b._denylist, "add", side_effect=OSError("disk full")):
+                result = b.persist_deny("docs.stripe.com", "global")
+            self.assertEqual(result.error, broker.DENYLIST_PERSIST_FAILED_REASON)
+            self.assertIsNone(result.entry)
+            self.assertEqual(result.decided, [])
+            with b._lock:
+                self.assertIn(request_id, b._requests)  # left open, not lost
+            b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+
+    def test_persist_deny_trigger_request_id_closed_on_write_failure(self):
+        """finding #1/#3: when the write fails AND a trigger_request_id was
+        given (the watcher's D/G, or an HTTP caller with a live held
+        connection), persist_deny closes exactly that request as a one-shot
+        deny (persist_failed=True in the audit) so the held client is
+        released and the watcher does not re-prompt it — proven against
+        fold_queue's open set, the same thing the watcher itself polls."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            result_body: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "docs.stripe.com", 443)
+                result_body["body"] = body
+
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+
+            with mock.patch.object(b._denylist, "add", side_effect=OSError("disk full")):
+                result = b.persist_deny(
+                    "docs.stripe.com", "global", trigger_request_id=request_id
+                )
+            self.assertEqual(result.error, broker.DENYLIST_PERSIST_FAILED_REASON)
+            self.assertIsNone(result.entry)
+            self.assertEqual(result.decided, [])
+
+            join_thread_or_fail(thread, label="file_request")
+            self.assertEqual(result_body["body"], {"decision": "deny"})
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)
+            open_ids = egress_log.EgressLog(root).fold_queue(now=b.now()).open_requests
+            self.assertNotIn(request_id, open_ids)
+
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(denied), 1)
+            self.assertEqual(denied[0].get("scope"), "once")
+            self.assertTrue(denied[0].get("persist_failed"))
+            self.assertIsNone(b._denylist.matches("coding-brassbottle", "docs.stripe.com"))
+
+    def test_persist_deny_write_failure_with_stale_trigger_id_logs_not_swallows(self):
+        """finding #5: the write ALSO failed, and trigger_request_id no
+        longer names an open request (already decided/evicted/never
+        existed) — _close_request() raises EgressBrokerHostError for it,
+        and that used to be swallowed by a bare `except
+        EgressBrokerHostError: pass`. It must now log one INFO line instead
+        of vanishing, and persist_deny still returns normally (no raise)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+
+            with mock.patch.object(b._denylist, "add", side_effect=OSError("disk full")):
+                with self.assertLogs(broker.LOG, level="INFO") as captured:
+                    result = b.persist_deny(
+                        "docs.stripe.com", "global", trigger_request_id="deadbeef"
+                    )
+
+            self.assertEqual(result.error, broker.DENYLIST_PERSIST_FAILED_REASON)
+            self.assertIsNone(result.entry)
+            self.assertEqual(result.decided, [])
+
+            skip_lines = [
+                r.getMessage()
+                for r in captured.records
+                if "persist_deny_trigger skip" in r.getMessage()
+            ]
+            self.assertEqual(len(skip_lines), 1)
+            self.assertIn("request_id=deadbeef", skip_lines[0])
+            self.assertIn("reason=", skip_lines[0])
+            self.assertIn("no open request", skip_lines[0])
+
+    def test_decide_deny_persist_failed_flag_degrades_to_one_shot_deny(self):
+        """finding #1: decide() itself never touches DenyList any more, so
+        there is nothing left in decide() that can raise from a disk
+        failure — persist_failed=True (set only by persist_deny, see the
+        two tests above) is just a plain audit flag/return value, never a
+        raised exception a caller would need to catch.
+
+        finding #9: persist_failed is internal-only — the public decide()
+        wrapper can no longer accept it at all (see
+        test_decide_public_wrapper_rejects_internal_kwargs below), so this
+        drives it through _close_request() directly, exactly like
+        persist_deny() itself does."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "neon.tech", 443)
+                result["body"] = body
+
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+
+            err = b._close_request(request_id, "deny", scope="bottle", persist_failed=True)
+            self.assertEqual(err, broker.DENYLIST_PERSIST_FAILED_REASON)
+
+            join_thread_or_fail(thread, label="file_request")
+            self.assertEqual(result["body"], {"decision": "deny"})
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)  # closed, not stuck
+            self.assertIsNone(b._denylist.matches("coding-brassbottle", "neon.tech"))
+
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(denied), 1)
+            self.assertEqual(denied[0].get("scope"), "once")
+            self.assertTrue(denied[0].get("persist_failed"))
+
+    def test_decide_public_wrapper_rejects_internal_kwargs(self):
+        """finding #9: decide() is now a thin public wrapper over the
+        private _close_request() and its signature simply has no
+        denylist_zone/denylist_scope/persist_failed parameters any more —
+        an operator surface (the watcher, the /decide HTTP handler) passing
+        one of these must fail loudly (TypeError) rather than silently
+        reaching persist_deny()-only behavior. No open request is needed:
+        argument binding fails before decide() ever touches self._requests."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+
+            with self.assertRaises(TypeError):
+                b.decide("deadbeef", "deny", persist_failed=True)
+            with self.assertRaises(TypeError):
+                b.decide("deadbeef", "deny", denylist_zone="x.com")
+            with self.assertRaises(TypeError):
+                b.decide("deadbeef", "deny", denylist_scope="global")
+
+    def test_decide_deny_response_body_and_waiter_carry_denylist_zone_scope(self):
+        """finding #7: the held connection that triggered a scope=bottle|global
+        deny must see reason/zone/scope in its own decision body, not the
+        generic one-shot deny shape. Driven through persist_deny (the only
+        thing that ever sets denylist_zone/denylist_scope on decide()) with
+        an operator reason, so this also proves finding #4: the audit event
+        KEEPS that free-text reason (never overwritten with the literal
+        "denylist") and carries the denylist context in separate fields."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._touch_token(root, "coding-brassbottle")
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "neon.tech", 443)
+                result["body"] = body
+
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            persist_result = b.persist_deny(
+                "neon.tech", "bottle", container="coding-brassbottle", reason="noisy"
+            )
+            self.assertIsNone(persist_result.error)
+            join_thread_or_fail(thread, label="file_request")
+            self.assertEqual(
+                result["body"],
+                {
+                    "decision": "deny",
+                    "reason": "denylist",
+                    "zone": "neon.tech",
+                    "scope": "coding-brassbottle",
+                },
+            )
+
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(denied), 1)
+            # The operator's free-text reason survives untouched...
+            self.assertEqual(denied[0].get("reason"), "noisy")
+            # ...and the denylist context lives in its own fields.
+            self.assertEqual(denied[0].get("via"), "denylist")
+            self.assertEqual(denied[0].get("zone"), "neon.tech")
+            self.assertEqual(denied[0].get("scope"), "coding-brassbottle")
+
+    def test_decide_deny_once_response_body_stays_generic(self):
+        """A plain scope=once deny (no denylist write) keeps the old bare
+        {"decision": "deny"} shape — no regression for the common path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, _ = b.file_request("coding-brassbottle", "neon.tech", 443)
+                result["body"] = body
+
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            request_id = wait_for_broker_open_request(b)
+            b.decide(request_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+            self.assertEqual(result["body"], {"decision": "deny"})
+
+    def test_denylist_short_circuit_returns_deny_body_and_never_notifies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            b._denylist.add(zone="datadoghq.com", scope="global", reason="telemetry")
+
+            with mock.patch.object(b, "_notify_operator") as notify:
+                body, request_id = b.file_request(
+                    "coding-brassbottle", "http-intake.logs.us5.datadoghq.com", 443
+                )
+                notify.assert_not_called()
+            self.assertEqual(
+                body,
+                {
+                    "decision": "deny",
+                    "reason": "denylist",
+                    "zone": "datadoghq.com",
+                    "scope": "global",
+                },
+            )
+            # No held request: the id must not appear in the open-request map.
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)
+            requested = [r for r in self._log_records(root) if r.get("kind") == "requested"]
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(len(denied), 1)
+            self.assertEqual(denied[0].get("reason"), "denylist")
+            self.assertEqual(denied[0].get("zone"), "datadoghq.com")
+            self.assertEqual(denied[0].get("scope"), "global")
+            # finding #6: the audit pair and the id returned to the caller
+            # must be the SAME id, not two independently-minted ones.
+            self.assertEqual(requested[0]["request_id"], request_id)
+            self.assertEqual(denied[0]["request_id"], request_id)
+            # fold_queue must see this request as closed (requested->denied),
+            # never resurrected as open after a daemon restart.
+            folded = egress_log.EgressLog(root).fold_queue(now=NOW)
+            self.assertEqual(folded.open_requests, {})
+
+    def test_denylist_short_circuit_requested_event_carries_full_fields(self):
+        """finding #7: the "requested" audit event a denylist short-circuit
+        appends must carry the SAME fields a normal filing does (uid, comm,
+        reason, host_is_ip) — not a stripped-down container/host/port-only
+        version, which would make a denylisted request's audit trail less
+        informative than an approved/denied-by-operator one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            b._denylist.add(zone="datadoghq.com", scope="global")
+
+            body, request_id = b.file_request(
+                "coding-brassbottle",
+                "datadoghq.com",
+                443,
+                uid=1000,
+                comm="curl",
+                reason="ci fetch",
+            )
+            self.assertEqual(body["decision"], "deny")
+            requested = [r for r in self._log_records(root) if r.get("kind") == "requested"]
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(requested[0]["request_id"], request_id)
+            self.assertEqual(requested[0].get("uid"), 1000)
+            self.assertEqual(requested[0].get("comm"), "curl")
+            self.assertEqual(requested[0].get("reason"), "ci fetch")
+            self.assertEqual(requested[0].get("container"), "coding-brassbottle")
+            self.assertEqual(requested[0].get("host"), "datadoghq.com")
+            self.assertEqual(requested[0].get("port"), 443)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            b._denylist.add(zone="93.184.216.34", scope="global")
+
+            body, request_id = b.file_request(
+                "coding-brassbottle",
+                "93.184.216.34",
+                443,
+                host_is_ip=True,
+            )
+            self.assertEqual(body["decision"], "deny")
+            requested = [r for r in self._log_records(root) if r.get("kind") == "requested"]
+            self.assertEqual(requested[0].get("host_is_ip"), True)
+
+    def test_denylist_short_circuit_id_matches_audit_with_client_supplied_id(self):
+        """Same finding #6 guarantee, exercised on the OTHER file_request
+        branch — a client-supplied request_id — which used to mint its own
+        internal id for the audit pair while returning the client's id,
+        leaving the two permanently out of sync."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root, FakeClock(NOW), hold_seconds=5)
+            b._denylist.add(zone="datadoghq.com", scope="global")
+
+            body, request_id = b.file_request(
+                "coding-brassbottle",
+                "datadoghq.com",
+                443,
+                request_id="cafebabe",
+            )
+            self.assertEqual(request_id, "cafebabe")
+            self.assertEqual(body["decision"], "deny")
+            requested = [r for r in self._log_records(root) if r.get("kind") == "requested"]
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(requested[0]["request_id"], "cafebabe")
+            self.assertEqual(denied[0]["request_id"], "cafebabe")
+
+    def test_denylist_short_circuit_coalesces_within_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            b._denylist.add(zone="datadoghq.com", scope="global")
+
+            for _ in range(5):
+                body, _rid = b.file_request("coding-brassbottle", "datadoghq.com", 443)
+                self.assertEqual(body["decision"], "deny")
+                clock.advance(1)
+
+            requested = [r for r in self._log_records(root) if r.get("kind") == "requested"]
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(len(denied), 1)
+
+            clock.advance(broker.HIT_COALESCE_SECONDS + 1)
+            body, _rid = b.file_request("coding-brassbottle", "datadoghq.com", 443)
+            self.assertEqual(body["decision"], "deny")
+            requested = [r for r in self._log_records(root) if r.get("kind") == "requested"]
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(requested), 2)
+            self.assertEqual(len(denied), 2)
+
+    def test_denylist_short_circuit_log_info_gated_to_coalesce_window(self):
+        """Cleanup (finding C): LOG.info at INFO on every hit floods just as
+        badly as the audit log did — gated to the same coalesce window, with
+        suppressed=N surfaced on the next logged hit so nothing vanishes
+        silently."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            b._denylist.add(zone="datadoghq.com", scope="global")
+
+            with self.assertLogs(broker.LOG, level="INFO") as captured:
+                for _ in range(4):
+                    b.file_request("coding-brassbottle", "datadoghq.com", 443)
+                    clock.advance(1)
+            short_circuit_lines = [
+                r.getMessage()
+                for r in captured.records
+                if "denylist short_circuit" in r.getMessage()
+            ]
+            # Only the FIRST hit is logged inside the window; the other 3
+            # are suppressed (no LOG.info at all) rather than each logging
+            # their own line.
+            self.assertEqual(len(short_circuit_lines), 1)
+            self.assertIn("suppressed=0", short_circuit_lines[0])
+
+            clock.advance(broker.HIT_COALESCE_SECONDS + 1)
+            with self.assertLogs(broker.LOG, level="INFO") as captured2:
+                for _ in range(3):
+                    b.file_request("coding-brassbottle", "datadoghq.com", 443)
+                    clock.advance(1)
+            short_circuit_lines2 = [
+                r.getMessage()
+                for r in captured2.records
+                if "denylist short_circuit" in r.getMessage()
+            ]
+            self.assertEqual(len(short_circuit_lines2), 1)
+            # 3 hits were suppressed since the last logged one (the 2nd,
+            # 3rd, 4th calls of the FIRST loop — the suppressed count isn't
+            # reset until it's actually surfaced, which is right here).
+            self.assertIn("suppressed=3", short_circuit_lines2[0])
+
+    def test_denylist_hit_coalescing_keys_by_matched_zone_not_raw_host(self):
+        """Cleanup: distinct subdomains under the same denylisted zone must
+        coalesce TOGETHER (one audit pair per zone per window), not each get
+        their own window keyed off the raw host — a rotating-hostname
+        telemetry client would otherwise defeat the coalescing entirely."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            b._denylist.add(zone="datadoghq.com", scope="global")
+
+            for host in ("a.datadoghq.com", "b.datadoghq.com", "c.datadoghq.com"):
+                body, _rid = b.file_request("coding-brassbottle", host, 443)
+                self.assertEqual(body["decision"], "deny")
+
+            requested = [r for r in self._log_records(root) if r.get("kind") == "requested"]
+            denied = [r for r in self._log_records(root) if r.get("kind") == "denied"]
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(len(denied), 1)
+            self.assertEqual(len(b._denylist_hit_last), 1)
+            self.assertIn(("coding-brassbottle", "datadoghq.com"), b._denylist_hit_last)
+
+    def test_denylist_hit_last_prunes_stale_keys_on_insert(self):
+        """Cleanup: _denylist_hit_last must not grow without bound — a stale
+        entry (older than HIT_COALESCE_SECONDS) is dropped the next time any
+        key is inserted, not just the one that expired."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            b._denylist.add(zone="old-zone.example.com", scope="global")
+            b._denylist.add(zone="new-zone.example.com", scope="global")
+
+            b.file_request("coding-brassbottle", "old-zone.example.com", 443)
+            self.assertEqual(len(b._denylist_hit_last), 1)
+
+            clock.advance(broker.HIT_COALESCE_SECONDS + 1)
+            b.file_request("coding-brassbottle", "new-zone.example.com", 443)
+            # The stale old-zone key must be gone, not just the new one added.
+            self.assertEqual(len(b._denylist_hit_last), 1)
+            self.assertIn(("coding-brassbottle", "new-zone.example.com"), b._denylist_hit_last)
+            self.assertNotIn(
+                ("coding-brassbottle", "old-zone.example.com"), b._denylist_hit_last
+            )
+
+    def test_denylist_suppressed_evicted_hits_are_logged_not_dropped_silently(self):
+        """finding #4: _denylist_short_circuit's own docstring promises a
+        suppressed hit is surfaced on the "NEXT logged hit" for the same
+        key — but a key can be evicted by _prune_denylist_hit_last before
+        any next hit ever arrives for it, and the suppressed count used to
+        just vanish with it (bare dict.pop, no log). Now eviction with a
+        nonzero suppressed count logs one INFO line naming the count."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            b._denylist.add(zone="old-zone.example.com", scope="global")
+            b._denylist.add(zone="new-zone.example.com", scope="global")
+
+            # First hit on old-zone logs (suppressed=0); the second, within
+            # the same coalesce window, is suppressed (counted, not logged).
+            b.file_request("coding-brassbottle", "old-zone.example.com", 443)
+            b.file_request("coding-brassbottle", "old-zone.example.com", 443)
+            self.assertEqual(
+                b._denylist_suppressed[("coding-brassbottle", "old-zone.example.com")], 1
+            )
+
+            clock.advance(broker.HIT_COALESCE_SECONDS + 1)
+            with self.assertLogs(broker.LOG, level="INFO") as captured:
+                # A hit on a DIFFERENT zone triggers the prune (on insert),
+                # evicting the now-stale old-zone key.
+                b.file_request("coding-brassbottle", "new-zone.example.com", 443)
+
+            evict_lines = [
+                r.getMessage() for r in captured.records if "suppressed_evict" in r.getMessage()
+            ]
+            self.assertEqual(len(evict_lines), 1)
+            self.assertIn("container=coding-brassbottle", evict_lines[0])
+            self.assertIn("zone=old-zone.example.com", evict_lines[0])
+            self.assertIn("suppressed=1", evict_lines[0])
+            self.assertNotIn(
+                ("coding-brassbottle", "old-zone.example.com"), b._denylist_suppressed
+            )
+
+    def test_open_request_not_short_circuited_by_a_later_denylist_entry(self):
+        """The coalesce path precedes the denylist check: an already-open
+        request keeps its normal path even after a matching entry appears."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            thread = threading.Thread(
+                target=b.file_request,
+                args=("coding-brassbottle", "neon.tech", 443),
+            )
+            thread.start()
+            open_id = wait_for_broker_open_request(b)
+
+            b._denylist.add(zone="neon.tech", scope="global")
+
+            second_body, second_id = b.file_request("coding-brassbottle", "neon.tech", 443)
+            self.assertEqual(second_id, open_id)
+            self.assertEqual(second_body["decision"], "pending")
+
+            b.decide(open_id, "deny")
+            join_thread_or_fail(thread, label="file_request")
+
+    def test_denylist_matches_reload_picks_up_cli_edit_live(self):
+        """Broker.file_request sees a denylist entry added after daemon start
+        without a restart — mtime reload is the whole point."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=1)
+            body, _rid = b.file_request("coding-brassbottle", "example.net", 443)
+            self.assertEqual(body["decision"], "pending")
+            with b._lock:
+                for state in list(b._requests.values()):
+                    b.decide(state.request_id, "deny")
+
+            # Simulate an external CLI process editing denylist.json directly.
+            import egress_denylist as denylist_mod
+
+            external = denylist_mod.DenyList(root / denylist_mod.DENYLIST_FILENAME)
+            external.add(zone="example.net", scope="global")
+
+            body2, _rid2 = b.file_request("coding-brassbottle", "example.net", 443)
+            self.assertEqual(
+                body2,
+                {"decision": "deny", "reason": "denylist", "zone": "example.net", "scope": "global"},
+            )
 
     def test_file_request_invokes_notifier_once_per_request(self):
         with tempfile.TemporaryDirectory() as tmp:

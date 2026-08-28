@@ -75,3 +75,25 @@ DJINN_CTR_PREFIX="djinn-"
 # Runtime state (pid files, sockets, egress broker run dir). Read-only
 # derivation — callers mkdir what they need under $RUN_PATH themselves.
 RUN_PATH="$BASE_PATH/run"
+
+# Host python3 resolver (same rule as up.sh: prefer the SYSTEM interpreter over
+# a $PATH shim that may be present-but-broken, and PROVE it runs). Sets
+# $PYTHON3; returns 1 with a diagnostic (stderr only) when nothing works.
+# Callers that exec a Python implementation invoke this right before the exec.
+#
+# The candidate loop below already PROVES whatever it picks runs (that's the
+# `"$cand" -c ''` inside the loop) — re-probing it again after the loop would
+# only repeat that same successful check. Only a caller-supplied $PYTHON3
+# skips the loop entirely, so only that branch still needs its own probe.
+require_python3() {
+    if [ -z "${PYTHON3:-}" ]; then
+        for cand in /usr/bin/python3 python3; do
+            if "$cand" -c '' 2>/dev/null; then PYTHON3="$cand"; break; fi
+        done
+        [ -n "${PYTHON3:-}" ] && return 0
+    else
+        "$PYTHON3" -c '' 2>/dev/null && return 0
+    fi
+    echo "Error: no working python3 (tried /usr/bin/python3 and PATH — broken pyenv/brew shim? Install Xcode CLT on macOS, or set PYTHON3=/path/to/python3)" >&2
+    return 1
+}

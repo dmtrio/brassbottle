@@ -40,13 +40,9 @@ CNAME="$DJINN_CTR_PREFIX$NAME"
 # see, so each candidate must actually RUN. Override with PYTHON3=/path.
 # Resolved BEFORE the manifest is read: src/pull_manifests.py runs next, and a
 # manifest merged upstream only exists locally once that pull has happened.
-if [ -z "${PYTHON3:-}" ]; then
-    for cand in /usr/bin/python3 python3; do
-        if "$cand" -c '' 2>/dev/null; then PYTHON3="$cand"; break; fi
-    done
-fi
-[ -n "${PYTHON3:-}" ] && "$PYTHON3" -c '' 2>/dev/null \
-    || { echo "Error: no working python3 (tried /usr/bin/python3 and PATH — broken pyenv/brew shim? Install Xcode CLT on macOS, or set PYTHON3=/path/to/python3)"; exit 1; }
+# require_python3 (src/common.sh, sourced above) owns the candidate loop and
+# the diagnostic; up.sh only decides what to do on failure (exit 1).
+require_python3 || exit 1
 
 # BOTTLES_PATH (resolved in common.sh) is where manifests live: the repo's
 # bottles/ by default, or $BASE_PATH/bottles / a BOTTLES_PATH override

@@ -44,6 +44,16 @@ class EgressWatchTests(unittest.TestCase):
             hold_seconds_default=hold_seconds,
         )
 
+    def _touch_token(self, root: Path, bottle: str) -> None:
+        """Seed tokens/<bottle>.token so persist_deny's bottle-existence
+        check (validate_bottle_scope) passes — real watcher requests always
+        have this already (the bottle had to authenticate to file the
+        request in the first place); tests that go through the real
+        persist_deny with scope=bottle must set it up by hand."""
+        tokens_dir = root / broker.TOKENS_DIRNAME
+        tokens_dir.mkdir(parents=True, exist_ok=True)
+        (tokens_dir / f"{bottle}.token").write_text("tok\n", encoding="utf-8")
+
     def _details(self, **overrides: object) -> watch.RequestDetails:
         base = {
             "request_id": "req-1",
@@ -55,10 +65,10 @@ class EgressWatchTests(unittest.TestCase):
         base.update(overrides)
         return watch.RequestDetails(**base)  # type: ignore[arg-type]
 
-    def _file_request(self, b: broker.EgressBroker) -> str:
+    def _file_request(self, b: broker.EgressBroker, container: str = "coding-brassbottle") -> str:
         thread = threading.Thread(
             target=b.file_request,
-            args=("coding-brassbottle", "docs.stripe.com", 443),
+            args=(container, "docs.stripe.com", 443),
         )
         thread.start()
         request_id = wait_for_broker_open_request(b)
@@ -106,13 +116,337 @@ class EgressWatchTests(unittest.TestCase):
                     self.assertIsNotNone(choice)
                     with mock.patch("subprocess.run") as mocked:
                         mocked.return_value = mock.Mock(returncode=0)
-                        watch.apply_operator_choice(b, request_id, choice)
+                        watch.apply_operator_choice(b, request_id, choice, self._details())
                     with b._lock:
                         self.assertNotIn(request_id, b._requests)
                     if decision == "allow":
                         argv = mocked.call_args[0][0]
                         self.assertNotIn("firewall", argv)
                         self.assertEqual(argv[-1], "yml" if scope == "manifest" else "none")
+
+    def test_new_choices_parse_deny_bottle_and_deny_global(self):
+        self.assertEqual(watch.parse_terminal_choice("D"), watch.OperatorChoice("deny_bottle"))
+        self.assertEqual(watch.parse_terminal_choice("G"), watch.OperatorChoice("deny_global"))
+        # Case matters: lowercase 'd' stays the narrow one-shot deny, and
+        # lowercase 'g' is unmapped (re-prompt) since only uppercase G means
+        # "deny always, all bottles" — a deliberately harder gesture.
+        self.assertEqual(watch.parse_terminal_choice("d"), watch.OperatorChoice("deny"))
+        self.assertIsNone(watch.parse_terminal_choice("g"))
+        # a/p/s remain case-insensitive.
+        self.assertEqual(watch.parse_terminal_choice("A"), watch.OperatorChoice("allow_live"))
+        self.assertEqual(watch.parse_terminal_choice("P"), watch.OperatorChoice("allow_manifest"))
+        self.assertEqual(watch.parse_terminal_choice("S"), watch.OperatorChoice("skip"))
+
+    def test_apply_operator_choice_deny_bottle_and_deny_global_call_persist_deny(self):
+        """finding #5: D/G route through EgressBroker.persist_deny (zone =
+        details.host), not a direct decide(request_id, scope=...) call —
+        that is what makes the sweep-every-covered-request behaviour work.
+
+        finding #7: details.reason is the requesting AGENT's justification
+        for wanting the host, not the operator's — persist_deny must always
+        be called with reason=None from the watcher, never details.reason."""
+        cases = [
+            (watch.OperatorChoice("deny_bottle"), "bottle"),
+            (watch.OperatorChoice("deny_global"), "global"),
+        ]
+        for choice, expected_scope in cases:
+            with self.subTest(action=choice.action):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    b = self._broker(root)
+                    request_id = self._file_request(b)
+                    details = self._details(reason="npm install")
+                    fake_result = broker.PersistDenyResult(
+                        decided=[request_id], entry=mock.Mock(), error=None
+                    )
+                    with mock.patch.object(b, "persist_deny") as mocked_persist:
+                        mocked_persist.return_value = fake_result
+                        error, entry = watch.apply_operator_choice(
+                            b, request_id, choice, details
+                        )
+                    self.assertIsNone(error)
+                    self.assertIsNotNone(entry)
+                    mocked_persist.assert_called_once_with(
+                        details.host,
+                        expected_scope,
+                        container=details.container,
+                        reason=None,
+                        trigger_request_id=request_id,
+                    )
+                    # persist_deny (mocked) never actually closed the held
+                    # request in this test — decide it directly to avoid
+                    # leaking a thread past the test.
+                    b.decide(request_id, "deny")
+
+    def test_deny_bottle_writes_denylist_entry_scoped_to_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._touch_token(root, "coding-brassbottle")
+            b = self._broker(root)
+            request_id = self._file_request(b)
+            watch.apply_operator_choice(
+                b, request_id, watch.OperatorChoice("deny_bottle"), self._details()
+            )
+            entry = b._denylist.matches("coding-brassbottle", "docs.stripe.com")
+            self.assertIsNotNone(entry)
+            self.assertEqual(entry.scope, "coding-brassbottle")
+            # persist_deny sweeps the triggering request itself too.
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)
+
+    def test_deny_global_writes_global_denylist_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            request_id = self._file_request(b)
+            watch.apply_operator_choice(
+                b, request_id, watch.OperatorChoice("deny_global"), self._details()
+            )
+            entry = b._denylist.matches("any-other-bottle", "docs.stripe.com")
+            self.assertIsNotNone(entry)
+            self.assertEqual(entry.scope, "global")
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)
+
+    def test_deny_global_sweeps_other_containers_open_requests_too(self):
+        """finding #5: a G on one bottle's request must also close a
+        DIFFERENT bottle's already-open request for the same host — not
+        just leave it to time out."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            request_id = self._file_request(b)  # coding-brassbottle
+
+            other_result: dict[str, object] = {}
+
+            def other_waiter() -> None:
+                body, _ = b.file_request("other-bottle", "docs.stripe.com", 443)
+                other_result["body"] = body
+
+            other_thread = threading.Thread(target=other_waiter)
+            other_thread.start()
+            wait_for_broker_open_request(b, count=2)
+
+            watch.apply_operator_choice(
+                b, request_id, watch.OperatorChoice("deny_global"), self._details()
+            )
+            join_thread_or_fail(other_thread, label="other bottle file_request")
+            self.assertEqual(
+                other_result["body"],
+                {
+                    "decision": "deny",
+                    "reason": "denylist",
+                    "zone": "docs.stripe.com",
+                    "scope": "global",
+                },
+            )
+
+    def test_deny_bottle_persist_failure_surfaces_via_format_apply_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._touch_token(root, "coding-brassbottle")
+            b = self._broker(root)
+            request_id = self._file_request(b)
+            with mock.patch.object(b._denylist, "add", side_effect=OSError("disk full")):
+                error, entry = watch.apply_operator_choice(
+                    b, request_id, watch.OperatorChoice("deny_bottle"), self._details()
+                )
+            self.assertEqual(error, watch.DENYLIST_PERSIST_FAILED_REASON)
+            self.assertIsNone(entry)
+            self.assertIn(
+                "deny-list entry NOT written", watch.format_apply_failure(error)
+            )
+            # The persist failure must still close the TRIGGERING request as
+            # a one-shot deny (persist_deny's trigger_request_id path) —
+            # "Denied once; deny-list entry NOT written" must be true, not
+            # aspirational: the request is gone from the open queue and the
+            # held waiter already got a deny body (asserted via fold_queue,
+            # not just b._requests, since that's what the watcher itself
+            # polls to decide whether to prompt again).
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)
+            log = egress_log.EgressLog(root)
+            open_ids = log.fold_queue(now=b.now()).open_requests
+            self.assertNotIn(request_id, open_ids)
+
+    def test_run_once_prints_denylist_ack_after_deny_bottle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._touch_token(root, "coding-brassbottle")
+            log = egress_log.EgressLog(root)
+            b = self._broker(root)
+            request_id = self._file_request(b)
+            out = io.StringIO()
+            watcher = watch.EgressWatcher(
+                b, log, input_fn=lambda _p: "D", output=out, platform="linux",
+            )
+            self.assertTrue(watcher.run_once())
+            self.assertIn("Deny-list entry written: zone=docs.stripe.com", out.getvalue())
+            self.assertIn(
+                "undo with: ./djinn undeny docs.stripe.com --bottle coding-brassbottle",
+                out.getvalue(),
+            )
+            with b._lock:
+                self.assertNotIn(request_id, b._requests)
+
+    def test_run_once_prints_nothing_extra_after_plain_deny(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = egress_log.EgressLog(root)
+            b = self._broker(root)
+            self._file_request(b)
+            out = io.StringIO()
+            watcher = watch.EgressWatcher(
+                b, log, input_fn=lambda _p: "d", output=out, platform="linux",
+            )
+            self.assertTrue(watcher.run_once())
+            self.assertNotIn("Deny-list entry written", out.getvalue())
+
+    def test_format_denylist_status_reports_entry_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "denylist.json"
+            d = watch.DenyList(path)
+            self.assertEqual(watch.format_denylist_status(d), "Deny list: 0 entries")
+            d.add(zone="example.com", scope="global")
+            d.add(zone="example.net", scope="global")
+            self.assertEqual(watch.format_denylist_status(d), "Deny list: 2 entries")
+
+    def test_format_denylist_status_reports_corrupt_file(self):
+        """finding #8b: a corrupt denylist.json must not fail silently —
+        the status line says so, and says entries are not applied."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "denylist.json"
+            path.write_text("{BROKEN", encoding="utf-8")
+            d = watch.DenyList(path)
+            status = watch.format_denylist_status(d)
+            self.assertIn("CORRUPT", status)
+            self.assertIn("entries NOT applied", status)
+            self.assertIn("prompts will resume", status)
+
+    def test_run_once_prompt_block_includes_denylist_status(self):
+        """finding #8b: each prompt block shows the deny-list status, not
+        just the startup banner — the operator needs it visible right where
+        they're deciding, not only once at launch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = egress_log.EgressLog(root)
+            b = self._broker(root)
+            b._denylist.add(zone="example.com", scope="global")
+            self._file_request(b)
+            out = io.StringIO()
+            watcher = watch.EgressWatcher(
+                b, log, input_fn=lambda _p: "d", output=out, platform="linux",
+            )
+            self.assertTrue(watcher.run_once())
+            self.assertIn("Deny list: 1 entries", out.getvalue())
+
+    def test_run_once_deny_bottle_on_container_named_global_leaves_request_open(self):
+        """finding #4: a request whose container is literally "global"
+        hitting the watcher's D key must not crash the watcher —
+        persist_deny's own validate_bottle_scope raises before writing
+        anything; run_once catches it, prints the error, and the request
+        stays open (nothing was decided) rather than the exception
+        propagating out of run_once."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = egress_log.EgressLog(root)
+            b = self._broker(root)
+            request_id = self._file_request(b, container="global")
+            out = io.StringIO()
+            watcher = watch.EgressWatcher(
+                b, log, input_fn=lambda _p: "D", output=out, platform="linux",
+            )
+            self.assertTrue(watcher.run_once())
+            self.assertIn("Error:", out.getvalue())
+            self.assertIn("reserved", out.getvalue())
+            with b._lock:
+                self.assertIn(request_id, b._requests)
+            open_ids = log.fold_queue(now=b.now()).open_requests
+            self.assertIn(request_id, open_ids)
+
+    def test_dialog_output_deny_always_maps_to_deny_bottle(self):
+        self.assertEqual(
+            watch._dialog_choice_from_output("Deny always"),
+            watch.OperatorChoice("deny_bottle"),
+        )
+        self.assertEqual(
+            watch._dialog_choice_from_output("Deny always\n"),
+            watch.OperatorChoice("deny_bottle"),
+        )
+
+    def test_dialog_buttons_are_deny_then_deny_always_then_allow(self):
+        """finding #6: "Deny" keeps its ORIGINAL position (first — it was
+        {"Deny", "Allow"} before "Deny always" existed); "Deny always" is
+        inserted BETWEEN Deny and Allow, not in front of Deny. The default
+        button stays "Deny", unchanged."""
+        argv = watch.build_osascript_argv(title="t", message="m")
+        script_lines = [arg for i, arg in enumerate(argv) if i > 0 and argv[i - 1] == "-e"]
+        dialog_line = next(line for line in script_lines if "display dialog" in line)
+        self.assertIn('"Deny always"', dialog_line)
+        self.assertIn('"Deny"', dialog_line)
+        self.assertIn('"Allow"', dialog_line)
+        # .index('"Deny"') finds the FIRST exact `"Deny"` — the button list
+        # entry, not `"Deny always"` (no exact `"Deny"` substring inside
+        # that) and not the later `default button "Deny"`.
+        self.assertLess(
+            dialog_line.index('"Deny"'),
+            dialog_line.index('"Deny always"'),
+        )
+        self.assertLess(
+            dialog_line.index('"Deny always"'),
+            dialog_line.index('"Allow"'),
+        )
+        self.assertIn('default button "Deny"', dialog_line)
+
+    def test_dialog_message_states_deny_always_scope(self):
+        """finding #6: the dialog message must say what "Deny always"
+        actually does (this host, this bottle — not the broader "all
+        bottles" scope, which stays terminal/CLI-only) and how to undo it."""
+        _title, message = watch.build_dialog_message(self._details())
+        self.assertIn(
+            "Deny always = this host, this bottle (persistent; undo with ./djinn undeny)",
+            message,
+        )
+
+    def test_dialog_deny_always_prompt_resolves_to_deny_bottle(self):
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("Deny always\n")
+        proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        gate = threading.Event()
+
+        def input_fn(_prompt: str) -> str:
+            gate.wait()
+            return "s"
+
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=input_fn,
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: proc,
+            notify_runner=lambda _argv: None,
+        )
+        choice = watcher._prompt_with_dialog(self._details())
+        self.assertEqual(choice.action, "deny_bottle")
+
+    def test_prompt_line_renders_deny_always_keys(self):
+        details = self._details()
+        block = watch.format_request_block(details)
+        for key in ("[d]", "[D]", "[G]"):
+            self.assertIn(key, block)
+        # finding #5: honest about scope — "this host" in both, "this
+        # bottle" vs "all bottles" is what actually differs.
+        self.assertIn("deny always: this host, this bottle", block)
+        self.assertIn("deny always: this host, all bottles", block)
+
+    def test_ip_prompt_line_also_renders_deny_always_keys(self):
+        details = self._details(host="192.0.2.55", port=5432)
+        block = watch.format_request_block(details)
+        for key in ("[d]", "[D]", "[G]"):
+            self.assertIn(key, block)
 
     def test_skip_does_not_call_decide(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -124,6 +458,7 @@ class EgressWatchTests(unittest.TestCase):
                     b,
                     request_id,
                     watch.OperatorChoice("skip"),
+                    self._details(),
                 )
                 mocked_decide.assert_not_called()
             with b._lock:
@@ -841,8 +1176,17 @@ class WatcherStartupSurfaceTests(unittest.TestCase):
         self.assertIn("Watching for egress requests on 127.0.0.1:", out)
         self.assertIn("queue:", out)
         self.assertIn(str(watch.resolve_egress_root(base)), out)
-        for key in ("[a]", "[p]", "[d]", "[s]"):
+        # finding #8b: the deny-list status must be visible in the startup
+        # banner too, not only per-prompt — a fresh base_path has no
+        # denylist.json yet, which reads as 0 entries (not corrupt).
+        self.assertIn("Deny list: 0 entries", out)
+        for key in ("[a]", "[p]", "[d]", "[D]", "[G]", "[s]"):
             self.assertIn(key, out, f"key legend must mention {key}")
+        # finding E: D/G's uppercase-means-writes-to-disk convention is
+        # deliberate but easy to fat-finger — the banner must say so
+        # explicitly, not leave it to be inferred from the key legend.
+        self.assertIn("D/G are uppercase on purpose", out)
+        self.assertIn("./djinn undeny", out)
 
     def test_run_watch_creates_the_run_directory(self):
         """RUN_PATH is a side-effect-free derivation; the daemon creates it.

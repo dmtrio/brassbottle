@@ -344,11 +344,15 @@ COPY src/code_workspace.py /usr/local/lib/djinn/code_workspace.py
 RUN chmod 644 /usr/local/lib/djinn/code_workspace.py
 
 COPY src/egress_log.py /usr/local/lib/djinn/egress_log.py
+COPY src/egress_denylist.py /usr/local/lib/djinn/egress_denylist.py
+COPY src/egress_notify.py /usr/local/lib/djinn/egress_notify.py
 COPY src/egress_broker_host.py /usr/local/lib/djinn/egress_broker_host.py
 COPY src/egress_broker.py /usr/local/lib/djinn/egress_broker.py
 COPY src/egress_nflog.py /usr/local/lib/djinn/egress_nflog.py
 COPY src/egress_request.py /usr/local/lib/djinn/egress_request.py
 RUN chmod 644 /usr/local/lib/djinn/egress_log.py \
+    /usr/local/lib/djinn/egress_denylist.py \
+    /usr/local/lib/djinn/egress_notify.py \
     /usr/local/lib/djinn/egress_broker_host.py \
     /usr/local/lib/djinn/egress_broker.py \
     /usr/local/lib/djinn/egress_nflog.py \

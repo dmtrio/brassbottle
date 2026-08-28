@@ -19,13 +19,9 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$SCRIPT_DIR/src/common.sh"
 
-if [ -z "${PYTHON3:-}" ]; then
-    for cand in /usr/bin/python3 python3; do
-        if "$cand" -c '' 2>/dev/null; then PYTHON3="$cand"; break; fi
-    done
-fi
-[ -n "${PYTHON3:-}" ] && "$PYTHON3" -c '' 2>/dev/null \
-    || { echo "Error: no working python3" >&2; exit 1; }
+# require_python3 (src/common.sh, sourced above) owns the candidate loop and
+# the diagnostic; backup.sh only decides what to do on failure (exit 1).
+require_python3 || exit 1
 
 if [ -z "${1:-}" ]; then
     echo "Usage: ./backup.sh <cmd> [args...]"

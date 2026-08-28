@@ -35,7 +35,7 @@ echo "── ./djinn: help / -h / --help ──"
 for h in help -h --help; do
     out=$(./djinn "$h" 2>&1); rc=$?
     assert_rc "'$h' → rc 0" 0 "$rc"
-    for sub in up down service backup allow keys; do
+    for sub in up down service backup allow deny undeny keys; do
         assert_contains "'$h' mentions '$sub'" "$out" "  $sub "
     done
 done
@@ -44,6 +44,52 @@ echo "── ./djinn: unknown subcommand ──"
 out=$(./djinn bogus 2>&1); rc=$?
 assert_rc "unknown subcommand → rc 1" 1 "$rc"
 assert_contains "unknown subcommand names it" "$out" "unknown subcommand 'bogus'"
+
+echo "── ./djinn deny/deny --list/undeny: dispatch to src/egress_denylist.py ──"
+# deny/undeny are glue, same as every other subcommand: they hand off to
+# src/egress_denylist.py's add/list/remove subcommands (all real logic —
+# scope validation, atomic write, the daemon-first POST — is unit-tested in
+# tests/test_egress_denylist.py). This proves only the WIRING: the right
+# Python subcommand is actually reached, DJINN_HOME is resolved from
+# BASE_PATH (not guessed by the Python side — the same failure mode called
+# out for `allow --watch` above), and a usage error raised by Python
+# surfaces with djinn's own exit code, not swallowed by the bash dispatcher.
+DENY_HOME="$(mktemp -d)"
+trap 'rm -rf "$DENY_HOME"' EXIT
+
+# A zone with no scope reaches Python (bash does no scope validation of its
+# own) and fails there with a usage message and exit 2.
+out=$(DJINN_HOME="$DENY_HOME" ./djinn deny example.com 2>&1); rc=$?
+assert_rc "deny with no scope → rc 2 (usage error from Python)" 2 "$rc"
+assert_contains "deny with no scope names what's missing" "$out" "scope is required"
+
+# 'deny' dispatches to egress_denylist.py's 'add' subcommand; the written
+# entry landing under $DENY_HOME also proves DJINN_HOME is set from
+# BASE_PATH rather than left to Python's own default guess.
+out=$(DJINN_HOME="$DENY_HOME" ./djinn deny example.com --global --reason "test entry" 2>&1); rc=$?
+assert_rc "deny <zone> --global → rc 0" 0 "$rc"
+assert_contains "deny dispatches to egress_denylist.py add" "$out" "Denied: example.com"
+if [ -f "$DENY_HOME/run/egress/denylist.json" ]; then
+    pass "deny wrote denylist.json under DJINN_HOME (BASE_PATH), not guessed"
+else
+    fail "deny did not write under DJINN_HOME=$DENY_HOME (run/egress/denylist.json missing)"
+fi
+
+# 'deny --list' dispatches to egress_denylist.py's 'list' subcommand.
+out=$(DJINN_HOME="$DENY_HOME" ./djinn deny --list 2>&1); rc=$?
+assert_rc "deny --list → rc 0" 0 "$rc"
+assert_contains "deny --list dispatches to egress_denylist.py list" "$out" "example.com"
+
+# 'undeny' dispatches to egress_denylist.py's 'remove' subcommand.
+out=$(DJINN_HOME="$DENY_HOME" ./djinn undeny example.com --global 2>&1); rc=$?
+assert_rc "undeny <zone> --global → rc 0" 0 "$rc"
+assert_contains "undeny dispatches to egress_denylist.py remove" "$out" "Undenied: example.com"
+
+out=$(DJINN_HOME="$DENY_HOME" ./djinn deny --list 2>&1)
+assert_contains "deny --list reflects the removal" "$out" "no denylist entries"
+
+out=$(DJINN_HOME="$DENY_HOME" ./djinn undeny nope.example.com --global 2>&1); rc=$?
+assert_rc "undeny nonexistent entry → rc 3 (from Python, not swallowed)" 3 "$rc"
 
 echo "── ./djinn: every subcommand target exists (and is executable, where that applies) ──"
 check_target() {   # $1=subcommand $2=target-path $3=1 if it must be +x

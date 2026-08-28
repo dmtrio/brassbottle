@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from egress_broker_host import DEFAULT_HOLD_SECONDS, normalize_destination
+from egress_broker_host import DEFAULT_HOLD_SECONDS, normalize_destination, undeny_hint
 from egress_nflog import (
     default_broker_url,
     host_for_filing,
@@ -334,12 +334,27 @@ def build_http_503(host: str, request_id: str, bottle: str) -> bytes:
     return ("\r\n".join(headers) + "\r\n\r\n").encode("ascii") + body
 
 
-def build_http_403(host: str, request_id: str) -> bytes:
-    reason = f"Egress denied: {host} (req {request_id})"
-    body = (
-        f"Outbound access to {host} was denied by the operator "
-        f"(request id {request_id}).\n"
-    ).encode("utf-8")
+def build_http_403(
+    host: str,
+    request_id: str,
+    *,
+    denylist_zone: str | None = None,
+    denylist_scope: str | None = None,
+) -> bytes:
+    if denylist_zone is not None and denylist_scope is not None:
+        reason = f"Egress denied: {host} is on the persistent deny list (req {request_id})"
+        body = (
+            f"Outbound access to {host} is on the persistent deny list "
+            f"(zone {denylist_zone}, scope {denylist_scope}) "
+            f"(request id {request_id}).\n"
+            f"An operator can lift it with `{undeny_hint(denylist_zone, denylist_scope)}`.\n"
+        ).encode("utf-8")
+    else:
+        reason = f"Egress denied: {host} (req {request_id})"
+        body = (
+            f"Outbound access to {host} was denied by the operator "
+            f"(request id {request_id}).\n"
+        ).encode("utf-8")
     headers = [
         f"HTTP/1.1 403 {reason}",
         "Content-Type: text/plain; charset=utf-8",
@@ -754,8 +769,34 @@ def handle_intercepted_connection(
         )
 
     if outcome == "deny":
-        LOG.info("egress broker decide_deny conn_id=%s request_id=%s", conn_id, request_id)
-        _emit_failure(client, dst.port, host=host, request_id=request_id, bottle=config.container, reason="deny")
+        decision_body = filing_result.get("value")
+        denylist_zone: str | None = None
+        denylist_scope: str | None = None
+        if isinstance(decision_body, dict) and decision_body.get("reason") == "denylist":
+            zone_val = decision_body.get("zone")
+            scope_val = decision_body.get("scope")
+            if isinstance(zone_val, str) and isinstance(scope_val, str):
+                denylist_zone, denylist_scope = zone_val, scope_val
+        if denylist_zone is not None:
+            LOG.info(
+                "egress broker decide_deny_denylist conn_id=%s request_id=%s zone=%s scope=%s",
+                conn_id,
+                request_id,
+                denylist_zone,
+                denylist_scope,
+            )
+        else:
+            LOG.info("egress broker decide_deny conn_id=%s request_id=%s", conn_id, request_id)
+        _emit_failure(
+            client,
+            dst.port,
+            host=host,
+            request_id=request_id,
+            bottle=config.container,
+            reason="deny",
+            denylist_zone=denylist_zone,
+            denylist_scope=denylist_scope,
+        )
         return ConnectionOutcome(
             action="deny",
             dst_ip=dst.ip,
@@ -802,12 +843,23 @@ def _emit_failure(
     request_id: str,
     bottle: str,
     reason: str,
+    denylist_zone: str | None = None,
+    denylist_scope: str | None = None,
 ) -> None:
     if dst_port == 443:
+        # TLS carries no room for a message; the LOG line at the call site
+        # already distinguishes a denylist hit from an operator deny.
         client.sendall(TLS_ACCESS_DENIED_ALERT)
         return
     if reason == "deny":
-        client.sendall(build_http_403(host, request_id))
+        client.sendall(
+            build_http_403(
+                host,
+                request_id,
+                denylist_zone=denylist_zone,
+                denylist_scope=denylist_scope,
+            )
+        )
     elif reason == "daemon_error":
         client.sendall(build_http_502())
     else:
