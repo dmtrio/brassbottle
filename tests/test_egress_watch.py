@@ -1135,6 +1135,86 @@ class EgressWatchTests(unittest.TestCase):
         warnings = [r for r in captured.records if r.levelno == logging.WARNING]
         self.assertEqual(warnings, [])
 
+    def test_a_poll_reads_the_log_once_regardless_of_queue_depth(self):
+        """Announcing every open request must not re-read the log per request.
+
+        request_details_from_log folds the queue AND re-reads the whole month
+        each call, so calling it per open request made a poll
+        O(open requests x log size) — the backlog case is exactly when the
+        operator can least afford the delay.
+        """
+        reads: list[int] = []
+        folds: list[int] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            log = egress_log.EgressLog(root)
+            filed = set()
+            for name in ("bottle-one", "bottle-two", "bottle-three", "bottle-four"):
+                filed.add(self._file_request(b, container=name, already=set(filed)))
+
+            watcher = watch.EgressWatcher(
+                b,
+                log,
+                input_fn=lambda _p: "s",
+                output=io.StringIO(),
+                platform="linux",
+            )
+
+            real_month_records = watch._month_records
+            real_fold = log.fold_queue
+
+            def counting_month_records(*args, **kwargs):
+                reads.append(1)
+                return real_month_records(*args, **kwargs)
+
+            def counting_fold(*args, **kwargs):
+                folds.append(1)
+                return real_fold(*args, **kwargs)
+
+            with mock.patch.object(watch, "_month_records", counting_month_records), \
+                    mock.patch.object(log, "fold_queue", counting_fold):
+                self.assertTrue(watcher.run_once())
+
+        self.assertEqual(len(folds), 1, "the queue must be folded once per poll")
+        self.assertEqual(
+            len(reads), 1, "the month log must be read once per poll, not per request"
+        )
+
+    def test_all_four_requests_are_announced_from_the_one_snapshot(self):
+        # The single-pass optimisation must not cost coverage: every open
+        # request still gets its banner, with its own details.
+        hosts: list[str] = []
+        all_seen = threading.Event()
+
+        def notify_runner(argv: list[str]) -> None:
+            # _osascript_argv ends "-- <message> <title>"; the message is the
+            # half naming the container and destination.
+            hosts.append(argv[-2])
+            if len(hosts) >= 4:
+                all_seen.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            filed = set()
+            for name in ("bottle-one", "bottle-two", "bottle-three", "bottle-four"):
+                filed.add(self._file_request(b, container=name, already=set(filed)))
+            watcher = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=lambda _p: "s",
+                output=io.StringIO(),
+                platform="darwin",
+                notify_runner=notify_runner,
+            )
+            watcher.run_once()
+            self.assertTrue(all_seen.wait(timeout=5), f"only announced {hosts}")
+
+        containers = {h for host in hosts for h in host.split() if h.startswith("bottle-")}
+        self.assertEqual(len(containers), 4, hosts)
+
     def test_banner_fires_once_per_request_across_polls(self):
         # The old code suppressed the banner when the operator answered inside
         # the scheduling gap. Announcing on first sight replaces that: fire
@@ -1173,7 +1253,7 @@ class EgressWatchTests(unittest.TestCase):
         both = threading.Event()
 
         def notify_runner(argv: list[str]) -> None:
-            seen.append(argv[-1])
+            seen.append(argv[-2])
             if len(seen) >= 2:
                 both.set()
 
