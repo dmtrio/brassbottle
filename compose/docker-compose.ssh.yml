@@ -11,6 +11,10 @@ services:
     environment:
       - SSH_ENABLED=true
       - SSH_AUTHORIZED_KEY=${SSH_AUTHORIZED_KEY:-}
+      # Optional second authorized key: the singleton jump container's.
+      # Empty until ./djinn jump start generates one and it is added to
+      # secrets.env; entrypoint.sh appends it rather than replacing.
+      - JUMP_AUTHORIZED_KEY=${JUMP_AUTHORIZED_KEY:-}
       # RFC 04: land interactive SSH/mosh logins in a durable shared tmux
       # session (the entrypoint persists this into /etc/environment so
       # PAM-built SSH session envs see it).

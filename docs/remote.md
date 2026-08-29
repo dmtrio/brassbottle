@@ -58,3 +58,60 @@ Point your WireGuard/VPN layer at that CIDR once and every container is
 reachable at its bridge IP from any enrolled device — `djinn up` prints the
 IP in its summary. sshd and the mosh range stay loopback/tunnel-only;
 nothing listens publicly.
+
+## The jump container (`./djinn jump`)
+
+A singleton container per djinn installation that terminates your inbound
+mosh session and hops onward to bottles over `djinn-net`. One mosh endpoint
+for the whole fleet instead of a UDP range baked into every bottle.
+
+```bash
+./djinn jump start      # build + start; prints the address and the key to authorise
+./djinn jump pubkey     # the key your bottles must trust
+./djinn jump status
+./djinn jump logs -f
+./djinn jump stop
+```
+
+**First run, once:**
+
+1. `./djinn jump start` — generates the jump's own ed25519 keypair (persisted
+   under `$DJINN_HOME/jump/ssh/`, so a rebuild keeps it) and prints it.
+2. Put that line in `secrets.env` as `JUMP_AUTHORIZED_KEY`.
+3. `./djinn up <bottle>` for each bottle you want reachable. The bottle
+   *appends* it to `authorized_keys` — your own `SSH_AUTHORIZED_KEY` keeps
+   working, so a bottle stays directly reachable even when the jump is down.
+
+**Then, from a phone over your tunnel:**
+
+```
+mosh coder@172.30.0.2          # the jump's static bridge address
+ssh djinn-coding-tanks         # hop onward; lands in the bottle's tmux session
+```
+
+The hop must be **SSH**, not `docker exec` — `src/tmux-landing.bashrc` only
+attaches the durable `agent` session for an `sshd`/`mosh-server` parent, so
+`docker exec` deliberately drops you in a bare shell with nothing persistent.
+
+**Why no published host ports.** The jump is reached at its bridge IP over
+the tunnel, so nothing is published to the host at all. That also removes the
+host-port exclusivity that forced a disjoint `remote.mosh_ports` range per
+bottle: one in-container range now serves every session. Its address is
+static (`.2` of `DJINN_SUBNET`, override with `DJINN_JUMP_IP`) so the tunnel
+target survives a recreate.
+
+**Bottle host keys.** A bottle regenerates its SSH host keys on every
+recreate, so the jump uses `StrictHostKeyChecking accept-new` against a
+persisted `known_hosts`. After `./djinn up <bottle>`, clear the stale entry:
+
+```bash
+docker exec djinn-jump-<suffix> ssh-keygen -R djinn-<bottle> \
+    -f /etc/djinn-jump/ssh/known_hosts
+```
+
+Per-bottle jump users (one Unix user per bottle, each holding only that
+bottle's key) are a planned follow-up — see *PLN - Djinn Admin Plane* §D8.
+Today the jump holds one key that opens every bottle that authorises it.
+
+Per-bottle `remote.mosh` still works and is unchanged; the two paths coexist
+so the jump can be proven before anything is removed.

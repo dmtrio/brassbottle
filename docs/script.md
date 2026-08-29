@@ -120,6 +120,14 @@ The host commands above live in `bin/`; `src/` is internal source — the
 - **`src/tmux.conf` / `src/tmux-landing.bashrc`** — remote access (RFC 04):
   mobile-friendly tmux defaults, and the guarded snippet that lands interactive
   SSH/mosh logins in the shared durable `agent` session.
+- **`src/jump_config.py`** — singleton jump container: identity, host paths,
+  bridge address resolution and compose generation (host-side, stdlib).
+- **`src/jump_host.py`** — `./djinn jump` operator commands (start/stop/
+  status/logs/pubkey); thin docker-compose glue over `jump_config`.
+- **`jump/Dockerfile`, `jump/entrypoint.sh`, `jump/ssh_config`** — the jump
+  image: sshd + mosh only. The entrypoint generates and persists both the
+  host keys and the jump's own client key on the mounted volume, so neither
+  changes across a rebuild.
 - **`src/mosh-server-wrapper.sh`** — pins client-launched mosh servers to the
   firewalled/published UDP range.
 - **`src/tmux-notify.sh`** — agent-blind idle notifier; fired by the tmux

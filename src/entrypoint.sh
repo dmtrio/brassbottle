@@ -152,6 +152,14 @@ if [ "$SSH_ENABLED" = "true" ]; then
         exit 1
     fi
     echo "$SSH_AUTHORIZED_KEY" > /home/coder/.ssh/authorized_keys
+    # The singleton jump container's own key (PLN - Djinn Admin Plane, PR 1).
+    # Appended, never replacing: the operator key above must keep working so a
+    # bottle stays reachable directly even when the jump is down. Optional —
+    # bottles are unaffected until ./djinn jump start has generated one.
+    if [ -n "${JUMP_AUTHORIZED_KEY:-}" ]; then
+        echo "$JUMP_AUTHORIZED_KEY" >> /home/coder/.ssh/authorized_keys
+        echo "✓ Jump container key authorized"
+    fi
     chmod 600 /home/coder/.ssh/authorized_keys
     chown coder:coder /home/coder/.ssh/authorized_keys
 

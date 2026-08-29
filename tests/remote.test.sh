@@ -24,9 +24,26 @@ fail() { echo "  ✗ $1"; FAILURES=$((FAILURES + 1)); }
 pass() { echo "  ✓ $1"; }
 
 echo "── syntax"
-for f in up.sh src/entrypoint.sh src/init-firewall.sh src/tmux-notify.sh src/mosh-server-wrapper.sh src/tmux-landing.bashrc src/freshness-landing.bashrc; do
+for f in up.sh jump.sh src/entrypoint.sh src/init-firewall.sh src/tmux-notify.sh src/mosh-server-wrapper.sh src/tmux-landing.bashrc src/freshness-landing.bashrc jump/entrypoint.sh; do
     bash -n "$f" && pass "bash -n $f" || fail "$f has syntax errors"
 done
+
+echo "── jump container (PLN - Djinn Admin Plane PR 1)"
+grep -qF 'COPY src/mosh-server-wrapper.sh /usr/local/bin/mosh-server' jump/Dockerfile \
+    && pass "jump image reuses the bottle's mosh-server wrapper" \
+    || fail "jump/Dockerfile does not install src/mosh-server-wrapper.sh"
+grep -qF 'update-locale LANG=en_US.UTF-8' jump/Dockerfile \
+    && pass "jump image sets a UTF-8 native locale (mosh-server aborts without one)" \
+    || fail "jump/Dockerfile is missing the UTF-8 locale setup"
+grep -qF 'JUMP_AUTHORIZED_KEY' src/entrypoint.sh \
+    && pass "bottle entrypoint honours JUMP_AUTHORIZED_KEY" \
+    || fail "src/entrypoint.sh does not append JUMP_AUTHORIZED_KEY"
+grep -qF 'JUMP_AUTHORIZED_KEY=${JUMP_AUTHORIZED_KEY:-}' compose/docker-compose.ssh.yml \
+    && pass "ssh overlay passes JUMP_AUTHORIZED_KEY into the bottle" \
+    || fail "compose/docker-compose.ssh.yml does not pass JUMP_AUTHORIZED_KEY"
+grep -qF '>> /home/coder/.ssh/authorized_keys' src/entrypoint.sh \
+    && pass "jump key is APPENDED, so the operator key keeps working" \
+    || fail "src/entrypoint.sh must append the jump key, never replace"
 
 echo "── compose overlays"
 for f in compose/docker-compose.local.yml compose/docker-compose.ssh.yml compose/docker-compose.mosh.yml; do
