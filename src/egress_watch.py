@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, Iterable, TextIO
 
 from egress_broker_host import (
     CONFIG_FILENAME,
@@ -50,7 +50,7 @@ from egress_broker_host import (
     write_daemon_endpoint,
 )
 from egress_denylist import DenyEntry, DenyList
-from egress_log import EgressLog
+from egress_log import EgressLog, OpenRequest, QueueState
 
 from egress_notify import (
     NtfyNotifier,
@@ -257,34 +257,68 @@ def _month_records(log: EgressLog, when: datetime) -> list[dict]:
     return records
 
 
-def request_details_from_log(
-    log: EgressLog,
-    request_id: str,
-    *,
-    now: datetime | None = None,
-) -> RequestDetails | None:
-    """Fold request metadata and hit count from the monthly audit log."""
-    when = now or datetime.now(timezone.utc)
-    queue = log.fold_queue(now=when)
-    open_req = queue.open_requests.get(request_id)
-    if open_req is None:
-        return None
+_META_KEYS = ("container", "host", "port", "uid", "comm", "reason")
 
-    meta: dict[str, object] = {}
-    hit_count = 1
-    for record in _month_records(log, when):
-        if record.get("request_id") != request_id:
+
+def request_details_for_ids(
+    log: EgressLog,
+    request_ids: Iterable[str],
+    *,
+    queue: QueueState,
+    now: datetime,
+) -> dict[str, RequestDetails]:
+    """Build RequestDetails for many requests in ONE pass over the log.
+
+    The per-request helper folds the queue AND re-reads the whole monthly
+    audit log every call, so asking for details one id at a time makes a poll
+    O(open requests x log size) — with a backlogged queue and a large month
+    that delays the very prompt and notifications this loop exists to deliver.
+    Callers that already hold a folded `queue` pass it in and get every
+    request's details for a single read.
+
+    Ids that are not open (or whose records are unusable) are simply absent
+    from the result.
+    """
+    wanted = {rid for rid in request_ids if rid in queue.open_requests}
+    if not wanted:
+        return {}
+
+    meta: dict[str, dict[str, object]] = {rid: {} for rid in wanted}
+    hit_counts: dict[str, int] = {rid: 1 for rid in wanted}
+    for record in _month_records(log, now):
+        request_id = record.get("request_id")
+        if request_id not in wanted:
             continue
         kind = record.get("kind")
         if kind == "requested":
-            for key in ("container", "host", "port", "uid", "comm", "reason"):
+            for key in _META_KEYS:
                 if key in record:
-                    meta[key] = record[key]
+                    meta[request_id][key] = record[key]
         elif kind == "hit":
             count = record.get("count", 1)
             if isinstance(count, int) and count > 0:
-                hit_count += count
+                hit_counts[request_id] += count
 
+    details: dict[str, RequestDetails] = {}
+    for request_id in wanted:
+        built = _build_details(
+            request_id,
+            meta[request_id],
+            hit_counts[request_id],
+            queue.open_requests[request_id],
+        )
+        if built is not None:
+            details[request_id] = built
+    return details
+
+
+def _build_details(
+    request_id: str,
+    meta: dict[str, object],
+    hit_count: int,
+    open_req: OpenRequest,
+) -> RequestDetails | None:
+    """Reconcile folded queue state with the request's own log records."""
     container = meta.get("container", open_req.container)
     host = meta.get("host", open_req.host)
     port = meta.get("port", open_req.port)
@@ -303,6 +337,24 @@ def request_details_from_log(
         uid=uid if isinstance(uid, int) else None,
         comm=comm if isinstance(comm, str) else None,
         reason=reason if isinstance(reason, str) else None,
+    )
+
+
+def request_details_from_log(
+    log: EgressLog,
+    request_id: str,
+    *,
+    now: datetime | None = None,
+) -> RequestDetails | None:
+    """Fold request metadata and hit count from the monthly audit log.
+
+    Single-request convenience wrapper; a caller handling several requests
+    should fold once and use request_details_for_ids instead.
+    """
+    when = now or datetime.now(timezone.utc)
+    queue = log.fold_queue(now=when)
+    return request_details_for_ids(log, [request_id], queue=queue, now=when).get(
+        request_id
     )
 
 
@@ -500,6 +552,14 @@ class EgressWatcher:
         self._deferred &= still_open
         self._notified &= still_open
 
+        # ONE pass over the log for the whole poll. Asking for details per
+        # request would make each poll O(open requests x log size) — with a
+        # backlogged queue and a large monthly log that delays the very
+        # prompt and banners this loop exists to deliver.
+        details_by_id = request_details_for_ids(
+            self._log, open_ids, queue=queue, now=when
+        )
+
         # Announce EVERY open request as soon as it appears. This used to live
         # inside _prompt_with_dialog, which meant the banner for request B did
         # not fire until the operator had answered request A — and an
@@ -508,7 +568,7 @@ class EgressWatcher:
         for request_id in open_ids:
             if request_id in self._notified:
                 continue
-            details = request_details_from_log(self._log, request_id, now=when)
+            details = details_by_id.get(request_id)
             if details is None:
                 continue
             self._notified.add(request_id)
@@ -517,7 +577,7 @@ class EgressWatcher:
         for request_id in open_ids:
             if request_id in self._deferred:
                 continue
-            details = request_details_from_log(self._log, request_id, now=when)
+            details = details_by_id.get(request_id)
             if details is None:
                 continue
             choice = self._prompt_operator(details)
