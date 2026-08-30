@@ -80,6 +80,13 @@ SSHD
 # PAM builds each session's env from /etc/environment and ignores container
 # env — same reason src/entrypoint.sh does this for the bottles. Without it
 # the mosh-server wrapper cannot see MOSH_PORTS and falls back to its default.
+#
+# touch first: debian:bookworm-slim does not ship /etc/environment (it is
+# dpkg-unowned), and the bottle image only gets away with the same loop
+# because its Dockerfile writes the file explicitly. Under `set -e` a `sed -i`
+# on a missing file exits 2 and kills the entrypoint before sshd ever starts —
+# a permanent restart loop that would first surface on the operator's phone.
+touch /etc/environment
 for var in MOSH_PORTS LANG LC_ALL; do
     val="${!var:-}"
     [ -n "$val" ] || continue
@@ -103,7 +110,11 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  djinn-jump is up (sshd :22, mosh UDP ${MOSH_PORTS:-60000:60010})"
 echo ""
 echo "  Authorise this key in your bottles — set in secrets.env:"
-echo "    JUMP_AUTHORIZED_KEY=$(cat "$CLIENT_KEY.pub")"
+# QUOTED: secrets.env is sourced by every host script under `set -e`, so an
+# unquoted key's spaces would make bash run its comment as a command and abort
+# every ./djinn up. Printing the line the operator copies is exactly where
+# that has to be right.
+echo "    JUMP_AUTHORIZED_KEY=\"$(cat "$CLIENT_KEY.pub")\""
 echo "  then re-run ./djinn up <bottle> for each bottle you want reachable."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
