@@ -25,7 +25,11 @@ fi
 # client key (bottles keep trusting the key they already authorised).
 mkdir -p "$SSH_DIR"
 chown coder:coder "$SSH_DIR"
-chmod 700 "$SSH_DIR"
+# 0755, not 0700: this is a bind mount, and `./djinn jump pubkey` reads the
+# public key from the HOST side as the operator's uid. 0700 owned by uid 1000
+# makes the directory untraversable there. The private keys inside stay 0600,
+# which is what sshd and ssh actually check.
+chmod 755 "$SSH_DIR"
 
 printf '%s\n' "$SSH_AUTHORIZED_KEY" > /home/coder/.ssh/authorized_keys
 chmod 600 /home/coder/.ssh/authorized_keys

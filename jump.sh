@@ -19,13 +19,10 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$SCRIPT_DIR/src/common.sh"
 
-if [ -z "${PYTHON3:-}" ]; then
-    for cand in /usr/bin/python3 python3; do
-        if "$cand" -c '' 2>/dev/null; then PYTHON3="$cand"; break; fi
-    done
-fi
-[ -n "${PYTHON3:-}" ] && "$PYTHON3" -c '' 2>/dev/null \
-    || { echo "Error: no working python3" >&2; exit 1; }
+# require_python3 (src/common.sh, sourced above) owns the candidate loop and
+# the diagnostic — it names the pyenv/brew/Xcode-CLT causes, which is exactly
+# the failure this hits on a Mac host.
+require_python3 || exit 1
 
 SECRETS_FILE="$BASE_PATH/secrets.env"
 [ -f "$SECRETS_FILE" ] && . "$SECRETS_FILE"
@@ -36,5 +33,15 @@ if [ -z "${1:-}" ]; then
     exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" --help
 fi
 
+# DJINN_SUBNET / DJINN_JUMP_IP / DJINN_JUMP_MOSH_PORTS are documented as
+# ./.env overrides, and src/common.sh sources ./.env as plain shell
+# assignments — it exports nothing. up.sh gets away with reading DJINN_SUBNET
+# as a shell variable because it passes it to ensure_net.py as an ARGUMENT;
+# jump_host reads os.environ, so they must be forwarded explicitly here or the
+# derivation silently falls back to the defaults and emits an address on the
+# wrong bridge.
 exec env DJINN_HOME="$BASE_PATH" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
+    DJINN_SUBNET="${DJINN_SUBNET:-}" \
+    DJINN_JUMP_IP="${DJINN_JUMP_IP:-}" \
+    DJINN_JUMP_MOSH_PORTS="${DJINN_JUMP_MOSH_PORTS:-}" \
     "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" "$@"
