@@ -114,6 +114,19 @@ class JumpIpTests(unittest.TestCase):
             jump_config.resolve_jump_ip({"DJINN_SUBNET": "10.9.0.0/29"}), "10.9.0.6"
         )
 
+    def test_explicit_subnet_argument_overrides_the_env(self):
+        # cmd_start passes the LIVE bridge subnet; it must win over
+        # DJINN_SUBNET, which ensure_net only warns about on a mismatch.
+        import ipaddress as _ip
+
+        self.assertEqual(
+            jump_config.resolve_jump_ip(
+                {"DJINN_SUBNET": "10.9.0.0/24"},
+                subnet=_ip.IPv4Network("172.30.0.0/24"),
+            ),
+            "172.30.0.254",
+        )
+
     def test_explicit_override_wins(self):
         self.assertEqual(
             jump_config.resolve_jump_ip({"DJINN_JUMP_IP": "172.30.0.50"}), "172.30.0.50"
@@ -218,6 +231,23 @@ class ComposeRenderTests(unittest.TestCase):
             self.assertIn("external: true", out)
             self.assertIn(self.KEY, out)
             self.assertIn('MOSH_PORTS: "60000:60010"', out)
+
+    def test_volume_path_is_escaped(self):
+        # A DJINN_HOME containing " #" would truncate the scalar at a YAML
+        # comment and silently mount a shorter path — the jump would then
+        # regenerate its keys somewhere the operator never sees.
+        with tempfile.TemporaryDirectory() as home:
+            odd = Path(home) / "dj inn #home"
+            (odd / "jump" / "ssh").mkdir(parents=True)
+            out = jump_config.render_compose_yaml(
+                identity=jump_config.derive_identity(odd),
+                ssh_dir=odd / "jump" / "ssh",
+                jump_ip="172.30.0.254",
+                mosh_ports="60000:60010",
+                authorized_key=self.KEY,
+            )
+            self.assertIn('"', out.split("volumes:")[1].split("\n")[1])
+            self.assertIn("#home", out)
 
     def test_publishes_no_host_ports(self):
         # Load-bearing: the jump is reached at its bridge IP over the tunnel.

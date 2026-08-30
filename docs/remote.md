@@ -119,9 +119,14 @@ recreate, so the jump uses `StrictHostKeyChecking accept-new` against a
 persisted `known_hosts`. After `./djinn up <bottle>`, clear the stale entry:
 
 ```bash
-docker exec djinn-jump-<suffix> ssh-keygen -R djinn-<bottle> \
+docker exec -u coder djinn-jump-<suffix> ssh-keygen -R djinn-<bottle> \
     -f /etc/djinn-jump/ssh/known_hosts
 ```
+
+`-u coder` matters: the image sets no `USER`, and `ssh-keygen -R` *replaces*
+the file rather than editing it. Run as root it leaves a root-owned
+`known_hosts`, and `accept-new` then fails to append the recreated bottle's
+key on every hop until the container is recreated.
 
 Per-bottle jump users (one Unix user per bottle, each holding only that
 bottle's key) are a planned follow-up — see *PLN - Djinn Admin Plane* §D8.

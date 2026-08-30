@@ -89,6 +89,38 @@ class StartTests(unittest.TestCase):
                 "compose up must not run when the bridge is unavailable",
             )
 
+    def test_start_derives_the_address_from_the_live_bridge(self):
+        # ensure_net only WARNS on subnet drift and returns 0, so the desired
+        # DJINN_SUBNET is not a safe basis for a static address.
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            with mock.patch.dict(
+                jump_host.os.environ,
+                {"SSH_AUTHORIZED_KEY": KEY, "DJINN_SUBNET": "10.9.0.0/24"},
+                clear=False,
+            ), mock.patch(
+                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
+            ), mock.patch.object(
+                jump_host.ensure_net, "network_subnet", return_value="172.30.0.0/24"
+            ):
+                self.assertEqual(jump_host.cmd_start(base), 0)
+            compose = jump_config.paths(base)["compose_file"].read_text(encoding="utf-8")
+            self.assertIn("ipv4_address: 172.30.0.254", compose)
+            self.assertNotIn("10.9.0.254", compose)
+
+    def test_start_survives_an_unreadable_live_subnet(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            with mock.patch.dict(
+                jump_host.os.environ, {"SSH_AUTHORIZED_KEY": KEY}, clear=False
+            ), mock.patch(
+                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
+            ), mock.patch.object(
+                jump_host.ensure_net, "network_subnet", return_value=None
+            ):
+                self.assertEqual(jump_host.cmd_start(base), 0)
+            self.assertTrue(jump_config.paths(base)["compose_file"].exists())
+
     def test_start_writes_compose_and_calls_up(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
@@ -134,9 +166,25 @@ class StopStatusTests(unittest.TestCase):
             base = Path(home)
             jump_config.write_compose_file(base, KEY)
             with mock.patch(
-                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd, 0, "abc123\n")
+                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd, 0, "jump\n")
             ):
                 self.assertEqual(jump_host.cmd_status(base), 0)
+
+    def test_status_uses_running_filter_not_bare_ps_q(self):
+        # `ps -q` yields an id for a created/restarting container too, and the
+        # jump is restart: unless-stopped — a crash-looping entrypoint would
+        # otherwise report "running".
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            jump_config.write_compose_file(base, KEY)
+            with mock.patch(
+                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd, 0, "")
+            ) as run:
+                jump_host.cmd_status(base)
+            argv = run.call_args[0][0]
+            self.assertIn("--status", argv)
+            self.assertIn("running", argv)
+            self.assertNotIn("-q", argv)
 
     def test_status_stopped_returns_1(self):
         with tempfile.TemporaryDirectory() as home:

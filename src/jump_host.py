@@ -7,6 +7,7 @@ Thin docker-compose glue around jump_config. Stdlib only.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import subprocess
 import sys
@@ -16,6 +17,8 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+import ensure_net  # noqa: E402
 
 from jump_config import (  # noqa: E402
     JumpConfigError,
@@ -87,13 +90,23 @@ def _run(
 
 
 def _service_running(base_path: Path, identity: JumpIdentity, *, boundary: str) -> bool:
+    """True only when the service is actually RUNNING.
+
+    `ps -q` returns an id for a created/restarting container too, and the jump
+    is `restart: unless-stopped` — so an entrypoint that dies on every start
+    would report "running" while nothing is reachable, which is precisely the
+    silent failure this command exists to catch. Same shape as
+    backup_host._service_running.
+    """
     result = _run(
-        _compose_cmd(base_path, identity, "ps", "-q", SERVICE_NAME),
+        _compose_cmd(base_path, identity, "ps", "--status", "running", "--services"),
         boundary=boundary,
         check=False,
         capture_output=True,
     )
-    return result.returncode == 0 and bool((result.stdout or "").strip())
+    if result.returncode != 0:
+        return False
+    return SERVICE_NAME in (result.stdout or "").split()
 
 
 def _authorized_key() -> str:
@@ -103,6 +116,28 @@ def _authorized_key() -> str:
             f"{ENV_AUTHORIZED_KEY} is missing from secrets.env — set your public key there"
         )
     return key
+
+
+def _live_subnet() -> "ipaddress.IPv4Network | None":
+    """The subnet djinn-net actually has, or None if it cannot be read.
+
+    ensure_net only WARNS when a pre-existing bridge disagrees with
+    DJINN_SUBNET and still returns 0, so the desired value is not a safe basis
+    for a static address. Reading the live network is what makes
+    resolve_jump_ip's contract true.
+    """
+    try:
+        raw = ensure_net.network_subnet(ensure_net.NET_NAME)
+    except Exception as exc:  # noqa: BLE001 — boundary: never fail start on this
+        print(f"jump ensure-net warn reason=subnet-unreadable detail={exc}")
+        return None
+    if not raw:
+        return None
+    try:
+        return ipaddress.IPv4Network(raw, strict=True)
+    except ValueError:
+        print(f"jump ensure-net warn reason=subnet-unparseable value={raw}")
+        return None
 
 
 def _ensure_network(base_path: Path) -> int:
@@ -138,7 +173,6 @@ def cmd_start(base_path: Path) -> int:
         key = _authorized_key()
         jump_ip = resolve_jump_ip()
         mosh_ports = resolve_mosh_ports()
-        write_compose_file(base_path, key)
     except (JumpConfigError, JumpHostError) as exc:
         print(f"jump start error reason={exc}", file=sys.stderr)
         return 1
@@ -150,6 +184,23 @@ def cmd_start(base_path: Path) -> int:
                 file=sys.stderr,
             )
             return rc
+        # Re-derive against the bridge that actually exists (see _live_subnet).
+        live = _live_subnet()
+        if live is not None and live != resolve_subnet():
+            print(
+                f"jump start warn reason=subnet-drift live={live} "
+                f"desired={resolve_subnet()} — using the live bridge"
+            )
+        try:
+            if live is not None:
+                if live != resolve_subnet():
+                    jump_ip = resolve_jump_ip(subnet=live)
+                write_compose_file(base_path, key, subnet=live)
+            else:
+                write_compose_file(base_path, key)
+        except JumpConfigError as exc:
+            print(f"jump start error reason={exc}", file=sys.stderr)
+            return 1
         result = _run(
             _compose_cmd(base_path, identity, "up", "-d", "--build", SERVICE_NAME),
             boundary="start",
