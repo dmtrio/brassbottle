@@ -1,7 +1,9 @@
 # Staged copy of .github/workflows/ci.yml — the agent token lacks the
 # `workflow` scope, so a human moves this file into .github/workflows/ and a
-# follow-up commit removes this staged copy. Once live, the README's CI badge
-# (see README badges) starts reporting.
+# follow-up commit removes this staged copy.
+#
+# This revision adds the jump-container image build (PLN - Djinn Admin Plane,
+# PR 1) alongside the existing bottle and backup image builds.
 name: ci
 
 on:
@@ -30,6 +32,20 @@ jobs:
         run: docker build -t djinn-ci-smoke .
       - name: Backup image builds
         run: docker build -f backup/Dockerfile -t djinn-backup-ci-smoke .
+      - name: Jump image builds
+        # Same rule as the bottle and backup images: the jump container is
+        # something the operator actually runs, so a PR that breaks its
+        # Dockerfile must fail here rather than at 2am on a phone.
+        run: docker build -f jump/Dockerfile -t djinn-jump-ci-smoke .
+      - name: Jump entry point exists and mosh is installed
+        # A green build with a missing entrypoint is still a broken jump.
+        # mosh-server is checked too: it is the entire reason this image
+        # exists, and apt silently succeeding with a renamed package would
+        # otherwise only show up when a phone cannot connect.
+        run: |
+          docker run --rm --entrypoint test djinn-jump-ci-smoke -x /usr/local/bin/jump-entrypoint.sh
+          docker run --rm --entrypoint test djinn-jump-ci-smoke -x /usr/local/bin/mosh-server
+          docker run --rm --entrypoint /usr/bin/mosh-server djinn-jump-ci-smoke --version
       - name: Pull pinned Backrest image
         run: docker pull ghcr.io/garethgeorge/backrest:v1.14.1
       - name: Backup integration smoke
