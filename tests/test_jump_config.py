@@ -11,6 +11,7 @@ import ipaddress
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -88,6 +89,25 @@ class JumpIpTests(unittest.TestCase):
         with self.assertRaises(jump_config.JumpConfigError) as ctx:
             jump_config.resolve_jump_ip({"DJINN_SUBNET": "10.9.0.0/31"})
         self.assertIn("DJINN_JUMP_IP", str(ctx.exception))
+
+    def test_large_subnet_does_not_enumerate_hosts(self):
+        # DJINN_SUBNET permits large networks; a /8 would materialise ~16.7M
+        # IPv4Address objects if this enumerated. Patching hosts() to raise
+        # pins the constant-time path without a flaky timing assertion.
+        import ipaddress as _ip
+
+        def boom(self):
+            raise AssertionError("resolve_jump_ip must not enumerate the subnet")
+
+        with unittest.mock.patch.object(_ip.IPv4Network, "hosts", boom):
+            self.assertEqual(
+                jump_config.resolve_jump_ip({"DJINN_SUBNET": "10.0.0.0/8"}),
+                "10.255.255.254",
+            )
+            with self.assertRaises(jump_config.JumpConfigError):
+                jump_config.resolve_jump_ip(
+                    {"DJINN_SUBNET": "10.0.0.0/8", "DJINN_JUMP_IP": "10.255.255.255"}
+                )
 
     def test_slash_29_is_the_smallest_derivable(self):
         self.assertEqual(

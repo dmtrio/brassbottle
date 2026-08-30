@@ -113,11 +113,16 @@ def _ensure_network(base_path: Path) -> int:
     step of a fresh install, before any `./djinn up` has run ensure_net. Same
     call up.sh makes (src/ensure_net.py owns create/verify and is unit-tested);
     the subnet is passed as an argument, not inherited from the environment.
+
+    sys.executable, not a bare "python3": jump.sh resolves $PYTHON3 through
+    common.sh's require_python3 precisely because a broken PATH shim is the
+    common Mac failure. Re-looking-up "python3" here would reintroduce that
+    failure one step later, after jump_host had already started fine.
     """
     subnet = str(resolve_subnet())
     try:
         return _run(
-            ["python3", str(_repo_root() / "src" / "ensure_net.py"), subnet],
+            [sys.executable, str(_repo_root() / "src" / "ensure_net.py"), subnet],
             boundary="ensure-net",
             check=False,
         ).returncode
