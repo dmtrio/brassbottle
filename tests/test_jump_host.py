@@ -43,6 +43,36 @@ class StartTests(unittest.TestCase):
             with mock.patch.dict(jump_host.os.environ, {"SSH_AUTHORIZED_KEY": ""}, clear=False):
                 self.assertEqual(jump_host.cmd_start(Path(home)), 1)
 
+    def test_start_bootstraps_the_external_bridge_first(self):
+        # djinn-net is declared external, and `jump start` is documented as the
+        # FIRST step of a fresh install — before any ./djinn up has created it.
+        calls = []
+        with tempfile.TemporaryDirectory() as home:
+            def record(cmd, **kw):
+                calls.append(cmd)
+                return _completed(cmd)
+            with mock.patch.dict(
+                jump_host.os.environ, {"SSH_AUTHORIZED_KEY": KEY}, clear=False
+            ), mock.patch("subprocess.run", side_effect=record):
+                self.assertEqual(jump_host.cmd_start(Path(home)), 0)
+        self.assertTrue(any("ensure_net.py" in " ".join(c) for c in calls))
+        ensure_at = next(i for i, c in enumerate(calls) if "ensure_net.py" in " ".join(c))
+        up_at = next(i for i, c in enumerate(calls) if "up" in c and "docker" in c)
+        self.assertLess(ensure_at, up_at, "ensure_net must run before compose up")
+
+    def test_start_aborts_when_the_bridge_cannot_be_ensured(self):
+        with tempfile.TemporaryDirectory() as home:
+            def fail_ensure(cmd, **kw):
+                return _completed(cmd, 1 if "ensure_net.py" in " ".join(cmd) else 0)
+            with mock.patch.dict(
+                jump_host.os.environ, {"SSH_AUTHORIZED_KEY": KEY}, clear=False
+            ), mock.patch("subprocess.run", side_effect=fail_ensure) as run:
+                self.assertEqual(jump_host.cmd_start(Path(home)), 1)
+            self.assertFalse(
+                any("up" in c[0] for c in run.call_args_list if "docker" in c[0][0]),
+                "compose up must not run when the bridge is unavailable",
+            )
+
     def test_start_writes_compose_and_calls_up(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
@@ -133,6 +163,22 @@ class PubkeyTests(unittest.TestCase):
                 self.assertEqual(jump_host.cmd_pubkey(base), 0)
             printed = "".join(c.args[0] for c in out.write.call_args_list)
             self.assertIn("ssh-ed25519 AAAAjump djinn-jump", printed)
+
+    def test_pubkey_reports_unreadable_differently_from_missing(self):
+        # Path.exists() returns False on PermissionError, which would tell the
+        # operator to re-run the command that just created the key.
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            p["client_pubkey"].write_text("ssh-ed25519 AAAAjump djinn-jump\n", encoding="utf-8")
+            with mock.patch.object(
+                Path, "stat", side_effect=PermissionError(13, "Permission denied")
+            ):
+                with self.assertRaises(jump_host.JumpHostError) as ctx:
+                    jump_host.cmd_pubkey(base)
+            msg = str(ctx.exception)
+            self.assertIn("cannot read", msg)
+            self.assertNotIn("jump start", msg)
 
     def test_pubkey_does_not_need_a_running_container(self):
         with tempfile.TemporaryDirectory() as home:

@@ -65,13 +65,33 @@ class SubnetTests(unittest.TestCase):
 
 
 class JumpIpTests(unittest.TestCase):
-    def test_default_is_second_address_in_default_subnet(self):
-        self.assertEqual(jump_config.resolve_jump_ip({}), "172.30.0.2")
+    def test_default_is_last_usable_address(self):
+        # NOT .2: docker's dynamic pool allocates ascending from .2, so the low
+        # addresses are exactly where bottles land and a static .2 collides on
+        # any installation that already has one.
+        self.assertEqual(jump_config.resolve_jump_ip({}), "172.30.0.254")
+
+    def test_default_avoids_the_dynamic_allocation_range(self):
+        ip = jump_config.resolve_jump_ip({})
+        self.assertNotIn(ip, {"172.30.0.2", "172.30.0.3", "172.30.0.4"})
+
+    def test_default_is_not_the_broadcast_address(self):
+        self.assertNotEqual(jump_config.resolve_jump_ip({}), "172.30.0.255")
 
     def test_tracks_a_subnet_override(self):
         # The whole point: a DJINN_SUBNET override must move the jump with it.
         self.assertEqual(
-            jump_config.resolve_jump_ip({"DJINN_SUBNET": "10.9.0.0/24"}), "10.9.0.2"
+            jump_config.resolve_jump_ip({"DJINN_SUBNET": "10.9.0.0/24"}), "10.9.0.254"
+        )
+
+    def test_subnet_too_small_is_rejected(self):
+        with self.assertRaises(jump_config.JumpConfigError) as ctx:
+            jump_config.resolve_jump_ip({"DJINN_SUBNET": "10.9.0.0/31"})
+        self.assertIn("DJINN_JUMP_IP", str(ctx.exception))
+
+    def test_slash_29_is_the_smallest_derivable(self):
+        self.assertEqual(
+            jump_config.resolve_jump_ip({"DJINN_SUBNET": "10.9.0.0/29"}), "10.9.0.6"
         )
 
     def test_explicit_override_wins(self):
@@ -82,7 +102,16 @@ class JumpIpTests(unittest.TestCase):
     def test_override_outside_subnet_is_rejected(self):
         with self.assertRaises(jump_config.JumpConfigError) as ctx:
             jump_config.resolve_jump_ip({"DJINN_JUMP_IP": "10.0.0.5"})
-        self.assertIn("outside", str(ctx.exception))
+        self.assertIn("assignable", str(ctx.exception))
+
+    def test_override_on_network_or_broadcast_is_rejected(self):
+        # Both are inside the subnet but not assignable; docker rejects them
+        # with an opaque IPAM error far downstream of the typo.
+        for bad in ("172.30.0.0", "172.30.0.255"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(jump_config.JumpConfigError) as ctx:
+                    jump_config.resolve_jump_ip({"DJINN_JUMP_IP": bad})
+                self.assertIn("assignable", str(ctx.exception))
 
     def test_override_on_the_gateway_is_rejected(self):
         with self.assertRaises(jump_config.JumpConfigError) as ctx:
@@ -152,7 +181,7 @@ class ComposeRenderTests(unittest.TestCase):
         args = dict(
             identity=jump_config.derive_identity(Path(home)),
             ssh_dir=p["ssh_dir"],
-            jump_ip="172.30.0.2",
+            jump_ip="172.30.0.254",
             mosh_ports="60000:60010",
             authorized_key=self.KEY,
         )
@@ -164,7 +193,7 @@ class ComposeRenderTests(unittest.TestCase):
             out = self._render(home)
             self.assertIn("do not hand-edit", out)
             self.assertIn("dockerfile: jump/Dockerfile", out)
-            self.assertIn("ipv4_address: 172.30.0.2", out)
+            self.assertIn("ipv4_address: 172.30.0.254", out)
             self.assertIn("name: djinn-net", out)
             self.assertIn("external: true", out)
             self.assertIn(self.KEY, out)
@@ -182,6 +211,15 @@ class ComposeRenderTests(unittest.TestCase):
             with self.assertRaises(jump_config.JumpConfigError) as ctx:
                 self._render(home, authorized_key="   ")
             self.assertIn("SSH_AUTHORIZED_KEY", str(ctx.exception))
+
+    def test_key_with_quotes_is_escaped_not_interpolated(self):
+        # A `"` or `\\` in the key's comment would break the YAML scalar, and a
+        # `$` would be eaten by docker compose's ${VAR} interpolation.
+        with tempfile.TemporaryDirectory() as home:
+            out = self._render(home, authorized_key='ssh-ed25519 AAAA me "work$laptop"')
+            self.assertNotIn('SSH_AUTHORIZED_KEY: "ssh-ed25519 AAAA me "work', out)
+            self.assertIn(r'\"work', out)
+            self.assertIn("$$laptop", out)
 
     def test_multiline_key_is_rejected(self):
         # A newline would break out of the quoted YAML scalar.

@@ -25,6 +25,7 @@ from jump_config import (  # noqa: E402
     paths,
     resolve_jump_ip,
     resolve_mosh_ports,
+    resolve_subnet,
     write_compose_file,
 )
 
@@ -104,6 +105,26 @@ def _authorized_key() -> str:
     return key
 
 
+def _ensure_network(base_path: Path) -> int:
+    """Create/validate djinn-net before compose runs.
+
+    The generated compose declares the bridge `external: true`, so compose
+    will not create it — and `./djinn jump start` is documented as the FIRST
+    step of a fresh install, before any `./djinn up` has run ensure_net. Same
+    call up.sh makes (src/ensure_net.py owns create/verify and is unit-tested);
+    the subnet is passed as an argument, not inherited from the environment.
+    """
+    subnet = str(resolve_subnet())
+    try:
+        return _run(
+            ["python3", str(_repo_root() / "src" / "ensure_net.py"), subnet],
+            boundary="ensure-net",
+            check=False,
+        ).returncode
+    except DockerCommandMissing:
+        raise
+
+
 def cmd_start(base_path: Path) -> int:
     identity = derive_identity(base_path)
     started = time.monotonic()
@@ -117,6 +138,13 @@ def cmd_start(base_path: Path) -> int:
         print(f"jump start error reason={exc}", file=sys.stderr)
         return 1
     try:
+        rc = _ensure_network(base_path)
+        if rc != 0:
+            print(
+                f"jump start error reason=djinn-net-unavailable exit_code={rc}",
+                file=sys.stderr,
+            )
+            return rc
         result = _run(
             _compose_cmd(base_path, identity, "up", "-d", "--build", SERVICE_NAME),
             boundary="start",
@@ -203,10 +231,21 @@ def cmd_pubkey(base_path: Path) -> int:
     container is running (it is generated on first start).
     """
     pub = paths(base_path)["client_pubkey"]
-    if not pub.exists():
+    # Path.exists() swallows PermissionError and returns False, which would
+    # tell an operator who cannot traverse the directory to re-run the very
+    # command that just created the key — an infinite loop. stat() separately
+    # so "missing" and "unreadable" get different advice.
+    try:
+        pub.stat()
+    except FileNotFoundError:
         raise JumpHostError(
             f"no jump key yet at {pub} — run: ./djinn jump start (it is generated on first start)"
-        )
+        ) from None
+    except OSError as exc:
+        raise JumpHostError(
+            f"cannot read {pub}: {exc} — check ownership of {pub.parent} "
+            f"(the container writes it as uid 1000)"
+        ) from exc
     try:
         text = pub.read_text(encoding="utf-8").strip()
     except OSError as exc:

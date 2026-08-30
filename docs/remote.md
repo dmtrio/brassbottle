@@ -75,9 +75,16 @@ for the whole fleet instead of a UDP range baked into every bottle.
 
 **First run, once:**
 
-1. `./djinn jump start` — generates the jump's own ed25519 keypair (persisted
-   under `$DJINN_HOME/jump/ssh/`, so a rebuild keeps it) and prints it.
-2. Put that line in `secrets.env` as `JUMP_AUTHORIZED_KEY`.
+1. `./djinn jump start` — creates `djinn-net` if it does not exist yet, then
+   generates the jump's own ed25519 keypair (persisted under
+   `$DJINN_HOME/jump/ssh/`, so a rebuild keeps it) and prints it.
+2. Put that line in `secrets.env` as `JUMP_AUTHORIZED_KEY`, **quoted** — the
+   file is sourced by every host script, so an unquoted key's spaces would
+   try to run its comment as a command:
+
+   ```bash
+   JUMP_AUTHORIZED_KEY="ssh-ed25519 AAAA... djinn-jump"
+   ```
 3. `./djinn up <bottle>` for each bottle you want reachable. The bottle
    *appends* it to `authorized_keys` — your own `SSH_AUTHORIZED_KEY` keeps
    working, so a bottle stays directly reachable even when the jump is down.
@@ -85,7 +92,7 @@ for the whole fleet instead of a UDP range baked into every bottle.
 **Then, from a phone over your tunnel:**
 
 ```
-mosh coder@172.30.0.2          # the jump's static bridge address
+mosh coder@172.30.0.254        # the jump's static bridge address
 ssh djinn-coding-tanks         # hop onward; lands in the bottle's tmux session
 ```
 
@@ -97,8 +104,15 @@ attaches the durable `agent` session for an `sshd`/`mosh-server` parent, so
 the tunnel, so nothing is published to the host at all. That also removes the
 host-port exclusivity that forced a disjoint `remote.mosh_ports` range per
 bottle: one in-container range now serves every session. Its address is
-static (`.2` of `DJINN_SUBNET`, override with `DJINN_JUMP_IP`) so the tunnel
-target survives a recreate.
+static so the tunnel target survives a recreate.
+
+**Which address.** The *last* usable address in `DJINN_SUBNET` (`.254` on the
+default `/24`), not the first. `djinn-net` is created with `--subnet` and no
+`--ip-range`, so docker's dynamic allocator hands out addresses ascending
+from `.2` — the low end is exactly where bottles land, and a running fleet
+already occupies it. Override with `DJINN_JUMP_IP` (must be an assignable
+host address in the subnet, and not the gateway). Both `DJINN_SUBNET` and
+`DJINN_JUMP_IP` are read from `./.env`.
 
 **Bottle host keys.** A bottle regenerates its SSH host keys on every
 recreate, so the jump uses `StrictHostKeyChecking accept-new` against a
