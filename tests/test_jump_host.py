@@ -60,6 +60,22 @@ class StartTests(unittest.TestCase):
         up_at = next(i for i, c in enumerate(calls) if "up" in c and "docker" in c)
         self.assertLess(ensure_at, up_at, "ensure_net must run before compose up")
 
+    def test_ensure_net_uses_the_running_interpreter(self):
+        # A bare "python3" would re-do the PATH lookup that jump.sh's
+        # require_python3 exists to avoid — failing one step AFTER jump_host
+        # already started fine under an explicit $PYTHON3.
+        calls = []
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(
+                jump_host.os.environ, {"SSH_AUTHORIZED_KEY": KEY}, clear=False
+            ), mock.patch(
+                "subprocess.run", side_effect=lambda cmd, **kw: (calls.append(cmd), _completed(cmd))[1]
+            ):
+                jump_host.cmd_start(Path(home))
+        ensure = next(c for c in calls if "ensure_net.py" in " ".join(c))
+        self.assertEqual(ensure[0], sys.executable)
+        self.assertNotEqual(ensure[0], "python3")
+
     def test_start_aborts_when_the_bridge_cannot_be_ensured(self):
         with tempfile.TemporaryDirectory() as home:
             def fail_ensure(cmd, **kw):

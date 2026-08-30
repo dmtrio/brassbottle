@@ -157,6 +157,14 @@ def resolve_subnet(env: dict[str, str] | None = None) -> ipaddress.IPv4Network:
         raise JumpConfigError(f"invalid {ENV_SUBNET} '{raw}': {exc}") from exc
 
 
+def _is_reserved(subnet: ipaddress.IPv4Network, addr: ipaddress.IPv4Address) -> bool:
+    """Network or broadcast address — inside the subnet but not assignable.
+
+    Constant-time by construction; never enumerate a subnet to answer this.
+    """
+    return addr == subnet.network_address or addr == subnet.broadcast_address
+
+
 def _default_jump_address(subnet: ipaddress.IPv4Network) -> ipaddress.IPv4Address:
     """Last usable address in the subnet — see JUMP_HOST_OFFSET."""
     # /29 (8 addresses, 6 usable) is the smallest that leaves room for the
@@ -170,7 +178,7 @@ def _default_jump_address(subnet: ipaddress.IPv4Network) -> ipaddress.IPv4Addres
             f"use a /29 or larger, or set {ENV_JUMP_IP} explicitly"
         )
     candidate = subnet.broadcast_address + JUMP_HOST_OFFSET + 1
-    if candidate not in set(subnet.hosts()) or candidate == subnet.network_address + 1:
+    if _is_reserved(subnet, candidate) or candidate == subnet.network_address + 1:
         raise JumpConfigError(
             f"{ENV_SUBNET} {subnet} is too small for a jump address — "
             f"set {ENV_JUMP_IP} explicitly"
@@ -193,10 +201,11 @@ def resolve_jump_ip(env: dict[str, str] | None = None) -> str:
             addr = ipaddress.IPv4Address(override)
         except ValueError as exc:
             raise JumpConfigError(f"invalid {ENV_JUMP_IP} '{override}': {exc}") from exc
-        # hosts(), not `in subnet`: the network and broadcast addresses are
-        # inside the subnet but are not assignable, and docker rejects them
-        # with an opaque IPAM error far downstream of the typo.
-        if addr not in set(subnet.hosts()):
+        # Constant-time: compare against the two reserved endpoints directly.
+        # NOT `set(subnet.hosts())` — DJINN_SUBNET permits large networks, and
+        # a /8 would materialise ~16.7M IPv4Address objects on every start
+        # just to test one value.
+        if addr not in subnet or _is_reserved(subnet, addr):
             raise JumpConfigError(
                 f"{ENV_JUMP_IP} {addr} is not an assignable host address in "
                 f"{ENV_SUBNET} {subnet}"
