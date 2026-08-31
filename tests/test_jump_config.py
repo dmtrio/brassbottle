@@ -206,17 +206,103 @@ class LayoutTests(unittest.TestCase):
             self.assertFalse(p["client_pubkey"].exists())
 
 
+class AuthorizedKeysTests(unittest.TestCase):
+    KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 operator@mac"
+    KEY2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE6 phone@moshi"
+
+    def test_parses_multiple_keys(self):
+        keys = jump_config.parse_authorized_keys(
+            f"{self.KEY}\n{self.KEY2}\n", source="t"
+        )
+        self.assertEqual(keys, [self.KEY, self.KEY2])
+
+    def test_skips_blanks_and_comments(self):
+        text = f"# my mac\n{self.KEY}\n\n   \n# phone\n{self.KEY2}\n"
+        self.assertEqual(
+            jump_config.parse_authorized_keys(text, source="t"),
+            [self.KEY, self.KEY2],
+        )
+
+    def test_strips_carriage_returns(self):
+        # A file edited on Windows, or a key pasted through a phone, would
+        # otherwise leave a CR that sshd treats as part of the key.
+        keys = jump_config.parse_authorized_keys(
+            f"{self.KEY}\r\n{self.KEY2}\r\n", source="t"
+        )
+        self.assertEqual(keys, [self.KEY, self.KEY2])
+
+    def test_unknown_key_type_names_the_line(self):
+        with self.assertRaises(jump_config.JumpConfigError) as ctx:
+            jump_config.parse_authorized_keys(
+                f"{self.KEY}\nnope AAAA x\n", source="keys"
+            )
+        self.assertIn("line 2", str(ctx.exception))
+        self.assertIn("nope", str(ctx.exception))
+
+    def test_key_type_with_no_material_is_rejected(self):
+        with self.assertRaises(jump_config.JumpConfigError):
+            jump_config.parse_authorized_keys("ssh-ed25519\n", source="t")
+
+    def test_file_wins_over_env_seed(self):
+        # Precedence is one-directional: once the file has a key, secrets.env
+        # stops mattering, or an operator could never remove a key the env
+        # keeps re-adding.
+        with tempfile.TemporaryDirectory() as home:
+            jump_config.ensure_layout(Path(home))
+            jump_config.write_authorized_keys(Path(home), [self.KEY2])
+            keys, source = jump_config.resolve_authorized_keys(
+                Path(home), {"SSH_AUTHORIZED_KEY": self.KEY}
+            )
+            self.assertEqual((keys, source), ([self.KEY2], "file"))
+
+    def test_env_seeds_when_file_absent(self):
+        with tempfile.TemporaryDirectory() as home:
+            keys, source = jump_config.resolve_authorized_keys(
+                Path(home), {"SSH_AUTHORIZED_KEY": self.KEY}
+            )
+            self.assertEqual((keys, source), ([self.KEY], "env"))
+
+    def test_no_keys_anywhere_names_both_sources(self):
+        with tempfile.TemporaryDirectory() as home:
+            with self.assertRaises(jump_config.JumpConfigError) as ctx:
+                jump_config.resolve_authorized_keys(Path(home), {})
+            msg = str(ctx.exception)
+            self.assertIn("authorized_keys", msg)
+            self.assertIn("SSH_AUTHORIZED_KEY", msg)
+
+    def test_empty_file_falls_back_to_env(self):
+        # An empty file is "not configured", not "configured with nothing" —
+        # otherwise touching the file locks you out with no diagnostic.
+        with tempfile.TemporaryDirectory() as home:
+            jump_config.ensure_layout(Path(home))
+            jump_config.paths(Path(home))["authorized_keys"].write_text("# nothing\n")
+            keys, source = jump_config.resolve_authorized_keys(
+                Path(home), {"SSH_AUTHORIZED_KEY": self.KEY}
+            )
+            self.assertEqual(source, "env")
+
+    def test_write_authorized_keys_is_readable_and_one_per_line(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = jump_config.write_authorized_keys(Path(home), [self.KEY, self.KEY2])
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), f"{self.KEY}\n{self.KEY2}\n"
+            )
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+
 class ComposeRenderTests(unittest.TestCase):
     KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 operator@mac"
+    KEY2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE6 phone@moshi"
 
-    def _render(self, home, **kw):
+    def _render(self, home, keys=None, **kw):
         p = jump_config.ensure_layout(Path(home))
+        keys_file = jump_config.write_authorized_keys(Path(home), keys or [self.KEY])
         args = dict(
             identity=jump_config.derive_identity(Path(home)),
             ssh_dir=p["ssh_dir"],
+            authorized_keys_file=keys_file,
             jump_ip="172.30.0.254",
             mosh_ports="60000:60010",
-            authorized_key=self.KEY,
         )
         args.update(kw)
         return jump_config.render_compose_yaml(**args)
@@ -229,8 +315,26 @@ class ComposeRenderTests(unittest.TestCase):
             self.assertIn("ipv4_address: 172.30.0.254", out)
             self.assertIn("name: djinn-net", out)
             self.assertIn("external: true", out)
-            self.assertIn(self.KEY, out)
             self.assertIn('MOSH_PORTS: "60000:60010"', out)
+
+    def test_key_material_is_mounted_never_embedded(self):
+        # The whole point of the file: no key content in the compose overlay,
+        # so multiple keys need no YAML scalar carrying newlines.
+        with tempfile.TemporaryDirectory() as home:
+            out = self._render(home, keys=[self.KEY, self.KEY2])
+            self.assertNotIn(self.KEY, out)
+            self.assertNotIn("SSH_AUTHORIZED_KEY", out)
+            self.assertIn(jump_config.AUTHORIZED_KEYS_MOUNT, out)
+
+    def test_keys_mount_is_read_only(self):
+        # A compromised jump must not be able to authorise a new device.
+        with tempfile.TemporaryDirectory() as home:
+            out = self._render(home)
+            line = [
+                ln for ln in out.splitlines()
+                if jump_config.AUTHORIZED_KEYS_MOUNT in ln
+            ][0]
+            self.assertTrue(line.rstrip().endswith(':ro"'), line)
 
     def test_volume_path_is_escaped(self):
         # A DJINN_HOME containing " #" would truncate the scalar at a YAML
@@ -239,12 +343,13 @@ class ComposeRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             odd = Path(home) / "dj inn #home"
             (odd / "jump" / "ssh").mkdir(parents=True)
+            keys_file = jump_config.write_authorized_keys(odd, [self.KEY])
             out = jump_config.render_compose_yaml(
                 identity=jump_config.derive_identity(odd),
                 ssh_dir=odd / "jump" / "ssh",
+                authorized_keys_file=keys_file,
                 jump_ip="172.30.0.254",
                 mosh_ports="60000:60010",
-                authorized_key=self.KEY,
             )
             self.assertIn('"', out.split("volumes:")[1].split("\n")[1])
             self.assertIn("#home", out)
@@ -256,43 +361,36 @@ class ComposeRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             self.assertNotIn("ports:", self._render(home))
 
-    def test_empty_key_is_rejected(self):
+    def test_missing_keys_file_is_rejected(self):
+        # Docker creates a DIRECTORY at a missing bind-mount source, so a
+        # hand-deleted file must fail here, not become a silent crash loop.
         with tempfile.TemporaryDirectory() as home:
+            p = jump_config.ensure_layout(Path(home))
             with self.assertRaises(jump_config.JumpConfigError) as ctx:
-                self._render(home, authorized_key="   ")
-            self.assertIn("SSH_AUTHORIZED_KEY", str(ctx.exception))
-
-    def test_key_with_quotes_is_escaped_not_interpolated(self):
-        # A `"` or `\\` in the key's comment would break the YAML scalar, and a
-        # `$` would be eaten by docker compose's ${VAR} interpolation.
-        with tempfile.TemporaryDirectory() as home:
-            out = self._render(home, authorized_key='ssh-ed25519 AAAA me "work$laptop"')
-            self.assertNotIn('SSH_AUTHORIZED_KEY: "ssh-ed25519 AAAA me "work', out)
-            self.assertIn(r'\"work', out)
-            self.assertIn("$$laptop", out)
-
-    def test_multiline_key_is_rejected(self):
-        # A newline would break out of the quoted YAML scalar.
-        with tempfile.TemporaryDirectory() as home:
-            with self.assertRaises(jump_config.JumpConfigError):
-                self._render(home, authorized_key=f"{self.KEY}\nssh-ed25519 BBBB x")
+                self._render(home, authorized_keys_file=p["jump_root"] / "absent")
+            self.assertIn("authorized_keys", str(ctx.exception))
 
     def test_missing_ssh_dir_is_rejected(self):
         with tempfile.TemporaryDirectory() as home:
+            keys_file = jump_config.write_authorized_keys(Path(home), [self.KEY])
             with self.assertRaises(jump_config.JumpConfigError):
                 jump_config.render_compose_yaml(
                     identity=jump_config.derive_identity(Path(home)),
                     ssh_dir=Path(home) / "absent",
+                    authorized_keys_file=keys_file,
                     jump_ip="172.30.0.2",
                     mosh_ports="60000:60010",
-                    authorized_key=self.KEY,
                 )
 
     def test_write_compose_file_round_trips(self):
         with tempfile.TemporaryDirectory() as home:
-            path = jump_config.write_compose_file(Path(home), self.KEY)
+            path = jump_config.write_compose_file(Path(home), [self.KEY, self.KEY2])
             self.assertEqual(path, jump_config.paths(Path(home))["compose_file"])
             self.assertIn("djinn-net", path.read_text(encoding="utf-8"))
+            # The key file must exist by the time compose reads the overlay.
+            keys_path = jump_config.paths(Path(home))["authorized_keys"]
+            self.assertTrue(keys_path.is_file())
+            self.assertIn(self.KEY2, keys_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

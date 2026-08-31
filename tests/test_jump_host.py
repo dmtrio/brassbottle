@@ -43,6 +43,19 @@ class StartTests(unittest.TestCase):
             with mock.patch.dict(jump_host.os.environ, {"SSH_AUTHORIZED_KEY": ""}, clear=False):
                 self.assertEqual(jump_host.cmd_start(Path(home)), 1)
 
+    def test_start_accepts_multiple_keys_from_the_file(self):
+        # The reason the file exists: more than one device, no secrets.env
+        # quoting, and no key content in the compose overlay.
+        keys = [KEY, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE6 phone@moshi"]
+        with tempfile.TemporaryDirectory() as home:
+            jump_config.write_authorized_keys(Path(home), keys)
+            with mock.patch.dict(
+                jump_host.os.environ, {"SSH_AUTHORIZED_KEY": ""}, clear=False
+            ), mock.patch("subprocess.run", side_effect=lambda c, **k: _completed(c)):
+                self.assertEqual(jump_host.cmd_start(Path(home)), 0)
+            written = jump_config.paths(Path(home))["authorized_keys"].read_text()
+            self.assertEqual(written, "".join(f"{k}\n" for k in keys))
+
     def test_start_bootstraps_the_external_bridge_first(self):
         # djinn-net is declared external, and `jump start` is documented as the
         # FIRST step of a fresh install — before any ./djinn up has created it.
