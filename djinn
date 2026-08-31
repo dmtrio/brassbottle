@@ -16,6 +16,7 @@ Usage: ./djinn <subcommand> [args...]
   service  <name> [args...]    start a plugin's host-side service on this Mac
   backup   <cmd> [args...]     singleton artifact backup (start/stop/status/.../browser)
   jump     <cmd> [args...]     singleton mosh jump container (start/stop/status/logs/pubkey)
+  newt     <cmd> [args...]     singleton Pangolin site connector (start/stop/status/logs)
   allow    --watch                  interactive egress approval watcher
   allow    <container> <domain...>  add domains to a running container's egress allowlist
   deny     <zone> (--bottle <name> | --global) [--reason "..."]   persist a deny entry
@@ -32,6 +33,7 @@ case "${1:-}" in
     service) shift; exec "$SCRIPT_DIR/service.sh" "$@" ;;
     backup)  shift; exec "$SCRIPT_DIR/backup.sh" "$@" ;;
     jump)    shift; exec "$SCRIPT_DIR/jump.sh" "$@" ;;
+    newt)    shift; exec "$SCRIPT_DIR/newt.sh" "$@" ;;
     allow)
         shift
         if [ "${1:-}" = "--watch" ]; then

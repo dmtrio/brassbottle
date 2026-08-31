@@ -35,7 +35,7 @@ echo "── ./djinn: help / -h / --help ──"
 for h in help -h --help; do
     out=$(./djinn "$h" 2>&1); rc=$?
     assert_rc "'$h' → rc 0" 0 "$rc"
-    for sub in up down service backup jump allow deny undeny keys; do
+    for sub in up down service backup jump newt allow deny undeny keys; do
         assert_contains "'$h' mentions '$sub'" "$out" "  $sub "
     done
 done
@@ -106,6 +106,7 @@ check_target down down.sh 1
 check_target service service.sh 1
 check_target backup backup.sh 1
 check_target jump jump.sh 1
+check_target newt newt.sh 1
 check_target allow bin/allow-egress.sh 1
 check_target keys bin/update-agent-keys.sh 1
 
@@ -132,6 +133,7 @@ compare "down" "./down.sh" down
 compare "service" "./service.sh" service
 compare "backup" "./backup.sh" backup
 compare "jump" "./jump.sh" jump
+compare "newt" "./newt.sh" newt
 compare "allow" "./bin/allow-egress.sh" allow
 compare "keys" "./bin/update-agent-keys.sh" keys
 
