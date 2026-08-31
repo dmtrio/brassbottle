@@ -179,7 +179,7 @@ def cmd_start(base_path: Path) -> int:
     try:
         secrets = resolve_secrets()
         image = resolve_image()
-        newt_ip = resolve_tunnel_ip()
+        tunnel_ip = resolve_tunnel_ip()
     except TunnelConfigError as exc:
         print(f"tunnel start error reason={exc}", file=sys.stderr)
         return 1
@@ -197,15 +197,21 @@ def cmd_start(base_path: Path) -> int:
                 f"tunnel start warn reason=subnet-drift live={live} "
                 f"desired={resolve_subnet()} — using the live bridge"
             )
+        # `effective` is the subnet everything downstream must agree on: the
+        # address written into compose, AND the CIDR the operator is told to
+        # route. Reporting the desired one here would send them to configure
+        # the VPN for a network the connector is not on.
+        effective = live if live is not None else resolve_subnet()
         try:
             if live is not None:
                 if live != resolve_subnet():
-                    newt_ip = resolve_tunnel_ip(subnet=live)
+                    tunnel_ip = resolve_tunnel_ip(subnet=live)
                 write_compose_file(base_path, secrets, subnet=live)
             else:
                 write_compose_file(base_path, secrets)
         except TunnelConfigError as exc:
             print(f"tunnel start error reason={exc}", file=sys.stderr)
+            remove_env_file(base_path)
             return 1
         result = _run(
             _compose_cmd(base_path, identity, "up", "-d", SERVICE_NAME),
@@ -216,9 +222,24 @@ def cmd_start(base_path: Path) -> int:
     except DockerCommandMissing:
         return DOCKER_MISSING_EXIT
     if result.returncode != 0:
+        # No usable connector exists, so its credentials must not be left on
+        # disk. `down` first: a failed `up` can still have created a container,
+        # and removing the env_file the compose overlay references would then
+        # make every later compose call — including `stop` — fail on the
+        # missing file, orphaning it.
+        try:
+            _run(
+                _compose_cmd(base_path, identity, "down"),
+                boundary="start-cleanup",
+                check=False,
+            )
+        except DockerCommandMissing:
+            pass
+        remove_env_file(base_path)
         print(
             f"tunnel start error duration={time.monotonic() - started:.2f}s "
-            f"exit_code={result.returncode}",
+            f"exit_code={result.returncode} credentials-removed=true "
+            "— fix the cause and re-run './djinn tunnel start'.",
             file=sys.stderr,
         )
         return result.returncode
@@ -231,16 +252,21 @@ def cmd_start(base_path: Path) -> int:
         print(
             f"tunnel start error reason=not-running-after-start provider={PROVIDER} "
             "— the container was created but is not running. Most likely bad "
-            "credentials in secrets.env; check './djinn tunnel logs'.",
+            "credentials in secrets.env; check './djinn tunnel logs'. "
+            "Credentials are kept so that command still works — "
+            "'./djinn tunnel stop' clears them.",
             file=sys.stderr,
         )
         return 1
     # Never log the secrets themselves — identifiers and sizes only.
-    print(f"tunnel start ok container={identity.container_name} ip={newt_ip} image={image}")
+    print(
+        f"tunnel start ok container={identity.container_name} ip={tunnel_ip} "
+        f"image={image} provider={PROVIDER} subnet={effective}"
+    )
     print("")
     print("  The connector dials OUT — nothing is published on this Mac.")
     print("  Point your VPN's private route at this bridge:")
-    print(f"    {resolve_subnet()}   (or just {newt_ip} and the jump)")
+    print(f"    {effective}   (or just {tunnel_ip} and the jump)")
     print("  Then enrol your phone and scope its AllowedIPs to that CIDR.")
     return 0
 

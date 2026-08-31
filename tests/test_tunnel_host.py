@@ -105,6 +105,67 @@ class StartTests(unittest.TestCase):
             self.assertIn("ipv4_address: 172.30.0.253", compose)
             self.assertNotIn("10.9.0.253", compose)
 
+    def test_drift_reports_the_live_cidr_not_the_desired_one(self):
+        # The bug this guards: compose is written against the LIVE bridge but
+        # the operator was told to route the DESIRED one, so they configure the
+        # VPN for a network the connector is not on and the phone reaches
+        # nothing.
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(
+                tunnel_host.os.environ, dict(ENV, DJINN_SUBNET="10.9.0.0/24"), clear=False
+            ), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=_fake_docker()
+            ), mock.patch.object(
+                tunnel_host.ensure_net, "network_subnet", return_value="172.30.0.0/24"
+            ), mock.patch("sys.stdout") as out:
+                self.assertEqual(tunnel_host.cmd_start(Path(home)), 0)
+            printed = "".join(c.args[0] for c in out.write.call_args_list)
+            self.assertIn("172.30.0.0/24", printed)
+            self.assertIn("172.30.0.253", printed)
+            # The desired CIDR must not appear as a routing instruction.
+            self.assertNotIn("10.9.0.0/24   (or just", printed)
+            self.assertNotIn("10.9.0.253", printed)
+
+    def test_failed_compose_up_removes_the_credentials(self):
+        # No usable connector exists, so its credentials must not be left on
+        # disk — the stated lifecycle is that they never outlive the container.
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+
+            def fail_up(cmd, **kw):
+                if "up" in cmd:
+                    return _completed(cmd, 1)
+                if "--status" in cmd:
+                    return _completed(cmd, 0, "")
+                return _completed(cmd)
+
+            with mock.patch.dict(tunnel_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=fail_up
+            ) as run:
+                self.assertEqual(tunnel_host.cmd_start(base), 1)
+            self.assertFalse(tunnel_config.paths(base)["env_file"].exists())
+            # `down` must run BEFORE the file goes: a failed up can still have
+            # created a container, and later compose calls would then fail on
+            # the missing env_file and orphan it.
+            self.assertTrue(any("down" in c[0][0] for c in run.call_args_list))
+
+    def test_crashloop_keeps_the_credentials_for_diagnosis(self):
+        # The container exists here, so `./djinn tunnel logs` must keep working
+        # — which needs the env_file the compose overlay references.
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+
+            def crashloop(cmd, **kw):
+                if "--status" in cmd:
+                    return _completed(cmd, 0, "")
+                return _completed(cmd)
+
+            with mock.patch.dict(tunnel_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=crashloop
+            ):
+                self.assertEqual(tunnel_host.cmd_start(base), 1)
+            self.assertTrue(tunnel_config.paths(base)["env_file"].exists())
+
     def test_start_aborts_when_the_bridge_is_unavailable(self):
         with tempfile.TemporaryDirectory() as home:
             def fail_ensure(cmd, **kw):
