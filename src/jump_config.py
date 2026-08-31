@@ -22,38 +22,33 @@ import ipaddress
 import json
 import os
 import re
+import sys
 from pathlib import Path
+
+_SRC = Path(__file__).resolve().parent
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+import djinn_net_addr  # noqa: E402
 
 IDENTITY_PREFIX = "djinn-jump"
 SERVICE_NAME = "jump"
 IDENTITY_SUFFIX_LENGTH = 8
 
-# Same default as up.sh's DESIRED_SUBNET; both read DJINN_SUBNET.
-DEFAULT_SUBNET = "172.30.0.0/24"
-NETWORK_NAME = "djinn-net"
+# Subnet/address rules live in djinn_net_addr (shared with newt_config).
+DEFAULT_SUBNET = djinn_net_addr.DEFAULT_SUBNET
+NETWORK_NAME = djinn_net_addr.NETWORK_NAME
 
-# The jump takes the LAST usable address in the bridge subnet, not the first.
-#
-# src/ensure_net.py creates djinn-net with `--subnet` and no `--ip-range`, so
-# docker's dynamic allocator hands out addresses ascending from .2 — the low
-# addresses are exactly where bottles land (a running fleet already occupies
-# .2, .3, .4 ...). A static .2 would collide on any installation with bottles,
-# and even a clean start is not durable: `jump stop` frees it, the next
-# `djinn up` claims it, and `jump start` then fails permanently.
-#
-# The top of the subnet is not *reserved* either — carving out an --ip-range
-# would mean recreating the shared bridge under every running bottle — but
-# docker only reaches it after ~250 concurrent containers on one installation.
-# If it is ever taken, compose fails loudly with "Address already in use" and
-# DJINN_JUMP_IP is the escape hatch.
-JUMP_HOST_OFFSET = -2  # relative to the broadcast address; see _default_jump_address
+# The jump takes the LAST usable address in the bridge subnet — offset 1 from
+# the top. See djinn_net_addr.top_address for why the top and not the bottom.
+JUMP_ADDRESS_OFFSET = 1
 
 # mosh's UDP range INSIDE the container. Nothing is published to the host, so
 # this range is not exclusive per-container the way the per-bottle ranges were
 # — one range serves every session to every bottle.
 DEFAULT_MOSH_PORTS = "60000:60010"
 
-ENV_SUBNET = "DJINN_SUBNET"
+ENV_SUBNET = djinn_net_addr.ENV_SUBNET
 ENV_JUMP_IP = "DJINN_JUMP_IP"
 ENV_MOSH_PORTS = "DJINN_JUMP_MOSH_PORTS"
 
@@ -149,41 +144,10 @@ def ensure_layout(base_path: Path) -> dict[str, Path]:
 
 def resolve_subnet(env: dict[str, str] | None = None) -> ipaddress.IPv4Network:
     """The bridge subnet, from DJINN_SUBNET — same source up.sh reads."""
-    env = os.environ if env is None else env
-    raw = (env.get(ENV_SUBNET) or "").strip() or DEFAULT_SUBNET
     try:
-        return ipaddress.IPv4Network(raw, strict=True)
+        return djinn_net_addr.resolve_subnet(env)
     except ValueError as exc:
-        raise JumpConfigError(f"invalid {ENV_SUBNET} '{raw}': {exc}") from exc
-
-
-def _is_reserved(subnet: ipaddress.IPv4Network, addr: ipaddress.IPv4Address) -> bool:
-    """Network or broadcast address — inside the subnet but not assignable.
-
-    Constant-time by construction; never enumerate a subnet to answer this.
-    """
-    return addr == subnet.network_address or addr == subnet.broadcast_address
-
-
-def _default_jump_address(subnet: ipaddress.IPv4Network) -> ipaddress.IPv4Address:
-    """Last usable address in the subnet — see JUMP_HOST_OFFSET."""
-    # /29 (8 addresses, 6 usable) is the smallest that leaves room for the
-    # gateway, the jump at the top, and a fleet in between. Below that the
-    # arithmetic still yields an address, but a /31's "last usable" is the
-    # network address itself — refuse rather than emit something docker will
-    # reject with an opaque IPAM error.
-    if subnet.prefixlen > 29:
-        raise JumpConfigError(
-            f"{ENV_SUBNET} {subnet} is too small for a derived jump address — "
-            f"use a /29 or larger, or set {ENV_JUMP_IP} explicitly"
-        )
-    candidate = subnet.broadcast_address + JUMP_HOST_OFFSET + 1
-    if _is_reserved(subnet, candidate) or candidate == subnet.network_address + 1:
-        raise JumpConfigError(
-            f"{ENV_SUBNET} {subnet} is too small for a jump address — "
-            f"set {ENV_JUMP_IP} explicitly"
-        )
-    return candidate
+        raise JumpConfigError(str(exc)) from exc
 
 
 def resolve_jump_ip(
@@ -202,26 +166,14 @@ def resolve_jump_ip(
     env = os.environ if env is None else env
     subnet = resolve_subnet(env) if subnet is None else subnet
     override = (env.get(ENV_JUMP_IP) or "").strip()
-    if override:
-        try:
-            addr = ipaddress.IPv4Address(override)
-        except ValueError as exc:
-            raise JumpConfigError(f"invalid {ENV_JUMP_IP} '{override}': {exc}") from exc
-        # Constant-time: compare against the two reserved endpoints directly.
-        # NOT `set(subnet.hosts())` — DJINN_SUBNET permits large networks, and
-        # a /8 would materialise ~16.7M IPv4Address objects on every start
-        # just to test one value.
-        if addr not in subnet or _is_reserved(subnet, addr):
-            raise JumpConfigError(
-                f"{ENV_JUMP_IP} {addr} is not an assignable host address in "
-                f"{ENV_SUBNET} {subnet}"
+    try:
+        if override:
+            return djinn_net_addr.validate_static(subnet, override, ENV_JUMP_IP)
+        return str(
+                djinn_net_addr.top_address(subnet, JUMP_ADDRESS_OFFSET, ENV_JUMP_IP)
             )
-        if addr == subnet.network_address + 1:
-            raise JumpConfigError(
-                f"{ENV_JUMP_IP} {addr} is the bridge gateway — pick another address"
-            )
-        return str(addr)
-    return str(_default_jump_address(subnet))
+    except ValueError as exc:
+        raise JumpConfigError(str(exc)) from exc
 
 
 def resolve_mosh_ports(env: dict[str, str] | None = None) -> str:
