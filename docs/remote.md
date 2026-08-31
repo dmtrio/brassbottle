@@ -138,24 +138,35 @@ for the whole fleet instead of a UDP range baked into every bottle.
 1. Put the public keys you want to log in with — one per line — in
    `$DJINN_HOME/jump/authorized_keys`:
 
-   ```
+   ```bash
+   mkdir -p "$DJINN_HOME/jump"
+   cat > "$DJINN_HOME/jump/authorized_keys" <<'KEYS'
    # mac
    ssh-ed25519 AAAA... you@mac
    # phone
    ssh-ed25519 AAAA... moshi
+   KEYS
    ```
 
-   Standard `authorized_keys` format: blank lines and `#` comments are fine.
-   Public keys are not secrets, so they live here rather than in
-   `secrets.env` — which is also what makes **multiple** keys practical,
-   with no shell quoting to get wrong. The file is bind-mounted read-only
-   and copied into place at startup, so **adding a key needs a
-   `./djinn jump stop && ./djinn jump start`**, not just an edit.
+   Standard `authorized_keys` format: blank lines and `#` comments are fine,
+   and the file is left exactly as you wrote it — the labels are how you tell
+   later which key belongs to which device. Public keys are not secrets, so
+   they live here rather than in `secrets.env`, which is what makes
+   **multiple** keys practical with no shell quoting to get wrong.
 
-   *Upgrading from a single key?* If the file is absent, `SSH_AUTHORIZED_KEY`
-   from `secrets.env` seeds it once. After that the file wins and the
-   variable stops mattering — otherwise you could never remove a key that
-   `secrets.env` kept re-adding.
+   Adding or removing a key takes effect on the next `./djinn jump start`:
+   the overlay carries a hash of the key set, so compose recreates the
+   container instead of leaving the old one running. Reordering the file
+   changes nothing, so it will not drop a live session for no reason.
+
+   **Emptying the file authorises nobody, and is an error rather than a
+   fallback** — clearing it is how you revoke every device, so it must never
+   quietly restore an old key.
+
+   *Upgrading from a single key?* If the file does not exist,
+   `SSH_AUTHORIZED_KEY` from `secrets.env` seeds it once. After that the file
+   is the only authority and the variable stops mattering for the jump —
+   otherwise you could never remove a key `secrets.env` kept re-adding.
 2. `./djinn jump start` — creates `djinn-net` if it does not exist yet, then
    generates the jump's own ed25519 keypair (persisted under
    `$DJINN_HOME/jump/ssh/`, so a rebuild keeps it) and prints it.

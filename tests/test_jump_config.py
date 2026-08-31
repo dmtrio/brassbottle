@@ -249,7 +249,7 @@ class AuthorizedKeysTests(unittest.TestCase):
         # keeps re-adding.
         with tempfile.TemporaryDirectory() as home:
             jump_config.ensure_layout(Path(home))
-            jump_config.write_authorized_keys(Path(home), [self.KEY2])
+            jump_config.seed_authorized_keys(Path(home), [self.KEY2])
             keys, source = jump_config.resolve_authorized_keys(
                 Path(home), {"SSH_AUTHORIZED_KEY": self.KEY}
             )
@@ -270,20 +270,53 @@ class AuthorizedKeysTests(unittest.TestCase):
             self.assertIn("authorized_keys", msg)
             self.assertIn("SSH_AUTHORIZED_KEY", msg)
 
-    def test_empty_file_falls_back_to_env(self):
-        # An empty file is "not configured", not "configured with nothing" —
-        # otherwise touching the file locks you out with no diagnostic.
+    def test_emptying_the_file_never_restores_the_env_key(self):
+        # Revocation safety. Clearing the file is the obvious way to revoke
+        # every device; falling back to SSH_AUTHORIZED_KEY there would
+        # silently RE-AUTHORISE the key the operator just removed.
         with tempfile.TemporaryDirectory() as home:
             jump_config.ensure_layout(Path(home))
             jump_config.paths(Path(home))["authorized_keys"].write_text("# nothing\n")
-            keys, source = jump_config.resolve_authorized_keys(
-                Path(home), {"SSH_AUTHORIZED_KEY": self.KEY}
-            )
-            self.assertEqual(source, "env")
+            with self.assertRaises(jump_config.JumpConfigError) as ctx:
+                jump_config.resolve_authorized_keys(
+                    Path(home), {"SSH_AUTHORIZED_KEY": self.KEY}
+                )
+            msg = str(ctx.exception)
+            self.assertIn("no keys", msg)
+            # The way back is named, so the error is not a dead end.
+            self.assertIn("delete the file", msg)
+
+    def test_read_distinguishes_absent_from_empty(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertIsNone(jump_config.read_authorized_keys(Path(home)))
+            jump_config.ensure_layout(Path(home))
+            jump_config.paths(Path(home))["authorized_keys"].write_text("")
+            self.assertEqual(jump_config.read_authorized_keys(Path(home)), [])
+
+    def test_operator_file_is_never_rewritten(self):
+        # docs/remote.md advertises `# mac` / `# phone` labels, and those are
+        # the only thing telling the operator which key to revoke later.
+        # Rewriting the parsed keys on every start would silently strip them.
+        original = f"# mac\n{self.KEY}\n\n# phone\n{self.KEY2}\n"
+        with tempfile.TemporaryDirectory() as home:
+            jump_config.ensure_layout(Path(home))
+            path = jump_config.paths(Path(home))["authorized_keys"]
+            path.write_text(original)
+            keys, source = jump_config.resolve_authorized_keys(Path(home), {})
+            self.assertEqual(source, "file")
+            jump_config.write_compose_file(Path(home), keys, seed=(source == "env"))
+            self.assertEqual(path.read_text(), original)
+
+    def test_digest_tracks_the_set_not_the_order(self):
+        # Reordering the file must not recreate the container; adding or
+        # removing a key must.
+        a = jump_config.authorized_keys_digest([self.KEY, self.KEY2])
+        self.assertEqual(a, jump_config.authorized_keys_digest([self.KEY2, self.KEY]))
+        self.assertNotEqual(a, jump_config.authorized_keys_digest([self.KEY]))
 
     def test_write_authorized_keys_is_readable_and_one_per_line(self):
         with tempfile.TemporaryDirectory() as home:
-            path = jump_config.write_authorized_keys(Path(home), [self.KEY, self.KEY2])
+            path = jump_config.seed_authorized_keys(Path(home), [self.KEY, self.KEY2])
             self.assertEqual(
                 path.read_text(encoding="utf-8"), f"{self.KEY}\n{self.KEY2}\n"
             )
@@ -296,11 +329,13 @@ class ComposeRenderTests(unittest.TestCase):
 
     def _render(self, home, keys=None, **kw):
         p = jump_config.ensure_layout(Path(home))
-        keys_file = jump_config.write_authorized_keys(Path(home), keys or [self.KEY])
+        keys = keys or [self.KEY]
+        keys_file = jump_config.seed_authorized_keys(Path(home), keys)
         args = dict(
             identity=jump_config.derive_identity(Path(home)),
             ssh_dir=p["ssh_dir"],
             authorized_keys_file=keys_file,
+            keys_digest=jump_config.authorized_keys_digest(keys),
             jump_ip="172.30.0.254",
             mosh_ports="60000:60010",
         )
@@ -326,6 +361,24 @@ class ComposeRenderTests(unittest.TestCase):
             self.assertNotIn("SSH_AUTHORIZED_KEY", out)
             self.assertIn(jump_config.AUTHORIZED_KEYS_MOUNT, out)
 
+    def test_key_change_changes_the_overlay(self):
+        # Without this the overlay is byte-identical after an operator adds a
+        # key (the list is mounted, not embedded), so `compose up -d` sees an
+        # unchanged config, leaves the old container running, and reports
+        # success while the new device still cannot log in.
+        with tempfile.TemporaryDirectory() as home:
+            one = self._render(home, keys=[self.KEY])
+            two = self._render(home, keys=[self.KEY, self.KEY2])
+            self.assertNotEqual(one, two)
+            self.assertIn("djinn.authorized_keys_sha256", one)
+
+    def test_reordering_keys_does_not_change_the_overlay(self):
+        # A pointless recreate on every start would drop live mosh sessions.
+        with tempfile.TemporaryDirectory() as home:
+            a = self._render(home, keys=[self.KEY, self.KEY2])
+            b = self._render(home, keys=[self.KEY2, self.KEY])
+            self.assertEqual(a, b)
+
     def test_keys_mount_is_read_only(self):
         # A compromised jump must not be able to authorise a new device.
         with tempfile.TemporaryDirectory() as home:
@@ -343,11 +396,12 @@ class ComposeRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             odd = Path(home) / "dj inn #home"
             (odd / "jump" / "ssh").mkdir(parents=True)
-            keys_file = jump_config.write_authorized_keys(odd, [self.KEY])
+            keys_file = jump_config.seed_authorized_keys(odd, [self.KEY])
             out = jump_config.render_compose_yaml(
                 identity=jump_config.derive_identity(odd),
                 ssh_dir=odd / "jump" / "ssh",
                 authorized_keys_file=keys_file,
+                keys_digest=jump_config.authorized_keys_digest([self.KEY]),
                 jump_ip="172.30.0.254",
                 mosh_ports="60000:60010",
             )
@@ -372,19 +426,29 @@ class ComposeRenderTests(unittest.TestCase):
 
     def test_missing_ssh_dir_is_rejected(self):
         with tempfile.TemporaryDirectory() as home:
-            keys_file = jump_config.write_authorized_keys(Path(home), [self.KEY])
+            keys_file = jump_config.seed_authorized_keys(Path(home), [self.KEY])
             with self.assertRaises(jump_config.JumpConfigError):
                 jump_config.render_compose_yaml(
                     identity=jump_config.derive_identity(Path(home)),
                     ssh_dir=Path(home) / "absent",
                     authorized_keys_file=keys_file,
+                    keys_digest=jump_config.authorized_keys_digest([self.KEY]),
                     jump_ip="172.30.0.2",
                     mosh_ports="60000:60010",
                 )
 
+    def test_write_compose_file_rejects_a_bare_string(self):
+        # The pre-file signature took one key as a str; passing one now would
+        # sort its characters into the digest and write it one char per line.
+        with tempfile.TemporaryDirectory() as home:
+            with self.assertRaises(jump_config.JumpConfigError):
+                jump_config.write_compose_file(Path(home), self.KEY, seed=True)
+
     def test_write_compose_file_round_trips(self):
         with tempfile.TemporaryDirectory() as home:
-            path = jump_config.write_compose_file(Path(home), [self.KEY, self.KEY2])
+            path = jump_config.write_compose_file(
+                Path(home), [self.KEY, self.KEY2], seed=True
+            )
             self.assertEqual(path, jump_config.paths(Path(home))["compose_file"])
             self.assertIn("djinn-net", path.read_text(encoding="utf-8"))
             # The key file must exist by the time compose reads the overlay.
