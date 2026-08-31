@@ -223,29 +223,78 @@ def resolve_mosh_ports(env: dict[str, str] | None = None) -> str:
     return raw
 
 
+def _split_leading_options(line: str) -> tuple[str, str]:
+    """Split an authorized_keys line into (options, remainder).
+
+    OpenSSH's format is `[options] keytype base64 [comment]`, where the
+    options field contains no UNQUOTED whitespace but may contain quoted
+    values that do — `command="ssh-ed25519 nope",restrict ssh-ed25519 AAAA...`
+    is a legal line whose quoted value looks exactly like a key type. So the
+    split has to be quote-aware; a plain .split() would find the decoy and
+    validate the wrong token.
+
+    Returns ("", line) when the line has no options — decided by looking at
+    the first token, since an options field is only distinguishable from a
+    key type by not being one.
+    """
+    head = line.split(None, 1)[0] if line.split() else ""
+    if head in KEY_TYPE_PREFIXES:
+        return "", line
+
+    in_quotes = False
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_quotes:
+            escaped = True
+            continue
+        if ch == '"':
+            in_quotes = not in_quotes
+            continue
+        if ch.isspace() and not in_quotes:
+            return line[:i], line[i:].lstrip()
+    return "", line
+
+
 def parse_authorized_keys(text: str, *, source: str) -> list[str]:
     """Split authorized_keys content into validated key lines.
 
     Blank lines and # comments are dropped (standard authorized_keys), CR is
     stripped so a file edited on Windows or pasted through a phone does not
-    produce a key sshd silently rejects. Every surviving line must start with
-    a key type OpenSSH accepts — an unrecognised one is an error naming the
-    line number, because the alternative is a phone that cannot log in and no
-    visible reason why.
+    produce a key sshd silently rejects.
+
+    OpenSSH options (`restrict`, `from="..."`, `command="..."`) are accepted
+    and passed through untouched — the docs promise standard authorized_keys
+    input, and refusing them would break migrating an already-hardened key
+    list. They are deliberately NOT validated here: the file is copied to the
+    container verbatim, so sshd remains the authority on what the options
+    mean. This parser is a pre-flight check and the source of the change
+    digest, not the thing that decides who gets in.
+
+    What IS checked is the key type, because an unrecognised one is silently
+    ignored by sshd — a phone that cannot log in with nothing to read. Better
+    a named error with a line number.
     """
     keys: list[str] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.replace("\r", "").strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split()
-        # `options ssh-ed25519 AAAA...` is legal authorized_keys, but this file
-        # is generated-adjacent operator input, not a general parser: accepting
-        # options would mean validating them too. Require the key type first.
-        if parts[0] not in KEY_TYPE_PREFIXES:
+
+        options, remainder = _split_leading_options(line)
+        parts = remainder.split()
+        if not parts or parts[0] not in KEY_TYPE_PREFIXES:
+            found = parts[0] if parts else options
+            # Name the options we skipped: a typo'd key type is parsed AS an
+            # options field, so "unrecognised key type 'AAAA'" alone would
+            # point at the wrong token on the line the operator has to fix.
+            hint = f" (after options {options!r})" if options else ""
             raise JumpConfigError(
                 f"{source} line {lineno}: unrecognised key type "
-                f"{parts[0]!r} — expected one of {', '.join(KEY_TYPE_PREFIXES)}"
+                f"{found!r}{hint} — expected one of "
+                f"{', '.join(KEY_TYPE_PREFIXES)}"
             )
         if len(parts) < 2:
             raise JumpConfigError(

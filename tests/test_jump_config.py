@@ -231,6 +231,45 @@ class AuthorizedKeysTests(unittest.TestCase):
         )
         self.assertEqual(keys, [self.KEY, self.KEY2])
 
+    def test_accepts_openssh_options(self):
+        # An already-hardened key list must survive migration: docs promise
+        # standard authorized_keys input, and `restrict` / `from=` are that.
+        lines = [
+            "restrict,port-forwarding=no " + self.KEY,
+            'from="10.0.0.0/8" ' + self.KEY2,
+        ]
+        self.assertEqual(
+            jump_config.parse_authorized_keys("\n".join(lines), source="t"), lines
+        )
+
+    def test_options_are_passed_through_untouched(self):
+        # sshd is the authority on what options mean; this parser must not
+        # normalise or drop them, since the file is copied verbatim.
+        line = 'command="/bin/false",no-pty ' + self.KEY
+        self.assertEqual(
+            jump_config.parse_authorized_keys(line, source="t"), [line]
+        )
+
+    def test_quoted_option_value_is_not_mistaken_for_the_key(self):
+        # `command="ssh-ed25519 decoy"` contains a token that looks exactly
+        # like a key type. A plain .split() would validate the decoy and let
+        # a line through whose REAL key type was never checked.
+        line = 'command="ssh-ed25519 decoy",restrict ssh-ed25519 AAAAREAL phone'
+        self.assertEqual(
+            jump_config.parse_authorized_keys(line, source="t"), [line]
+        )
+        opts, rest = jump_config._split_leading_options(line)
+        self.assertEqual(rest, "ssh-ed25519 AAAAREAL phone")
+
+    def test_bad_key_type_after_options_is_still_rejected(self):
+        with self.assertRaises(jump_config.JumpConfigError) as ctx:
+            jump_config.parse_authorized_keys("restrict nope AAAA x", source="t")
+        self.assertIn("after options", str(ctx.exception))
+
+    def test_options_with_no_key_material_is_rejected(self):
+        with self.assertRaises(jump_config.JumpConfigError):
+            jump_config.parse_authorized_keys("restrict ssh-ed25519", source="t")
+
     def test_unknown_key_type_names_the_line(self):
         with self.assertRaises(jump_config.JumpConfigError) as ctx:
             jump_config.parse_authorized_keys(
