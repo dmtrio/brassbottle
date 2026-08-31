@@ -42,7 +42,7 @@ from egress_denylist import (
     resolve_egress_root,
     validate_bottle_scope,
 )
-from egress_log import EgressLog, EgressLogError, _iso_ts, _utc_now
+from egress_log import EgressLog, EgressLogError, request_details_for_ids, _iso_ts, _utc_now
 from egress_notify import (
     EgressNotification,
     NtfyNotifier,
@@ -603,6 +603,62 @@ class EgressBroker:
             return _utc_now(parsed)
         except ValueError:
             return fallback
+
+    def queue_snapshot(self) -> dict[str, Any]:
+        """Return the current open decision queue for operator-facing UIs.
+
+        This answers what was asked and decided, never whether host X is
+        currently permitted - ipset allowed-domains is the sole authority.
+        A caller must render decisions, not current egress state.
+        """
+
+        def _age_seconds(opened_at: str | None, now: datetime) -> int | None:
+            if not isinstance(opened_at, str):
+                return None
+            try:
+                if opened_at.endswith("Z"):
+                    parsed = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+                else:
+                    parsed = datetime.fromisoformat(opened_at)
+            except ValueError:
+                return None
+            return max(0, int((now - _utc_now(parsed)).total_seconds()))
+
+        with self._lock:
+            now = self.now()
+            queue = self._log.fold_queue(now=now)
+            details = request_details_for_ids(
+                self._log, queue.open_requests.keys(), queue=queue, now=now
+            )
+            open_rows: list[dict[str, Any]] = []
+            for request_id, open_req in queue.open_requests.items():
+                detail = details.get(request_id)
+                if detail is None:
+                    continue
+                opened_at = open_req.opened_at if isinstance(open_req.opened_at, str) else None
+                open_rows.append(
+                    {
+                        "request_id": request_id,
+                        "container": detail.container,
+                        "host": detail.host,
+                        "port": detail.port,
+                        "host_is_ip": is_ip_literal(detail.host),
+                        "opened_at": opened_at,
+                        "age_seconds": _age_seconds(opened_at, now),
+                        "hit_count": detail.hit_count,
+                        "uid": detail.uid,
+                        "comm": detail.comm,
+                        "reason": detail.reason,
+                    }
+                )
+            open_rows.sort(key=lambda item: ((item["opened_at"] or ""), item["request_id"]))
+            snapshot = {
+                "open": open_rows,
+                "count": len(open_rows),
+                "generated_at": _iso_ts(now),
+            }
+        LOG.info("egress broker queue snapshot open=%d", snapshot["count"])
+        return snapshot
 
     def _rebuild_from_log(self) -> None:
         now = self.now()
@@ -1683,6 +1739,12 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
+            return
+        if self.path == "/queue":
+            LOG.info("egress broker request enter path=/queue")
+            if not self._resolve_operator_auth():
+                return
+            self._send_json(HTTPStatus.OK, self.server.broker.queue_snapshot())
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
