@@ -55,9 +55,11 @@ ENV_NEWT_IP = "DJINN_NEWT_IP"
 ENV_NEWT_IMAGE = "DJINN_NEWT_IMAGE"
 
 # Pinned, never :latest — same rule as the Backrest image in backup_config.
-# 1.16.0 is the GitHub release tag as of 2026-08-30; Docker Hub was blocked by
-# the egress allowlist when this was written, so the exact tag string is
-# unverified. DJINN_NEWT_IMAGE overrides it without a code change.
+# Verified on Docker Hub 2026-08-31: 1.16.0 is the newest release (published
+# 2026-08-19). The plain tag is the multi-arch manifest; per-arch variants
+# (arm64-1.16.0, amd64-1.16.0, armv7-1.16.0) also exist, so do NOT pin one of
+# those — it would break on a host of a different architecture.
+# DJINN_NEWT_IMAGE overrides this without a code change.
 DEFAULT_NEWT_IMAGE = "fosrl/newt:1.16.0"
 
 # Secrets Newt needs, from secrets.env. Created in the Pangolin admin UI when

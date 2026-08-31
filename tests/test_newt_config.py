@@ -72,6 +72,13 @@ class ImageTests(unittest.TestCase):
         self.assertTrue(image.startswith("fosrl/newt:"))
         self.assertNotIn(":latest", image)
 
+    def test_default_is_the_multiarch_tag_not_a_per_arch_one(self):
+        # fosrl publishes arm64-/amd64-/armv7- prefixed tags alongside the
+        # multi-arch manifest; pinning one would break on another host.
+        tag = newt_config.DEFAULT_NEWT_IMAGE.rsplit(":", 1)[-1]
+        for arch in ("arm64-", "amd64-", "armv7-"):
+            self.assertFalse(tag.startswith(arch))
+
     def test_override(self):
         self.assertEqual(
             newt_config.resolve_image({"DJINN_NEWT_IMAGE": "fosrl/newt:1.17.0"}),
