@@ -114,13 +114,43 @@ class SecretsTests(unittest.TestCase):
             newt_config.resolve_secrets(env)
 
 
+class EnvFileTests(unittest.TestCase):
+    def test_written_0600_with_every_secret(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = newt_config.write_env_file(Path(home), dict(SECRETS))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            body = path.read_text(encoding="utf-8")
+            for name, value in SECRETS.items():
+                self.assertIn(f"{name}={value}", body)
+
+    def test_rewrite_is_idempotent_and_keeps_the_mode(self):
+        with tempfile.TemporaryDirectory() as home:
+            newt_config.write_env_file(Path(home), dict(SECRETS))
+            path = newt_config.write_env_file(Path(home), dict(SECRETS, NEWT_ID="other"))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertIn("NEWT_ID=other", path.read_text(encoding="utf-8"))
+
+    def test_no_stale_tmp_file_left_behind(self):
+        with tempfile.TemporaryDirectory() as home:
+            newt_config.write_env_file(Path(home), dict(SECRETS))
+            leftovers = list((Path(home) / "compose").glob("*.tmp"))
+            self.assertEqual(leftovers, [])
+
+    def test_remove_env_file_is_safe_when_absent(self):
+        with tempfile.TemporaryDirectory() as home:
+            newt_config.remove_env_file(Path(home))  # must not raise
+            newt_config.write_env_file(Path(home), dict(SECRETS))
+            newt_config.remove_env_file(Path(home))
+            self.assertFalse(newt_config.paths(Path(home))["env_file"].exists())
+
+
 class ComposeRenderTests(unittest.TestCase):
     def _render(self, **kw):
         args = dict(
             identity=newt_config.derive_identity(Path("/tmp")),
             newt_ip="172.30.0.253",
             image="fosrl/newt:1.16.0",
-            secrets=dict(SECRETS),
+            env_file=Path("/tmp/djinn/compose/newt.env"),
         )
         args.update(kw)
         return newt_config.render_compose_yaml(**args)
@@ -131,38 +161,38 @@ class ComposeRenderTests(unittest.TestCase):
         self.assertIn("image: fosrl/newt:1.16.0", out)
         self.assertIn("ipv4_address: 172.30.0.253", out)
         self.assertIn("name: djinn-net", out)
-        self.assertIn("external: true", out)
-        for name in newt_config.SECRET_VARS:
-            self.assertIn(name, out)
+        self.assertIn("env_file:", out)
+
+    def test_compose_carries_no_secret(self):
+        # The whole point of the env_file split: the overlay is written at the
+        # process umask, so it must not contain a credential.
+        out = self._render()
+        for value in SECRETS.values():
+            self.assertNotIn(value, out)
+        self.assertNotIn("NEWT_SECRET", out)
 
     def test_publishes_no_ports(self):
-        # Newt dials OUT — an inbound port would defeat the whole point and
-        # put a listener on the Mac.
         self.assertNotIn("ports:", self._render())
 
     def test_requests_no_capabilities(self):
-        # Newt is fully userspace (wireguard-go netstack); NET_ADMIN or a tun
-        # device would be an unnecessary privilege grant.
         out = self._render()
         for forbidden in ("cap_add", "NET_ADMIN", "/dev/net/tun", "privileged"):
             self.assertNotIn(forbidden, out)
 
-    def test_secret_values_are_escaped(self):
-        out = self._render(
-            secrets=dict(SECRETS, NEWT_SECRET='a"b$c\\d')
-        )
-        self.assertIn(r"\"b", out)
-        self.assertIn("$$c", out)
+    def test_env_file_path_is_escaped(self):
+        out = self._render(env_file=Path('/tmp/dj inn #home/compose/newt.env'))
+        self.assertIn('"', out.split("env_file:")[1].split("\n")[1])
+        self.assertIn("#home", out)
 
-    def test_missing_secret_is_rejected(self):
-        with self.assertRaises(newt_config.NewtConfigError):
-            self._render(secrets={"NEWT_ID": "x"})
-
-    def test_write_round_trips(self):
+    def test_write_round_trips_and_splits_the_secret_out(self):
         with tempfile.TemporaryDirectory() as home:
             path = newt_config.write_compose_file(Path(home), dict(SECRETS))
-            self.assertEqual(path, newt_config.paths(Path(home))["compose_file"])
-            self.assertIn("djinn-net", path.read_text(encoding="utf-8"))
+            compose = path.read_text(encoding="utf-8")
+            self.assertIn("djinn-net", compose)
+            self.assertNotIn("s3cr3t", compose)
+            env_file = newt_config.paths(Path(home))["env_file"]
+            self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+            self.assertIn("s3cr3t", env_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

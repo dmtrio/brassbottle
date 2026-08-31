@@ -94,6 +94,22 @@ class ValidateStaticTests(unittest.TestCase):
             na.validate_static(self.NET, "172.30.0.1", "X")
         self.assertIn("gateway", str(ctx.exception))
 
+    def test_rejects_a_sibling_singletons_address(self):
+        # This is the collision the two fixed top-of-subnet slots create: a
+        # newt override of .254 would fail inside compose with an opaque
+        # "Address already in use", or take the slot while jump is stopped and
+        # break the NEXT jump start instead.
+        jump_addr = str(na.top_address(self.NET, 1))
+        with self.assertRaises(ValueError) as ctx:
+            na.validate_static(self.NET, jump_addr, "DJINN_NEWT_IP", own_offset=2)
+        self.assertIn("jump", str(ctx.exception))
+
+    def test_allows_its_own_default(self):
+        own = str(na.top_address(self.NET, 2))
+        self.assertEqual(
+            na.validate_static(self.NET, own, "DJINN_NEWT_IP", own_offset=2), own
+        )
+
     def test_rejects_garbage(self):
         with self.assertRaises(ValueError):
             na.validate_static(self.NET, "nope", "X")

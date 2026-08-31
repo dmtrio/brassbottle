@@ -21,9 +21,37 @@ SECRETS = {
     "NEWT_SECRET": "s3cr3t",
 }
 
+# clear=False leaves the ambient environment in play, which for THIS module
+# means a developer's exported DJINN_NEWT_IP or DJINN_SUBNET silently changes
+# the address under test. Blank them alongside the secrets.
+SCRUBBED = {"DJINN_NEWT_IP": "", "DJINN_SUBNET": "", "DJINN_NEWT_IMAGE": ""}
+ENV = dict(SECRETS, **SCRUBBED)
+
 
 def _completed(cmd, returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(args=cmd, returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _fake_docker(calls=None):
+    """A subprocess.run stand-in where the service reports RUNNING.
+
+    cmd_start polls after compose up, so a fake that returns empty stdout for
+    `ps` makes every start look like a crash-loop.
+    """
+
+    def run(cmd, **kw):
+        if calls is not None:
+            calls.append(cmd)
+        if "--status" in cmd:
+            return _completed(cmd, 0, "newt\n")
+        return _completed(cmd)
+
+    return run
+
+
+def _no_settle_delay():
+    # The settle poll sleeps between checks; irrelevant to the assertions.
+    return mock.patch.object(newt_host, "SETTLE_INTERVAL_SECONDS", 0)
 
 
 class StartTests(unittest.TestCase):
@@ -35,8 +63,8 @@ class StartTests(unittest.TestCase):
     def test_start_bootstraps_the_bridge_before_compose(self):
         calls = []
         with tempfile.TemporaryDirectory() as home:
-            with mock.patch.dict(newt_host.os.environ, SECRETS, clear=False), mock.patch(
-                "subprocess.run", side_effect=lambda cmd, **kw: (calls.append(cmd), _completed(cmd))[1]
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=_fake_docker(calls)
             ):
                 self.assertEqual(newt_host.cmd_start(Path(home)), 0)
         ensure_at = next(i for i, c in enumerate(calls) if "ensure_net.py" in " ".join(c))
@@ -46,8 +74,8 @@ class StartTests(unittest.TestCase):
     def test_ensure_net_uses_the_running_interpreter(self):
         calls = []
         with tempfile.TemporaryDirectory() as home:
-            with mock.patch.dict(newt_host.os.environ, SECRETS, clear=False), mock.patch(
-                "subprocess.run", side_effect=lambda cmd, **kw: (calls.append(cmd), _completed(cmd))[1]
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=_fake_docker(calls)
             ):
                 newt_host.cmd_start(Path(home))
         ensure = next(c for c in calls if "ensure_net.py" in " ".join(c))
@@ -56,19 +84,19 @@ class StartTests(unittest.TestCase):
     def test_start_does_not_build(self):
         # Newt ships an official pinned image; there is no Dockerfile to build.
         with tempfile.TemporaryDirectory() as home:
-            with mock.patch.dict(newt_host.os.environ, SECRETS, clear=False), mock.patch(
-                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=_fake_docker()
             ) as run:
                 newt_host.cmd_start(Path(home))
-            self.assertNotIn("--build", run.call_args[0][0])
+            self.assertFalse(any("--build" in c[0][0] for c in run.call_args_list))
 
     def test_start_derives_from_the_live_bridge(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
             with mock.patch.dict(
-                newt_host.os.environ, dict(SECRETS, DJINN_SUBNET="10.9.0.0/24"), clear=False
-            ), mock.patch(
-                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
+                newt_host.os.environ, dict(ENV, DJINN_SUBNET="10.9.0.0/24"), clear=False
+            ), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=_fake_docker()
             ), mock.patch.object(
                 newt_host.ensure_net, "network_subnet", return_value="172.30.0.0/24"
             ):
@@ -82,7 +110,7 @@ class StartTests(unittest.TestCase):
             def fail_ensure(cmd, **kw):
                 return _completed(cmd, 1 if "ensure_net.py" in " ".join(cmd) else 0)
 
-            with mock.patch.dict(newt_host.os.environ, SECRETS, clear=False), mock.patch(
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), mock.patch(
                 "subprocess.run", side_effect=fail_ensure
             ) as run:
                 self.assertEqual(newt_host.cmd_start(Path(home)), 1)
@@ -92,16 +120,45 @@ class StartTests(unittest.TestCase):
 
     def test_start_never_prints_the_secret(self):
         with tempfile.TemporaryDirectory() as home:
-            with mock.patch.dict(newt_host.os.environ, SECRETS, clear=False), mock.patch(
-                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=_fake_docker()
             ), mock.patch("sys.stdout") as out:
                 newt_host.cmd_start(Path(home))
             printed = "".join(c.args[0] for c in out.write.call_args_list)
             self.assertNotIn("s3cr3t", printed)
 
+    def test_start_fails_when_the_container_does_not_stay_up(self):
+        # compose up returns 0 for a container that immediately exits; with
+        # restart: unless-stopped that is a silent crash-loop. The most likely
+        # cause is a bad NEWT_SECRET, so it must not report success.
+        with tempfile.TemporaryDirectory() as home:
+            def crashloop(cmd, **kw):
+                if "--status" in cmd:
+                    return _completed(cmd, 0, "")
+                return _completed(cmd)
+
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=crashloop
+            ):
+                self.assertEqual(newt_host.cmd_start(Path(home)), 1)
+
+    def test_start_does_not_print_enrolment_when_not_running(self):
+        with tempfile.TemporaryDirectory() as home:
+            def crashloop(cmd, **kw):
+                if "--status" in cmd:
+                    return _completed(cmd, 0, "")
+                return _completed(cmd)
+
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), _no_settle_delay(), mock.patch(
+                "subprocess.run", side_effect=crashloop
+            ), mock.patch("sys.stdout") as out:
+                newt_host.cmd_start(Path(home))
+            printed = "".join(c.args[0] for c in out.write.call_args_list)
+            self.assertNotIn("Olm", printed)
+
     def test_start_without_docker_returns_127(self):
         with tempfile.TemporaryDirectory() as home:
-            with mock.patch.dict(newt_host.os.environ, SECRETS, clear=False), mock.patch(
+            with mock.patch.dict(newt_host.os.environ, ENV, clear=False), mock.patch(
                 "subprocess.run", side_effect=FileNotFoundError("docker")
             ):
                 self.assertEqual(newt_host.cmd_start(Path(home)), newt_host.DOCKER_MISSING_EXIT)
@@ -113,6 +170,24 @@ class StopStatusTests(unittest.TestCase):
             with mock.patch("subprocess.run") as run:
                 self.assertEqual(newt_host.cmd_stop(Path(home)), 0)
             run.assert_not_called()
+
+    def test_stop_removes_the_credential_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            newt_config.write_compose_file(base, dict(SECRETS))
+            env_file = newt_config.paths(base)["env_file"]
+            self.assertTrue(env_file.exists())
+            with mock.patch("subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)):
+                self.assertEqual(newt_host.cmd_stop(base), 0)
+            self.assertFalse(env_file.exists())
+
+    def test_stop_keeps_credentials_when_down_fails(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            newt_config.write_compose_file(base, dict(SECRETS))
+            with mock.patch("subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd, 1)):
+                newt_host.cmd_stop(base)
+            self.assertTrue(newt_config.paths(base)["env_file"].exists())
 
     def test_status_not_configured(self):
         with tempfile.TemporaryDirectory() as home:
