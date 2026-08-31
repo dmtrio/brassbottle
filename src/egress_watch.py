@@ -22,10 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, TextIO
 
-try:  # POSIX only; absent on Windows, where the drain is simply skipped.
-    import termios
-except ImportError:  # pragma: no cover - not reachable on macOS/Linux
-    termios = None  # type: ignore[assignment]
+import termios
 
 from egress_broker_host import (
     CONFIG_FILENAME,
@@ -68,6 +65,7 @@ LOG = logging.getLogger(__name__)
 
 InputFn = Callable[[str], str]
 PopenFactory = Callable[..., subprocess.Popen[str]]
+_EOF = object()
 
 
 @dataclass(frozen=True)
@@ -494,6 +492,10 @@ class EgressWatcher:
     ) -> None:
         self._broker = broker
         self._log = log
+        # Contract: an injected input_fn is declared to read from a source
+        # other than this process's stdin. In that mode tcflush() is disabled;
+        # wrappers around real stdin therefore forfeit kernel-drain protection.
+        # The timestamp filter still discards pre-rendered lines either way.
         self._input_fn = input_fn or input
         # Only drain the real terminal we are about to read from — an injected
         # input_fn reads from somewhere else, and draining stdin then would be
@@ -507,6 +509,14 @@ class EgressWatcher:
         self._deferred: set[str] = set()
         self._notified: set[str] = set()
         self._stop = threading.Event()
+        # Bounded to prevent unbounded growth with synthetic/non-blocking
+        # injected input_fn implementations; real terminal input naturally
+        # blocks on line entry and will not flood this queue.
+        self._terminal_choices: queue.Queue[tuple[float, OperatorChoice | object]] = queue.Queue(maxsize=1)
+        self._terminal_reader: threading.Thread | None = None
+        self._terminal_reader_lock = threading.Lock()
+        self._terminal_reader_closed = False
+        self._terminal_eof_ignored_on_darwin = False
 
     def _run_notification(
         self,
@@ -682,15 +692,18 @@ class EgressWatcher:
         flush the input queue between rendering and reading. Skipped when
         stdin is not a tty (tests, pipes) so piped answers still work.
         """
-        if termios is None or not self._owns_stdin:
+        if not self._owns_stdin:
+            return
+        if sys.stdin is None:
             return
         try:
             fd = sys.stdin.fileno()
             if not os.isatty(fd):
                 return
             termios.tcflush(fd, termios.TCIFLUSH)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             # A closed or exotic stdin is not worth failing a prompt over.
+            LOG.warning("egress watch stdin drain skipped reason=%s", exc)
             return
 
     def _prompt_operator(self, details: RequestDetails) -> OperatorChoice:
@@ -700,36 +713,76 @@ class EgressWatcher:
         # After the prompt is on screen, before any read: everything typed
         # earlier belongs to a question that was not being asked.
         self._drain_pending_input()
+        deadline = time.monotonic()
         if self._platform == "darwin":
-            return self._prompt_with_dialog(details)
-        return self._prompt_terminal()
+            return self._prompt_with_dialog(details, deadline)
+        return self._prompt_terminal(deadline)
 
-    def _prompt_terminal(self) -> OperatorChoice:
+    def _ensure_terminal_reader(self) -> None:
+        if self._terminal_reader is not None and self._terminal_reader.is_alive():
+            return
+        with self._terminal_reader_lock:
+            if self._terminal_reader is not None and self._terminal_reader.is_alive():
+                return
+            if self._terminal_reader_closed:
+                return
+            reader = threading.Thread(
+                target=self._terminal_reader_loop,
+                name="egress-terminal-reader",
+                daemon=True,
+            )
+            self._terminal_reader = reader
+            reader.start()
+
+    def _terminal_reader_loop(self) -> None:
         while True:
-            raw = self._input_fn("")
+            try:
+                raw = self._input_fn("")
+            except EOFError:
+                LOG.info("egress watch terminal input closed")
+                self._terminal_reader_closed = True
+                try:
+                    self._terminal_choices.put_nowait((time.monotonic(), _EOF))
+                except queue.Full:
+                    pass
+                return
             choice = parse_terminal_choice(raw)
             if choice is not None:
+                self._terminal_choices.put((time.monotonic(), choice))
+
+    def _next_terminal_choice(
+        self, deadline: float, *, timeout: float | None = None
+    ) -> OperatorChoice | object | None:
+        self._ensure_terminal_reader()
+        while True:
+            if self._terminal_reader_closed and self._terminal_choices.empty():
+                return _EOF
+            try:
+                ts, choice = self._terminal_choices.get(timeout=timeout)
+            except queue.Empty:
+                if self._terminal_reader_closed:
+                    return _EOF
+                return None
+            if choice is _EOF:
+                self._terminal_reader_closed = True
+                return _EOF
+            if ts <= deadline:
+                LOG.info("egress watch typed-ahead answer discarded")
+                continue
+            return choice
+
+    def _prompt_terminal(self, deadline: float) -> OperatorChoice:
+        while True:
+            choice = self._next_terminal_choice(deadline, timeout=None)
+            if choice is _EOF:
+                raise EOFError
+            if isinstance(choice, OperatorChoice):
                 return choice
 
-    def _prompt_with_dialog(self, details: RequestDetails) -> OperatorChoice:
+    def _prompt_with_dialog(self, details: RequestDetails, deadline: float) -> OperatorChoice:
         choice_queue: queue.Queue[OperatorChoice] = queue.Queue(maxsize=1)
         dialog_proc: list[subprocess.Popen[str] | None] = [None]
         resolved = threading.Event()
-
-        def terminal_thread() -> None:
-            while True:
-                try:
-                    raw = self._input_fn("")
-                except EOFError:
-                    LOG.info("egress watch terminal input closed")
-                    return
-                choice = parse_terminal_choice(raw)
-                if choice is not None:
-                    try:
-                        choice_queue.put_nowait(choice)
-                    except queue.Full:
-                        pass
-                    return
 
         def dialog_thread() -> None:
             title, message = build_dialog_message(details)
@@ -810,17 +863,37 @@ class EgressWatcher:
                         first_line[:120],
                     )
 
-        terminal = threading.Thread(target=terminal_thread, daemon=True)
         dialog = threading.Thread(target=dialog_thread, daemon=True)
-        terminal.start()
         dialog.start()
         try:
-            choice = choice_queue.get()
+            choice: OperatorChoice | None = None
+            consult_terminal = not self._terminal_eof_ignored_on_darwin
+            while choice is None:
+                try:
+                    choice = choice_queue.get_nowait()
+                    break
+                except queue.Empty:
+                    pass
+                if consult_terminal:
+                    terminal_choice = self._next_terminal_choice(deadline, timeout=0.1)
+                    if terminal_choice is _EOF:
+                        consult_terminal = False
+                        self._terminal_eof_ignored_on_darwin = True
+                    elif isinstance(terminal_choice, OperatorChoice):
+                        choice = terminal_choice
+                        break
+                else:
+                    try:
+                        choice = choice_queue.get(timeout=0.1)
+                        break
+                    except queue.Empty:
+                        pass
+            if choice is None:
+                choice = OperatorChoice("skip")
         except Exception:
             choice = OperatorChoice("skip")
         resolved.set()
         _terminate_process(dialog_proc[0])
-        terminal.join(timeout=2)
         dialog.join(timeout=2)
         return choice
 

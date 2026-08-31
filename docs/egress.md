@@ -39,11 +39,11 @@ surfaced as an IP-literal approval prompt no operator answer could clear.
 
 ### Type-ahead is discarded
 
-The input queue is flushed each time a prompt is rendered, so only keystrokes
-made **after** a question is on screen can answer it. Without that, anything
-typed while the watcher was polling is returned the instant the next prompt
-appears — silently answering a request the operator never read, and with
-`D`/`G` writing a persistent deny-list entry.
+The watcher owns one persistent stdin reader thread for the whole session. It
+timestamps terminal answers, flushes the kernel input buffer when each prompt
+renders, and accepts only answers newer than that render point. This keeps the
+guarantee true on both terminal-only and macOS dialog paths: only keystrokes
+made **after** a question is on screen can answer it.
 
 If you type ahead deliberately, the keystrokes are dropped rather than queued;
 answer each request as it appears.

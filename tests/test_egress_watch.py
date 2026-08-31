@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -36,14 +37,60 @@ class FakeClock:
         return self._now
 
 
+def make_broker(root: Path, hold_seconds: int = 60) -> broker.EgressBroker:
+    return broker.EgressBroker(
+        root,
+        repo_root=REPO_ROOT,
+        now_fn=FakeClock(NOW).now,
+        hold_seconds_default=hold_seconds,
+    )
+
+
+def make_details(**overrides: object) -> watch.RequestDetails:
+    base = {
+        "request_id": "req-1",
+        "container": "coding-brassbottle",
+        "host": "docs.stripe.com",
+        "port": 443,
+        "hit_count": 1,
+    }
+    base.update(overrides)
+    return watch.RequestDetails(**base)  # type: ignore[arg-type]
+
+
+def file_request_with_cleanup(
+    testcase: unittest.TestCase,
+    b: broker.EgressBroker,
+    container: str = "coding-brassbottle",
+    *,
+    already: set[str] | None = None,
+) -> str:
+    """File one request and return its id; register cleanup on the testcase."""
+    already = already or set()
+    thread = threading.Thread(
+        target=b.file_request,
+        args=(container, "docs.stripe.com", 443),
+    )
+    thread.start()
+    wait_for_broker_open_request(b, count=len(already) + 1)
+    with b._lock:
+        request_id = next(iter(set(b._requests) - already))
+
+    def cleanup() -> None:
+        if thread.is_alive():
+            with b._lock:
+                still_open = request_id in b._requests
+            if still_open:
+                b.decide(request_id, "deny")
+        join_thread_or_fail(thread, label="file_request")
+
+    testcase.addCleanup(cleanup)
+    return request_id
+
+
 class EgressWatchTests(unittest.TestCase):
     def _broker(self, root: Path, hold_seconds: int = 60) -> broker.EgressBroker:
-        return broker.EgressBroker(
-            root,
-            repo_root=REPO_ROOT,
-            now_fn=FakeClock(NOW).now,
-            hold_seconds_default=hold_seconds,
-        )
+        return make_broker(root, hold_seconds=hold_seconds)
 
     def _touch_token(self, root: Path, bottle: str) -> None:
         """Seed tokens/<bottle>.token so persist_deny's bottle-existence
@@ -56,15 +103,7 @@ class EgressWatchTests(unittest.TestCase):
         (tokens_dir / f"{bottle}.token").write_text("tok\n", encoding="utf-8")
 
     def _details(self, **overrides: object) -> watch.RequestDetails:
-        base = {
-            "request_id": "req-1",
-            "container": "coding-brassbottle",
-            "host": "docs.stripe.com",
-            "port": 443,
-            "hit_count": 1,
-        }
-        base.update(overrides)
-        return watch.RequestDetails(**base)  # type: ignore[arg-type]
+        return make_details(**overrides)
 
     def _file_request(
         self,
@@ -73,33 +112,10 @@ class EgressWatchTests(unittest.TestCase):
         *,
         already: set[str] | None = None,
     ) -> str:
-        """File one request and return its id.
-
-        `already` names the ids this test has filed before: the sync helper
-        returns an ARBITRARY open id, so without it a second call can hand back
-        the first request's id — and cleanup then denies the wrong one, leaving
-        the second file_request thread blocked until its hold expires.
-        """
-        already = already or set()
-        thread = threading.Thread(
-            target=b.file_request,
-            args=(container, "docs.stripe.com", 443),
+        """File one request and return its id."""
+        return file_request_with_cleanup(
+            self, b, container=container, already=already
         )
-        thread.start()
-        wait_for_broker_open_request(b, count=len(already) + 1)
-        with b._lock:
-            request_id = next(iter(set(b._requests) - already))
-
-        def cleanup() -> None:
-            if thread.is_alive():
-                with b._lock:
-                    still_open = request_id in b._requests
-                if still_open:
-                    b.decide(request_id, "deny")
-            join_thread_or_fail(thread, label="file_request")
-
-        self.addCleanup(cleanup)
-        return request_id
 
     def test_prompt_contains_host_and_subdomain_coverage(self):
         details = self._details()
@@ -446,7 +462,7 @@ class EgressWatchTests(unittest.TestCase):
             popen_factory=lambda *args, **kwargs: proc,
             notify_runner=lambda _argv: None,
         )
-        choice = watcher._prompt_with_dialog(self._details())
+        choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
         self.assertEqual(choice.action, "deny_bottle")
 
     def test_prompt_line_renders_deny_always_keys(self):
@@ -584,7 +600,7 @@ class EgressWatchTests(unittest.TestCase):
             notify_runner=notify_runner,
         )
         details = self._details()
-        choice = watcher._prompt_with_dialog(details)
+        choice = watcher._prompt_with_dialog(details, time.monotonic() - 1.0)
         self.assertEqual(choice.action, "allow_live")
         self.assertEqual(len(popen_calls), 1)
         self.assertTrue(any("display dialog" in a for a in popen_calls[0]))
@@ -668,7 +684,7 @@ class EgressWatchTests(unittest.TestCase):
         def run():
             with mock.patch.object(watch, "_terminate_process", recording_terminate), \
                     mock.patch.object(watch, "build_dialog_message", stalled_message):
-                choice = watcher._prompt_with_dialog(self._details())
+                choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
             self.assertTrue(resolved_pass.is_set())
             return choice
 
@@ -714,7 +730,7 @@ class EgressWatchTests(unittest.TestCase):
             popen_factory=lambda *args, **kwargs: proc,
             notify_runner=notify_runner,
         )
-        choice = watcher._prompt_with_dialog(self._details())
+        choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
         self.assertEqual(choice.action, "allow_live")
 
     def test_run_notification_timeout_is_logged_as_timeout(self):
@@ -761,15 +777,10 @@ class EgressWatchTests(unittest.TestCase):
 
     def test_non_darwin_skips_dialog_and_terminal_still_works(self):
         out = io.StringIO()
-        inputs = iter(["a"])
-
-        def input_fn(_prompt: str) -> str:
-            return next(inputs)
-
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
             egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=input_fn,
+            input_fn=lambda _p: "a",
             output=out,
             platform="linux",
         )
@@ -803,23 +814,16 @@ class EgressWatchTests(unittest.TestCase):
             root = Path(tmp)
             b = self._broker(root)
             request_id = self._file_request(b)
-            prompts: list[str] = []
-
-            def input_fn(_prompt: str) -> str:
-                prompts.append("prompted")
-                return "s"
-
             watcher = watch.EgressWatcher(
                 b,
                 egress_log.EgressLog(root),
-                input_fn=input_fn,
+                input_fn=lambda _p: "s",
                 output=io.StringIO(),
                 platform="linux",
             )
             self.assertTrue(watcher.run_once())
             self.assertFalse(watcher.run_once(), "a skipped request must go quiet")
             self.assertFalse(watcher.run_once())
-            self.assertEqual(len(prompts), 1, "skipped request was re-prompted")
             with b._lock:
                 self.assertIn(request_id, b._requests)
 
@@ -867,24 +871,18 @@ class EgressWatchTests(unittest.TestCase):
 
             self.addCleanup(cleanup)
 
-            prompts: list[str] = []
-
-            def input_fn(_prompt: str) -> str:
-                prompts.append("prompted")
-                return "a"
-
             out = io.StringIO()
             watcher = watch.EgressWatcher(
                 b,
                 egress_log.EgressLog(root),
-                input_fn=input_fn,
+                input_fn=lambda _p: "a",
                 output=out,
                 platform="linux",
             )
             self.assertTrue(watcher.run_once())
             self.assertIn("ALLOWED_CIDRS", out.getvalue())
             self.assertFalse(watcher.run_once(), "IP allow must not re-prompt")
-            self.assertEqual(len(prompts), 1)
+            self.assertEqual(out.getvalue().count("Request id:"), 1)
 
     def test_watcher_run_once_apply_failure_surfaces_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -972,7 +970,7 @@ class EgressWatchTests(unittest.TestCase):
             platform="darwin",
             popen_factory=lambda *args, **kwargs: proc,
         )
-        choice = watcher._prompt_with_dialog(self._details())
+        choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
         self.assertEqual(choice.action, "allow_live")
 
     def test_dialog_allow_without_terminal_input(self):
@@ -996,14 +994,15 @@ class EgressWatchTests(unittest.TestCase):
             platform="darwin",
             popen_factory=lambda *args, **kwargs: proc,
         )
-        choice = watcher._prompt_with_dialog(self._details())
+        choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
         self.assertEqual(choice.action, "allow_live")
         self.assertFalse(gate.is_set())
 
     def test_terminal_wins_when_it_answers_first(self):
         proc = mock.Mock()
         proc.poll.return_value = None
-        proc.stdout = io.StringIO("Allow\n")
+        proc.stdout = mock.Mock()
+        proc.stdout.read.side_effect = lambda: (time.sleep(0.2), "Allow\n")[1]
         proc.stderr = io.StringIO("")
         proc.wait.return_value = 0
         proc.returncode = 0
@@ -1017,36 +1016,72 @@ class EgressWatchTests(unittest.TestCase):
             popen_factory=lambda *args, **kwargs: proc,
             notify_runner=lambda _argv: None,
         )
-        choice = watcher._prompt_with_dialog(self._details())
+        choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
         self.assertEqual(choice.action, "deny")
         proc.terminate.assert_called_once()
 
-    def test_prompt_threads_join_after_resolution(self):
-        proc = mock.Mock()
-        proc.stdout = io.StringIO("Allow\n")
-        proc.stderr = io.StringIO("")
-        proc.wait.return_value = 0
-        proc.returncode = 0
-        threads: list[threading.Thread] = []
-        real_thread = threading.Thread
-
-        def track_thread(*args, **kwargs) -> threading.Thread:
-            thread = real_thread(*args, **kwargs)
-            threads.append(thread)
-            return thread
-
+    def test_terminal_reader_is_reused_across_prompts(self):
+        answers: queue.Queue[str] = queue.Queue()
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
             egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=lambda _p: "s",
+            input_fn=lambda _p: answers.get(),
+            output=io.StringIO(),
+            platform="linux",
+        )
+        answers.put("a")
+        first = watcher._prompt_terminal(time.monotonic() - 1.0)
+        first_reader = watcher._terminal_reader
+        self.assertEqual(first.action, "allow_live")
+        self.assertIsNotNone(first_reader)
+        answers.put("d")
+        second = watcher._prompt_terminal(time.monotonic() - 1.0)
+        self.assertEqual(second.action, "deny")
+        self.assertIs(first_reader, watcher._terminal_reader)
+
+    def test_typed_ahead_terminal_answer_is_discarded(self):
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: "a",
+            output=io.StringIO(),
+            platform="linux",
+        )
+        watcher._terminal_choices = queue.Queue()
+        watcher._terminal_choices.put((10.0, watch.OperatorChoice("deny")))
+        watcher._terminal_choices.put((20.0, watch.OperatorChoice("allow_live")))
+        with mock.patch.object(watcher, "_ensure_terminal_reader", return_value=None), \
+                self.assertLogs(watch.LOG, level="INFO") as captured:
+            choice = watcher._prompt_terminal(15.0)
+        self.assertEqual(choice.action, "allow_live")
+        self.assertTrue(
+            any("typed-ahead answer discarded" in r.getMessage() for r in captured.records)
+        )
+
+    def test_typed_ahead_dialog_answer_is_discarded(self):
+        proc = mock.Mock()
+        proc.stdout = io.StringIO("")
+        proc.stderr = io.StringIO("")
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: "a",
             output=io.StringIO(),
             platform="darwin",
             popen_factory=lambda *args, **kwargs: proc,
         )
-        with mock.patch.object(watch.threading, "Thread", track_thread):
-            watcher._prompt_with_dialog(self._details())
-        for thread in threads:
-            join_thread_or_fail(thread, label="prompt worker")
+        watcher._terminal_choices = queue.Queue()
+        watcher._terminal_choices.put((10.0, watch.OperatorChoice("deny")))
+        watcher._terminal_choices.put((20.0, watch.OperatorChoice("allow_live")))
+        with mock.patch.object(watcher, "_ensure_terminal_reader", return_value=None), \
+                self.assertLogs(watch.LOG, level="INFO") as captured:
+            choice = watcher._prompt_with_dialog(self._details(), 15.0)
+        self.assertEqual(choice.action, "allow_live")
+        self.assertTrue(
+            any("typed-ahead answer discarded" in r.getMessage() for r in captured.records)
+        )
 
     def test_dialog_nonzero_exit_with_empty_output_is_logged(self):
         dialog_done = threading.Event()
@@ -1084,7 +1119,7 @@ class EgressWatchTests(unittest.TestCase):
 
         with mock.patch.object(watch.LOG, "warning", warning_hook):
             with self.assertLogs(watch.LOG, level="WARNING") as captured:
-                choice = watcher._prompt_with_dialog(self._details())
+                choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
         warnings = [r for r in captured.records if r.levelno == logging.WARNING]
         self.assertEqual(len(warnings), 1)
         self.assertIn("gave no answer", warnings[0].getMessage())
@@ -1125,7 +1160,7 @@ class EgressWatchTests(unittest.TestCase):
 
         with mock.patch.object(watch.LOG, "info", info_hook):
             with self.assertLogs(watch.LOG, level="INFO") as captured:
-                choice = watcher._prompt_with_dialog(self._details())
+                choice = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
         self.assertEqual(choice.action, "skip")
         dismissed = [
             r for r in captured.records
@@ -1292,33 +1327,90 @@ class EgressWatchTests(unittest.TestCase):
             watcher.run_once()
         self.assertEqual(notify_argvs, [])
 
-    def test_terminal_thread_exits_quietly_on_eof(self):
-        proc = mock.Mock()
-        proc.stdout = io.StringIO("Allow\n")
-        proc.stderr = io.StringIO("")
-        proc.wait.return_value = 0
-        proc.returncode = 0
-
-        def input_fn(_prompt: str) -> str:
-            raise EOFError
-
+    def test_linux_terminal_eof_raises(self):
         watcher = watch.EgressWatcher(
             self._broker(Path(tempfile.mkdtemp())),
             egress_log.EgressLog(Path(tempfile.mkdtemp())),
-            input_fn=input_fn,
+            input_fn=lambda _p: "a",
+            output=io.StringIO(),
+            platform="linux",
+        )
+        watcher._terminal_reader_closed = True
+        watcher._terminal_choices.put((time.monotonic(), watch._EOF))
+        with mock.patch.object(watcher, "_ensure_terminal_reader", return_value=None):
+            with self.assertRaises(EOFError):
+                watcher._prompt_terminal(time.monotonic() - 1.0)
+
+    def test_darwin_dialog_continues_after_terminal_eof(self):
+        procs: queue.Queue[mock.Mock] = queue.Queue()
+        first_proc = mock.Mock()
+        first_proc.stdout = mock.Mock()
+        first_proc.stdout.read.side_effect = lambda: (time.sleep(0.2), "Allow\n")[1]
+        first_proc.stderr = io.StringIO("")
+        first_proc.wait.return_value = 0
+        first_proc.returncode = 0
+        procs.put(first_proc)
+        second_proc = mock.Mock()
+        second_proc.stdout = io.StringIO("Allow\n")
+        second_proc.stderr = io.StringIO("")
+        second_proc.wait.return_value = 0
+        second_proc.returncode = 0
+        procs.put(second_proc)
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: (_ for _ in ()).throw(EOFError),
             output=io.StringIO(),
             platform="darwin",
-            popen_factory=lambda *args, **kwargs: proc,
+            popen_factory=lambda *args, **kwargs: procs.get(timeout=5),
             notify_runner=lambda _argv: None,
         )
         with self.assertLogs(watch.LOG, level="INFO") as captured:
-            choice = watcher._prompt_with_dialog(self._details())
-        self.assertEqual(choice.action, "allow_live")
-        closed = [
-            r for r in captured.records
-            if "terminal input closed" in r.getMessage()
-        ]
-        self.assertEqual(len(closed), 1)
+            first = watcher._prompt_with_dialog(self._details(), time.monotonic() - 1.0)
+            second = watcher._prompt_with_dialog(self._details(request_id="req-2"), time.monotonic() - 1.0)
+        self.assertEqual(first.action, "allow_live")
+        self.assertEqual(second.action, "allow_live")
+        self.assertTrue(watcher._terminal_eof_ignored_on_darwin)
+        self.assertTrue(
+            any("terminal input closed" in record.getMessage() for record in captured.records)
+        )
+
+    def test_darwin_dialog_answer_then_next_prompt_terminal_answer_is_not_lost(self):
+        answers: queue.Queue[str] = queue.Queue()
+        proc_allow = mock.Mock()
+        proc_allow.stdout = io.StringIO("Allow\n")
+        proc_allow.stderr = io.StringIO("")
+        proc_allow.wait.return_value = 0
+        proc_allow.returncode = 0
+        proc_empty = mock.Mock()
+        proc_empty.stdout = io.StringIO("")
+        proc_empty.stderr = io.StringIO("")
+        proc_empty.wait.return_value = 0
+        proc_empty.returncode = 0
+        procs: queue.Queue[mock.Mock] = queue.Queue()
+        procs.put(proc_allow)
+        procs.put(proc_empty)
+        watcher = watch.EgressWatcher(
+            self._broker(Path(tempfile.mkdtemp())),
+            egress_log.EgressLog(Path(tempfile.mkdtemp())),
+            input_fn=lambda _p: answers.get(),
+            output=io.StringIO(),
+            platform="darwin",
+            popen_factory=lambda *args, **kwargs: procs.get(timeout=5),
+            notify_runner=lambda _argv: None,
+        )
+        first = watcher._prompt_with_dialog(self._details(request_id="req-a"), time.monotonic() - 1.0)
+        self.assertEqual(first.action, "allow_live")
+
+        def answer_later() -> None:
+            time.sleep(0.05)
+            answers.put("d")
+
+        t = threading.Thread(target=answer_later)
+        t.start()
+        second = watcher._prompt_with_dialog(self._details(request_id="req-b"), time.monotonic())
+        join_thread_or_fail(t, label="delayed terminal answer")
+        self.assertEqual(second.action, "deny")
 
 
 class WatcherStartupSurfaceTests(unittest.TestCase):
@@ -1460,9 +1552,7 @@ class DrainPendingInputTests(unittest.TestCase):
     """
 
     def _watcher(self, root: Path, **kw) -> watch.EgressWatcher:
-        b = broker.EgressBroker(
-            root, repo_root=REPO_ROOT, now_fn=FakeClock(NOW).now, hold_seconds_default=60
-        )
+        b = make_broker(root)
         return watch.EgressWatcher(
             b, egress_log.EgressLog(root), output=io.StringIO(), platform="linux", **kw
         )
@@ -1503,15 +1593,52 @@ class DrainPendingInputTests(unittest.TestCase):
             w = self._watcher(Path(tmp))
             with mock.patch.object(watch, "termios") as t, mock.patch.object(
                 sys.stdin, "fileno", side_effect=ValueError
-            ):
+            ), self.assertLogs(watch.LOG, level="WARNING") as captured:
                 w._drain_pending_input()  # must not raise
             t.tcflush.assert_not_called()
+        self.assertTrue(
+            any("stdin drain skipped" in record.getMessage() for record in captured.records)
+        )
 
-    def test_missing_termios_is_tolerated(self):
+    def test_none_stdin_is_tolerated(self):
         with tempfile.TemporaryDirectory() as tmp:
             w = self._watcher(Path(tmp))
-            with mock.patch.object(watch, "termios", None):
+            with mock.patch.object(watch, "sys") as patched_sys:
+                patched_sys.stdin = None
                 w._drain_pending_input()  # must not raise
+
+    def test_drain_oserror_logs_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = self._watcher(Path(tmp))
+            with mock.patch.object(watch, "termios") as t, mock.patch.object(
+                sys.stdin, "fileno", side_effect=OSError("bad fd")
+            ), self.assertLogs(watch.LOG, level="WARNING") as captured:
+                w._drain_pending_input()
+            t.tcflush.assert_not_called()
+        self.assertEqual(
+            len([r for r in captured.records if "stdin drain skipped" in r.getMessage()]),
+            1,
+        )
+
+    def test_stdin_none_during_prompt_does_not_break_run_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = make_broker(root)
+            request_id = file_request_with_cleanup(self, b)
+            out = io.StringIO()
+            w = watch.EgressWatcher(
+                b,
+                egress_log.EgressLog(root),
+                input_fn=lambda _p: "s",
+                output=out,
+                platform="linux",
+            )
+            w._owns_stdin = True
+            with mock.patch.object(watch, "sys") as patched_sys:
+                patched_sys.stdin = None
+                self.assertTrue(w.run_once())
+            with b._lock:
+                self.assertIn(request_id, b._requests)
 
     def test_prompt_drains_after_rendering_not_before(self):
         # Draining before the block is on screen would leave a window in which
@@ -1519,9 +1646,7 @@ class DrainPendingInputTests(unittest.TestCase):
         order: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            b = broker.EgressBroker(
-                root, repo_root=REPO_ROOT, now_fn=FakeClock(NOW).now, hold_seconds_default=60
-            )
+            b = make_broker(root)
 
             class Recorder(io.StringIO):
                 def flush(self) -> None:
@@ -1530,13 +1655,7 @@ class DrainPendingInputTests(unittest.TestCase):
             w = watch.EgressWatcher(
                 b, egress_log.EgressLog(root), output=Recorder(), platform="linux"
             )
-            details = watch.RequestDetails(
-                request_id="req-1",
-                container="coding-brassbottle",
-                host="docs.stripe.com",
-                port=443,
-                hit_count=1,
-            )
+            details = make_details()
             with mock.patch.object(
                 w, "_drain_pending_input", side_effect=lambda: order.append("drain")
             ), mock.patch.object(w, "_prompt_terminal", return_value=None):
