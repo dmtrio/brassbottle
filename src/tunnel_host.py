@@ -243,11 +243,11 @@ def cmd_start(base_path: Path) -> int:
             file=sys.stderr,
         )
         return result.returncode
-    # compose up returning 0 only means the container was CREATED. Newt exits
-    # immediately on a bad NEWT_SECRET or PANGOLIN_ENDPOINT — the most likely
-    # failure here — and `restart: unless-stopped` then loops it silently.
-    # Printing the enrolment procedure at that point sends the operator off to
-    # configure Pangolin against a connector that is not running.
+    # compose up returning 0 only means the container was CREATED. The
+    # connector exits immediately on bad credentials — the most likely failure
+    # here — and `restart: unless-stopped` then loops it silently. Printing the
+    # enrolment procedure at that point sends the operator off to configure
+    # their VPN against a connector that is not running.
     if not _settled_running(base_path, identity):
         print(
             f"tunnel start error reason=not-running-after-start provider={PROVIDER} "
@@ -339,8 +339,11 @@ def resolve_base_path(explicit: str | None) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="djinn newt",
-        description="Singleton Pangolin Newt connector for this djinn installation.",
+        prog="djinn tunnel",
+        description=(
+            "Singleton VPN/tunnel connector for this djinn installation — "
+            "joins djinn-net so enrolled devices reach the bridge at L3."
+        ),
     )
     parser.add_argument("--base-path", default=None, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)

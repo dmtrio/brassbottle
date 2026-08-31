@@ -35,7 +35,7 @@ IDENTITY_PREFIX = "djinn-jump"
 SERVICE_NAME = "jump"
 IDENTITY_SUFFIX_LENGTH = 8
 
-# Subnet/address rules live in djinn_net_addr (shared with newt_config).
+# Subnet/address rules live in djinn_net_addr (shared with tunnel_config).
 DEFAULT_SUBNET = djinn_net_addr.DEFAULT_SUBNET
 NETWORK_NAME = djinn_net_addr.NETWORK_NAME
 
