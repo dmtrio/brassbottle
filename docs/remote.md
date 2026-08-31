@@ -149,8 +149,10 @@ for the whole fleet instead of a UDP range baked into every bottle.
    ```
 
    Standard `authorized_keys` format: blank lines and `#` comments are fine,
+   OpenSSH options work (`restrict`, `from="10.0.0.0/8"`, `command="..."`),
    and the file is left exactly as you wrote it — the labels are how you tell
-   later which key belongs to which device. Public keys are not secrets, so
+   later which key belongs to which device. Options are passed through
+   untouched and interpreted by sshd, not by djinn. Public keys are not secrets, so
    they live here rather than in `secrets.env`, which is what makes
    **multiple** keys practical with no shell quoting to get wrong.
 
