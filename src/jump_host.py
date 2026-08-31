@@ -28,11 +28,10 @@ from jump_config import (  # noqa: E402
     paths,
     resolve_jump_ip,
     resolve_mosh_ports,
+    resolve_authorized_keys,
     resolve_subnet,
     write_compose_file,
 )
-
-ENV_AUTHORIZED_KEY = "SSH_AUTHORIZED_KEY"
 
 
 class JumpHostError(Exception):
@@ -109,13 +108,12 @@ def _service_running(base_path: Path, identity: JumpIdentity, *, boundary: str) 
     return SERVICE_NAME in (result.stdout or "").split()
 
 
-def _authorized_key() -> str:
-    key = (os.environ.get(ENV_AUTHORIZED_KEY) or "").strip()
-    if not key:
-        raise JumpHostError(
-            f"{ENV_AUTHORIZED_KEY} is missing from secrets.env — set your public key there"
-        )
-    return key
+def _authorized_keys(base_path: Path) -> list[str]:
+    """Operator keys from the file, or the legacy env seed. See
+    jump_config.resolve_authorized_keys for the precedence rule."""
+    keys, source = resolve_authorized_keys(base_path)
+    print(f"jump authorized_keys resolved source={source} count={len(keys)}")
+    return keys
 
 
 def _live_subnet() -> "ipaddress.IPv4Network | None":
@@ -170,7 +168,7 @@ def cmd_start(base_path: Path) -> int:
     started = time.monotonic()
     print(f"jump start begin base={base_path}")
     try:
-        key = _authorized_key()
+        keys = _authorized_keys(base_path)
         jump_ip = resolve_jump_ip()
         mosh_ports = resolve_mosh_ports()
     except (JumpConfigError, JumpHostError) as exc:
@@ -195,9 +193,9 @@ def cmd_start(base_path: Path) -> int:
             if live is not None:
                 if live != resolve_subnet():
                     jump_ip = resolve_jump_ip(subnet=live)
-                write_compose_file(base_path, key, subnet=live)
+                write_compose_file(base_path, keys, subnet=live)
             else:
-                write_compose_file(base_path, key)
+                write_compose_file(base_path, keys)
         except JumpConfigError as exc:
             print(f"jump start error reason={exc}", file=sys.stderr)
             return 1

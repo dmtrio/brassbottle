@@ -7,16 +7,23 @@
 set -euo pipefail
 
 SSH_DIR="${SSH_DIR:-/etc/djinn-jump/ssh}"
+AUTHORIZED_KEYS_SRC="${AUTHORIZED_KEYS_SRC:-/etc/djinn-jump/authorized_keys}"
 CLIENT_KEY="$SSH_DIR/id_ed25519"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
 
 log() { printf '%s jump %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-log "start begin ssh_dir=$SSH_DIR mosh_ports=${MOSH_PORTS:-unset}"
+log "start begin ssh_dir=$SSH_DIR keys_src=$AUTHORIZED_KEYS_SRC mosh_ports=${MOSH_PORTS:-unset}"
 
-if [ -z "${SSH_AUTHORIZED_KEY:-}" ]; then
-    log "start error reason=SSH_AUTHORIZED_KEY empty"
-    echo "FATAL: SSH_AUTHORIZED_KEY is empty — set your public key in secrets.env." >&2
+# The key list arrives as a read-only FILE bind mount, so multiple keys need
+# no env var and no YAML scalar carrying newlines. Docker silently creates a
+# DIRECTORY when a bind-mount source is missing, so check for a regular file
+# specifically — "is a directory" here would otherwise become an unreadable
+# authorized_keys and a phone that cannot log in for no visible reason.
+if [ ! -f "$AUTHORIZED_KEYS_SRC" ]; then
+    log "start error reason=authorized_keys-not-a-file path=$AUTHORIZED_KEYS_SRC"
+    echo "FATAL: $AUTHORIZED_KEYS_SRC is missing or not a regular file." >&2
+    echo "Add one public key per line to \$DJINN_HOME/jump/authorized_keys." >&2
     exit 1
 fi
 
@@ -31,10 +38,22 @@ chown coder:coder "$SSH_DIR"
 # which is what sshd and ssh actually check.
 chmod 755 "$SSH_DIR"
 
-printf '%s\n' "$SSH_AUTHORIZED_KEY" > /home/coder/.ssh/authorized_keys
-chmod 600 /home/coder/.ssh/authorized_keys
-chown coder:coder /home/coder/.ssh/authorized_keys
-log "authorized_keys written bytes=${#SSH_AUTHORIZED_KEY}"
+# COPIED, not pointed at directly: sshd's StrictModes rejects an
+# authorized_keys owned by neither root nor the login user, and a bind-mounted
+# host file carries whatever uid the host maps it to. Copying gives it a known
+# owner and mode. Cost: adding a key needs a jump restart, not just an edit.
+install -o coder -g coder -m 600 "$AUTHORIZED_KEYS_SRC" /home/coder/.ssh/authorized_keys
+# `|| true` because grep exits 1 on zero matches, which set -e would kill.
+# The :-0 default covers an exit 2 (grep itself failed), where stdout is empty
+# and a bare [ "" -eq 0 ] would be a syntax error instead of a clear message.
+key_count=$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*#' /home/coder/.ssh/authorized_keys || true)
+key_count=${key_count:-0}
+if [ "$key_count" -eq 0 ]; then
+    log "start error reason=authorized_keys-empty path=$AUTHORIZED_KEYS_SRC"
+    echo "FATAL: $AUTHORIZED_KEYS_SRC contains no keys — sshd would accept nobody." >&2
+    exit 1
+fi
+log "authorized_keys installed keys=$key_count"
 
 # Host keys live on the mount, not in the image layer: a regenerated host key
 # is a scary warning on the operator's phone every time the jump is rebuilt.

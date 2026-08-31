@@ -135,17 +135,38 @@ for the whole fleet instead of a UDP range baked into every bottle.
 
 **First run, once:**
 
-1. `./djinn jump start` — creates `djinn-net` if it does not exist yet, then
+1. Put the public keys you want to log in with — one per line — in
+   `$DJINN_HOME/jump/authorized_keys`:
+
+   ```
+   # mac
+   ssh-ed25519 AAAA... you@mac
+   # phone
+   ssh-ed25519 AAAA... moshi
+   ```
+
+   Standard `authorized_keys` format: blank lines and `#` comments are fine.
+   Public keys are not secrets, so they live here rather than in
+   `secrets.env` — which is also what makes **multiple** keys practical,
+   with no shell quoting to get wrong. The file is bind-mounted read-only
+   and copied into place at startup, so **adding a key needs a
+   `./djinn jump stop && ./djinn jump start`**, not just an edit.
+
+   *Upgrading from a single key?* If the file is absent, `SSH_AUTHORIZED_KEY`
+   from `secrets.env` seeds it once. After that the file wins and the
+   variable stops mattering — otherwise you could never remove a key that
+   `secrets.env` kept re-adding.
+2. `./djinn jump start` — creates `djinn-net` if it does not exist yet, then
    generates the jump's own ed25519 keypair (persisted under
    `$DJINN_HOME/jump/ssh/`, so a rebuild keeps it) and prints it.
-2. Put that line in `secrets.env` as `JUMP_AUTHORIZED_KEY`, **quoted** — the
+3. Put that line in `secrets.env` as `JUMP_AUTHORIZED_KEY`, **quoted** — the
    file is sourced by every host script, so an unquoted key's spaces would
    try to run its comment as a command:
 
    ```bash
    JUMP_AUTHORIZED_KEY="ssh-ed25519 AAAA... djinn-jump"
    ```
-3. `./djinn up <bottle>` for each bottle you want reachable. The bottle
+4. `./djinn up <bottle>` for each bottle you want reachable. The bottle
    *appends* it to `authorized_keys` — your own `SSH_AUTHORIZED_KEY` keeps
    working, so a bottle stays directly reachable even when the jump is down.
 

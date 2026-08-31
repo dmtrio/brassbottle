@@ -11,8 +11,11 @@
 #   ./jump.sh logs [-f]
 #   ./jump.sh pubkey
 #
-# Unlike backup.sh this sources secrets.env: the jump needs SSH_AUTHORIZED_KEY
-# (the same operator public key the bottles already use) to let you in at all.
+# Unlike backup.sh this sources secrets.env, but only as a COMPATIBILITY SEED:
+# the operator's keys now live one-per-line in $DJINN_HOME/jump/authorized_keys
+# (public keys are not secrets, and a file takes multiple keys without any
+# shell quoting). SSH_AUTHORIZED_KEY populates that file when it does not
+# exist yet; after that the file wins. See jump_config.resolve_authorized_keys.
 
 set -eo pipefail
 
