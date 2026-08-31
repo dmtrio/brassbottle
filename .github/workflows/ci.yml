@@ -2,8 +2,8 @@
 # `workflow` scope, so a human moves this file into .github/workflows/ and a
 # follow-up commit removes this staged copy.
 #
-# This revision adds the jump-container image build (PLN - Djinn Admin Plane,
-# PR 1) alongside the existing bottle and backup image builds.
+# This revision adds a pull of the pinned tunnel-connector image, matching the existing
+# Backrest pull (PLN - Djinn Admin Plane, phase A).
 name: ci
 
 on:
@@ -48,6 +48,13 @@ jobs:
           docker run --rm --entrypoint /usr/bin/mosh-server djinn-jump-ci-smoke --version
       - name: Pull pinned Backrest image
         run: docker pull ghcr.io/garethgeorge/backrest:v1.14.1
+      - name: Pull pinned tunnel image
+        # Same guard as the Backrest pull: the connector ships as an upstream
+        # image, so
+        # nothing else in CI would notice a tag that does not exist. Without
+        # this, a bad pin is discovered on the Mac at the moment remote access
+        # is wanted.
+        run: docker pull fosrl/newt:1.16.0
       - name: Backup integration smoke
         env:
           DJINN_BACKUP_CI_IMAGE: djinn-backup-ci-smoke
