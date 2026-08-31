@@ -16,6 +16,21 @@ queue and HTTP API without the interactive UI. Containers file requests via
 `POST /egress`; the operator answers through the watcher, CLI, or notification
 actions.
 
+## Queue page (`djinn queue`)
+
+`./djinn queue` serves a local read-only operator page at
+`http://127.0.0.1:8817` (or a loopback host/port you pass with `--host/--port`).
+It polls the daemon's queue endpoint and lists only open approval requests.
+
+This page requires the egress daemon/watcher to be running, because it proxies
+to the live daemon endpoint each poll. It is intentionally read-only: there are
+no approve/deny controls.
+
+It shows decisions in flight, not currently-permitted hosts. The ipset
+allowlist remains the authority for effective egress state. The operator bearer
+token is kept server-side and used only by the local Python proxy; it is never
+sent to the browser.
+
 ## Loopback is never filed
 
 Traffic to `127.0.0.0/8` is local, not egress, and never reaches the operator

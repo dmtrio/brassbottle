@@ -19,6 +19,7 @@ Usage: ./djinn <subcommand> [args...]
   tunnel   <cmd> [args...]     singleton VPN/tunnel connector (start/stop/status/logs)
   allow    --watch                  interactive egress approval watcher
   allow    <container> <domain...>  add domains to a running container's egress allowlist
+  queue    [--port N]               read-only egress approval queue page (http://127.0.0.1:8817)
   deny     <zone> (--bottle <name> | --global) [--reason "..."]   persist a deny entry
   deny     --list                                                 list deny entries
   undeny   <zone> (--bottle <name> | --global)                    remove a deny entry
@@ -51,6 +52,11 @@ case "${1:-}" in
             exec env DJINN_HOME="$BASE_PATH" python3 "$SCRIPT_DIR/src/egress_watch.py" "$@"
         fi
         exec "$SCRIPT_DIR/bin/allow-egress.sh" "$@"
+        ;;
+    queue)
+        shift
+        . "$SCRIPT_DIR/src/common.sh"
+        exec env DJINN_HOME="$BASE_PATH" python3 "$SCRIPT_DIR/src/egress_queue_page.py" "$@"
         ;;
     deny)
         shift
