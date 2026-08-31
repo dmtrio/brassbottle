@@ -59,17 +59,45 @@ reachable at its bridge IP from any enrolled device — `djinn up` prints the
 IP in its summary. sshd and the mosh range stay loopback/tunnel-only;
 nothing listens publicly.
 
-## The Pangolin site connector (`./djinn newt`)
+## The tunnel connector (`./djinn tunnel`)
 
-Newt is what makes any of this reachable from a phone. It runs as a singleton
-container **joined to `djinn-net`** and dials OUT to your Pangolin instance;
-devices enrolled with Olm then get L3 access to the bridge.
+One connector per djinn installation, joined to `djinn-net`. It dials **out**
+to your VPN control plane, and devices you enrol there get L3 access to the
+bridge — which is what makes the jump container and every bottle reachable
+from a phone.
 
 ```bash
-./djinn newt start | stop | status | logs [-f]
+./djinn tunnel start | stop | status | logs [-f]
 ```
 
-**Setup, once:**
+**Why a container and not a process on the Mac.** Docker Desktop runs
+containers in a LinuxKit VM and macOS has no route to `172.30.0.x`. A
+connector running natively on the Mac could not reach the bridge any more than
+anything else on macOS can, and every bottle would be back to publishing its
+own ports. On a Linux host this would not matter.
+
+**Nothing is published.** The connector dials out, so there is no inbound port
+on this Mac, no router forward and no dynamic DNS. The internet-facing surface
+is your VPN's control plane, not this machine.
+
+**It must be a private, L3 route — not a public HTTP one.** A public resource
+is fronted by an HTTP reverse proxy, and UDP does not traverse one, so mosh
+could not ride it. Point a public hostname at web UIs (backrest, later the
+management app) instead; terminals go over the private path.
+
+**Addresses.** The connector takes the second-from-last address in
+`DJINN_SUBNET` (`172.30.0.253` by default), one below the jump. Override with
+`DJINN_TUNNEL_IP`; the image is pinned and overridable via
+`DJINN_TUNNEL_IMAGE`, never `:latest`.
+
+### Current provider
+
+The role is provider-neutral — a Tailscale subnet router, Netbird, headscale
+or a plain wireguard-go container would occupy the same slot. Everything
+vendor-specific lives in one marked block in `src/tunnel_config.py`; nothing
+in `./djinn` or `tunnel.sh` names a product.
+
+Today that provider is **Newt**, the site connector for Pangolin:
 
 1. In the Pangolin admin UI, create a **site**. It generates an ID and a
    secret (the secret is shown once).
@@ -81,32 +109,15 @@ devices enrolled with Olm then get L3 access to the bridge.
    NEWT_SECRET="..."
    ```
 
-3. `./djinn newt start` — it prints the bridge CIDR to register.
-4. In Pangolin, add a **private site resource** targeting that CIDR
-   (`172.30.0.0/24` by default). Enrol the phone with Olm and scope its
-   `AllowedIPs` to the same CIDR.
+3. `./djinn tunnel start` — it prints the bridge CIDR to register.
+4. Add a **private site resource** targeting that CIDR (`172.30.0.0/24` by
+   default), then enrol the phone with Olm and scope its `AllowedIPs` to the
+   same CIDR.
 
-**Private site resource, not a public HTTP one.** A public resource is fronted
-by Traefik, and UDP does not traverse an HTTP reverse proxy — so mosh could not
-work over it. A private site resource is L3 over WireGuard and carries
-arbitrary TCP/UDP. Point a public hostname at web UIs (backrest, later the
-management app) instead; terminals go over the private path.
-
-**Why a container and not a process on the Mac.** Docker Desktop runs
-containers in a LinuxKit VM and macOS has no route to `172.30.0.x`. A Newt
-running natively on the Mac could not reach the bridge any more than anything
-else on macOS can, and every bottle would be back to publishing its own ports.
-On a Linux host this would not matter.
-
-**No capabilities, no published ports.** Newt is a fully user-space WireGuard
-client (wireguard-go netstack), so it needs neither `NET_ADMIN` nor
-`/dev/net/tun`. It dials out, so nothing is published on the Mac, no router
-forward is needed and no dynamic DNS. The internet-facing surface is the
-Pangolin server, not this machine.
-
-**Addresses.** Newt takes the second-from-last address in `DJINN_SUBNET`
-(`172.30.0.253` by default), one below the jump. Override with
-`DJINN_NEWT_IP`. The image is pinned via `DJINN_NEWT_IMAGE` — never `:latest`.
+Newt is a fully user-space WireGuard client, so the container needs neither
+`NET_ADMIN` nor `/dev/net/tun`. Its credentials are written to a `0600`
+`env_file` under `$DJINN_HOME/compose/`, never inline in the compose overlay,
+and are removed on `./djinn tunnel stop`.
 
 ## The jump container (`./djinn jump`)
 

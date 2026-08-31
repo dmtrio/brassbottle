@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""newt_host.py — host-side operator commands for the singleton newt connector.
+"""tunnel_host.py — host-side operator commands for the singleton tunnel connector.
 
-Thin docker-compose glue around newt_config. Stdlib only.
+Thin docker-compose glue around tunnel_config. Stdlib only.
 
-Newt has no key material and no persistent volume: its identity is the three
-Pangolin secrets in secrets.env, and everything else is reconstructed from
+The connector has no key material and no persistent volume: its identity is
+the provider secrets in secrets.env, and everything else is reconstructed from
 them on each start. So there is no `pubkey`-style command and `stop` is safe.
 """
 
@@ -24,23 +24,24 @@ if str(_SRC) not in sys.path:
 
 import ensure_net  # noqa: E402
 
-from newt_config import (  # noqa: E402
-    NewtConfigError,
-    remove_env_file,
-    NewtIdentity,
+from tunnel_config import (  # noqa: E402
+    PROVIDER,
     SERVICE_NAME,
+    TunnelConfigError,
+    TunnelIdentity,
     derive_identity,
     paths,
+    remove_env_file,
     resolve_image,
-    resolve_newt_ip,
     resolve_secrets,
     resolve_subnet,
+    resolve_tunnel_ip,
     write_compose_file,
 )
 
 
-class NewtHostError(Exception):
-    """Operator-facing newt error."""
+class TunnelHostError(Exception):
+    """Operator-facing tunnel error."""
 
 
 class DockerCommandMissing(Exception):
@@ -56,7 +57,7 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _compose_cmd(base_path: Path, identity: NewtIdentity, *args: str) -> list[str]:
+def _compose_cmd(base_path: Path, identity: TunnelIdentity, *args: str) -> list[str]:
     p = paths(base_path)
     return [
         "docker",
@@ -83,17 +84,17 @@ def _run(
     try:
         result = subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
     except FileNotFoundError as exc:
-        print(f"newt {boundary or 'run'} error reason=docker-not-found", file=sys.stderr)
+        print(f"tunnel {boundary or 'run'} error reason=docker-not-found", file=sys.stderr)
         raise DockerCommandMissing(str(exc)) from exc
     if boundary is not None and started is not None:
         print(
-            f"newt {boundary} done duration={time.monotonic() - started:.2f}s "
+            f"tunnel {boundary} done duration={time.monotonic() - started:.2f}s "
             f"exit_code={result.returncode}"
         )
     return result
 
 
-def _service_running(base_path: Path, identity: NewtIdentity, *, boundary: str) -> bool:
+def _service_running(base_path: Path, identity: TunnelIdentity, *, boundary: str) -> bool:
     """True only when the service is actually RUNNING.
 
     `ps -q` returns an id for a created/restarting container too, and the jump
@@ -123,14 +124,14 @@ def _live_subnet() -> "ipaddress.IPv4Network | None":
     try:
         raw = ensure_net.network_subnet(ensure_net.NET_NAME)
     except Exception as exc:  # noqa: BLE001 — boundary: never fail start on this
-        print(f"newt ensure-net warn reason=subnet-unreadable detail={exc}")
+        print(f"tunnel ensure-net warn reason=subnet-unreadable detail={exc}")
         return None
     if not raw:
         return None
     try:
         return ipaddress.IPv4Network(raw, strict=True)
     except ValueError:
-        print(f"newt ensure-net warn reason=subnet-unparseable value={raw}")
+        print(f"tunnel ensure-net warn reason=subnet-unparseable value={raw}")
         return None
 
 
@@ -138,7 +139,7 @@ def _ensure_network(base_path: Path) -> int:
     """Create/validate djinn-net before compose runs.
 
     The generated compose declares the bridge `external: true`, so compose
-    will not create it. sys.executable, not a bare "python3": newt.sh resolves
+    will not create it. sys.executable, not a bare "python3": tunnel.sh resolves
     $PYTHON3 through common.sh's require_python3, and re-looking-up "python3"
     here would reintroduce that failure one step later.
     """
@@ -150,13 +151,13 @@ def _ensure_network(base_path: Path) -> int:
     ).returncode
 
 
-# How long to wait for newt to settle after compose returns. A crash-loop
+# How long to wait for tunnel to settle after compose returns. A crash-loop
 # restart takes a moment to show, so a single immediate check would pass.
 SETTLE_CHECKS = 3
 SETTLE_INTERVAL_SECONDS = 1.0
 
 
-def _settled_running(base_path: Path, identity: NewtIdentity) -> bool:
+def _settled_running(base_path: Path, identity: TunnelIdentity) -> bool:
     """True once the service is running and stays running.
 
     Polls rather than checking once: a container that exits on start is
@@ -174,37 +175,37 @@ def _settled_running(base_path: Path, identity: NewtIdentity) -> bool:
 def cmd_start(base_path: Path) -> int:
     identity = derive_identity(base_path)
     started = time.monotonic()
-    print(f"newt start begin base={base_path}")
+    print(f"tunnel start begin base={base_path}")
     try:
         secrets = resolve_secrets()
         image = resolve_image()
-        newt_ip = resolve_newt_ip()
-    except NewtConfigError as exc:
-        print(f"newt start error reason={exc}", file=sys.stderr)
+        newt_ip = resolve_tunnel_ip()
+    except TunnelConfigError as exc:
+        print(f"tunnel start error reason={exc}", file=sys.stderr)
         return 1
     try:
         rc = _ensure_network(base_path)
         if rc != 0:
             print(
-                f"newt start error reason=djinn-net-unavailable exit_code={rc}",
+                f"tunnel start error reason=djinn-net-unavailable exit_code={rc}",
                 file=sys.stderr,
             )
             return rc
         live = _live_subnet()
         if live is not None and live != resolve_subnet():
             print(
-                f"newt start warn reason=subnet-drift live={live} "
+                f"tunnel start warn reason=subnet-drift live={live} "
                 f"desired={resolve_subnet()} — using the live bridge"
             )
         try:
             if live is not None:
                 if live != resolve_subnet():
-                    newt_ip = resolve_newt_ip(subnet=live)
+                    newt_ip = resolve_tunnel_ip(subnet=live)
                 write_compose_file(base_path, secrets, subnet=live)
             else:
                 write_compose_file(base_path, secrets)
-        except NewtConfigError as exc:
-            print(f"newt start error reason={exc}", file=sys.stderr)
+        except TunnelConfigError as exc:
+            print(f"tunnel start error reason={exc}", file=sys.stderr)
             return 1
         result = _run(
             _compose_cmd(base_path, identity, "up", "-d", SERVICE_NAME),
@@ -216,7 +217,7 @@ def cmd_start(base_path: Path) -> int:
         return DOCKER_MISSING_EXIT
     if result.returncode != 0:
         print(
-            f"newt start error duration={time.monotonic() - started:.2f}s "
+            f"tunnel start error duration={time.monotonic() - started:.2f}s "
             f"exit_code={result.returncode}",
             file=sys.stderr,
         )
@@ -228,19 +229,19 @@ def cmd_start(base_path: Path) -> int:
     # configure Pangolin against a connector that is not running.
     if not _settled_running(base_path, identity):
         print(
-            "newt start error reason=not-running-after-start — the container "
-            "was created but is not running. Most likely a bad NEWT_SECRET or "
-            "PANGOLIN_ENDPOINT; check './djinn newt logs'.",
+            f"tunnel start error reason=not-running-after-start provider={PROVIDER} "
+            "— the container was created but is not running. Most likely bad "
+            "credentials in secrets.env; check './djinn tunnel logs'.",
             file=sys.stderr,
         )
         return 1
     # Never log the secrets themselves — identifiers and sizes only.
-    print(f"newt start ok container={identity.container_name} ip={newt_ip} image={image}")
+    print(f"tunnel start ok container={identity.container_name} ip={newt_ip} image={image}")
     print("")
-    print("  Newt dials OUT to Pangolin — nothing is published on this Mac.")
-    print("  In Pangolin, point the site's private resource at this bridge:")
+    print("  The connector dials OUT — nothing is published on this Mac.")
+    print("  Point your VPN's private route at this bridge:")
     print(f"    {resolve_subnet()}   (or just {newt_ip} and the jump)")
-    print("  Then enrol your phone with Olm and scope AllowedIPs to that CIDR.")
+    print("  Then enrol your phone and scope its AllowedIPs to that CIDR.")
     return 0
 
 
@@ -249,7 +250,7 @@ def cmd_stop(base_path: Path) -> int:
     compose_file = paths(base_path)["compose_file"]
     started = time.monotonic()
     if not compose_file.exists():
-        print(f"newt stop not-configured project={identity.compose_project_name}")
+        print(f"tunnel stop not-configured project={identity.compose_project_name}")
         return 0
     try:
         result = _run(
@@ -264,7 +265,7 @@ def cmd_stop(base_path: Path) -> int:
         # The credential file must not outlive the container it was written
         # for; the next start regenerates it from secrets.env.
         remove_env_file(base_path)
-        print("newt stop ok credentials-removed=true")
+        print("tunnel stop ok credentials-removed=true")
     return result.returncode
 
 
@@ -272,14 +273,14 @@ def cmd_status(base_path: Path) -> int:
     identity = derive_identity(base_path)
     compose_file = paths(base_path)["compose_file"]
     if not compose_file.exists():
-        print(f"newt status not-configured project={identity.compose_project_name}")
+        print(f"tunnel status not-configured project={identity.compose_project_name}")
         return 1
     try:
         running = _service_running(base_path, identity, boundary="status")
     except DockerCommandMissing:
         return DOCKER_MISSING_EXIT
     print(
-        f"newt status {'running' if running else 'stopped'} "
+        f"tunnel status {'running' if running else 'stopped'} "
         f"container={identity.container_name} project={identity.compose_project_name}"
     )
     return 0 if running else 1
@@ -289,7 +290,7 @@ def cmd_logs(base_path: Path, follow: bool) -> int:
     identity = derive_identity(base_path)
     compose_file = paths(base_path)["compose_file"]
     if not compose_file.exists():
-        raise NewtHostError("newt container is not configured — run: ./djinn newt start")
+        raise TunnelHostError("tunnel container is not configured — run: ./djinn tunnel start")
     args = ["logs", SERVICE_NAME]
     if follow:
         args.append("-f")
@@ -317,10 +318,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--base-path", default=None, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("start", help="start the newt connector")
-    sub.add_parser("stop", help="stop and remove the newt connector")
-    sub.add_parser("status", help="report whether the newt container is running")
-    logs = sub.add_parser("logs", help="show newt container logs")
+    sub.add_parser("start", help="start the tunnel connector")
+    sub.add_parser("stop", help="stop and remove the tunnel connector")
+    sub.add_parser("status", help="report whether the tunnel container is running")
+    logs = sub.add_parser("logs", help="show tunnel container logs")
     logs.add_argument("-f", "--follow", action="store_true")
     return parser
 
@@ -337,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_status(base_path)
         if args.command == "logs":
             return cmd_logs(base_path, args.follow)
-    except (NewtHostError, NewtConfigError) as exc:
+    except (TunnelHostError, TunnelConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 2

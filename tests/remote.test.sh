@@ -24,7 +24,7 @@ fail() { echo "  ✗ $1"; FAILURES=$((FAILURES + 1)); }
 pass() { echo "  ✓ $1"; }
 
 echo "── syntax"
-for f in up.sh jump.sh newt.sh src/entrypoint.sh src/init-firewall.sh src/tmux-notify.sh src/mosh-server-wrapper.sh src/tmux-landing.bashrc src/freshness-landing.bashrc jump/entrypoint.sh; do
+for f in up.sh jump.sh tunnel.sh src/entrypoint.sh src/init-firewall.sh src/tmux-notify.sh src/mosh-server-wrapper.sh src/tmux-landing.bashrc src/freshness-landing.bashrc jump/entrypoint.sh; do
     bash -n "$f" && pass "bash -n $f" || fail "$f has syntax errors"
 done
 
@@ -45,24 +45,24 @@ grep -qF '>> /home/coder/.ssh/authorized_keys' src/entrypoint.sh \
     && pass "jump key is APPENDED, so the operator key keeps working" \
     || fail "src/entrypoint.sh must append the jump key, never replace"
 
-echo "── newt connector (PLN - Djinn Admin Plane, phase A)"
-grep -qF 'DEFAULT_NEWT_IMAGE = "fosrl/newt:' src/newt_config.py \
-    && pass "newt image is pinned to a version, never :latest" \
-    || fail "src/newt_config.py does not pin the newt image"
+echo "── tunnel connector (PLN - Djinn Admin Plane, phase A)"
+grep -qF 'DEFAULT_TUNNEL_IMAGE = "fosrl/newt:' src/tunnel_config.py \
+    && pass "tunnel image is pinned to a version, never :latest" \
+    || fail "src/tunnel_config.py does not pin the tunnel image"
 grep -qF 'PANGOLIN_ENDPOINT' secrets.env.example \
     && pass "secrets.env.example documents the Pangolin credentials" \
     || fail "secrets.env.example is missing PANGOLIN_ENDPOINT"
 # The rendered compose is what matters, not the source (whose docstring
-# explains why these are absent). tests/test_newt_config.py asserts the render
+# explains why these are absent). tests/test_tunnel_config.py asserts the render
 # directly; here we pin the plumbing bash can see.
 for v in PANGOLIN_ENDPOINT NEWT_ID NEWT_SECRET; do
-    grep -qF -- "$v=\"\${$v:-}\"" newt.sh \
-        && pass "newt.sh forwards $v from secrets.env" \
-        || fail "newt.sh does not forward $v"
+    grep -qF -- "$v=\"\${$v:-}\"" tunnel.sh \
+        && pass "tunnel.sh forwards $v from secrets.env" \
+        || fail "tunnel.sh does not forward $v"
 done
-grep -qF 'DJINN_SUBNET="${DJINN_SUBNET:-}"' newt.sh \
-    && pass "newt.sh forwards DJINN_SUBNET (common.sh exports nothing)" \
-    || fail "newt.sh does not forward DJINN_SUBNET"
+grep -qF 'DJINN_SUBNET="${DJINN_SUBNET:-}"' tunnel.sh \
+    && pass "tunnel.sh forwards DJINN_SUBNET (common.sh exports nothing)" \
+    || fail "tunnel.sh does not forward DJINN_SUBNET"
 
 echo "── compose overlays"
 for f in compose/docker-compose.local.yml compose/docker-compose.ssh.yml compose/docker-compose.mosh.yml; do
