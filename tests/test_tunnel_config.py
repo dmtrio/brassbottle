@@ -50,6 +50,19 @@ class VendorNeutralityTests(unittest.TestCase):
             with self.subTest(vendor=vendor):
                 self.assertNotIn(vendor, stripped.lower())
 
+    def test_the_help_output_names_no_vendor(self):
+        # --help is the primary discoverability surface, and a bulk rename can
+        # miss it: `prog="djinn newt"` has no "./" prefix, so a sweep keyed on
+        # "./djinn newt" left it behind.
+        import tunnel_host
+
+        parser = tunnel_host.build_parser()
+        text = parser.format_help().lower()
+        self.assertIn("djinn tunnel", text)
+        for vendor in self.VENDORS:
+            with self.subTest(vendor=vendor):
+                self.assertNotIn(vendor, text)
+
     def test_our_env_vars_name_the_role_not_the_vendor(self):
         self.assertEqual(tunnel_config.ENV_TUNNEL_IP, "DJINN_TUNNEL_IP")
         self.assertEqual(tunnel_config.ENV_TUNNEL_IMAGE, "DJINN_TUNNEL_IMAGE")

@@ -2,7 +2,7 @@
 """djinn_net_addr.py — shared djinn-net subnet and static-address arithmetic.
 
 Extracted so the singleton containers that need a stable bridge address
-(jump, newt) derive it the same way instead of each keeping its own copy of
+(jump, tunnel) derive it the same way instead of each keeping its own copy of
 the rules. Past reviews have flagged exactly this shape of duplication
 ("constants drift ... without a single source of truth").
 
@@ -43,7 +43,7 @@ MIN_PREFIXLEN_FOR_DERIVED = 29
 # otherwise compose fails with an opaque "Address already in use", or worse
 # the sibling is stopped, this one takes its address, and the NEXT start of
 # the sibling is what breaks, far from the cause.
-SINGLETON_OFFSETS = {1: "jump", 2: "newt"}
+SINGLETON_OFFSETS = {1: "jump", 2: "tunnel"}
 
 
 def resolve_subnet(env: dict[str, str] | None = None) -> ipaddress.IPv4Network:
