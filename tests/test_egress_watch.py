@@ -1449,5 +1449,100 @@ class WatcherStartupSurfaceTests(unittest.TestCase):
             self.assertTrue((egress_root / watch.TOKENS_DIRNAME).is_dir())
 
 
+
+class DrainPendingInputTests(unittest.TestCase):
+    """Type-ahead must not answer a prompt the operator never saw.
+
+    Observed in the field: a `d` typed while the watcher was still polling was
+    consumed the instant the first prompt rendered, denying a request the
+    operator had not read. `D`/`G` would have written a PERSISTENT deny-list
+    entry the same way.
+    """
+
+    def _watcher(self, root: Path, **kw) -> watch.EgressWatcher:
+        b = broker.EgressBroker(
+            root, repo_root=REPO_ROOT, now_fn=FakeClock(NOW).now, hold_seconds_default=60
+        )
+        return watch.EgressWatcher(
+            b, egress_log.EgressLog(root), output=io.StringIO(), platform="linux", **kw
+        )
+
+    def test_injected_input_fn_is_never_drained(self):
+        # An injected reader reads from somewhere other than the tty; draining
+        # stdin for it would be pointless and would break piped answers.
+        with tempfile.TemporaryDirectory() as tmp:
+            w = self._watcher(Path(tmp), input_fn=lambda _p: "a")
+            self.assertFalse(w._owns_stdin)
+            with mock.patch.object(watch, "termios") as t:
+                w._drain_pending_input()
+            t.tcflush.assert_not_called()
+
+    def test_real_stdin_on_a_tty_is_flushed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = self._watcher(Path(tmp))
+            self.assertTrue(w._owns_stdin)
+            with mock.patch.object(watch, "termios") as t, mock.patch.object(
+                watch.os, "isatty", return_value=True
+            ), mock.patch.object(sys.stdin, "fileno", return_value=0):
+                w._drain_pending_input()
+            t.tcflush.assert_called_once()
+            self.assertEqual(t.tcflush.call_args[0][1], t.TCIFLUSH)
+
+    def test_non_tty_stdin_is_left_alone(self):
+        # Piped input is a legitimate way to drive this; do not eat it.
+        with tempfile.TemporaryDirectory() as tmp:
+            w = self._watcher(Path(tmp))
+            with mock.patch.object(watch, "termios") as t, mock.patch.object(
+                watch.os, "isatty", return_value=False
+            ), mock.patch.object(sys.stdin, "fileno", return_value=0):
+                w._drain_pending_input()
+            t.tcflush.assert_not_called()
+
+    def test_a_closed_stdin_does_not_break_the_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = self._watcher(Path(tmp))
+            with mock.patch.object(watch, "termios") as t, mock.patch.object(
+                sys.stdin, "fileno", side_effect=ValueError
+            ):
+                w._drain_pending_input()  # must not raise
+            t.tcflush.assert_not_called()
+
+    def test_missing_termios_is_tolerated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = self._watcher(Path(tmp))
+            with mock.patch.object(watch, "termios", None):
+                w._drain_pending_input()  # must not raise
+
+    def test_prompt_drains_after_rendering_not_before(self):
+        # Draining before the block is on screen would leave a window in which
+        # type-ahead still lands, so ordering is the whole fix.
+        order: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = broker.EgressBroker(
+                root, repo_root=REPO_ROOT, now_fn=FakeClock(NOW).now, hold_seconds_default=60
+            )
+
+            class Recorder(io.StringIO):
+                def flush(self) -> None:
+                    order.append("render")
+
+            w = watch.EgressWatcher(
+                b, egress_log.EgressLog(root), output=Recorder(), platform="linux"
+            )
+            details = watch.RequestDetails(
+                request_id="req-1",
+                container="coding-brassbottle",
+                host="docs.stripe.com",
+                port=443,
+                hit_count=1,
+            )
+            with mock.patch.object(
+                w, "_drain_pending_input", side_effect=lambda: order.append("drain")
+            ), mock.patch.object(w, "_prompt_terminal", return_value=None):
+                w._prompt_operator(details)
+        self.assertEqual(order, ["render", "drain"])
+
+
 if __name__ == "__main__":
     unittest.main()

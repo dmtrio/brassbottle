@@ -37,6 +37,17 @@ the process makes fails this way, and the only record is the `self_dial` log
 line. Before this was refused at the socket the same request was *filed*, and
 surfaced as an IP-literal approval prompt no operator answer could clear.
 
+### Type-ahead is discarded
+
+The input queue is flushed each time a prompt is rendered, so only keystrokes
+made **after** a question is on screen can answer it. Without that, anything
+typed while the watcher was polling is returned the instant the next prompt
+appears — silently answering a request the operator never read, and with
+`D`/`G` writing a persistent deny-list entry.
+
+If you type ahead deliberately, the keystrokes are dropped rather than queued;
+answer each request as it appears.
+
 ## Notifications
 
 ### macOS banner / dialog
