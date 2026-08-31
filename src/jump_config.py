@@ -255,13 +255,18 @@ def parse_authorized_keys(text: str, *, source: str) -> list[str]:
     return keys
 
 
-def read_authorized_keys(base_path: Path) -> list[str]:
-    """Validated keys from DJINN_HOME/jump/authorized_keys, [] if absent."""
+def read_authorized_keys(base_path: Path) -> list[str] | None:
+    """Validated keys from DJINN_HOME/jump/authorized_keys.
+
+    None means the file does not exist (never configured); [] means it exists
+    but holds no keys. The distinction is load-bearing for revocation — see
+    resolve_authorized_keys.
+    """
     path = paths(base_path)["authorized_keys"]
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return []
+        return None
     except OSError as exc:
         raise JumpConfigError(f"cannot read {path}: {exc}") from exc
     except UnicodeDecodeError as exc:
@@ -274,36 +279,61 @@ def resolve_authorized_keys(
 ) -> tuple[list[str], str]:
     """The keys to authorise, and where they came from ("file" | "env").
 
-    Precedence is deliberate and one-directional: the FILE wins whenever it
-    holds at least one key. SSH_AUTHORIZED_KEY is a compatibility seed for
-    installations that predate the file — it populates the file once and then
-    stops mattering. The alternative (env always wins, or a merge) would mean
-    an operator editing the file sees no effect, or cannot remove a key that
-    secrets.env keeps re-adding.
+    Precedence is one-directional and keyed on the file's EXISTENCE, not on
+    whether it holds keys. Once the file exists it is the only authority;
+    SSH_AUTHORIZED_KEY is a compatibility seed for installations that predate
+    it and stops mattering thereafter.
+
+    Emptying the file therefore authorises NOBODY and is an error, never a
+    fallback. Falling back on an empty file would make clearing the file —
+    the obvious way to revoke every device — silently restore the legacy key
+    from secrets.env and re-authorise it, which is the opposite of what the
+    operator just asked for.
     """
     env = os.environ if env is None else env
+    path = paths(base_path)["authorized_keys"]
     keys = read_authorized_keys(base_path)
-    if keys:
-        return keys, "file"
+
+    if keys is not None:
+        if keys:
+            return keys, "file"
+        raise JumpConfigError(
+            f"{path} exists but contains no keys — sshd would accept nobody. "
+            f"Add a key, or delete the file to fall back to "
+            f"{ENV_AUTHORIZED_KEY}."
+        )
 
     legacy = (env.get(ENV_AUTHORIZED_KEY) or "").strip()
     if legacy:
         return parse_authorized_keys(legacy, source=ENV_AUTHORIZED_KEY), "env"
 
-    path = paths(base_path)["authorized_keys"]
     raise JumpConfigError(
         f"no authorised keys — add one public key per line to {path} "
         f"(or set {ENV_AUTHORIZED_KEY} in secrets.env to seed it)"
     )
 
 
-def write_authorized_keys(base_path: Path, keys: list[str]) -> Path:
-    """Persist the key list, 0644, one per line.
+def authorized_keys_digest(keys: list[str]) -> str:
+    """Stable digest of the key SET, for compose change detection.
 
-    Always written before compose runs, even when the content is unchanged:
-    docker creates a DIRECTORY at a bind-mount source that does not exist, and
-    a directory mounted where the entrypoint expects a file is a crash loop
-    whose cause is invisible from the phone.
+    Sorted, so reordering the file does not recreate the container; the digest
+    changes only when the authorised set actually changes.
+    """
+    body = "\n".join(sorted(keys))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def seed_authorized_keys(base_path: Path, keys: list[str]) -> Path:
+    """Create the key file from the legacy env value. SEEDING ONLY.
+
+    Never called when the file is already the source: it writes the PARSED
+    keys, which would strip the comments and blank lines an operator put there
+    (docs/remote.md advertises `# mac` / `# phone` labels, and those labels are
+    the only thing distinguishing which device to revoke later).
+
+    Docker creates a DIRECTORY at a bind-mount source that does not exist, so
+    the file must be on disk before compose runs either way — but for an
+    operator-owned file that is guaranteed by its existence, not by rewriting.
     """
     p = ensure_layout(base_path)
     target = p["authorized_keys"]
@@ -323,6 +353,7 @@ def render_compose_yaml(
     identity: JumpIdentity,
     ssh_dir: Path,
     authorized_keys_file: Path,
+    keys_digest: str,
     jump_ip: str,
     mosh_ports: str,
 ) -> str:
@@ -340,8 +371,8 @@ def render_compose_yaml(
         raise JumpConfigError(f"jump ssh dir does not exist: {ssh_dir}")
     # Docker creates a DIRECTORY at a missing bind-mount source, which the
     # entrypoint would then fail to read as a file — on a restart:
-    # unless-stopped service that is a silent crash loop. write_authorized_keys
-    # runs first in the normal path; this catches a hand-deleted file.
+    # unless-stopped service that is a silent crash loop. This also catches a
+    # hand-deleted file, which resolve_authorized_keys would not see.
     if not authorized_keys_file.is_file():
         raise JumpConfigError(
             f"jump authorized_keys is not a file: {authorized_keys_file}"
@@ -368,6 +399,15 @@ def render_compose_yaml(
     return f"""# Generated by brassbottle jump — do not hand-edit.
 services:
   {SERVICE_NAME}:
+    labels:
+      # The authorised key SET, hashed. Load-bearing, not decoration: the key
+      # list is mounted rather than embedded, so without this the overlay is
+      # byte-identical after an operator adds a key, `compose up -d` sees an
+      # unchanged config and leaves the old container running, and the new
+      # device cannot log in while the command reports success. Changing a
+      # label changes the config hash, so compose recreates — and the
+      # entrypoint re-copies the file — on the very next `./djinn jump start`.
+      djinn.authorized_keys_sha256: "{keys_digest}"
     build:
       context: .
       dockerfile: jump/Dockerfile
@@ -395,19 +435,31 @@ def write_compose_file(
     base_path: Path,
     keys: list[str],
     subnet: ipaddress.IPv4Network | None = None,
+    *,
+    seed: bool = False,
 ) -> Path:
-    """Ensure layout, persist the key list, and write the compose overlay.
+    """Ensure layout, optionally seed the key file, write the compose overlay.
 
-    The key file is written HERE rather than by the caller so the bind-mount
-    source is guaranteed to exist by the time compose reads the overlay.
+    `seed` is True only when the keys came from the legacy SSH_AUTHORIZED_KEY
+    and the file does not exist yet. When the file IS the source it is left
+    exactly as the operator wrote it — comments and all.
     """
+    # A bare str is the OLD signature (one key, not a list) and would be
+    # accepted silently everywhere below — sorted() over its characters, and a
+    # key file written one character per line. Cheap guard, unbounded damage.
+    if isinstance(keys, str):
+        raise JumpConfigError(
+            "write_compose_file takes a list of keys, not a single string"
+        )
     p = ensure_layout(base_path)
     identity = derive_identity(base_path)
-    keys_path = write_authorized_keys(base_path, keys)
+    if seed:
+        seed_authorized_keys(base_path, keys)
     content = render_compose_yaml(
         identity=identity,
         ssh_dir=p["ssh_dir"],
-        authorized_keys_file=keys_path,
+        authorized_keys_file=p["authorized_keys"],
+        keys_digest=authorized_keys_digest(keys),
         jump_ip=resolve_jump_ip(subnet=subnet),
         mosh_ports=resolve_mosh_ports(),
     )

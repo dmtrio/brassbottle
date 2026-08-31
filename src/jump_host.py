@@ -108,12 +108,14 @@ def _service_running(base_path: Path, identity: JumpIdentity, *, boundary: str) 
     return SERVICE_NAME in (result.stdout or "").split()
 
 
-def _authorized_keys(base_path: Path) -> list[str]:
-    """Operator keys from the file, or the legacy env seed. See
-    jump_config.resolve_authorized_keys for the precedence rule."""
+def _authorized_keys(base_path: Path) -> tuple[list[str], bool]:
+    """Operator keys, and whether they must be seeded into the key file.
+
+    See jump_config.resolve_authorized_keys for the precedence rule.
+    """
     keys, source = resolve_authorized_keys(base_path)
     print(f"jump authorized_keys resolved source={source} count={len(keys)}")
-    return keys
+    return keys, source == "env"
 
 
 def _live_subnet() -> "ipaddress.IPv4Network | None":
@@ -168,7 +170,7 @@ def cmd_start(base_path: Path) -> int:
     started = time.monotonic()
     print(f"jump start begin base={base_path}")
     try:
-        keys = _authorized_keys(base_path)
+        keys, seed = _authorized_keys(base_path)
         jump_ip = resolve_jump_ip()
         mosh_ports = resolve_mosh_ports()
     except (JumpConfigError, JumpHostError) as exc:
@@ -193,9 +195,9 @@ def cmd_start(base_path: Path) -> int:
             if live is not None:
                 if live != resolve_subnet():
                     jump_ip = resolve_jump_ip(subnet=live)
-                write_compose_file(base_path, keys, subnet=live)
+                write_compose_file(base_path, keys, subnet=live, seed=seed)
             else:
-                write_compose_file(base_path, keys)
+                write_compose_file(base_path, keys, seed=seed)
         except JumpConfigError as exc:
             print(f"jump start error reason={exc}", file=sys.stderr)
             return 1

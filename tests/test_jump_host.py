@@ -48,13 +48,15 @@ class StartTests(unittest.TestCase):
         # quoting, and no key content in the compose overlay.
         keys = [KEY, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE6 phone@moshi"]
         with tempfile.TemporaryDirectory() as home:
-            jump_config.write_authorized_keys(Path(home), keys)
+            jump_config.seed_authorized_keys(Path(home), keys)
             with mock.patch.dict(
                 jump_host.os.environ, {"SSH_AUTHORIZED_KEY": ""}, clear=False
             ), mock.patch("subprocess.run", side_effect=lambda c, **k: _completed(c)):
                 self.assertEqual(jump_host.cmd_start(Path(home)), 0)
             written = jump_config.paths(Path(home))["authorized_keys"].read_text()
             self.assertEqual(written, "".join(f"{k}\n" for k in keys))
+            overlay = jump_config.paths(Path(home))["compose_file"].read_text()
+            self.assertIn("djinn.authorized_keys_sha256", overlay)
 
     def test_start_bootstraps_the_external_bridge_first(self):
         # djinn-net is declared external, and `jump start` is documented as the
@@ -177,7 +179,7 @@ class StopStatusTests(unittest.TestCase):
     def test_status_running_returns_0(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
-            jump_config.write_compose_file(base, KEY)
+            jump_config.write_compose_file(base, [KEY], seed=True)
             with mock.patch(
                 "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd, 0, "jump\n")
             ):
@@ -189,7 +191,7 @@ class StopStatusTests(unittest.TestCase):
         # otherwise report "running".
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
-            jump_config.write_compose_file(base, KEY)
+            jump_config.write_compose_file(base, [KEY], seed=True)
             with mock.patch(
                 "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd, 0, "")
             ) as run:
@@ -202,7 +204,7 @@ class StopStatusTests(unittest.TestCase):
     def test_status_stopped_returns_1(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
-            jump_config.write_compose_file(base, KEY)
+            jump_config.write_compose_file(base, [KEY], seed=True)
             with mock.patch(
                 "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd, 0, "")
             ):
@@ -216,7 +218,7 @@ class StopStatusTests(unittest.TestCase):
     def test_logs_follow_appends_flag(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
-            jump_config.write_compose_file(base, KEY)
+            jump_config.write_compose_file(base, [KEY], seed=True)
             with mock.patch(
                 "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
             ) as run:
