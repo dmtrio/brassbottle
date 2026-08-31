@@ -269,6 +269,134 @@ class EgressQueuePageTests(unittest.TestCase):
                     self._stop_server(server, thread, "queue page server")
                 self._stop_server(stub, stub_thread, "stub daemon server")
 
+    def test_env_override_reaches_daemon_without_daemon_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            token = "operator-token"
+            canned = b'{"open":[],"count":0,"generated_at":"x"}'
+            stub, stub_thread = self._start_stub_daemon(HTTPStatus.OK, canned)
+            server = thread = None
+            try:
+                stub_host, stub_port = stub.server_address
+                # No daemon.json anywhere: the documented EGRESS_BROKER_URL
+                # override alone must carry the proxy to the daemon.
+                server, thread = self._start_queue_server(egress_root, token)
+                host, port = server.server_address
+                with mock.patch.dict(
+                    os.environ,
+                    {broker.EGRESS_BROKER_URL_ENV: f"http://{stub_host}:{stub_port}"},
+                ):
+                    status, body = self._json_get(host, port, "/api/queue")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(body, canned)
+            finally:
+                if server is not None and thread is not None:
+                    self._stop_server(server, thread, "queue page server")
+                self._stop_server(stub, stub_thread, "stub daemon server")
+
+    def test_upstream_401_reports_token_rejected_not_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            stub, stub_thread = self._start_stub_daemon(
+                HTTPStatus.UNAUTHORIZED, b'{"error":"unauthorized"}'
+            )
+            server = thread = None
+            try:
+                stub_host, stub_port = stub.server_address
+                broker.write_daemon_endpoint(egress_root, stub_host, stub_port)
+                server, thread = self._start_queue_server(egress_root, "stale-token")
+                host, port = server.server_address
+                status, body = self._json_get(host, port, "/api/queue")
+                self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+                self.assertEqual(body, queue_page.TOKEN_REJECTED_BODY)
+                self.assertNotIn(b"unauthorized", body)
+            finally:
+                if server is not None and thread is not None:
+                    self._stop_server(server, thread, "queue page server")
+                self._stop_server(stub, stub_thread, "stub daemon server")
+
+    def test_ipv6_loopback_host_binds_and_serves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            try:
+                server = queue_page.EgressQueueHTTPServer(("::1", 0), egress_root, "tok")
+            except OSError as exc:  # pragma: no cover - IPv6-less environments
+                self.skipTest(f"IPv6 loopback unavailable: {exc}")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                host, port = server.server_address[:2]
+                wait_for_tcp_listening(host, port)
+                status, body = self._json_get(host, port, "/")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertIn("Egress queue", body.decode("utf-8"))
+            finally:
+                self._stop_server(server, thread, "ipv6 queue page server")
+
+    def test_client_disconnect_logs_one_line_not_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = queue_page.EgressQueueHTTPServer(
+                ("127.0.0.1", 0), Path(tmp), "tok"
+            )
+            try:
+                with self.assertLogs(queue_page.LOG.name, level="INFO") as logs:
+                    try:
+                        raise ConnectionResetError("peer went away")
+                    except ConnectionResetError:
+                        server.handle_error(None, ("127.0.0.1", 12345))
+                self.assertTrue(
+                    any("client disconnected" in line for line in logs.output)
+                )
+            finally:
+                server.server_close()
+
+    def test_bind_conflict_exits_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            occupier = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            occupier.bind(("127.0.0.1", 0))
+            occupier.listen(1)
+            port = occupier.getsockname()[1]
+            stderr = io.StringIO()
+            try:
+                with mock.patch.dict(os.environ, {"DJINN_HOME": tmp}, clear=True):
+                    with redirect_stderr(stderr):
+                        rc = queue_page.main(["--port", str(port)])
+            finally:
+                occupier.close()
+            self.assertEqual(rc, 1)
+            self.assertIn("already running", stderr.getvalue())
+
+    def test_empty_token_file_exits_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp) / "run" / "egress"
+            egress_root.mkdir(parents=True)
+            (egress_root / broker.OPERATOR_TOKEN_FILENAME).write_text(
+                "", encoding="utf-8"
+            )
+            stderr = io.StringIO()
+            with mock.patch.dict(os.environ, {"DJINN_HOME": tmp}, clear=True):
+                with redirect_stderr(stderr):
+                    rc = queue_page.main([])
+            self.assertEqual(rc, 1)
+            self.assertIn("operator token unavailable", stderr.getvalue())
+
+    def test_token_create_race_recovers_by_rereading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            token_path = egress_root / broker.OPERATOR_TOKEN_FILENAME
+
+            def lose_race(_root: Path) -> str:
+                # The winner (daemon under DaemonLock) lands its token between
+                # our is_file() miss and the O_EXCL create.
+                token_path.write_text("winners-token\n", encoding="utf-8")
+                raise FileExistsError(str(token_path))
+
+            with mock.patch.object(
+                queue_page, "ensure_operator_token", side_effect=lose_race
+            ):
+                token = queue_page._read_operator_token(egress_root)
+            self.assertEqual(token, "winners-token")
+
 
 if __name__ == "__main__":
     unittest.main()

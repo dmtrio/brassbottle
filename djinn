@@ -56,7 +56,8 @@ case "${1:-}" in
     queue)
         shift
         . "$SCRIPT_DIR/src/common.sh"
-        exec env DJINN_HOME="$BASE_PATH" python3 "$SCRIPT_DIR/src/egress_queue_page.py" "$@"
+        require_python3 || exit 1
+        exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/egress_queue_page.py" "$@"
         ;;
     deny)
         shift
