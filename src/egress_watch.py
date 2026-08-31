@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, TextIO
 
+try:  # POSIX only; absent on Windows, where the drain is simply skipped.
+    import termios
+except ImportError:  # pragma: no cover - not reachable on macOS/Linux
+    termios = None  # type: ignore[assignment]
+
 from egress_broker_host import (
     CONFIG_FILENAME,
     DEFAULT_HOLD_SECONDS,
@@ -490,6 +495,10 @@ class EgressWatcher:
         self._broker = broker
         self._log = log
         self._input_fn = input_fn or input
+        # Only drain the real terminal we are about to read from — an injected
+        # input_fn reads from somewhere else, and draining stdin then would be
+        # both pointless and surprising.
+        self._owns_stdin = input_fn is None
         self._output = output or sys.stdout
         self._poll_interval = poll_interval
         self._platform = platform if platform is not None else sys.platform
@@ -659,10 +668,38 @@ class EgressWatcher:
 
         threading.Thread(target=run, name="egress-notify", daemon=True).start()
 
+    def _drain_pending_input(self) -> None:
+        """Discard anything typed before this question was on screen.
+
+        input() reads the tty's line buffer, so a keystroke made while the
+        watcher was still polling is returned the instant the prompt renders —
+        silently answering a question the operator never saw. Observed in the
+        field: a `d` typed ahead of the first prompt denied a request the
+        operator had not read, and `D`/`G` would have written a PERSISTENT
+        deny-list entry the same way.
+
+        Only keystrokes made after the question is visible should count, so
+        flush the input queue between rendering and reading. Skipped when
+        stdin is not a tty (tests, pipes) so piped answers still work.
+        """
+        if termios is None or not self._owns_stdin:
+            return
+        try:
+            fd = sys.stdin.fileno()
+            if not os.isatty(fd):
+                return
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except (OSError, ValueError):
+            # A closed or exotic stdin is not worth failing a prompt over.
+            return
+
     def _prompt_operator(self, details: RequestDetails) -> OperatorChoice:
         self._output.write(format_denylist_status(self._broker.denylist) + "\n")
         self._output.write(format_request_block(details) + "\n> ")
         self._output.flush()
+        # After the prompt is on screen, before any read: everything typed
+        # earlier belongs to a question that was not being asked.
+        self._drain_pending_input()
         if self._platform == "darwin":
             return self._prompt_with_dialog(details)
         return self._prompt_terminal()
