@@ -1162,7 +1162,7 @@ class EgressWatchTests(unittest.TestCase):
                 platform="linux",
             )
 
-            real_month_records = watch._month_records
+            real_month_records = egress_log._month_records
             real_fold = log.fold_queue
 
             def counting_month_records(*args, **kwargs):
@@ -1173,7 +1173,7 @@ class EgressWatchTests(unittest.TestCase):
                 folds.append(1)
                 return real_fold(*args, **kwargs)
 
-            with mock.patch.object(watch, "_month_records", counting_month_records), \
+            with mock.patch.object(egress_log, "_month_records", counting_month_records), \
                     mock.patch.object(log, "fold_queue", counting_fold):
                 self.assertTrue(watcher.run_once())
 

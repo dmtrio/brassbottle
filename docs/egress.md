@@ -16,6 +16,40 @@ queue and HTTP API without the interactive UI. Containers file requests via
 `POST /egress`; the operator answers through the watcher, CLI, or notification
 actions.
 
+### Broker endpoints
+
+- `GET /health` — no auth; returns `{"status":"ok"}`.
+- `POST /egress` — bottle bearer token; files or coalesces one request.
+- `POST /decide` — operator bearer token; applies allow/deny decisions.
+- `GET /queue` — operator bearer token; returns the daemon's current queue
+  snapshot for UI clients:
+
+```json
+{
+  "open": [
+    {
+      "request_id": "deadbeef",
+      "container": "coding-brassbottle",
+      "host": "192.0.2.55",
+      "port": 5432,
+      "host_is_ip": true,
+      "opened_at": "2026-08-31T23:00:00Z",
+      "age_seconds": 12,
+      "hit_count": 3,
+      "uid": 1000,
+      "comm": "curl",
+      "reason": "npm install"
+    }
+  ],
+  "count": 1,
+  "generated_at": "2026-09-01T00:05:00Z"
+}
+```
+
+`GET /queue` reports open decision requests only. It must never be interpreted
+as "currently allowed hosts" state; ipset `allowed-domains` is the sole
+authority for active permit checks.
+
 ## Loopback is never filed
 
 Traffic to `127.0.0.0/8` is local, not egress, and never reaches the operator

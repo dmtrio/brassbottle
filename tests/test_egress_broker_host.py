@@ -454,6 +454,325 @@ class EgressBrokerHostTests(unittest.TestCase):
                 server.shutdown()
                 join_thread_or_fail(thread, label="broker server")
 
+    def test_get_queue_requires_operator_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            wait_for_tcp_listening(host, port)
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request("GET", "/queue")
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, HTTPStatus.UNAUTHORIZED)
+                conn.close()
+
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "GET",
+                    "/queue",
+                    headers={"Authorization": "Bearer wrong"},
+                )
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, HTTPStatus.UNAUTHORIZED)
+                conn.close()
+            finally:
+                server.shutdown()
+                join_thread_or_fail(thread, label="broker server")
+
+    def test_get_queue_with_operator_token_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            wait_for_tcp_listening(host, port)
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "GET",
+                    "/queue",
+                    headers={"Authorization": f"Bearer {self.OPERATOR_TOKEN}"},
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.OK)
+                self.assertEqual(body["open"], [])
+                self.assertEqual(body["count"], 0)
+                self.assertTrue(isinstance(body["generated_at"], str))
+                self.assertTrue(body["generated_at"].endswith("Z"))
+                conn.close()
+            finally:
+                server.shutdown()
+                join_thread_or_fail(thread, label="broker server")
+
+    def test_get_queue_returns_details_ordering_and_host_is_ip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=1)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            wait_for_tcp_listening(host, port)
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/egress",
+                    json.dumps(
+                        {
+                            "host": "docs.stripe.com",
+                            "port": 443,
+                            "uid": 1000,
+                            "comm": "curl",
+                            "reason": "npm install",
+                            "hold_seconds": 0,
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer tok",
+                    },
+                )
+                first = json.loads(conn.getresponse().read().decode("utf-8"))
+                first_id = first["request_id"]
+                conn.close()
+
+                clock.advance(3)
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/egress",
+                    json.dumps(
+                        {
+                            "host": "192.0.2.55",
+                            "port": 5432,
+                            "uid": 1001,
+                            "comm": "python",
+                            "reason": "db connect",
+                            "hold_seconds": 0,
+                        }
+                    ),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer tok",
+                    },
+                )
+                second = json.loads(conn.getresponse().read().decode("utf-8"))
+                second_id = second["request_id"]
+                conn.close()
+
+                clock.advance(2)
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "GET",
+                    "/queue",
+                    headers={"Authorization": f"Bearer {self.OPERATOR_TOKEN}"},
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.OK)
+                self.assertEqual(body["count"], 2)
+                self.assertEqual([item["request_id"] for item in body["open"]], [first_id, second_id])
+
+                first_row = body["open"][0]
+                second_row = body["open"][1]
+                self.assertEqual(first_row["container"], "c")
+                self.assertEqual(first_row["host"], "docs.stripe.com")
+                self.assertEqual(first_row["port"], 443)
+                self.assertFalse(first_row["host_is_ip"])
+                self.assertGreaterEqual(first_row["age_seconds"], 0)
+                self.assertEqual(first_row["hit_count"], 1)
+                self.assertEqual(first_row["uid"], 1000)
+                self.assertEqual(first_row["comm"], "curl")
+                self.assertEqual(first_row["reason"], "npm install")
+
+                self.assertEqual(second_row["host"], "192.0.2.55")
+                self.assertEqual(second_row["port"], 5432)
+                self.assertTrue(second_row["host_is_ip"])
+                self.assertGreaterEqual(second_row["age_seconds"], 0)
+                self.assertEqual(second_row["uid"], 1001)
+                self.assertEqual(second_row["comm"], "python")
+                self.assertEqual(second_row["reason"], "db connect")
+                conn.close()
+            finally:
+                server.shutdown()
+                join_thread_or_fail(thread, label="broker server")
+
+    def test_get_queue_excludes_decided_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            wait_for_tcp_listening(host, port)
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "POST",
+                    "/egress",
+                    json.dumps({"host": "docs.stripe.com", "port": 443, "hold_seconds": 0}),
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer tok",
+                    },
+                )
+                body = json.loads(conn.getresponse().read().decode("utf-8"))
+                request_id = body["request_id"]
+                conn.close()
+
+                b.decide(request_id, "deny")
+
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "GET",
+                    "/queue",
+                    headers={"Authorization": f"Bearer {self.OPERATOR_TOKEN}"},
+                )
+                resp = conn.getresponse()
+                queue = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp.status, HTTPStatus.OK)
+                self.assertEqual(queue["open"], [])
+                self.assertEqual(queue["count"], 0)
+                conn.close()
+            finally:
+                server.shutdown()
+                join_thread_or_fail(thread, label="broker server")
+
+    def test_get_queue_coalesced_hits_increase_hit_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            wait_for_tcp_listening(host, port)
+            try:
+                for _ in range(2):
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request(
+                        "POST",
+                        "/egress",
+                        json.dumps({"host": "docs.stripe.com", "port": 443, "hold_seconds": 0}),
+                        {
+                            "Content-Type": "application/json",
+                            "Authorization": "Bearer tok",
+                        },
+                    )
+                    resp = conn.getresponse()
+                    self.assertEqual(resp.status, HTTPStatus.OK)
+                    _ = resp.read()
+                    conn.close()
+
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request(
+                    "GET",
+                    "/queue",
+                    headers={"Authorization": f"Bearer {self.OPERATOR_TOKEN}"},
+                )
+                body = json.loads(conn.getresponse().read().decode("utf-8"))
+                self.assertEqual(body["count"], 1)
+                self.assertGreaterEqual(body["open"][0]["hit_count"], 2)
+                conn.close()
+            finally:
+                server.shutdown()
+                join_thread_or_fail(thread, label="broker server")
+
+    def test_get_health_no_auth_and_unknown_get_404(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            egress_root = root / "egress"
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "c.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            wait_for_tcp_listening(host, port)
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request("GET", "/health")
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, HTTPStatus.OK)
+                self.assertEqual(json.loads(resp.read().decode("utf-8")), {"status": "ok"})
+                conn.close()
+
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request("GET", "/nope")
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, HTTPStatus.NOT_FOUND)
+                self.assertEqual(json.loads(resp.read().decode("utf-8")), {"error": "not found"})
+                conn.close()
+            finally:
+                server.shutdown()
+                join_thread_or_fail(thread, label="broker server")
+
+    def test_queue_snapshot_consumes_request_details_for_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=1)
+            first, _ = b.file_request("coding-brassbottle", "docs.stripe.com", 443, hold_seconds=0)
+            second, _ = b.file_request("coding-brassbottle", "api.github.com", 443, hold_seconds=0)
+            first_id = first["request_id"]
+            second_id = second["request_id"]
+
+            fake_details = {
+                first_id: egress_log.RequestDetails(
+                    request_id=first_id,
+                    container="coding-brassbottle",
+                    host="docs.stripe.com",
+                    port=443,
+                    hit_count=7,
+                    uid=1234,
+                    comm="curl",
+                    reason="npm install",
+                )
+            }
+            with mock.patch.object(
+                broker, "request_details_for_ids", return_value=fake_details
+            ) as mocked:
+                snapshot = b.queue_snapshot()
+
+            mocked.assert_called_once()
+            self.assertEqual(snapshot["count"], 1)
+            self.assertEqual(len(snapshot["open"]), 1)
+            self.assertEqual(snapshot["open"][0]["request_id"], first_id)
+            self.assertEqual(snapshot["open"][0]["hit_count"], 7)
+            self.assertNotEqual(snapshot["open"][0]["request_id"], second_id)
+
     def test_rebuild_across_month_rotation_keeps_dedupe_and_approvable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
