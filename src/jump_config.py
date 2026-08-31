@@ -168,7 +168,9 @@ def resolve_jump_ip(
     override = (env.get(ENV_JUMP_IP) or "").strip()
     try:
         if override:
-            return djinn_net_addr.validate_static(subnet, override, ENV_JUMP_IP)
+            return djinn_net_addr.validate_static(
+                subnet, override, ENV_JUMP_IP, own_offset=JUMP_ADDRESS_OFFSET
+            )
         return str(
                 djinn_net_addr.top_address(subnet, JUMP_ADDRESS_OFFSET, ENV_JUMP_IP)
             )

@@ -38,6 +38,13 @@ ENV_SUBNET = "DJINN_SUBNET"
 # "last usable" is the network address itself.
 MIN_PREFIXLEN_FOR_DERIVED = 29
 
+# Every singleton that claims a fixed top-of-subnet slot, by offset. Used to
+# reject an operator override that lands on another singleton's address —
+# otherwise compose fails with an opaque "Address already in use", or worse
+# the sibling is stopped, this one takes its address, and the NEXT start of
+# the sibling is what breaks, far from the cause.
+SINGLETON_OFFSETS = {1: "jump", 2: "newt"}
+
 
 def resolve_subnet(env: dict[str, str] | None = None) -> ipaddress.IPv4Network:
     """The bridge subnet, from DJINN_SUBNET."""
@@ -90,9 +97,16 @@ def top_address(
 
 
 def validate_static(
-    subnet: ipaddress.IPv4Network, raw: str, env_name: str
+    subnet: ipaddress.IPv4Network,
+    raw: str,
+    env_name: str,
+    own_offset: int | None = None,
 ) -> str:
-    """Validate an operator-supplied static address inside the subnet."""
+    """Validate an operator-supplied static address inside the subnet.
+
+    `own_offset` is the caller's own slot, so its own default is not reported
+    as a collision with itself.
+    """
     try:
         addr = ipaddress.IPv4Address(raw)
     except ValueError as exc:
@@ -106,4 +120,16 @@ def validate_static(
         raise ValueError(
             f"{env_name} {addr} is the bridge gateway — pick another address"
         )
+    for offset, owner in SINGLETON_OFFSETS.items():
+        if offset == own_offset:
+            continue
+        try:
+            taken = top_address(subnet, offset)
+        except ValueError:
+            continue
+        if addr == taken:
+            raise ValueError(
+                f"{env_name} {addr} is the {owner} container's address — "
+                f"pick another, or move {owner} too"
+            )
     return str(addr)

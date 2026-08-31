@@ -26,6 +26,7 @@ import ensure_net  # noqa: E402
 
 from newt_config import (  # noqa: E402
     NewtConfigError,
+    remove_env_file,
     NewtIdentity,
     SERVICE_NAME,
     derive_identity,
@@ -149,6 +150,27 @@ def _ensure_network(base_path: Path) -> int:
     ).returncode
 
 
+# How long to wait for newt to settle after compose returns. A crash-loop
+# restart takes a moment to show, so a single immediate check would pass.
+SETTLE_CHECKS = 3
+SETTLE_INTERVAL_SECONDS = 1.0
+
+
+def _settled_running(base_path: Path, identity: NewtIdentity) -> bool:
+    """True once the service is running and stays running.
+
+    Polls rather than checking once: a container that exits on start is
+    briefly 'running' between restarts, so one sample can catch a crash-loop
+    at the wrong instant.
+    """
+    for attempt in range(SETTLE_CHECKS):
+        if attempt:
+            time.sleep(SETTLE_INTERVAL_SECONDS)
+        if not _service_running(base_path, identity, boundary="settle"):
+            return False
+    return True
+
+
 def cmd_start(base_path: Path) -> int:
     identity = derive_identity(base_path)
     started = time.monotonic()
@@ -199,6 +221,19 @@ def cmd_start(base_path: Path) -> int:
             file=sys.stderr,
         )
         return result.returncode
+    # compose up returning 0 only means the container was CREATED. Newt exits
+    # immediately on a bad NEWT_SECRET or PANGOLIN_ENDPOINT — the most likely
+    # failure here — and `restart: unless-stopped` then loops it silently.
+    # Printing the enrolment procedure at that point sends the operator off to
+    # configure Pangolin against a connector that is not running.
+    if not _settled_running(base_path, identity):
+        print(
+            "newt start error reason=not-running-after-start — the container "
+            "was created but is not running. Most likely a bad NEWT_SECRET or "
+            "PANGOLIN_ENDPOINT; check './djinn newt logs'.",
+            file=sys.stderr,
+        )
+        return 1
     # Never log the secrets themselves — identifiers and sizes only.
     print(f"newt start ok container={identity.container_name} ip={newt_ip} image={image}")
     print("")
@@ -225,6 +260,11 @@ def cmd_stop(base_path: Path) -> int:
         )
     except DockerCommandMissing:
         return DOCKER_MISSING_EXIT
+    if result.returncode == 0:
+        # The credential file must not outlive the container it was written
+        # for; the next start regenerates it from secrets.env.
+        remove_env_file(base_path)
+        print("newt stop ok credentials-removed=true")
     return result.returncode
 
 
