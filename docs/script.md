@@ -122,10 +122,11 @@ The host commands above live in `bin/`; `src/` is internal source — the
   SSH/mosh logins in the shared durable `agent` session.
 - **`src/djinn_net_addr.py`** — shared djinn-net subnet/static-address rules
   (top-of-subnet derivation, reserved-address checks). Used by both the jump
-  and newt so the two cannot drift.
-- **`src/newt_config.py`** — singleton Pangolin Newt connector: identity, the
-  bridge address, image pinning, the three secrets, compose generation.
-- **`src/newt_host.py`** — `./djinn newt` operator commands.
+  and the tunnel so the two cannot drift.
+- **`src/tunnel_config.py`** — singleton VPN/tunnel connector: identity, the
+  bridge address, image pinning, provider credentials, compose generation.
+  All vendor-specific detail is confined to its `Provider` block.
+- **`src/tunnel_host.py`** — `./djinn tunnel` operator commands.
 - **`src/jump_config.py`** — singleton jump container: identity, host paths,
   bridge address resolution and compose generation (host-side, stdlib).
 - **`src/jump_host.py`** — `./djinn jump` operator commands (start/stop/
