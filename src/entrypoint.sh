@@ -179,7 +179,7 @@ if [ "$SSH_ENABLED" = "true" ]; then
         sed -i "/^$var=/d" /etc/environment
         echo "$var=$val" >> /etc/environment
     done
-    [ "${REMOTE_TMUX:-false}" = "true" ] && echo "✓ Remote access: SSH/mosh logins land in tmux session 'agent'"
+    [ "${REMOTE_TMUX:-false}" = "true" ] && echo "✓ Remote access: logins land in a fresh tmux session (picker when others exist)"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

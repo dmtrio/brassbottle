@@ -369,9 +369,10 @@ RUN useradd --system --no-create-home --shell /usr/sbin/nologin djinnbroker
 ENV SSH_ENABLED=false
 
 # ── Remote session tools: tmux + mosh (RFC 04) ───────────────────────────────
-# tmux gives every SSH-reachable container one durable, shared session (both
-# phone and laptop attach to the same view; agents survive disconnects). mosh
-# rides UDP for flaky mobile networks — reached only over the operator's
+# tmux gives every SSH-reachable container fresh-per-login landing sessions.
+# Each login starts in an empty session and can jump to other sessions from
+# tmux's picker. mosh rides UDP for flaky mobile networks — reached only over
+# the operator's
 # WireGuard/VPN tunnel, never a public listener. mosh requires a UTF-8
 # locale — update-locale writes /etc/default/locale, which PAM reads for
 # SSH sessions (the ENV below only covers entrypoint/docker-exec processes;
@@ -385,6 +386,8 @@ RUN apt-get update && apt-get install -y \
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 COPY --chown=$USERNAME:$USERNAME src/tmux.conf /home/$USERNAME/.tmux.conf
+COPY src/tmux_landing_gc.py /usr/local/lib/djinn/tmux_landing_gc.py
+RUN chmod 644 /usr/local/lib/djinn/tmux_landing_gc.py
 
 # Pin mosh-server to the firewalled/published UDP range: /usr/local/bin wins
 # over /usr/bin, so the client-launched `mosh-server new` resolves to the
@@ -419,12 +422,12 @@ RUN echo '' >> /home/$USERNAME/.bashrc \
     && echo '# PLN Container Freshness: one-line dim config-age readout (interactive)' >> /home/$USERNAME/.bashrc \
     && echo '. /usr/local/share/freshness-landing.bashrc' >> /home/$USERNAME/.bashrc
 
-# Land interactive SSH/mosh logins in the shared tmux session. The logic
+# Land interactive SSH/mosh logins in a fresh tmux session. The logic
 # lives in a sourced file (lintable, readable); the hook must be the LAST
 # line of .bashrc so fnm/shim PATH setup has already run when tmux execs.
 COPY src/tmux-landing.bashrc /usr/local/share/tmux-landing.bashrc
 RUN echo '' >> /home/$USERNAME/.bashrc \
-    && echo '# RFC 04: SSH/mosh logins land in a shared tmux session (keep last)' >> /home/$USERNAME/.bashrc \
+    && echo '# RFC 04: SSH/mosh logins land in a fresh tmux session (keep last)' >> /home/$USERNAME/.bashrc \
     && echo '. /usr/local/share/tmux-landing.bashrc' >> /home/$USERNAME/.bashrc
 
 # VS Code / Cursor "Attach to Running Container" reads this: attach as
