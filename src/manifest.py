@@ -1031,6 +1031,15 @@ def derive(manifest, plugin_files, agent_files, env):
         remote_shell = "tmux"
         print("  ⚠ remote.tmux is deprecated — remote.shell: tmux is the default; "
               "drop the key (shell: bash opts out)", file=sys.stderr)
+    elif "tmux" in remote and remote.get("tmux") is False:
+        # An explicit `tmux: false` was the OLD opt-out spelling (before
+        # shell: existed) — _raw_flag alone can't tell it apart from
+        # tmux: null/absent (both render "false"), so check the raw dict
+        # directly. Treating it as a no-op would silently hand the operator
+        # tmux instead of the bash they asked to opt out of.
+        remote_shell = "bash"
+        print("  ⚠ remote.tmux is deprecated — use remote.shell: bash "
+              "(tmux: false is read as shell: bash)", file=sys.stderr)
     elif not remote_shell:
         remote_shell = "tmux"
     # herdr gets its own message (a forward pointer, not a plain enum reject)
@@ -1040,7 +1049,7 @@ def derive(manifest, plugin_files, agent_files, env):
             "remote.shell: herdr is not available yet (lands with PLN - herdr adoption) "
             "— use tmux or bash")
     if remote_shell not in ("tmux", "bash"):
-        raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
+        raise ManifestError(f"remote.shell must be tmux or bash (got '{remote_shell}')")
 
     remote_mosh = _raw_flag(remote.get("mosh"), "remote.mosh")
     if remote_mosh == "true" and not ssh_port:
