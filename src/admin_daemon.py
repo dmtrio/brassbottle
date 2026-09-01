@@ -275,7 +275,7 @@ APP_HTML = """<!doctype html>
         if (resp.ok) {
           const failures = Array.isArray(body.apply_failures) ? body.apply_failures : null;
           if (!failures) {
-            state.rowMessage.set(row.request_id, { type: "neutral", text: "decision recorded" });
+            state.rowMessage.set(row.request_id, { type: "neutral", text: "decision recorded (apply status unknown on this broker) - row clears once applied" });
           } else {
             const hit = failures.find(function (f) { return f && f.request_id === row.request_id; });
             if (!hit) {
@@ -366,6 +366,14 @@ APP_HTML = """<!doctype html>
           td.appendChild(text("span", " "));
           td.appendChild(arming);
           td.appendChild(denyBtn);
+          const groupMsg = state.rowMessage.get("__group__:" + host);
+          if (groupMsg) {
+            const chip = document.createElement("span");
+            chip.className = "chip" + (groupMsg.type === "error" ? " error" : "");
+            chip.textContent = groupMsg.text;
+            chip.style.marginLeft = "8px";
+            td.appendChild(chip);
+          }
           gr.appendChild(td);
           tbody.appendChild(gr);
         }
