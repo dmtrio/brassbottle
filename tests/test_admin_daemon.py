@@ -570,6 +570,38 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    def test_decide_malformed_content_length_returns_400_not_traceback(self):
+        """A gated request with a hostile Content-Length must get a JSON 400,
+        not a ValueError traceback and a dropped connection (PR #98 review)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(Path(tmp), session_secret="cookie-cl")
+            host, port = server.server_address
+            try:
+                for bad_length in ("nope", "-5", str(1024 * 1024)):
+                    with socket.create_connection((host, port), timeout=5) as sock:
+                        request = (
+                            "POST /api/egress/decide HTTP/1.1\r\n"
+                            f"Host: 127.0.0.1:{port}\r\n"
+                            "Cookie: admin_session=cookie-cl\r\n"
+                            "X-Admin-UI: 1\r\n"
+                            "Content-Type: application/json\r\n"
+                            f"Content-Length: {bad_length}\r\n"
+                            "Connection: close\r\n\r\n"
+                        )
+                        sock.sendall(request.encode("ascii"))
+                        response = b""
+                        while True:
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            response += chunk
+                    self.assertIn(b" 400 ", response.split(b"\r\n", 1)[0])
+                    self.assertIn(b'"error"', response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
     def test_decide_response_mapping_and_apply_failures_filter(self):
         state = _StubBrokerState()
         state.decide_body = {
