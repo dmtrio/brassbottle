@@ -258,7 +258,14 @@ python3 "$SCRIPT_DIR/src/ensure_net.py" "$DESIRED_SUBNET" || exit 1
 # a command substitution aborts the script right there — wrapping it in the
 # `if` is what keeps this resolution non-fatal, same as the `|| JUMP_IP=""`
 # it replaces.
-JUMP_IP_ERR="$(mktemp "$BASE_PATH/jump-ip-err.XXXXXX")"
+#
+# mktemp itself must never be fatal here (this whole block is non-fatal by
+# design) and must never leak into $BASE_PATH (~/djinn) on failure — an
+# unwritable/missing BASE_PATH would otherwise abort under set -e right at
+# this line, before the non-fatal `if` even runs. Use the system TMPDIR (no
+# explicit template/dir) and fall back to /dev/null, which the read loop and
+# `-s` test below both handle harmlessly (empty read, always non-"-s").
+JUMP_IP_ERR="$(mktemp 2>/dev/null || echo /dev/null)"
 if JUMP_IP="$(env DJINN_SUBNET="${DJINN_SUBNET:-}" DJINN_JUMP_IP="${DJINN_JUMP_IP:-}" DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" ip 2>"$JUMP_IP_ERR")"; then
     JUMP_IP_FAILED=false
 else
@@ -270,7 +277,7 @@ if [ "$JUMP_IP_FAILED" = "true" ] || [ -s "$JUMP_IP_ERR" ]; then
         echo "  jump: $line"
     done < "$JUMP_IP_ERR"
 fi
-rm -f "$JUMP_IP_ERR"
+[ "$JUMP_IP_ERR" = "/dev/null" ] || rm -f "$JUMP_IP_ERR"
 
 # ── Jump reachability preflight (non-fatal) ───────────────────────────────────
 # Both are quiet-degradation warnings, not errors: the entrypoint and firewall

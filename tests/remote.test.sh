@@ -261,6 +261,7 @@ src/init-firewall.sh	^[0-9]+:[0-9]+$
 src/init-firewall.sh	--dport "$MOSH_PORTS"
 src/init-firewall.sh	-s "$HOST_IP"
 src/init-firewall.sh	-s "$DJINN_JUMP_IP"
+src/init-firewall.sh	--state NEW ! -s "$DJINN_JUMP_IP" -j DROP
 src/entrypoint.sh	REMOTE_SHELL MOSH_PORTS NTFY_URL NTFY_TOPIC CONTAINER_NAME
 Dockerfile	update-locale LANG=en_US.UTF-8
 DRIFT

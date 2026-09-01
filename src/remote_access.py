@@ -14,7 +14,10 @@ stderr saying what it decided and why:
 
     sshd [--authorized-keys PATH]
         Reads SSH_ENABLED, REMOTE_JUMP (default true), SSH_AUTHORIZED_KEY,
-        JUMP_AUTHORIZED_KEY. Emits SSHD_MODE=published|jump|off and
+        JUMP_AUTHORIZED_KEY, ENABLE_FIREWALL (default true — jump path only;
+        with no firewall there is no jump-scoped :22 rule to enforce, so
+        sshd is refused rather than left reachable from the whole bridge).
+        Emits SSHD_MODE=published|jump|off and
         START_SSHD=true|false. The published-with-no-key case prints the two
         FATAL lines to stderr and exits 1 — under `eval "$(...)"` + set -e,
         that aborts the entrypoint exactly as it did before this refactor.
@@ -67,24 +70,39 @@ def decide_sshd(env: Mapping[str, str]) -> Tuple[str, bool, str]:
     remote_jump = _flag(env, "REMOTE_JUMP", True)
     ssh_key = env.get("SSH_AUTHORIZED_KEY", "")
     jump_key = env.get("JUMP_AUTHORIZED_KEY", "")
+    # Built once, used by both modes' reason string: _rebuild_authorized_keys
+    # writes BOTH keys whenever they're present, regardless of mode (the
+    # published path doesn't strip a JUMP_AUTHORIZED_KEY that happens to also
+    # be set) — so the boundary log must say "keys=operator+jump" there too,
+    # not just "keys=operator", or it undercounts what actually landed in
+    # authorized_keys.
+    have = []
+    if ssh_key:
+        have.append("operator")
+    if jump_key:
+        have.append("jump")
 
     if ssh_enabled:
         # Explicit ssh: (host-published) — fail loud rather than start sshd
         # nobody can log into.
         if not ssh_key:
             return "published", False, "fatal"
-        return "published", True, "keys=operator"
+        return "published", True, "keys=" + "+".join(have)
 
     if remote_jump:
         # Default path: every bottle is jump-reachable unless remote.jump:
         # false. Either key alone is enough (operator key or the jump's
         # own); with neither, sshd simply doesn't start — the firewall rule
         # is equally harmless in that case, since nothing is listening.
-        have = []
-        if ssh_key:
-            have.append("operator")
-        if jump_key:
-            have.append("jump")
+        #
+        # ENABLE_FIREWALL=false means init-firewall.sh never runs at all, so
+        # there is no jump-scoped :22 rule to enforce — every sibling on the
+        # shared bridge could reach sshd, not just the jump. Refuse to start
+        # it rather than silently widen who can reach this bottle; the
+        # explicit ssh: (published) path is unaffected, since that path was
+        # always meant to be reachable from the whole bridge anyway.
+        if not _flag(env, "ENABLE_FIREWALL", True):
+            return "jump", False, "reason=no-firewall"
         if have:
             return "jump", True, "keys=" + "+".join(have)
         return "jump", False, "reason=no-keys"
@@ -130,7 +148,14 @@ def cmd_sshd(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> 
             file=sys.stderr,
         )
 
-    if mode == "jump" and not start:
+    if mode == "jump" and not start and reason == "reason=no-firewall":
+        print(
+            "⚠ Jump reachability: ENABLE_FIREWALL=false — the jump-only :22 "
+            "rule cannot be enforced; sshd not started (set ssh: to publish "
+            "explicitly)",
+            file=sys.stderr,
+        )
+    elif mode == "jump" and not start:
         print(
             "⚠ Jump reachability: no SSH keys (JUMP_AUTHORIZED_KEY unset — "
             "run ./djinn jump start and add it to secrets.env); sshd not started",

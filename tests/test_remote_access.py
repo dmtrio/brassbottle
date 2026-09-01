@@ -67,6 +67,54 @@ class DecideSshdTests(unittest.TestCase):
             ("published", False, "fatal"),
         )
 
+    def test_published_with_both_keys_reports_both(self):
+        # _rebuild_authorized_keys writes both keys whenever present,
+        # regardless of mode — the reason string must reflect that, not
+        # undercount to "keys=operator" just because this is the published
+        # path.
+        self.assertEqual(
+            ra.decide_sshd(
+                {"SSH_ENABLED": "true", "SSH_AUTHORIZED_KEY": OP_KEY, "JUMP_AUTHORIZED_KEY": JUMP_KEY}
+            ),
+            ("published", True, "keys=operator+jump"),
+        )
+
+    def test_published_ignores_enable_firewall(self):
+        # The published path is unaffected by ENABLE_FIREWALL — it was
+        # always meant to be reachable from the whole bridge (and the host),
+        # not scoped to a firewall-enforced jump rule.
+        self.assertEqual(
+            ra.decide_sshd(
+                {"SSH_ENABLED": "true", "SSH_AUTHORIZED_KEY": OP_KEY, "ENABLE_FIREWALL": "false"}
+            ),
+            ("published", True, "keys=operator"),
+        )
+
+    def test_jump_with_no_firewall_does_not_start(self):
+        # ENABLE_FIREWALL=false means init-firewall.sh never runs, so there
+        # is no jump-scoped :22 rule to enforce — starting sshd here would
+        # leave it reachable from every sibling on the bridge, not just the
+        # jump.
+        self.assertEqual(
+            ra.decide_sshd(
+                {
+                    "SSH_AUTHORIZED_KEY": OP_KEY,
+                    "JUMP_AUTHORIZED_KEY": JUMP_KEY,
+                    "ENABLE_FIREWALL": "false",
+                }
+            ),
+            ("jump", False, "reason=no-firewall"),
+        )
+
+    def test_jump_no_firewall_wins_over_no_keys(self):
+        # no-firewall is checked before the keys check — even with no keys
+        # at all, the reported reason should be the firewall one (it's the
+        # more actionable diagnosis: keys wouldn't help either way).
+        self.assertEqual(
+            ra.decide_sshd({"ENABLE_FIREWALL": "false"}),
+            ("jump", False, "reason=no-firewall"),
+        )
+
     def test_jump_default_with_both_keys(self):
         self.assertEqual(
             ra.decide_sshd({"SSH_AUTHORIZED_KEY": OP_KEY, "JUMP_AUTHORIZED_KEY": JUMP_KEY}),
@@ -136,6 +184,28 @@ class CmdSshdTests(unittest.TestCase):
         )
         self.assertIn("remote_access sshd mode=jump start=false reason=no-keys", err)
 
+    def test_jump_no_firewall_prints_the_reachability_warning_verbatim(self):
+        rc, out, err = _run_sshd(
+            {"SSH_AUTHORIZED_KEY": OP_KEY, "JUMP_AUTHORIZED_KEY": JUMP_KEY, "ENABLE_FIREWALL": "false"}
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "SSHD_MODE=jump\nSTART_SSHD=false\n")
+        self.assertIn(
+            "⚠ Jump reachability: ENABLE_FIREWALL=false — the jump-only :22 "
+            "rule cannot be enforced; sshd not started (set ssh: to publish "
+            "explicitly)",
+            err,
+        )
+        self.assertIn("remote_access sshd mode=jump start=false reason=no-firewall", err)
+
+    def test_published_no_firewall_still_starts(self):
+        rc, out, err = _run_sshd(
+            {"SSH_ENABLED": "true", "SSH_AUTHORIZED_KEY": OP_KEY, "ENABLE_FIREWALL": "false"}
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "SSHD_MODE=published\nSTART_SSHD=true\n")
+        self.assertNotIn("⚠", err)
+
     def test_off_mode_prints_no_reachability_warning(self):
         # The ⚠ no-keys warning is jump-specific; remote.jump: false is a
         # deliberate opt-out and must not look like a degraded jump path.
@@ -180,6 +250,31 @@ class AuthorizedKeysTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "authorized_keys"
             _run_sshd({"SSH_AUTHORIZED_KEY": OP_KEY}, authorized_keys=path)
+            self.assertEqual(path.read_text(), f"{OP_KEY}\n")
+
+    def test_jump_no_firewall_leaves_no_file_behind(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "authorized_keys"
+            rc, _, err = _run_sshd(
+                {
+                    "SSH_AUTHORIZED_KEY": OP_KEY,
+                    "JUMP_AUTHORIZED_KEY": JUMP_KEY,
+                    "ENABLE_FIREWALL": "false",
+                },
+                authorized_keys=path,
+            )
+            self.assertEqual(rc, 0)
+            self.assertFalse(path.exists())
+            self.assertIn("action=remove count=0", err)
+
+    def test_published_no_firewall_writes_the_key_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "authorized_keys"
+            rc, _, _ = _run_sshd(
+                {"SSH_ENABLED": "true", "SSH_AUTHORIZED_KEY": OP_KEY, "ENABLE_FIREWALL": "false"},
+                authorized_keys=path,
+            )
+            self.assertEqual(rc, 0)
             self.assertEqual(path.read_text(), f"{OP_KEY}\n")
 
     def test_no_keys_leaves_no_file_behind(self):

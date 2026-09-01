@@ -68,6 +68,48 @@ iptables -A INPUT -p udp --sport 53 -j ACCEPT
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
+# Inbound SSH — decided and PARTLY enforced here, right after the loopback
+# ACCEPTs and BEFORE the gateway ACCEPT added below (HOST_IP, ALL ports): on
+# a Linux host the gateway IS the docker host, so that wide-open gateway rule
+# would otherwise let the operator reach a jump-only bottle's :22 straight
+# through the gateway — bypassing the jump entirely and contradicting
+# "reachable ONLY from the jump". Because iptables evaluates INPUT rules in
+# the order they were added, a DROP added here (for every mode except
+# `open`, which is meant to be wide-open) sits ahead of that gateway ACCEPT
+# and wins first. `--state NEW` only — never ESTABLISHED,RELATED: a jump
+# session that is already flowing must keep passing even though this rule's
+# source test would otherwise match its packets too; the
+# ESTABLISHED,RELATED ACCEPT added further below (after the gateway rule)
+# covers those packets, so this rule only ever needs to stop a NEW connection
+# attempt from opening in the first place. remote_access.py owns the
+# open/jump/none decision and DJINN_JUMP_IP validation (AGENTS.md "Python
+# over bash"); captured into a variable BEFORE eval, not `eval "$(…)"`
+# inline — a failed command substitution's exit status is lost once `eval`
+# runs on its (empty) output, which would silently swallow the invalid-IP
+# fail-closed case under this script's `set -euo pipefail`. The
+# corresponding ACCEPT rules for this same decision are added further down
+# (after the gateway/ESTABLISHED rules, where SSH inbound has always been
+# decided) — SSH_INPUT_RULE and DJINN_JUMP_IP are re-used from this same
+# eval there, not re-derived.
+FIREWALL_SSH_ARGS=$(python3 /usr/local/lib/djinn/remote_access.py firewall-ssh)
+eval "$FIREWALL_SSH_ARGS"
+case "$SSH_INPUT_RULE" in
+    jump)
+        echo "Pre-gateway: dropping new inbound :22 except from jump $DJINN_JUMP_IP"
+        iptables -A INPUT -p tcp --dport 22 -m state --state NEW ! -s "$DJINN_JUMP_IP" -j DROP
+        ;;
+    none)
+        echo "Pre-gateway: dropping all new inbound :22 (no jump, no published ssh)"
+        iptables -A INPUT -p tcp --dport 22 -m state --state NEW -j DROP
+        ;;
+    open)
+        ;;
+    *)
+        echo "ERROR: remote_access.py returned an unknown SSH_INPUT_RULE: $SSH_INPUT_RULE"
+        exit 1
+        ;;
+esac
+
 # Create ipset with CIDR support
 ipset create allowed-domains hash:net
 
@@ -209,19 +251,18 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 # bridge address — because that path has no host port and no tunnel of its
 # own narrowing who can reach it. Never both: an explicit ssh: bottle already
 # gets the wide-open published rule, so a jump-scoped rule on top would only
-# suggest a narrower path exists when it doesn't. remote_access.py owns the
-# open/jump/none decision and DJINN_JUMP_IP validation (AGENTS.md "Python
-# over bash"); captured into a variable BEFORE eval, not `eval "$(…)"`
-# inline — a failed command substitution's exit status is lost once `eval`
-# runs on its (empty) output, which would silently swallow the invalid-IP
-# fail-closed case under this script's `set -euo pipefail`.
-FIREWALL_SSH_ARGS=$(python3 /usr/local/lib/djinn/remote_access.py firewall-ssh)
-eval "$FIREWALL_SSH_ARGS"
+# suggest a narrower path exists when it doesn't. SSH_INPUT_RULE and
+# DJINN_JUMP_IP were already decided by remote_access.py firewall-ssh right
+# after the loopback ACCEPTs above (see that comment for why it runs there,
+# ahead of the gateway ACCEPT) — reused here, not re-derived, so the
+# pre-gateway DROP and this ACCEPT always agree.
 case "$SSH_INPUT_RULE" in
     open)
+        echo "Allowing inbound :22 (published)"
         iptables -A INPUT -p tcp --dport 22 -j ACCEPT
         ;;
     jump)
+        echo "Allowing inbound :22 from jump $DJINN_JUMP_IP"
         iptables -A INPUT -s "$DJINN_JUMP_IP" -p tcp --dport 22 -j ACCEPT
         ;;
     none)

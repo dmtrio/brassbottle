@@ -398,7 +398,7 @@ class TestRemoteSchema(unittest.TestCase):
         with self.assertRaises(m.ManifestError) as cm:
             derive({"remote": {"shell": "zsh"}})
         self.assertEqual(str(cm.exception),
-                         "remote.shell must be tmux, herdr, or bash (got 'zsh')")
+                         "remote.shell must be tmux or bash (got 'zsh')")
 
     def test_tmux_alias_sets_shell_and_warns(self):
         err = io.StringIO()
@@ -410,10 +410,25 @@ class TestRemoteSchema(unittest.TestCase):
             "drop the key (shell: bash opts out)",
             err.getvalue())
 
-    def test_tmux_false_has_no_effect_and_no_warning(self):
+    def test_tmux_false_sets_shell_bash_and_warns(self):
+        # Old-style explicit opt-out (`remote: {tmux: false}`) must not
+        # silently become shell: tmux — it's read as shell: bash instead,
+        # with the same deprecation-warning shape as the tmux: true alias.
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             d = derive({"remote": {"tmux": False}})
+        self.assertEqual(d["REMOTE_SHELL"], "bash")
+        self.assertIn(
+            "remote.tmux is deprecated — use remote.shell: bash "
+            "(tmux: false is read as shell: bash)",
+            err.getvalue())
+
+    def test_tmux_null_has_no_effect_and_no_warning(self):
+        # Distinct from tmux: false — YAML null/absent both mean "the key
+        # isn't really set", so this stays the ordinary tmux default.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"tmux": None}})
         self.assertEqual(d["REMOTE_SHELL"], "tmux")
         self.assertEqual(err.getvalue(), "")
 
