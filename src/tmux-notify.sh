@@ -11,8 +11,8 @@
 #
 # $1: the window that went silent (tmux.conf passes #{hook_window}) — the
 # alert-silence hook is server-global, so without it we'd capture whatever
-# session 'agent' happens to front, not the pane that idled. Falls back to
-# the landing session's name for manual/legacy invocations.
+# pane happens to front, not the one that idled. Required — there is no
+# durable session name to fall back to.
 
 [ -n "${NTFY_URL:-}" ] || exit 0
 
@@ -20,7 +20,11 @@ if [ "$(tmux list-clients 2>/dev/null | wc -l)" -gt 0 ]; then
     exit 0
 fi
 
-TARGET="${1:-agent}"
+# No fallback target: the shared 'agent' session is gone (fresh-per-login
+# landing), and a guessed target would capture the wrong pane. The tmux.conf
+# hook always passes #{hook_window}; a manual invocation must too.
+TARGET="${1:-}"
+[ -n "$TARGET" ] || exit 0
 
 # Last non-blank pane lines give the push its context (the prompt/question).
 TAIL=$(tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 3)

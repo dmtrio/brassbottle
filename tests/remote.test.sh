@@ -196,9 +196,15 @@ grep -qF 'silence-action any' src/tmux.conf \
 grep -qF '#{hook_window}' src/tmux.conf \
     && pass "hook passes the alerting window to the notifier" \
     || fail "tmux.conf hook no longer passes #{hook_window}"
-grep -qF 'TARGET="${1:-agent}"' src/tmux-notify.sh \
-    && pass "notifier captures the window the hook passed" \
-    || fail "notifier lost the hook-window target argument"
+grep -qF 'TARGET="${1:-}"' src/tmux-notify.sh \
+    && pass "notifier requires the hook-window target argument" \
+    || fail "notifier target handling drifted (no durable session to fall back to)"
+grep -qF 'run-shell -b' src/tmux.conf \
+    && pass "GC hooks run backgrounded with output redirected" \
+    || fail "tmux.conf GC hooks lost run-shell -b (blocking pager in attached clients)"
+grep -qF '"kill-session", "-t", f"={name}"' src/tmux_landing_gc.py \
+    && pass "GC kills with exact-match (=) targets" \
+    || fail "GC lost exact-match kill targets — prefix matching can kill live sessions"
 grep -qF 'list-clients' src/tmux-notify.sh \
     && pass "notifier suppresses while a client is attached" \
     || fail "notifier lost attached-client suppression"
