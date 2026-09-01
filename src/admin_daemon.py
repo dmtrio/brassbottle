@@ -390,8 +390,18 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
         self._send_bytes(status, _json_bytes(body), content_type="application/json")
 
+    MAX_REQUEST_BODY_BYTES = 64 * 1024
+
     def _request_json_body(self) -> tuple[dict[str, Any] | None, int]:
-        length = int(self.headers.get("Content-Length", "0"))
+        # Unvalidated client input even after the session gate: a malformed
+        # or hostile Content-Length must become a JSON 400, not a ValueError
+        # traceback that closes the connection with no response.
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return None, 0
+        if length < 0 or length > self.MAX_REQUEST_BODY_BYTES:
+            return None, 0
         raw = self.rfile.read(length)
         if not raw:
             return {}, length
