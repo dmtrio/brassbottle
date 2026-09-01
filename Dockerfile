@@ -304,6 +304,12 @@ RUN chmod +x /usr/local/bin/init-firewall.sh
 COPY src/egress_broker_firewall.sh /usr/local/bin/egress_broker_firewall.sh
 RUN chmod +x /usr/local/bin/egress_broker_firewall.sh
 
+# RFC 04 remote-access decisions (START_SSHD + authorized_keys rebuild, the
+# jump-scoped :22 firewall rule) — invoked via `python3 …`, not exec'd
+# directly, by both entrypoint.sh (above) and init-firewall.sh (above).
+COPY src/remote_access.py /usr/local/lib/djinn/remote_access.py
+RUN chmod 644 /usr/local/lib/djinn/remote_access.py
+
 # Per-org git credential router (entrypoint installs it as the github.com
 # credential helper). Routes by repo owner to GH_TOKEN_<owner>, falling back to
 # the container GH_TOKEN then gh's human login. See src/git-credential-org.sh.

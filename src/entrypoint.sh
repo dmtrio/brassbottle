@@ -142,48 +142,21 @@ su -c "git config --global --add credential.'https://github.com'.helper ''" code
 su -c "git config --global --add credential.'https://github.com'.helper /usr/local/bin/git-credential-org" coder
 
 # ── SSH mode vs attach mode ───────────────────────────────────────────────────
-# Two independent paths can want sshd: explicit ssh: (host-published, fails
-# loud with no key) and the default jump path (bridge-only, degrades quietly
-# — a bottle with no key yet just isn't jump-reachable, never a crash loop).
-# START_SSHD collapses both into one key-build/banner/exec below so the two
-# paths cannot drift out of sync with each other.
-START_SSHD=false
-if [ "$SSH_ENABLED" = "true" ]; then
-    # Explicit ssh: (host-published) — fail loud rather than start sshd
-    # nobody can log into.
-    if [ -z "$SSH_AUTHORIZED_KEY" ]; then
-        echo "FATAL: SSH_ENABLED=true but SSH_AUTHORIZED_KEY is empty."
-        echo "Set SSH_AUTHORIZED_KEY in ~/djinn/secrets.env (your public key)."
-        exit 1
-    fi
-    START_SSHD=true
-elif [ "${REMOTE_JUMP:-true}" = "true" ]; then
-    # Default path: every bottle is jump-reachable unless remote.jump: false.
-    # Either key alone is enough (operator key or the jump's own); with
-    # neither, sshd simply doesn't start — the firewall rule init-firewall.sh
-    # adds is equally harmless in that case, since nothing is listening.
-    if [ -n "$SSH_AUTHORIZED_KEY" ] || [ -n "${JUMP_AUTHORIZED_KEY:-}" ]; then
-        START_SSHD=true
-    else
-        echo "⚠ Jump reachability: no SSH keys (JUMP_AUTHORIZED_KEY unset — run ./djinn jump start and add it to secrets.env); sshd not started"
-    fi
-fi
+# remote_access.py owns the START_SSHD decision — two independent paths can
+# want sshd: explicit ssh: (host-published, fails loud with no key) and the
+# default jump path (bridge-only, degrades quietly — a bottle with no key
+# yet just isn't jump-reachable, never a crash loop) — and rebuilds
+# authorized_keys to match (see src/remote_access.py; AGENTS.md "Python over
+# bash"). Captured into a variable BEFORE eval, not `eval "$(…)"` inline: a
+# failed command substitution's exit status is lost once `eval` runs on its
+# (empty, on failure) output, so `set -e` would silently continue past the
+# published-no-key FATAL case otherwise. Same two-step shape as up.sh's own
+# `DERIVED=$(...); eval "$DERIVED"`.
+SSHD_ARGS=$(python3 /usr/local/lib/djinn/remote_access.py sshd \
+    --authorized-keys /home/coder/.ssh/authorized_keys)
+eval "$SSHD_ARGS"
 
 if [ "$START_SSHD" = "true" ]; then
-    # Rebuilt from scratch every boot: a key dropped from the manifest/
-    # secrets.env must actually stop working, not survive in a stale file
-    # from a previous boot that never got a fresh truncate.
-    : > /home/coder/.ssh/authorized_keys
-    [ -n "$SSH_AUTHORIZED_KEY" ] && echo "$SSH_AUTHORIZED_KEY" >> /home/coder/.ssh/authorized_keys
-    # The singleton jump container's own key (PLN - Djinn Admin Plane, PR 1).
-    # Appended, never replacing: the operator key above must keep working so a
-    # bottle stays reachable directly even when the jump is down. Optional —
-    # bottles are unaffected until ./djinn jump start has generated one.
-    if [ -n "${JUMP_AUTHORIZED_KEY:-}" ]; then
-        echo "$JUMP_AUTHORIZED_KEY" >> /home/coder/.ssh/authorized_keys
-        echo "✓ Jump container key authorized"
-    fi
-    chmod 600 /home/coder/.ssh/authorized_keys
     chown coder:coder /home/coder/.ssh/authorized_keys
 
     if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
@@ -206,7 +179,7 @@ if [ "$START_SSHD" = "true" ]; then
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    if [ "$SSH_ENABLED" = "true" ]; then
+    if [ "$SSHD_MODE" = "published" ]; then
         echo "  Container:  djinn-${CONTAINER_NAME}   (sshd on :22, published"
         echo "              on the host at the manifest's ssh.port)"
         echo "  SSH:        ssh -p <ssh.port> coder@<docker-host>"
@@ -228,12 +201,10 @@ if [ "$START_SSHD" = "true" ]; then
     echo "Starting sshd..."
     exec /usr/sbin/sshd -D
 else
-    # Not starting sshd: drop a stale authorized_keys file left by a previous
-    # boot (or a manifest edit that turned SSH off) so a later `docker exec`
-    # root shell can't find leftover key material implying reachability that
-    # no longer applies.
-    rm -f /home/coder/.ssh/authorized_keys
-
+    # Not starting sshd: remote_access.py already removed a stale
+    # authorized_keys file left by a previous boot (or a manifest edit that
+    # turned SSH off) so a later `docker exec` root shell can't find
+    # leftover key material implying reachability that no longer applies.
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Container:  djinn-${CONTAINER_NAME}   (attach mode, no sshd)"
