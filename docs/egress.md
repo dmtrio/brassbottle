@@ -4,17 +4,46 @@ Outbound traffic from djinn containers is firewall allowlisted. When a process
 hits a destination that is not yet allowed, the egress broker holds the request
 until an operator approves or denies it.
 
-## Watcher and daemon
+## Operator surface (primary: `djinn admin`)
 
-`./djinn allow --watch` runs an interactive watcher on the host. It starts the
-egress broker HTTP server in-process, polls the approval queue, and presents
-each open request in the terminal. On macOS it also shows a system dialog in
-parallel with the terminal prompt.
+`./djinn admin` is the primary decision surface for open egress requests. It
+starts a loopback-only HTTP daemon (`http://127.0.0.1:8817` by default) that
+serves a browser UI and proxies decision calls to the egress broker daemon.
 
-The standalone egress broker daemon (`egress_broker_host.py`) provides the same
-queue and HTTP API without the interactive UI. Containers file requests via
-`POST /egress`; the operator answers through the watcher, CLI, or notification
-actions.
+The browser session gate on `POST /api/egress/decide` is intentionally narrow:
+it defends against hostile web pages (CSRF and DNS-rebinding style requests)
+with a strict cookie + header + origin/host policy, but it does **not** defend
+against local processes running as the same user. Local processes can already
+read the operator token file from disk, so loopback binding is the real trust
+boundary.
+
+`./djinn allow --watch` remains available for now and reads the same broker
+queue, but it is slated for deprecation in favor of the admin plane.
+
+### Decision action mapping
+
+The admin UI posts one of five actions, mapped to broker `/decide`:
+
+- `allow_live` -> `decision=allow`, `scope=live`
+- `allow_manifest` -> `decision=allow`, `scope=manifest`
+- `deny` -> `decision=deny`, `scope=once`
+- `deny_bottle` -> `decision=deny`, `scope=bottle`
+- `deny_global` -> `decision=deny`, `scope=global`
+
+`deny_global` intentionally omits `container`; other actions require it.
+
+### PWA install and alerts
+
+The admin page is a small PWA (manifest + service worker). It supports install
+from Chromium/Safari "Add to home screen" flows and can request Notification
+permission when the operator clicks "Enable alerts". New unseen requests can
+raise a local notification when the page is in the background.
+
+### Decisions, not current state
+
+The queue panel shows **open approval requests and decisions** only. It does
+not show currently-permitted hosts; the ipset allowlist remains the runtime
+authority.
 
 ### Broker endpoints
 

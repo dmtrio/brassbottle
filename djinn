@@ -17,6 +17,7 @@ Usage: ./djinn <subcommand> [args...]
   backup   <cmd> [args...]     singleton artifact backup (start/stop/status/.../browser)
   jump     <cmd> [args...]     singleton mosh jump container (start/stop/status/logs/pubkey)
   tunnel   <cmd> [args...]     singleton VPN/tunnel connector (start/stop/status/logs)
+  admin    [--port N]               admin plane UI daemon (http://127.0.0.1:8817)
   allow    --watch                  interactive egress approval watcher
   allow    <container> <domain...>  add domains to a running container's egress allowlist
   deny     <zone> (--bottle <name> | --global) [--reason "..."]   persist a deny entry
@@ -34,6 +35,12 @@ case "${1:-}" in
     backup)  shift; exec "$SCRIPT_DIR/backup.sh" "$@" ;;
     jump)    shift; exec "$SCRIPT_DIR/jump.sh" "$@" ;;
     tunnel)  shift; exec "$SCRIPT_DIR/tunnel.sh" "$@" ;;
+    admin)
+        shift
+        . "$SCRIPT_DIR/src/common.sh"
+        require_python3 || exit 1
+        exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/admin_daemon.py" "$@"
+        ;;
     allow)
         shift
         if [ "${1:-}" = "--watch" ]; then
