@@ -850,6 +850,44 @@ class EgressBrokerHostTests(unittest.TestCase):
             )
             self.assertEqual(results["api.github.com"], {"decision": "deny"})
 
+    def test_zone_sweeps_exclude_apply_in_progress_requests(self):
+        """A concurrent allow mid-apply must be counted neither as decided
+        nor as an apply failure — the in-flight apply resolves it (PR #97
+        review finding)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clock = FakeClock(NOW)
+            b = self._broker(root, clock, hold_seconds=5)
+            done = threading.Thread(
+                target=lambda: b.file_request("coding-brassbottle", "docs.stripe.com", 443)
+            )
+            done.start()
+            wait_for_broker_open_request(b, count=1)
+            request_id = next(iter(b._requests))
+            b._requests[request_id].applying = True
+
+            allow_result = b.decide_allow_for_zone(
+                "coding-brassbottle", "stripe.com", scope="live"
+            )
+            self.assertEqual(allow_result.decided, [])
+            self.assertEqual(allow_result.apply_failures, [])
+            self.assertIn(request_id, b._requests)
+            self.assertIsNone(b._requests[request_id].decision)
+
+            deny_decided = b.decide_deny_for_zone("coding-brassbottle", "stripe.com")
+            self.assertEqual(deny_decided, [])
+            self.assertIn(request_id, b._requests)
+
+            persist_result = b.persist_deny("stripe.com", "global")
+            self.assertIsNone(persist_result.error)
+            self.assertEqual(persist_result.decided, [])
+            self.assertIn(request_id, b._requests)
+
+            # Release the held waiter so the thread can exit.
+            b._requests[request_id].applying = False
+            b.decide(request_id, "deny")
+            done.join(timeout=5)
+
     def test_decide_allow_for_zone_skip_is_logged_not_swallowed(self):
         """finding #5: decide_allow_for_zone's sweep used to swallow a
         per-candidate EgressBrokerHostError with a bare `except: continue` —

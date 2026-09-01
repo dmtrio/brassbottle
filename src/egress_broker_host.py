@@ -74,6 +74,10 @@ IP_APPLY_FAILED_REASON = (
 )
 IP_REQUIRES_CIDR_REASON = "ip_requires_cidr"
 APPLY_FAILED_REASON = "apply_failed"
+# decide()/_close_request return value when a request is skipped because a
+# concurrent allow is already applying it: NOT decided, NOT an apply
+# failure — the in-flight apply resolves it. Sweeps must not count it.
+APPLY_IN_PROGRESS_REASON = "apply_in_progress"
 DENYLIST_PERSIST_FAILED_REASON = "denylist_persist_failed"
 
 DOMAIN_RE = re.compile(
@@ -1162,7 +1166,7 @@ class EgressBroker:
                     "egress broker decide noop request_id=%s reason=apply_in_progress",
                     request_id,
                 )
-                return None
+                return APPLY_IN_PROGRESS_REASON
 
             now = self.now()
             self._flush_hits(state)
@@ -1343,6 +1347,15 @@ class EgressBroker:
                     exc,
                 )
                 continue
+            if allow_error == APPLY_IN_PROGRESS_REASON:
+                # A concurrent allow is mid-apply: this sweep neither decided
+                # it nor failed it — the in-flight apply resolves it.
+                LOG.info(
+                    "egress broker decide_allow_for_zone skip request_id=%s reason=%s",
+                    request_id,
+                    allow_error,
+                )
+                continue
             if allow_error is None:
                 decided.append(request_id)
                 continue
@@ -1369,12 +1382,19 @@ class EgressBroker:
         decided: list[str] = []
         for request_id in candidates:
             try:
-                self.decide(request_id, "deny", scope="once", reason=reason)
+                deny_outcome = self.decide(request_id, "deny", scope="once", reason=reason)
             except EgressBrokerHostError as exc:
                 LOG.info(
                     "egress broker decide_deny_for_zone skip request_id=%s reason=%s",
                     request_id,
                     exc,
+                )
+                continue
+            if deny_outcome == APPLY_IN_PROGRESS_REASON:
+                LOG.info(
+                    "egress broker decide_deny_for_zone skip request_id=%s reason=%s",
+                    request_id,
+                    deny_outcome,
                 )
                 continue
             decided.append(request_id)
@@ -1502,7 +1522,7 @@ class EgressBroker:
                 # denylist_zone/denylist_scope are internal-only — goes
                 # through _close_request(), never the public decide()
                 # wrapper.
-                self._close_request(
+                sweep_outcome = self._close_request(
                     request_id,
                     "deny",
                     scope=scope,
@@ -1515,6 +1535,13 @@ class EgressBroker:
                     "egress broker persist_deny_sweep skip request_id=%s reason=%s",
                     request_id,
                     exc,
+                )
+                continue
+            if sweep_outcome == APPLY_IN_PROGRESS_REASON:
+                LOG.info(
+                    "egress broker persist_deny_sweep skip request_id=%s reason=%s",
+                    request_id,
+                    sweep_outcome,
                 )
                 continue
             decided.append(request_id)
