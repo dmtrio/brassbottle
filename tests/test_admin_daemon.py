@@ -280,7 +280,7 @@ class AdminDaemonTests(unittest.TestCase):
             finally:
                 server.server_close()
 
-    def test_get_shell_has_no_token_and_pwa_refs(self):
+    def test_get_shell_has_no_token_and_module_app_ref(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             token = "never-leak-this-token"
@@ -295,7 +295,46 @@ class AdminDaemonTests(unittest.TestCase):
                 text = raw.decode("utf-8")
                 self.assertNotIn(token, text)
                 self.assertIn("manifest.webmanifest", text)
-                self.assertIn('register("/sw.js")', text)
+                self.assertIn('<script type="module" src="/app.js"></script>', text)
+                self.assertNotIn("X-Admin-UI", text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_app_js_served_as_module_text_javascript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(Path(tmp))
+            host, port = server.server_address
+            try:
+                status, _payload, headers, raw = self._request(host, port, "GET", "/app.js")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(headers.get("Content-Type"), "text/javascript; charset=utf-8")
+                text = raw.decode("utf-8")
+                self.assertIn('from "/vendor/htm-preact-standalone.module.js"', text)
+                self.assertIn('fetch("/api/egress/decide"', text)
+                self.assertIn('"X-Admin-UI": "1"', text)
+                self.assertIn("type exact host to arm global deny", text)
+                self.assertIn("recorded - add CIDR to manifest by hand", text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_vendor_module_route_is_byte_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(Path(tmp))
+            host, port = server.server_address
+            expected = (
+                REPO_ROOT / "src" / "admin_vendor" / "htm-preact-standalone-3.1.1.module.js"
+            ).read_bytes()
+            try:
+                status, _payload, headers, raw = self._request(
+                    host, port, "GET", "/vendor/htm-preact-standalone.module.js"
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(headers.get("Content-Type"), "text/javascript; charset=utf-8")
+                self.assertEqual(raw, expected)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -315,15 +354,18 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
-    def test_sw_has_api_bypass(self):
+    def test_sw_has_api_bypass_and_precache_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             server, thread = self._start_admin(Path(tmp))
             host, port = server.server_address
             try:
                 status, _payload, _headers, raw = self._request(host, port, "GET", "/sw.js")
                 self.assertEqual(status, HTTPStatus.OK)
-                self.assertIn("/api/", raw.decode("utf-8"))
-                self.assertIn("startsWith(\"/api/\")", raw.decode("utf-8"))
+                text = raw.decode("utf-8")
+                self.assertIn("/api/", text)
+                self.assertIn("startsWith(\"/api/\")", text)
+                self.assertIn('"/app.js"', text)
+                self.assertIn('"/vendor/htm-preact-standalone.module.js"', text)
             finally:
                 server.shutdown()
                 server.server_close()

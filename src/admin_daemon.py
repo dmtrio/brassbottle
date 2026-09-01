@@ -46,7 +46,6 @@ DEFAULT_PORT = 8817
 UPSTREAM_TIMEOUT_SECONDS = 10.0
 SESSION_COOKIE_NAME = "admin_session"
 SESSION_HEADER_NAME = "X-Admin-UI"
-QUEUE_POLL_SECONDS = 2
 REASON_MAX_CHARS = 200
 TOKEN_RACE_SLEEP_SECONDS = 0.2
 TOKEN_REJECTED_ERROR = "operator token rejected by daemon; restart djinn admin"
@@ -74,6 +73,11 @@ _ICON_512 = base64.b64decode(
     "ACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACA"
     "gACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACA4AsM5QIh1ZNQ0QAAAABJRU5ErkJggg=="
 )
+
+_SRC_DIR = Path(__file__).resolve().parent
+_APP_JS_BYTES = (_SRC_DIR / "admin_app.js").read_bytes()
+_VENDOR_JS_PATH = _SRC_DIR / "admin_vendor" / "htm-preact-standalone-3.1.1.module.js"
+_VENDOR_JS_BYTES = _VENDOR_JS_PATH.read_bytes()
 
 APP_HTML = """<!doctype html>
 <html lang="en">
@@ -132,352 +136,11 @@ APP_HTML = """<!doctype html>
   </style>
 </head>
 <body>
-  <header>
-    <h1>Djinn admin</h1>
-    <nav aria-label="Panels">
-      <button type="button" aria-current="page">Egress queue</button>
-      <button type="button" disabled title="Coming soon">Denylist</button>
-      <button type="button" disabled title="Coming soon">Bottles</button>
-      <button type="button" disabled title="Coming soon">Backup</button>
-    </nav>
-  </header>
-  <main>
-    <section class="panel">
-      <div class="meta" id="metaLine">Loading queue...</div>
-      <button id="alertsBtn" type="button">Enable alerts</button>
-      <div id="staleBanner" class="banner" role="status" aria-live="polite"></div>
-      <div id="tableWrap"></div>
-    </section>
-  </main>
-  <footer class="small">Shows open approval requests (decisions), not currently-permitted hosts — the ipset allowlist is the authority.</footer>
-  <script>
-  (function () {
-    const pollMs = __POLL_MS__;
-    const state = {
-      seq: 0,
-      timer: null,
-      latestData: null,
-      staleSince: null,
-      inflightByKey: new Set(),
-      rowMessage: new Map(),
-      seenIds: new Set(),
-      lastIds: new Set()
-    };
-    const tableWrap = document.getElementById("tableWrap");
-    const staleBanner = document.getElementById("staleBanner");
-    const metaLine = document.getElementById("metaLine");
-    const alertsBtn = document.getElementById("alertsBtn");
-
-    function setBanner(msg, isError) {
-      if (!msg) {
-        staleBanner.style.display = "none";
-        staleBanner.textContent = "";
-        staleBanner.className = "banner";
-        return;
-      }
-      staleBanner.style.display = "block";
-      staleBanner.textContent = msg;
-      staleBanner.className = isError ? "banner error" : "banner";
-    }
-
-    function text(tag, value) {
-      const el = document.createElement(tag);
-      el.textContent = value;
-      return el;
-    }
-
-    function button(label, className, onClick) {
-      const el = document.createElement("button");
-      el.type = "button";
-      if (className) el.className = className;
-      el.textContent = label;
-      el.addEventListener("click", onClick);
-      return el;
-    }
-
-    function ageString(seconds) {
-      if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "-";
-      if (seconds < 60) return Math.floor(seconds) + "s";
-      if (seconds < 3600) return Math.floor(seconds / 60) + "m";
-      return Math.floor(seconds / 3600) + "h";
-    }
-
-    function loopbackOrigin(origin) {
-      try {
-        const parsed = new URL(origin);
-        if (parsed.protocol !== "http:") return false;
-        const host = parsed.hostname;
-        return host === "localhost" || host === "127.0.0.1" || host === "::1";
-      } catch (_err) {
-        return false;
-      }
-    }
-
-    function updateTitle(count) {
-      document.title = count > 0 ? "(" + count + ") Egress queue - Djinn admin" : "Egress queue - Djinn admin";
-      if ("setAppBadge" in navigator) {
-        Promise.resolve().then(function () {
-          if (count > 0) return navigator.setAppBadge(count);
-          return navigator.clearAppBadge();
-        }).catch(function () {});
-      }
-    }
-
-    function maybeNotify(openRows) {
-      if (!("Notification" in window) || Notification.permission !== "granted" || !document.hidden) return;
-      const nowIds = new Set();
-      for (const row of openRows) {
-        nowIds.add(row.request_id);
-        if (state.seenIds.has(row.request_id)) continue;
-        state.seenIds.add(row.request_id);
-        const n = new Notification("Egress request", { body: row.container + " \u2192 " + row.host + ":" + row.port });
-        n.onclick = function () { window.focus(); };
-      }
-      state.lastIds = nowIds;
-    }
-
-    function clearNode(node) {
-      while (node.firstChild) node.removeChild(node.firstChild);
-    }
-
-    function requestKey(row) {
-      return row.request_id;
-    }
-
-    function setInflight(row, value) {
-      const key = requestKey(row);
-      if (value) state.inflightByKey.add(key);
-      else state.inflightByKey.delete(key);
-    }
-
-    function postDecision(row, action, reason, requireHostText) {
-      if (requireHostText && requireHostText !== row.host) {
-        state.rowMessage.set(row.request_id, { type: "error", text: "type exact host to arm global deny" });
-        render(state.latestData);
-        return;
-      }
-      const payload = { action: action, host: row.host };
-      if (action !== "deny_global") payload.container = row.container;
-      if (reason) payload.reason = reason;
-      state.rowMessage.delete(row.request_id);
-      setInflight(row, true);
-      render(state.latestData);
-      fetch("/api/egress/decide", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Admin-UI": "1"
-        },
-        body: JSON.stringify(payload)
-      }).then(async function (resp) {
-        let body = {};
-        try { body = await resp.json(); } catch (_err) {}
-        if (resp.ok) {
-          const failures = Array.isArray(body.apply_failures) ? body.apply_failures : null;
-          if (!failures) {
-            state.rowMessage.set(row.request_id, { type: "neutral", text: "decision recorded (apply status unknown on this broker) - row clears once applied" });
-          } else {
-            const hit = failures.find(function (f) { return f && f.request_id === row.request_id; });
-            if (!hit) {
-              state.rowMessage.set(row.request_id, { type: "neutral", text: "decision recorded" });
-            } else if (hit.reason === "ip_requires_cidr") {
-              state.rowMessage.set(row.request_id, { type: "neutral", text: "recorded - add CIDR to manifest by hand" });
-            } else if (hit.reason === "apply_failed") {
-              state.rowMessage.set(row.request_id, { type: "error", text: "decision recorded but rule install FAILED - request stays queued" });
-            } else {
-              state.rowMessage.set(row.request_id, { type: "error", text: "decision recorded with apply failure" });
-            }
-          }
-          setBanner("", false);
-        } else if (resp.status === 400 && typeof body.error === "string") {
-          state.rowMessage.set(row.request_id, { type: "error", text: body.error });
-        } else if ((resp.status === 502 || resp.status === 503) && typeof body.error === "string") {
-          setBanner(body.error, true);
-        } else {
-          setBanner("decide failed", true);
-        }
-      }).catch(function () {
-        setBanner("egress daemon unreachable", true);
-      }).finally(function () {
-        setInflight(row, false);
-        pollNow();
-      });
-    }
-
-    function render(data) {
-      state.latestData = data;
-      clearNode(tableWrap);
-      if (!data || !Array.isArray(data.open)) {
-        tableWrap.appendChild(text("div", "No open requests"));
-        return;
-      }
-
-      const openRows = data.open.slice();
-      openRows.sort(function (a, b) {
-        const aa = typeof a.age_seconds === "number" ? a.age_seconds : 0;
-        const bb = typeof b.age_seconds === "number" ? b.age_seconds : 0;
-        return bb - aa;
-      });
-      maybeNotify(openRows);
-      updateTitle(typeof data.count === "number" ? data.count : openRows.length);
-      const generated = typeof data.generated_at === "string" ? data.generated_at : "unknown";
-      metaLine.textContent = "Open requests: " + openRows.length + " | generated at: " + generated;
-      if (openRows.length === 0) {
-        tableWrap.appendChild(text("div", "No open requests"));
-        tableWrap.lastChild.className = "empty";
-        return;
-      }
-
-      const groups = new Map();
-      for (const row of openRows) {
-        const key = row.host;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(row);
-      }
-
-      const table = document.createElement("table");
-      const thead = document.createElement("thead");
-      const hr = document.createElement("tr");
-      ["Age", "Container", "Host:port", "UID", "Comm", "Hits", "Reason", "Actions"].forEach(function (name) {
-        hr.appendChild(text("th", name));
-      });
-      thead.appendChild(hr);
-      table.appendChild(thead);
-      const tbody = document.createElement("tbody");
-      for (const host of groups.keys()) {
-        const rows = groups.get(host);
-        if (rows.length > 1) {
-          let totalHits = 0;
-          for (const r of rows) totalHits += Number(r.hit_count || 0);
-          const gr = document.createElement("tr");
-          gr.className = "host-group";
-          const td = document.createElement("td");
-          td.colSpan = 8;
-          td.textContent = host + " - " + rows.length + " request(s), " + totalHits + " hits";
-          const arming = document.createElement("input");
-          arming.type = "text";
-          arming.maxLength = 200;
-          arming.placeholder = "Type host to arm global deny";
-          const denyBtn = button("Deny always (global)", "error", function () {
-            const first = rows[0];
-            postDecision({ request_id: "__group__:" + host, host: host, container: first.container }, "deny_global", "", arming.value);
-          });
-          denyBtn.style.marginLeft = "8px";
-          td.appendChild(text("span", " "));
-          td.appendChild(arming);
-          td.appendChild(denyBtn);
-          const groupMsg = state.rowMessage.get("__group__:" + host);
-          if (groupMsg) {
-            const chip = document.createElement("span");
-            chip.className = "chip" + (groupMsg.type === "error" ? " error" : "");
-            chip.textContent = groupMsg.text;
-            chip.style.marginLeft = "8px";
-            td.appendChild(chip);
-          }
-          gr.appendChild(td);
-          tbody.appendChild(gr);
-        }
-        for (const row of rows) {
-          const tr = document.createElement("tr");
-          const inflight = state.inflightByKey.has(requestKey(row));
-          const denyReason = document.createElement("input");
-          denyReason.type = "text";
-          denyReason.maxLength = 200;
-          denyReason.placeholder = "Optional deny reason";
-
-          const globalArm = document.createElement("input");
-          globalArm.type = "text";
-          globalArm.maxLength = 200;
-          globalArm.placeholder = "Type host for global deny";
-
-          const hostCell = document.createElement("td");
-          hostCell.textContent = row.host + ":" + row.port;
-          if (row.host_is_ip) {
-            const badge = text("span", "IP");
-            badge.className = "badge";
-            badge.title = "Approving records the decision; the CIDR must reach the manifest by hand.";
-            hostCell.appendChild(badge);
-          }
-
-          tr.appendChild(text("td", ageString(row.age_seconds)));
-          tr.appendChild(text("td", String(row.container || "")));
-          tr.appendChild(hostCell);
-          tr.appendChild(text("td", String(row.uid == null ? "" : row.uid)));
-          tr.appendChild(text("td", String(row.comm || "")));
-          tr.appendChild(text("td", String(row.hit_count == null ? "" : row.hit_count)));
-          tr.appendChild(text("td", String(row.reason || "")));
-
-          const actionsTd = document.createElement("td");
-          const actions = document.createElement("div");
-          actions.className = "actions";
-          actions.appendChild(button("Allow", "", function () { postDecision(row, "allow_live", "", ""); }));
-          actions.appendChild(button("Allow+manifest", "", function () { postDecision(row, "allow_manifest", "", ""); }));
-          actions.appendChild(button("Deny", "warn", function () { postDecision(row, "deny", denyReason.value, ""); }));
-          actions.appendChild(button("Deny always (bottle)", "warn", function () { postDecision(row, "deny_bottle", denyReason.value, ""); }));
-          actions.appendChild(button("Deny always (global)", "error", function () { postDecision(row, "deny_global", denyReason.value, globalArm.value); }));
-          for (const node of actions.querySelectorAll("button")) node.disabled = inflight;
-          denyReason.disabled = inflight;
-          globalArm.disabled = inflight;
-          actionsTd.appendChild(actions);
-          actionsTd.appendChild(denyReason);
-          actionsTd.appendChild(globalArm);
-          const msg = state.rowMessage.get(row.request_id);
-          if (msg) {
-            const chip = text("div", msg.text);
-            chip.className = msg.type === "error" ? "chip error" : "chip";
-            actionsTd.appendChild(chip);
-          }
-          tr.appendChild(actionsTd);
-          tbody.appendChild(tr);
-        }
-      }
-      table.appendChild(tbody);
-      tableWrap.appendChild(table);
-    }
-
-    function pollNow() {
-      const seq = ++state.seq;
-      fetch("/api/egress/queue", { method: "GET" }).then(async function (resp) {
-        let body = {};
-        try { body = await resp.json(); } catch (_err) {}
-        if (seq !== state.seq) return;
-        if (resp.ok) {
-          state.staleSince = null;
-          setBanner("", false);
-          render(body);
-          return;
-        }
-        if (!state.staleSince) state.staleSince = new Date();
-        const ts = state.staleSince.toLocaleTimeString();
-        const msg = typeof body.error === "string" ? body.error : "daemon unreachable - data stale since " + ts;
-        setBanner(msg, true);
-      }).catch(function () {
-        if (seq !== state.seq) return;
-        if (!state.staleSince) state.staleSince = new Date();
-        setBanner("daemon unreachable - data stale since " + state.staleSince.toLocaleTimeString(), true);
-      }).finally(function () {
-        if (seq !== state.seq) return;
-        state.timer = setTimeout(pollNow, pollMs);
-      });
-    }
-
-    alertsBtn.addEventListener("click", function () {
-      if (!("Notification" in window)) return;
-      Notification.requestPermission().catch(function () {});
-    });
-
-    if ("serviceWorker" in navigator) {
-      try {
-        navigator.serviceWorker.register("/sw.js").catch(function () {});
-      } catch (_err) {}
-    }
-    pollNow();
-    render({open: [], count: 0, generated_at: "-"});
-  })();
-  </script>
+  <div id="appMount"></div>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>
-""".replace("__POLL_MS__", str(QUEUE_POLL_SECONDS * 1000))
+"""
 
 MANIFEST = {
     "name": "Djinn admin",
@@ -492,8 +155,15 @@ MANIFEST = {
     ],
 }
 
-SW_JS = """const CACHE_VERSION = "djinn-admin-shell-v1";
-const SHELL_PATHS = ["/", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
+SW_JS = """const CACHE_VERSION = "djinn-admin-shell-v2";
+const SHELL_PATHS = [
+  "/",
+  "/app.js",
+  "/vendor/htm-preact-standalone.module.js",
+  "/manifest.webmanifest",
+  "/icon-192.png",
+  "/icon-512.png"
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_VERSION).then((cache) => cache.addAll(SHELL_PATHS)));
@@ -654,6 +324,8 @@ class AdminHTTPServer(ThreadingHTTPServer):
         self.egress_root = egress_root
         self.session_secret = session_secret
         self.operator_token = operator_token
+        self.app_js = _APP_JS_BYTES
+        self.vendor_js = _VENDOR_JS_BYTES
         super().__init__(server_address, AdminRequestHandler)
 
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
@@ -682,6 +354,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         routes: dict[tuple[str, str], Callable[[], None]] = {
             ("GET", "/"): self._handle_root,
+            ("GET", "/app.js"): self._handle_app_js,
+            ("GET", "/vendor/htm-preact-standalone.module.js"): self._handle_vendor_js,
             ("GET", "/manifest.webmanifest"): self._handle_manifest,
             ("GET", "/sw.js"): self._handle_sw,
             ("GET", "/icon-192.png"): self._handle_icon_192,
@@ -741,6 +415,20 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     def _handle_manifest(self) -> None:
         body = json.dumps(MANIFEST, separators=(",", ":")).encode("utf-8")
         self._send_bytes(HTTPStatus.OK, body, content_type="application/manifest+json")
+
+    def _handle_app_js(self) -> None:
+        self._send_bytes(
+            HTTPStatus.OK,
+            self.server.app_js,
+            content_type="text/javascript; charset=utf-8",
+        )
+
+    def _handle_vendor_js(self) -> None:
+        self._send_bytes(
+            HTTPStatus.OK,
+            self.server.vendor_js,
+            content_type="text/javascript; charset=utf-8",
+        )
 
     def _handle_sw(self) -> None:
         self._send_bytes(HTTPStatus.OK, SW_JS.encode("utf-8"), content_type="application/javascript")
