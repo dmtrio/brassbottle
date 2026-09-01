@@ -44,7 +44,7 @@ class FreshFileTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            data["settings"], {"terminal.integrated.cwd": "/workspace/repos"}
+            data["settings"][code_workspace.TERMINAL_CWD_KEY], "/workspace/repos"
         )
 
     def test_empty_repo_names_just_artifacts(self):
@@ -54,7 +54,7 @@ class FreshFileTests(unittest.TestCase):
             _load(self.path),
             {
                 "folders": [{"path": "/artifacts", "name": "artifacts"}],
-                "settings": {"terminal.integrated.cwd": "/workspace/repos"},
+                "settings": code_workspace.merge_settings({})[0],
             },
         )
 
@@ -68,7 +68,7 @@ class FreshFileTests(unittest.TestCase):
             ["repos/app", "/artifacts"],
         )
         self.assertEqual(
-            data["settings"], {"terminal.integrated.cwd": "/workspace/repos"}
+            data["settings"][code_workspace.TERMINAL_CWD_KEY], "/workspace/repos"
         )
 
 
@@ -170,7 +170,11 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(data["folders"][0]["foo"], 1)
         self.assertEqual(data["folders"][1]["bar"], "keep")
         self.assertEqual(data["folders"][2]["baz"], True)
-        self.assertEqual(data["settings"], {"editor.tabSize": 2, "custom": {"a": 1}})
+        # The operator's own settings survive untouched; managed keys are
+        # ADDED alongside, never replacing the dict wholesale.
+        self.assertEqual(data["settings"]["editor.tabSize"], 2)
+        self.assertEqual(data["settings"]["custom"], {"a": 1})
+        self.assertIn(code_workspace.PROFILES_KEY, data["settings"])
         self.assertEqual(
             data["extensions"], {"recommendations": ["ms-python.python"]}
         )
@@ -201,6 +205,104 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(self.path.read_bytes(), payload)
         self.assertIn("folders", err.getvalue())
+
+
+class ManagedSettingsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "dev.code-workspace"
+
+    def _settings(self):
+        return _load(self.path)["settings"]
+
+    def test_fresh_file_gets_the_tmux_profile(self):
+        _run(self.path, "app")
+        profiles = self._settings()[code_workspace.PROFILES_KEY]
+        self.assertIn(code_workspace.TMUX_PROFILE_NAME, profiles)
+        self.assertIn(
+            "tmux new-session",
+            " ".join(profiles[code_workspace.TMUX_PROFILE_NAME]["args"]),
+        )
+
+    def test_default_profile_is_plain_bash(self):
+        # Load-bearing: VS Code runs tasks, debug consoles and git operations
+        # through the DEFAULT profile. Defaulting to the shared tmux session
+        # would drop all of them into one session, interleaving their output
+        # and letting one closing terminal detach the others.
+        _run(self.path, "app")
+        self.assertEqual(
+            self._settings()[code_workspace.DEFAULT_PROFILE_KEY], "bash"
+        )
+
+    def test_is_idempotent(self):
+        _run(self.path, "app")
+        first = self.path.read_text(encoding="utf-8")
+        _run(self.path, "app")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), first)
+
+    def test_never_overwrites_an_edited_profile(self):
+        # The operator tuning the command must survive `./djinn up`.
+        mine = {"path": "bash", "args": ["-lc", "tmux attach -t mine"]}
+        self.path.write_text(json.dumps({
+            "folders": [],
+            "settings": {code_workspace.PROFILES_KEY: {
+                code_workspace.TMUX_PROFILE_NAME: mine
+            }},
+        }))
+        _run(self.path, "app")
+        self.assertEqual(
+            self._settings()[code_workspace.PROFILES_KEY][
+                code_workspace.TMUX_PROFILE_NAME
+            ],
+            mine,
+        )
+
+    def test_never_overwrites_a_chosen_default_profile(self):
+        self.path.write_text(json.dumps({
+            "folders": [],
+            "settings": {code_workspace.DEFAULT_PROFILE_KEY: "tmux-agent"},
+        }))
+        _run(self.path, "app")
+        self.assertEqual(
+            self._settings()[code_workspace.DEFAULT_PROFILE_KEY], "tmux-agent"
+        )
+
+    def test_other_profiles_are_left_alone(self):
+        self.path.write_text(json.dumps({
+            "folders": [],
+            "settings": {code_workspace.PROFILES_KEY: {"zsh": {"path": "zsh"}}},
+        }))
+        _run(self.path, "app")
+        profiles = self._settings()[code_workspace.PROFILES_KEY]
+        self.assertEqual(profiles["zsh"], {"path": "zsh"})
+        self.assertIn(code_workspace.TMUX_PROFILE_NAME, profiles)
+
+    def test_non_dict_profiles_are_left_entirely_alone(self):
+        # The operator's own invalid config: VS Code already ignores it, and
+        # rewriting it would lose their work rather than fix anything.
+        self.path.write_text(json.dumps({
+            "folders": [],
+            "settings": {code_workspace.PROFILES_KEY: "nonsense"},
+        }))
+        self.assertEqual(_run(self.path, "app"), 0)
+        self.assertEqual(self._settings()[code_workspace.PROFILES_KEY], "nonsense")
+
+    def test_non_dict_settings_does_not_crash_or_clobber(self):
+        self.path.write_text(json.dumps({"folders": [], "settings": "nonsense"}))
+        self.assertEqual(_run(self.path, "app"), 0)
+        self.assertEqual(_load(self.path)["settings"], "nonsense")
+
+    def test_profile_is_not_aliased_to_the_module_constant(self):
+        # Two files in one process must not share a mutable profile dict.
+        a, _ = code_workspace.merge_settings({})
+        b, _ = code_workspace.merge_settings({})
+        a[code_workspace.PROFILES_KEY][code_workspace.TMUX_PROFILE_NAME]["args"] = ["x"]
+        self.assertNotEqual(
+            b[code_workspace.PROFILES_KEY][code_workspace.TMUX_PROFILE_NAME]["args"],
+            ["x"],
+        )
+        self.assertNotEqual(code_workspace.TMUX_PROFILE["args"], ["x"])
 
 
 if __name__ == "__main__":

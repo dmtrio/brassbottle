@@ -20,6 +20,40 @@ import os
 import sys
 from pathlib import Path
 
+# ── Managed settings ─────────────────────────────────────────────────────────
+# Merged into the file on every run, ADD-IF-MISSING only: an existing value is
+# never overwritten, so hand-tuning any of these sticks. Same contract as the
+# folders merge, including its one wart — deleting a managed key brings it back
+# on the next `./djinn up`. To opt out of the tmux profile permanently, keep
+# the key and point it somewhere else rather than removing it.
+TERMINAL_CWD_KEY = "terminal.integrated.cwd"
+TERMINAL_CWD = "/workspace/repos"
+PROFILES_KEY = "terminal.integrated.profiles.linux"
+DEFAULT_PROFILE_KEY = "terminal.integrated.defaultProfile.linux"
+
+TMUX_PROFILE_NAME = "tmux-agent"
+# Attaches the SAME durable session ssh/mosh logins land in
+# (src/tmux-landing.bashrc), so an editor terminal, a phone over mosh and a
+# laptop can share one shell.
+#
+# Grouped (`-t agent`) rather than a plain attach: a grouped session shares
+# the windows but keeps its own size, so a phone attached alongside does not
+# squeeze the editor panel — tmux.conf already sets aggressive-resize for
+# exactly this. The `||` fallback matters on a fresh container where nothing
+# has ssh'd in yet: `-t agent` fails when the target does not exist, and
+# `-A -s agent` then creates the session the phone will later attach to.
+TMUX_PROFILE_COMMAND = (
+    "tmux new-session -A -s vscode -t agent || tmux new-session -A -s agent"
+)
+TMUX_PROFILE = {"path": "bash", "args": ["-lc", TMUX_PROFILE_COMMAND]}
+
+# Default stays plain bash ON PURPOSE. VS Code spawns terminals for tasks,
+# debug consoles and git operations using the default profile; making the
+# shared session the default would drop every one of those into the SAME tmux
+# session, interleaving task output with whatever is running there and letting
+# one closing terminal detach the others. tmux-agent is a dropdown choice.
+DEFAULT_PROFILE = "bash"
+
 
 def _dump_json(obj):
     # jq-style output: 2-space indent, raw UTF-8, trailing newline.
@@ -39,6 +73,43 @@ def parse_repo_names(env):
     return [t for t in (env.get("REPO_NAMES") or "").split() if t]
 
 
+def merge_settings(settings):
+    """Add missing managed settings. Returns (settings, added_keys).
+
+    Never overwrites an existing value — including a nested profile the
+    operator has edited. A non-dict where a dict is expected is left entirely
+    alone rather than replaced: it is the operator's own (invalid) config, and
+    silently rewriting it would lose their work to fix a file VS Code was
+    already ignoring.
+    """
+    added = []
+    if not isinstance(settings, dict):
+        return settings, added
+
+    if TERMINAL_CWD_KEY not in settings:
+        settings[TERMINAL_CWD_KEY] = TERMINAL_CWD
+        added.append(TERMINAL_CWD_KEY)
+
+    profiles = settings.setdefault(PROFILES_KEY, {})
+    if isinstance(profiles, dict):
+        if not profiles:
+            added.append(PROFILES_KEY)
+        if DEFAULT_PROFILE not in profiles:
+            profiles[DEFAULT_PROFILE] = {"path": "bash"}
+        if TMUX_PROFILE_NAME not in profiles:
+            # Deep-copied so two calls in one process cannot alias the module
+            # constant and have an edit to one leak into the other.
+            profiles[TMUX_PROFILE_NAME] = json.loads(json.dumps(TMUX_PROFILE))
+            if PROFILES_KEY not in added:
+                added.append(f"{PROFILES_KEY}/{TMUX_PROFILE_NAME}")
+
+    if DEFAULT_PROFILE_KEY not in settings:
+        settings[DEFAULT_PROFILE_KEY] = DEFAULT_PROFILE
+        added.append(DEFAULT_PROFILE_KEY)
+
+    return settings, added
+
+
 def default_document(names):
     folders = [{"path": f"repos/{n}", "name": n} for n in sorted(names)]
     folders.append({"path": "/artifacts", "name": "artifacts"})
@@ -47,7 +118,8 @@ def default_document(names):
     # VS Code can still land a fresh terminal in whichever folder last had
     # focus. Pin it explicitly so a new container always opens shells in
     # /workspace/repos, never /artifacts.
-    return {"folders": folders, "settings": {"terminal.integrated.cwd": "/workspace/repos"}}
+    settings, _ = merge_settings({})
+    return {"folders": folders, "settings": settings}
 
 
 def merge_folders(existing, names):
@@ -106,6 +178,18 @@ def sync_workspace(path, names):
         return f"{path}: 'folders' is missing or not a list"
 
     data["folders"] = merge_folders(folders, names)
+
+    settings = data.get("settings")
+    if settings is None:
+        settings = {}
+    if isinstance(settings, dict):
+        data["settings"], added = merge_settings(settings)
+        # Boundary log: this file is the operator's, and a silent edit to it is
+        # the kind of thing that shows up much later as "why is my terminal
+        # doing that". Say what was added, once, only when something was.
+        if added:
+            print(f"  workspace settings added: {', '.join(added)}")
+
     _write_atomic(path, _dump_json(data))
     return None
 
