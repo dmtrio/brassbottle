@@ -130,6 +130,15 @@ def fold_open_requests(base_path: Path) -> dict[str, el.OpenRequest]:
 
 
 def month_records(base_path: Path, when: datetime | None = None) -> list[dict[str, Any]]:
+    """Records from the log file for `when`'s month (default: now).
+
+    Reads a SINGLE month file, so a caller that wrote records with an explicit
+    ts must pass the same `when` back. The live smoke path leaves it None on
+    purpose: it writes with the real clock, so "now" is the right file — with
+    the known edge that a run straddling midnight UTC on the 1st can write to
+    the previous month and read the next. Rare enough to leave; noted so the
+    next person does not rediscover it as a flake.
+    """
     when = when or datetime.now(timezone.utc)
     log = el.EgressLog(egress_log_root(base_path))
     path = el._log_path(log.root, el._month_filename(when))
@@ -151,9 +160,16 @@ def count_events(
     kind: str,
     host: str | None = None,
     port: int | None = None,
+    when: datetime | None = None,
 ) -> int:
+    """Count matching records in ONE month's log file.
+
+    `when` selects which month, defaulting to now — pass it whenever the
+    records were written with an explicit ts, or the count silently reads a
+    different file than the one that was written and returns 0.
+    """
     total = 0
-    for record in month_records(base_path):
+    for record in month_records(base_path, when):
         if record.get("kind") != kind:
             continue
         if host is not None and record.get("host") != host:
@@ -164,9 +180,12 @@ def count_events(
     return total
 
 
-def count_hits_for_request(base_path: Path, request_id: str) -> int:
+def count_hits_for_request(
+    base_path: Path, request_id: str, when: datetime | None = None
+) -> int:
+    """Hits for one request in ONE month's log. See count_events on `when`."""
     hits = 0
-    for record in month_records(base_path):
+    for record in month_records(base_path, when):
         if record.get("request_id") != request_id:
             continue
         if record.get("kind") != "hit":

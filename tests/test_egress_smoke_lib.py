@@ -69,10 +69,42 @@ class EgressSmokeLibTests(unittest.TestCase):
                 container="demo",
             )
             self.assertEqual(
-                smoke.count_events(base_path, kind="requested", host="docs.stripe.com", port=443),
+                smoke.count_events(
+                    base_path,
+                    kind="requested",
+                    host="docs.stripe.com",
+                    port=443,
+                    when=NOW,
+                ),
                 1,
             )
-            self.assertEqual(smoke.count_events(base_path, kind="hit"), 1)
+            self.assertEqual(
+                smoke.count_events(base_path, kind="hit", when=NOW), 1
+            )
+
+    def test_count_events_reads_the_month_it_is_asked_for(self):
+        # Regression. NOW is a fixed date, so the default (real now) reads a
+        # DIFFERENT month file than the fixture wrote and silently returns 0 —
+        # a pass that expires. This first failed when UTC rolled into
+        # September 2026, having passed every day of August.
+        with tempfile.TemporaryDirectory() as tmp:
+            base_path = Path(tmp)
+            (base_path / "run" / "egress").mkdir(parents=True)
+            el.EgressLog(base_path / "run" / "egress").append(
+                "requested",
+                "req-1",
+                ts=NOW,
+                host="docs.stripe.com",
+                port=443,
+                container="demo",
+            )
+            self.assertEqual(
+                smoke.count_events(base_path, kind="requested", when=NOW), 1
+            )
+            other_month = NOW.replace(month=NOW.month - 1)
+            self.assertEqual(
+                smoke.count_events(base_path, kind="requested", when=other_month), 0
+            )
 
     def test_queue_mount_violations_detects_run_path(self):
         with tempfile.TemporaryDirectory() as tmp:
