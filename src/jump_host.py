@@ -7,6 +7,7 @@ Thin docker-compose glue around jump_config. Stdlib only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ipaddress
 import os
 import subprocess
@@ -322,8 +323,16 @@ def cmd_ip(base_path: Path) -> int:
     cannot be read yet — e.g. before the first ./djinn up or
     ./djinn jump start on a fresh install. JumpConfigError propagates to
     main(), which prints "Error: …" and exits 1.
+
+    up.sh consumes this command's stdout as a bare `JUMP_IP=$(...)` value, so
+    it must be exactly one IP line — _live_subnet's own warn prints (an
+    unreadable or unparseable live subnet) go to stdout by default, which
+    would otherwise land INSIDE that value. Redirect them to stderr for the
+    duration of that one call only.
     """
-    print(resolve_jump_ip(subnet=_live_subnet()))
+    with contextlib.redirect_stdout(sys.stderr):
+        subnet = _live_subnet()
+    print(resolve_jump_ip(subnet=subnet))
     return 0
 
 

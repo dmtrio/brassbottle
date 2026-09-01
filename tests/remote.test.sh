@@ -30,6 +30,21 @@ done
 python3 -m py_compile src/tmux_landing_gc.py \
     && pass "python3 -m py_compile src/tmux_landing_gc.py" \
     || fail "src/tmux_landing_gc.py has syntax errors"
+python3 -m py_compile src/remote_access.py \
+    && pass "python3 -m py_compile src/remote_access.py" \
+    || fail "src/remote_access.py has syntax errors"
+
+echo "── remote_access.py (AGENTS.md \"Python over bash\" — START_SSHD +"
+echo "  authorized_keys + the jump-scoped :22 rule live here, not inline bash)"
+grep -qF '/usr/local/lib/djinn/remote_access.py sshd' src/entrypoint.sh \
+    && pass "entrypoint.sh calls remote_access.py sshd" \
+    || fail "src/entrypoint.sh no longer calls remote_access.py sshd"
+grep -qF '/usr/local/lib/djinn/remote_access.py firewall-ssh' src/init-firewall.sh \
+    && pass "init-firewall.sh calls remote_access.py firewall-ssh" \
+    || fail "src/init-firewall.sh no longer calls remote_access.py firewall-ssh"
+grep -qF 'COPY src/remote_access.py /usr/local/lib/djinn/remote_access.py' Dockerfile \
+    && pass "Dockerfile installs remote_access.py into /usr/local/lib/djinn" \
+    || fail "Dockerfile does not wire remote_access.py into /usr/local/lib/djinn"
 
 echo "── jump container (PLN - Djinn Admin Plane PR 1)"
 grep -qF 'COPY src/mosh-server-wrapper.sh /usr/local/bin/mosh-server' jump/Dockerfile \
@@ -38,15 +53,22 @@ grep -qF 'COPY src/mosh-server-wrapper.sh /usr/local/bin/mosh-server' jump/Docke
 grep -qF 'update-locale LANG=en_US.UTF-8' jump/Dockerfile \
     && pass "jump image sets a UTF-8 native locale (mosh-server aborts without one)" \
     || fail "jump/Dockerfile is missing the UTF-8 locale setup"
-grep -qF 'JUMP_AUTHORIZED_KEY' src/entrypoint.sh \
-    && pass "bottle entrypoint honours JUMP_AUTHORIZED_KEY" \
-    || fail "src/entrypoint.sh does not append JUMP_AUTHORIZED_KEY"
+# The env var itself is read by remote_access.py now (Python over bash),
+# not src/entrypoint.sh directly — see the '>> authorized_keys' pin below
+# for the ordering guarantee.
+grep -qF 'JUMP_AUTHORIZED_KEY' src/remote_access.py \
+    && pass "remote_access.py honours JUMP_AUTHORIZED_KEY" \
+    || fail "src/remote_access.py does not read JUMP_AUTHORIZED_KEY"
 grep -qF 'JUMP_AUTHORIZED_KEY=${JUMP_AUTHORIZED_KEY:-}' compose/docker-compose.local.yml \
     && pass "local compose passes JUMP_AUTHORIZED_KEY into the bottle" \
     || fail "compose/docker-compose.local.yml does not pass JUMP_AUTHORIZED_KEY"
-grep -qF '>> /home/coder/.ssh/authorized_keys' src/entrypoint.sh \
-    && pass "jump key is APPENDED, so the operator key keeps working" \
-    || fail "src/entrypoint.sh must append the jump key, never replace"
+# The append itself moved into remote_access.py's _rebuild_authorized_keys
+# (Python over bash — src/entrypoint.sh no longer touches the file directly),
+# so pin the operator-then-jump ORDER there instead of the old
+# '>> ...authorized_keys' literal, which no longer exists in entrypoint.sh.
+grep -qF 'for k in (ssh_key, jump_key)' src/remote_access.py \
+    && pass "jump key is appended AFTER the operator key, so the operator key keeps working" \
+    || fail "src/remote_access.py must write the operator key before the jump key, never replace"
 
 echo "── tunnel connector (PLN - Djinn Admin Plane, phase A)"
 grep -qF 'DEFAULT_TUNNEL_IMAGE = "fosrl/newt:' src/tunnel_config.py \

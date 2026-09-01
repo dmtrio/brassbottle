@@ -248,7 +248,29 @@ python3 "$SCRIPT_DIR/src/ensure_net.py" "$DESIRED_SUBNET" || exit 1
 # own no-keys case; init-firewall.sh and the summary/banner below only warn.
 # common.sh sources ./.env WITHOUT exporting, so DJINN_SUBNET/DJINN_JUMP_IP
 # must be forwarded explicitly here, same as jump.sh does.
-JUMP_IP="$(env DJINN_SUBNET="${DJINN_SUBNET:-}" DJINN_JUMP_IP="${DJINN_JUMP_IP:-}" DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" ip 2>/dev/null)" || JUMP_IP=""
+#
+# stderr is captured (not discarded) — a resolver failure used to disappear
+# behind `2>/dev/null`, leaving the operator to guess why JUMP_IP came back
+# empty. Surface every line the resolver printed, prefixed so it reads as
+# this boundary's own diagnostic, then remove the temp file either way. The
+# `if JUMP_IP=$(...); then … else …` shape (rather than `X=$(...); rc=$?`)
+# is deliberate: under this script's `set -e`, a bare failed assignment from
+# a command substitution aborts the script right there — wrapping it in the
+# `if` is what keeps this resolution non-fatal, same as the `|| JUMP_IP=""`
+# it replaces.
+JUMP_IP_ERR="$(mktemp "$BASE_PATH/jump-ip-err.XXXXXX")"
+if JUMP_IP="$(env DJINN_SUBNET="${DJINN_SUBNET:-}" DJINN_JUMP_IP="${DJINN_JUMP_IP:-}" DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" ip 2>"$JUMP_IP_ERR")"; then
+    JUMP_IP_FAILED=false
+else
+    JUMP_IP_FAILED=true
+    JUMP_IP=""
+fi
+if [ "$JUMP_IP_FAILED" = "true" ] || [ -s "$JUMP_IP_ERR" ]; then
+    while IFS= read -r line; do
+        echo "  jump: $line"
+    done < "$JUMP_IP_ERR"
+fi
+rm -f "$JUMP_IP_ERR"
 
 # ── Jump reachability preflight (non-fatal) ───────────────────────────────────
 # Both are quiet-degradation warnings, not errors: the entrypoint and firewall

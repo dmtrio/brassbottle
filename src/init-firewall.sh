@@ -26,6 +26,9 @@
 #                          reachability). true (default) scopes an inbound
 #                          :22 ACCEPT to DJINN_JUMP_IP when SSH_ENABLED is not
 #                          also set; false skips the rule entirely (opt-out).
+#                          Decision (open/jump/none) + validation of
+#                          DJINN_JUMP_IP is made by remote_access.py
+#                          firewall-ssh, evaled below.
 #   DJINN_JUMP_IP          the jump container's static bridge address (up.sh
 #                          resolves it host-side via `jump_host.py ip`).
 #                          Empty = warn and skip the rule — sshd, if the
@@ -206,23 +209,28 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 # bridge address — because that path has no host port and no tunnel of its
 # own narrowing who can reach it. Never both: an explicit ssh: bottle already
 # gets the wide-open published rule, so a jump-scoped rule on top would only
-# suggest a narrower path exists when it doesn't.
-if [ "${SSH_ENABLED:-false}" = "true" ]; then
-    iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-elif [ "${REMOTE_JUMP:-true}" = "true" ]; then
-    if [ -z "${DJINN_JUMP_IP:-}" ]; then
-        # Non-fatal, matches the entrypoint's own no-keys degradation: sshd
-        # (if it started at all) simply has no ACCEPT rule yet, rather than
-        # failing the whole firewall over a jump address that isn't known.
-        echo "⚠ REMOTE_JUMP=true but DJINN_JUMP_IP is empty — sshd (if running) is unreachable until the jump address is known"
-    elif [[ ! "$DJINN_JUMP_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        echo "ERROR: Invalid DJINN_JUMP_IP: $DJINN_JUMP_IP"
-        exit 1
-    else
-        echo "Allowing inbound SSH from jump $DJINN_JUMP_IP"
+# suggest a narrower path exists when it doesn't. remote_access.py owns the
+# open/jump/none decision and DJINN_JUMP_IP validation (AGENTS.md "Python
+# over bash"); captured into a variable BEFORE eval, not `eval "$(…)"`
+# inline — a failed command substitution's exit status is lost once `eval`
+# runs on its (empty) output, which would silently swallow the invalid-IP
+# fail-closed case under this script's `set -euo pipefail`.
+FIREWALL_SSH_ARGS=$(python3 /usr/local/lib/djinn/remote_access.py firewall-ssh)
+eval "$FIREWALL_SSH_ARGS"
+case "$SSH_INPUT_RULE" in
+    open)
+        iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+        ;;
+    jump)
         iptables -A INPUT -s "$DJINN_JUMP_IP" -p tcp --dport 22 -j ACCEPT
-    fi
-fi
+        ;;
+    none)
+        ;;
+    *)
+        echo "ERROR: remote_access.py returned an unknown SSH_INPUT_RULE: $SSH_INPUT_RULE"
+        exit 1
+        ;;
+esac
 
 # Inbound mosh UDP range when enabled (RFC 04). Set by the mosh compose
 # overlay; reached only over the operator's WireGuard/VPN tunnel — the

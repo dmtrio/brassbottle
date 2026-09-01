@@ -302,6 +302,39 @@ class IpTests(unittest.TestCase):
                     self.assertEqual(jump_host.cmd_ip(Path(home)), 0)
             self.assertEqual(out.getvalue().strip(), "10.9.0.254")
 
+    def test_ip_stdout_is_exactly_one_line_when_the_live_subnet_warns(self):
+        # up.sh reads this command's stdout as a bare JUMP_IP=$(...) value.
+        # _live_subnet's own warn prints (an unreadable/unparseable live
+        # subnet) go to stdout by default — cmd_ip must redirect those to
+        # stderr for the duration of that call, or they'd land INSIDE
+        # JUMP_IP. Two triggers for _live_subnet's warn path: network_subnet
+        # raising (this test) and network_subnet returning something that
+        # fails IPv4Network parsing (the next test).
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(
+                jump_host.os.environ, {"DJINN_SUBNET": "10.9.0.0/24"}, clear=False
+            ), mock.patch.object(
+                jump_host.ensure_net, "network_subnet", side_effect=RuntimeError("boom")
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+                    self.assertEqual(jump_host.cmd_ip(Path(home)), 0)
+            self.assertEqual(out.getvalue(), "10.9.0.254\n")
+            self.assertIn("subnet-unreadable", err.getvalue())
+
+    def test_ip_stdout_is_exactly_one_line_when_the_live_subnet_is_unparseable(self):
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(
+                jump_host.os.environ, {"DJINN_SUBNET": "10.9.0.0/24"}, clear=False
+            ), mock.patch.object(
+                jump_host.ensure_net, "network_subnet", return_value="not-a-subnet"
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+                    self.assertEqual(jump_host.cmd_ip(Path(home)), 0)
+            self.assertEqual(out.getvalue(), "10.9.0.254\n")
+            self.assertIn("subnet-unparseable", err.getvalue())
+
 
 class ParserTests(unittest.TestCase):
     def test_every_subcommand_parses(self):
