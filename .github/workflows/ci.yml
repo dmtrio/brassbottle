@@ -2,8 +2,8 @@
 # `workflow` scope, so a human moves this file into .github/workflows/ and a
 # follow-up commit removes this staged copy.
 #
-# This revision adds a pull of the pinned tunnel-connector image, matching the existing
-# Backrest pull (PLN - Djinn Admin Plane, phase A).
+# This revision wires tests/remote.test.sh and the landing-GC unit tests into
+# the test job: PR #99 added ~10 contract checks there that nothing executed.
 name: ci
 
 on:
@@ -26,6 +26,12 @@ jobs:
         # hard-skips (exit 0) only when yq/jq are missing, so installing yq
         # above keeps it honest.
         run: tests/plugins.test.sh
+      - name: Remote-access contract checks
+        # Static grep/lint assertions over the tmux landing, GC, notifier and
+        # jump wiring (tests/remote.test.sh) — previously never run by CI.
+        run: bash tests/remote.test.sh
+      - name: Landing-GC unit tests
+        run: python3 -m unittest tests.test_tmux_landing_gc -v
       - name: Image builds
         # "If it ships, CI builds it": the shared image is the artifact
         # every container runs, so a PR that breaks the Dockerfile must fail.
