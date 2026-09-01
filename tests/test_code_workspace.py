@@ -216,20 +216,15 @@ class ManagedSettingsTests(unittest.TestCase):
     def _settings(self):
         return _load(self.path)["settings"]
 
-    def test_fresh_file_gets_the_tmux_profile(self):
+    def test_fresh_file_gets_a_plain_bash_profile(self):
         _run(self.path, "app")
         profiles = self._settings()[code_workspace.PROFILES_KEY]
-        self.assertIn(code_workspace.TMUX_PROFILE_NAME, profiles)
-        self.assertIn(
-            "tmux new-session",
-            " ".join(profiles[code_workspace.TMUX_PROFILE_NAME]["args"]),
-        )
+        self.assertEqual(profiles["bash"], {"path": "bash"})
 
     def test_default_profile_is_plain_bash(self):
         # Load-bearing: VS Code runs tasks, debug consoles and git operations
-        # through the DEFAULT profile. Defaulting to the shared tmux session
-        # would drop all of them into one session, interleaving their output
-        # and letting one closing terminal detach the others.
+        # through the DEFAULT profile. Non-interactive shells must stay out of
+        # tmux and keep normal behavior.
         _run(self.path, "app")
         self.assertEqual(
             self._settings()[code_workspace.DEFAULT_PROFILE_KEY], "bash"
@@ -241,31 +236,29 @@ class ManagedSettingsTests(unittest.TestCase):
         _run(self.path, "app")
         self.assertEqual(self.path.read_text(encoding="utf-8"), first)
 
-    def test_never_overwrites_an_edited_profile(self):
-        # The operator tuning the command must survive `./djinn up`.
-        mine = {"path": "bash", "args": ["-lc", "tmux attach -t mine"]}
+    def test_never_overwrites_an_existing_bash_profile(self):
+        # Add-if-missing only: keep any already-written profile config.
+        mine = {"path": "bash", "args": ["--noprofile"]}
         self.path.write_text(json.dumps({
             "folders": [],
             "settings": {code_workspace.PROFILES_KEY: {
-                code_workspace.TMUX_PROFILE_NAME: mine
+                "bash": mine
             }},
         }))
         _run(self.path, "app")
         self.assertEqual(
-            self._settings()[code_workspace.PROFILES_KEY][
-                code_workspace.TMUX_PROFILE_NAME
-            ],
+            self._settings()[code_workspace.PROFILES_KEY]["bash"],
             mine,
         )
 
     def test_never_overwrites_a_chosen_default_profile(self):
         self.path.write_text(json.dumps({
             "folders": [],
-            "settings": {code_workspace.DEFAULT_PROFILE_KEY: "tmux-agent"},
+            "settings": {code_workspace.DEFAULT_PROFILE_KEY: "zsh"},
         }))
         _run(self.path, "app")
         self.assertEqual(
-            self._settings()[code_workspace.DEFAULT_PROFILE_KEY], "tmux-agent"
+            self._settings()[code_workspace.DEFAULT_PROFILE_KEY], "zsh"
         )
 
     def test_other_profiles_are_left_alone(self):
@@ -276,7 +269,7 @@ class ManagedSettingsTests(unittest.TestCase):
         _run(self.path, "app")
         profiles = self._settings()[code_workspace.PROFILES_KEY]
         self.assertEqual(profiles["zsh"], {"path": "zsh"})
-        self.assertIn(code_workspace.TMUX_PROFILE_NAME, profiles)
+        self.assertIn("bash", profiles)
 
     def test_non_dict_profiles_are_left_entirely_alone(self):
         # The operator's own invalid config: VS Code already ignores it, and
@@ -292,18 +285,6 @@ class ManagedSettingsTests(unittest.TestCase):
         self.path.write_text(json.dumps({"folders": [], "settings": "nonsense"}))
         self.assertEqual(_run(self.path, "app"), 0)
         self.assertEqual(_load(self.path)["settings"], "nonsense")
-
-    def test_profile_is_not_aliased_to_the_module_constant(self):
-        # Two files in one process must not share a mutable profile dict.
-        a, _ = code_workspace.merge_settings({})
-        b, _ = code_workspace.merge_settings({})
-        a[code_workspace.PROFILES_KEY][code_workspace.TMUX_PROFILE_NAME]["args"] = ["x"]
-        self.assertNotEqual(
-            b[code_workspace.PROFILES_KEY][code_workspace.TMUX_PROFILE_NAME]["args"],
-            ["x"],
-        )
-        self.assertNotEqual(code_workspace.TMUX_PROFILE["args"], ["x"])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,9 @@ echo "── syntax"
 for f in up.sh jump.sh tunnel.sh src/entrypoint.sh src/init-firewall.sh src/tmux-notify.sh src/mosh-server-wrapper.sh src/tmux-landing.bashrc src/freshness-landing.bashrc jump/entrypoint.sh; do
     bash -n "$f" && pass "bash -n $f" || fail "$f has syntax errors"
 done
+python3 -m py_compile src/tmux_landing_gc.py \
+    && pass "python3 -m py_compile src/tmux_landing_gc.py" \
+    || fail "src/tmux_landing_gc.py has syntax errors"
 
 echo "── jump container (PLN - Djinn Admin Plane PR 1)"
 grep -qF 'COPY src/mosh-server-wrapper.sh /usr/local/bin/mosh-server' jump/Dockerfile \
@@ -151,21 +154,36 @@ printf '%s' "ntfy.example.com" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.
     || pass "hostnames stay on the zone path"
 
 echo "── landing + notify wiring"
-grep -qF 'tmux new-session -A -s agent' src/tmux-landing.bashrc \
-    && pass "landing snippet attaches the shared 'agent' session" \
-    || fail "landing snippet lost the new-session -A attach"
+grep -qF 'login-' src/tmux-landing.bashrc \
+    && pass "landing snippet names fresh sessions with login-* prefix" \
+    || fail "landing snippet lost login-* fresh-session naming"
+grep -qF 'choose-tree -Zs' src/tmux-landing.bashrc \
+    && pass "landing snippet opens picker when other sessions exist" \
+    || fail "landing snippet lost choose-tree picker launch"
+grep -qF '/usr/local/lib/djinn/tmux_landing_gc.py' src/tmux-landing.bashrc \
+    && pass "landing snippet runs tmux landing GC before creating a session" \
+    || fail "landing snippet lost tmux landing GC invocation"
 grep -qE 'sshd\|sshd-session\|mosh-server' src/tmux-landing.bashrc \
     && pass "landing gates on sshd/sshd-session/mosh-server parents (OpenSSH >=9.8 split)" \
     || fail "landing snippet lost the parent-process gate (must include sshd-session)"
 grep -qF '/proc/$PPID/comm' src/tmux-landing.bashrc \
     && pass "parent check reads /proc directly (no procps dependency)" \
     || fail "parent check no longer reads /proc/\$PPID/comm"
+grep -qF 'TERM_PROGRAM' src/tmux-landing.bashrc \
+    && pass "landing supports interactive TERM_PROGRAM=vscode terminals" \
+    || fail "landing snippet lost TERM_PROGRAM=vscode gate"
 grep -qF 'tmux-landing.bashrc' Dockerfile \
     && pass "Dockerfile installs + sources the landing snippet" \
     || fail "Dockerfile no longer wires tmux-landing.bashrc"
+grep -qF 'COPY src/tmux_landing_gc.py /usr/local/lib/djinn/tmux_landing_gc.py' Dockerfile \
+    && pass "Dockerfile installs tmux_landing_gc.py into /usr/local/lib/djinn" \
+    || fail "Dockerfile does not wire tmux_landing_gc.py into /usr/local/lib/djinn"
 grep -qF '/usr/local/bin/tmux-notify.sh' src/tmux.conf \
     && pass "tmux.conf silence hook points at tmux-notify.sh" \
     || fail "tmux.conf hook target drifted"
+grep -qF '/usr/local/lib/djinn/tmux_landing_gc.py' src/tmux.conf \
+    && pass "tmux.conf triggers landing GC on detach/switch hooks" \
+    || fail "tmux.conf lost landing GC hook wiring"
 grep -qF 'src/tmux-notify.sh /usr/local/bin/tmux-notify.sh' Dockerfile \
     && pass "Dockerfile installs tmux-notify.sh where the hook expects" \
     || fail "Dockerfile install path drifted from the tmux.conf hook"

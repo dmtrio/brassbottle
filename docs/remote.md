@@ -39,9 +39,10 @@ ssh:     { port: 2222, bind: 127.0.0.1 }
 remote:  { tmux: true, mosh: true, notify: ntfy }
 ```
 
-- **tmux** — interactive SSH/mosh logins land attached to one durable
-  session (`agent`). Phone and laptop share the same view; agents survive
-  disconnects. `docker exec` and editor terminals are exempt.
+- **tmux** — interactive SSH, mosh, and VS Code/Cursor terminals land in a
+  fresh `login-*` session. If other sessions already exist, tmux opens the
+  session picker automatically; press Esc to keep the fresh landing session.
+  You can always reopen the picker with `Ctrl-b s`.
 - **mosh** — a per-manifest UDP range (`remote.mosh_ports`, default
   60000:60010; disjoint per container, like `ssh.port`), published next to
   sshd with the same bind rules and pinned server-side. Survives phone
@@ -119,36 +120,22 @@ Newt is a fully user-space WireGuard client, so the container needs neither
 `env_file` under `$DJINN_HOME/compose/`, never inline in the compose overlay,
 and are removed on `./djinn tunnel stop`.
 
-### Sharing that session with the editor
+### Sharing sessions across devices
 
-`./djinn up` merges a `tmux-agent` terminal profile into
-`/workspace/dev.code-workspace`, so a VS Code/Cursor terminal can join the
-same shell a phone and a laptop are already on. Pick it from the terminal
-dropdown; it runs:
+Interactive editor terminals now use the same landing gate as SSH/mosh:
+`src/tmux-landing.bashrc` triggers for `TERM_PROGRAM=vscode`, creates a fresh
+session, and opens the picker when other sessions exist so you can jump into a
+session opened elsewhere.
 
-```bash
-tmux new-session -A -s vscode -t agent || tmux new-session -A -s agent
-```
+Non-interactive VS Code terminals (tasks, debug consoles, git operations)
+stay out of tmux because the landing snippet is gated on interactive shells
+(`$-` contains `i`), and `terminal.integrated.defaultProfile.linux` stays
+plain `bash`.
 
-A **grouped** session (`-t agent`) rather than a plain attach: it shares the
-windows but keeps its own size, so a phone attached alongside does not squeeze
-the editor panel (`aggressive-resize` in `src/tmux.conf` is what makes that
-work). The fallback covers a fresh container where nothing has ssh'd in yet
-and `agent` does not exist.
-
-The default profile stays plain `bash` **on purpose** — VS Code runs tasks,
-debug consoles and git operations through the default profile, and pointing
-that at the shared session would drop all of them into one tmux session,
-interleaving their output and letting one closing terminal detach the others.
-
-Editor terminals do not auto-attach the way ssh and mosh logins do:
-`src/tmux-landing.bashrc` fires only for an `sshd`/`mosh-server` parent, and
-an editor terminal's parent is `node`. That exemption is deliberate, so
-attach-mode workflows stay unchanged.
-
-Settings are merged add-if-missing, so editing any of them sticks across
-`./djinn up`. Deleting one brings it back on the next run (same wart the
-folders merge has) — to opt out, keep the key and change its value.
+Landing-session GC runs on login and on tmux detach/session-switch hooks:
+an unattached `login-*` session is removed only when it is still an idle bare
+shell in one window/one pane, so named sessions and sessions with real work
+are left untouched.
 
 ## The jump container (`./djinn jump`)
 
@@ -218,12 +205,12 @@ for the whole fleet instead of a UDP range baked into every bottle.
 
 ```
 mosh coder@172.30.0.254        # the jump's static bridge address
-ssh djinn-coding-tanks         # hop onward; lands in the bottle's tmux session
+ssh djinn-coding-tanks         # hop onward; fresh tmux landing + picker
 ```
 
 The hop must be **SSH**, not `docker exec` — `src/tmux-landing.bashrc` only
-attaches the durable `agent` session for an `sshd`/`mosh-server` parent, so
-`docker exec` deliberately drops you in a bare shell with nothing persistent.
+applies to sshd/mosh-server and interactive editor terminals. `docker exec`
+deliberately stays a bare shell.
 
 **Why no published host ports.** The jump is reached at its bridge IP over
 the tunnel, so nothing is published to the host at all. That also removes the

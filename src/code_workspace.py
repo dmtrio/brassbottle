@@ -24,34 +24,16 @@ from pathlib import Path
 # Merged into the file on every run, ADD-IF-MISSING only: an existing value is
 # never overwritten, so hand-tuning any of these sticks. Same contract as the
 # folders merge, including its one wart — deleting a managed key brings it back
-# on the next `./djinn up`. To opt out of the tmux profile permanently, keep
-# the key and point it somewhere else rather than removing it.
+# on the next `./djinn up`.
 TERMINAL_CWD_KEY = "terminal.integrated.cwd"
 TERMINAL_CWD = "/workspace/repos"
 PROFILES_KEY = "terminal.integrated.profiles.linux"
 DEFAULT_PROFILE_KEY = "terminal.integrated.defaultProfile.linux"
 
-TMUX_PROFILE_NAME = "tmux-agent"
-# Attaches the SAME durable session ssh/mosh logins land in
-# (src/tmux-landing.bashrc), so an editor terminal, a phone over mosh and a
-# laptop can share one shell.
-#
-# Grouped (`-t agent`) rather than a plain attach: a grouped session shares
-# the windows but keeps its own size, so a phone attached alongside does not
-# squeeze the editor panel — tmux.conf already sets aggressive-resize for
-# exactly this. The `||` fallback matters on a fresh container where nothing
-# has ssh'd in yet: `-t agent` fails when the target does not exist, and
-# `-A -s agent` then creates the session the phone will later attach to.
-TMUX_PROFILE_COMMAND = (
-    "tmux new-session -A -s vscode -t agent || tmux new-session -A -s agent"
-)
-TMUX_PROFILE = {"path": "bash", "args": ["-lc", TMUX_PROFILE_COMMAND]}
-
 # Default stays plain bash ON PURPOSE. VS Code spawns terminals for tasks,
 # debug consoles and git operations using the default profile; making the
-# shared session the default would drop every one of those into the SAME tmux
-# session, interleaving task output with whatever is running there and letting
-# one closing terminal detach the others. tmux-agent is a dropdown choice.
+# tmux landing behavior the default would drop every one of those interactive
+# and non-interactive shells into tmux, interleaving unrelated output.
 DEFAULT_PROFILE = "bash"
 
 
@@ -96,12 +78,8 @@ def merge_settings(settings):
             added.append(PROFILES_KEY)
         if DEFAULT_PROFILE not in profiles:
             profiles[DEFAULT_PROFILE] = {"path": "bash"}
-        if TMUX_PROFILE_NAME not in profiles:
-            # Deep-copied so two calls in one process cannot alias the module
-            # constant and have an edit to one leak into the other.
-            profiles[TMUX_PROFILE_NAME] = json.loads(json.dumps(TMUX_PROFILE))
-            if PROFILES_KEY not in added:
-                added.append(f"{PROFILES_KEY}/{TMUX_PROFILE_NAME}")
+        # Existing containers can still have a previously written managed tmux
+        # profile; merge is add-if-missing only, so we do not rewrite/remove it.
 
     if DEFAULT_PROFILE_KEY not in settings:
         settings[DEFAULT_PROFILE_KEY] = DEFAULT_PROFILE
