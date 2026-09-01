@@ -22,6 +22,15 @@
 #   ENABLE_EGRESS_BROKER   when true (default), redirect blocked :80/:443 to
 #                          the in-container broker, log via NFLOG group 32,
 #                          and start the transparent broker (entrypoint).
+#   REMOTE_JUMP            default-on jump reachability (PLN - default jump
+#                          reachability). true (default) scopes an inbound
+#                          :22 ACCEPT to DJINN_JUMP_IP when SSH_ENABLED is not
+#                          also set; false skips the rule entirely (opt-out).
+#   DJINN_JUMP_IP          the jump container's static bridge address (up.sh
+#                          resolves it host-side via `jump_host.py ip`).
+#                          Empty = warn and skip the rule — sshd, if the
+#                          entrypoint started it, is unreachable until the
+#                          address is known.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -191,9 +200,28 @@ iptables -P OUTPUT DROP
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Allow inbound SSH when enabled
+# Allow inbound SSH: the published path (any source reaching :22, fronted by
+# the operator's WireGuard/VPN tunnel today) when ssh: is explicit, else the
+# default jump path scoped to ONE source IP — the jump container's static
+# bridge address — because that path has no host port and no tunnel of its
+# own narrowing who can reach it. Never both: an explicit ssh: bottle already
+# gets the wide-open published rule, so a jump-scoped rule on top would only
+# suggest a narrower path exists when it doesn't.
 if [ "${SSH_ENABLED:-false}" = "true" ]; then
     iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+elif [ "${REMOTE_JUMP:-true}" = "true" ]; then
+    if [ -z "${DJINN_JUMP_IP:-}" ]; then
+        # Non-fatal, matches the entrypoint's own no-keys degradation: sshd
+        # (if it started at all) simply has no ACCEPT rule yet, rather than
+        # failing the whole firewall over a jump address that isn't known.
+        echo "⚠ REMOTE_JUMP=true but DJINN_JUMP_IP is empty — sshd (if running) is unreachable until the jump address is known"
+    elif [[ ! "$DJINN_JUMP_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "ERROR: Invalid DJINN_JUMP_IP: $DJINN_JUMP_IP"
+        exit 1
+    else
+        echo "Allowing inbound SSH from jump $DJINN_JUMP_IP"
+        iptables -A INPUT -s "$DJINN_JUMP_IP" -p tcp --dport 22 -j ACCEPT
+    fi
 fi
 
 # Inbound mosh UDP range when enabled (RFC 04). Set by the mosh compose

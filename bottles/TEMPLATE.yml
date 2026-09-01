@@ -36,34 +36,45 @@ git:
 
 memory: 10g
 
-# Optional — SSH access for remote hosts (a Linux server or VPS): publishes sshd on
-# the host and enables it at runtime. Requires SSH_AUTHORIZED_KEY (your
-# public key) in secrets.env. Omit the whole section on the Mac (attach
-# mode needs no SSH). Keep bind at 127.0.0.1 and front with your
-# WireGuard/VPN tunnel — never expose sshd to the open internet.
-#ssh:
-#  port: 2222
-#  bind: 127.0.0.1
-
-# Optional — remote agent access (RFC 04). Extends ssh: (required) so you
-# can drive agents from a phone: SSH/mosh logins land attached to ONE
-# durable tmux session (phone + laptop share the view; agents survive
-# disconnects), mosh rides UDP 60000-60010 for flaky mobile networks, and
-# notify pushes to your phone when an agent goes idle waiting for input.
-# Everything is reached over your WireGuard/VPN tunnel — nothing public.
-# notify: ntfy needs NTFY_URL (and optional NTFY_TOPIC) in secrets.env;
-# the ntfy host is auto-added to this container's egress allowlist.
-# mosh_ports (optional, START:END, default 60000:60010): host UDP ports are
-# exclusive, so give each mosh container on one host its own range — same
-# reason each has its own ssh.port. notify requires tmux (the idle monitor
-# lives inside the tmux session). A self-hosted ntfy on a plain LAN
-# hostname needs the IP in capabilities.egress_cidrs instead (the domain
-# allowlist is DNS-driven); an IP-literal NTFY_URL is handled automatically.
+# Optional — remote access. Every bottle is jump-reachable by default: sshd
+# listens on the bridge :22 and the firewall accepts it only from the jump
+# container (./djinn jump start; JUMP_AUTHORIZED_KEY in secrets.env). Phone
+# flow: mosh coder@<jump ip>, then ssh djinn-<bottle>. Nothing to write here
+# for that — a normal bottle omits the whole section. The keys below are the
+# opt-outs and the extras:
+#   jump: false      not reachable from the jump (no sshd unless ssh: is set)
+#   shell: bash      interactive ssh/mosh/editor terminals land in plain bash
+#                    instead of a fresh tmux session with the picker (tmux is
+#                    the default; remote.tmux: true is a deprecated alias)
+#   mosh: true       publish a per-bottle mosh UDP range NEXT TO ssh.port
+#                    (requires ssh: below; the jump already carries mosh, so
+#                    most bottles never need this). mosh_ports (START:END,
+#                    default 60000:60010) must be disjoint per bottle — host
+#                    UDP ports are exclusive, like ssh.port.
+#   notify: ntfy     push to your ntfy topic when a tmux session goes idle at
+#                    a prompt with nobody attached. Requires shell: tmux and
+#                    NTFY_URL (+ optional NTFY_TOPIC) in secrets.env; the ntfy
+#                    host is auto-added to this bottle's egress allowlist (a
+#                    self-hosted ntfy on a plain LAN hostname needs its IP in
+#                    capabilities.egress_cidrs instead — the domain allowlist
+#                    is DNS-driven; an IP-literal NTFY_URL is handled).
 #remote:
-#  tmux: true
+#  jump: false
+#  shell: bash
 #  mosh: true
 #  mosh_ports: 60000:60010
 #  notify: ntfy
+
+# Optional — direct access from the Docker host (VS Code Remote-SSH, or a
+# Linux server/VPS you reach over your WireGuard/VPN tunnel): additionally
+# publishes sshd on the host at this port. Requires SSH_AUTHORIZED_KEY (your
+# public key) in secrets.env; on this path the firewall accepts :22 from the
+# whole bridge, so direct ssh/mosh to the bottle's bridge IP works too. Host
+# ports are exclusive — give each bottle its own. Keep bind at 127.0.0.1 and
+# front it with your tunnel — never expose sshd to the open internet.
+#ssh:
+#  port: 2222
+#  bind: 127.0.0.1
 
 # Agent CLIs baked into the image. Names are exact agents/<dir> matches.
 # Omit this key entirely to enable every descriptor under agents/.

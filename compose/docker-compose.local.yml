@@ -64,6 +64,30 @@ services:
       # MCP credentials are NOT container env — they load per agent at
       # process start from the mounted ~/.agent-keys dir (see volumes).
 
+      # ── Remote access (PLN - default jump reachability) ───────────────────
+      # Always present, on EVERY bottle — not just ssh:-enabled ones: sshd is
+      # jump-reachable by default (remote.jump: false opts out), so the
+      # entrypoint and firewall need these regardless of whether ssh: was
+      # ever set. docker-compose.ssh.yml layers SSH_ENABLED=true + the host
+      # port on top for the additional Mac-direct path.
+      - REMOTE_JUMP=${REMOTE_JUMP:-true}
+      - REMOTE_SHELL=${REMOTE_SHELL:-tmux}
+      # The jump container's static bridge address (up.sh resolves it
+      # host-side via `jump_host.py ip`, AFTER the shared network exists).
+      # Empty until a jump address has ever been derived — init-firewall.sh
+      # degrades to a warning, not a failure, in that case.
+      - DJINN_JUMP_IP=${DJINN_JUMP_IP:-}
+      # The operator's own key, plus the singleton jump container's key
+      # (appended, never replacing — see entrypoint.sh). Both authorise sshd
+      # regardless of which remote path started it.
+      - SSH_AUTHORIZED_KEY=${SSH_AUTHORIZED_KEY:-}
+      - JUMP_AUTHORIZED_KEY=${JUMP_AUTHORIZED_KEY:-}
+      # RFC 04 notify: set only when the manifest has remote.notify: ntfy (up.sh
+      # passes them through; empty otherwise). The tmux silence hook arms
+      # itself off NTFY_URL's presence.
+      - NTFY_URL=${NTFY_URL:-}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
+
     volumes:
       # ── Project workspace: named volume, repo cloned inside ───────────────
       # (compose project name prefixes this, so each container gets its own)

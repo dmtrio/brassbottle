@@ -41,9 +41,9 @@ grep -qF 'update-locale LANG=en_US.UTF-8' jump/Dockerfile \
 grep -qF 'JUMP_AUTHORIZED_KEY' src/entrypoint.sh \
     && pass "bottle entrypoint honours JUMP_AUTHORIZED_KEY" \
     || fail "src/entrypoint.sh does not append JUMP_AUTHORIZED_KEY"
-grep -qF 'JUMP_AUTHORIZED_KEY=${JUMP_AUTHORIZED_KEY:-}' compose/docker-compose.ssh.yml \
-    && pass "ssh overlay passes JUMP_AUTHORIZED_KEY into the bottle" \
-    || fail "compose/docker-compose.ssh.yml does not pass JUMP_AUTHORIZED_KEY"
+grep -qF 'JUMP_AUTHORIZED_KEY=${JUMP_AUTHORIZED_KEY:-}' compose/docker-compose.local.yml \
+    && pass "local compose passes JUMP_AUTHORIZED_KEY into the bottle" \
+    || fail "compose/docker-compose.local.yml does not pass JUMP_AUTHORIZED_KEY"
 grep -qF '>> /home/coder/.ssh/authorized_keys' src/entrypoint.sh \
     && pass "jump key is APPENDED, so the operator key keeps working" \
     || fail "src/entrypoint.sh must append the jump key, never replace"
@@ -77,14 +77,17 @@ done
 [ "$(yq '.networks.default.external' compose/docker-compose.local.yml)" = "true" ] \
     && pass "shared network is external (created by up.sh, not compose)" \
     || fail "shared network must be external: true"
-yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q '^REMOTE_TMUX=' \
-    && pass "ssh overlay passes REMOTE_TMUX" \
-    || fail "ssh overlay is missing REMOTE_TMUX"
-for var in NTFY_URL NTFY_TOPIC; do
-    yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q "^$var=" \
-        && pass "ssh overlay passes $var" \
-        || fail "ssh overlay is missing $var"
+for var in REMOTE_JUMP REMOTE_SHELL DJINN_JUMP_IP SSH_AUTHORIZED_KEY JUMP_AUTHORIZED_KEY NTFY_URL NTFY_TOPIC; do
+    yq -r '.services.djinn.environment[]' compose/docker-compose.local.yml | grep -q "^$var=" \
+        && pass "local compose passes $var" \
+        || fail "local compose is missing $var"
 done
+yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q '^SSH_ENABLED=true$' \
+    && pass "ssh overlay sets SSH_ENABLED=true" \
+    || fail "ssh overlay is missing SSH_ENABLED=true"
+[ "$(yq '.services.djinn.environment | length' compose/docker-compose.ssh.yml)" = "1" ] \
+    && pass "ssh overlay carries ONLY SSH_ENABLED (keys/shell/notify moved to local compose)" \
+    || fail "ssh overlay environment: has drifted from just SSH_ENABLED"
 
 echo "── mosh port-range agreement (manifest.py is the source; defaults must align)"
 # The overlay carries fallbacks (${MOSH_PORTS:-...} / ${MOSH_PORTS_DASH:-...})
@@ -122,14 +125,16 @@ awk '/for a in "\$@"/,/^fi$/' src/mosh-server-wrapper.sh | grep -qF '"--"' \
 
 echo "── manifest plumbing simulation (same expressions as up.sh)"
 M=$(mktemp); trap 'rm -f "$M"' EXIT
-printf 'ssh:\n  port: 2222\nremote:\n  tmux: true\n  mosh: true\n  notify: ntfy\n' > "$M"
-[ "$(yq '.remote.tmux // false' "$M")" = "true" ]  && pass "remote.tmux reads back"  || fail "remote.tmux read broken"
+printf 'ssh:\n  port: 2222\nremote:\n  jump: false\n  shell: bash\n  mosh: true\n  notify: ntfy\n' > "$M"
+# Read directly, no `// true` default: yq/jq's `//` treats `false` itself as
+# falsy and would silently substitute the default, masking exactly the
+# opt-out case (remote.jump: false) this is meant to prove reads back
+# correctly — same pitfall manifest.py's own reader must avoid (it keys the
+# default off "jump" not in remote, not off falsiness).
+[ "$(yq '.remote.jump' "$M")" = "false" ]   && pass "remote.jump reads back"   || fail "remote.jump read broken"
+[ "$(yq -r '.remote.shell // "tmux"' "$M")" = "bash" ] && pass "remote.shell reads back" || fail "remote.shell read broken"
 [ "$(yq '.remote.mosh // false' "$M")" = "true" ]  && pass "remote.mosh reads back"  || fail "remote.mosh read broken"
 [ "$(yq -r '.remote.notify // ""' "$M")" = "ntfy" ] && pass "remote.notify reads back" || fail "remote.notify read broken"
-printf 'remote:\n  tmux: true\n' > "$M"
-[ "$(yq -r '.ssh.port // ""' "$M")" = "" ] \
-    && pass "remote-without-ssh is detectable (ssh.port empty)" \
-    || fail "ssh.port unexpectedly present"
 
 # ntfy host extraction (same sed as up.sh; drift-guarded below)
 extract_host() { printf '%s' "$1" | sed -E 's|^[A-Za-z]+://||; s|/.*$||; s|^.*@||; s|:[0-9]+$||'; }
@@ -154,6 +159,9 @@ printf '%s' "ntfy.example.com" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.
     || pass "hostnames stay on the zone path"
 
 echo "── landing + notify wiring"
+grep -qF '${REMOTE_SHELL:-tmux}' src/tmux-landing.bashrc \
+    && pass "landing snippet gates on REMOTE_SHELL (tmux default)" \
+    || fail "landing snippet lost the REMOTE_SHELL gate"
 grep -qF 'login-' src/tmux-landing.bashrc \
     && pass "landing snippet names fresh sessions with login-* prefix" \
     || fail "landing snippet lost login-* fresh-session naming"
@@ -217,18 +225,21 @@ while IFS=$'\t' read -r file expr; do
         || fail "$file no longer contains (update this suite!): $expr"
 done <<'DRIFT'
 src/manifest.py	remote.get("tmux")
+src/manifest.py	remote.get("jump")
+src/manifest.py	remote.get("shell")
 src/manifest.py	remote.get("mosh")
 src/manifest.py	remote.get("notify")
 src/manifest.py	remote.get("mosh_ports")
 up.sh	compose/docker-compose.mosh.yml
 src/ensure_net.py	djinn-net
-src/manifest.py	remote.notify requires remote.tmux
+src/manifest.py	remote.notify requires remote.shell: tmux
 src/manifest.py	re.sub(r"^[A-Za-z]+://", "", ntfy_url)
 src/manifest.py	[0-9]{1,5}:[0-9]{1,5}
 src/init-firewall.sh	^[0-9]+:[0-9]+$
 src/init-firewall.sh	--dport "$MOSH_PORTS"
 src/init-firewall.sh	-s "$HOST_IP"
-src/entrypoint.sh	REMOTE_TMUX MOSH_PORTS NTFY_URL NTFY_TOPIC CONTAINER_NAME
+src/init-firewall.sh	-s "$DJINN_JUMP_IP"
+src/entrypoint.sh	REMOTE_SHELL MOSH_PORTS NTFY_URL NTFY_TOPIC CONTAINER_NAME
 Dockerfile	update-locale LANG=en_US.UTF-8
 DRIFT
 

@@ -3,8 +3,8 @@
 # so each shell starts empty while still letting you jump into existing work.
 #
 # Scope guards, in order:
-#   $REMOTE_TMUX   — only containers whose manifest sets remote.tmux (the
-#                    entrypoint persists it to /etc/environment for PAM)
+#   $REMOTE_SHELL  — tmux (default) lands; bash opts out (the entrypoint
+#                    persists it to /etc/environment for PAM)
 #   $TMUX          — shells inside tmux must not recurse
 #   $- has i       — non-interactive channels (scp, VS Code Remote-SSH's
 #                    command channel, tasks/debug/git shells) stay untouched
@@ -19,7 +19,7 @@
 #                    Plain docker exec shells (no TERM_PROGRAM) remain exempt:
 #                    agents rely on bare shells there. ntfy notifications are
 #                    per-window via tmux hook and unaffected by session names.
-if [ "${REMOTE_TMUX:-false}" = "true" ] && [ -z "${TMUX:-}" ] && [[ $- == *i* ]]; then
+if [ "${REMOTE_SHELL:-tmux}" = "tmux" ] && [ -z "${TMUX:-}" ] && [[ $- == *i* ]]; then
     should_land=false
     case "$(cat "/proc/$PPID/comm" 2>/dev/null)" in
         sshd|sshd-session|mosh-server) should_land=true ;;

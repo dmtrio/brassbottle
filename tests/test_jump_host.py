@@ -6,6 +6,7 @@ shape, the not-configured branches, docker-missing handling, and the pubkey
 command's read-from-the-host-side-of-the-mount behaviour.
 """
 
+import io
 import subprocess
 import sys
 import tempfile
@@ -269,10 +270,45 @@ class PubkeyTests(unittest.TestCase):
             run.assert_not_called()
 
 
+class IpTests(unittest.TestCase):
+    def test_ip_prefers_the_live_bridge(self):
+        # Same reasoning as cmd_start: ensure_net only WARNS on subnet drift
+        # and still returns 0, so DJINN_SUBNET alone is not a safe basis for
+        # a static address once a bridge with a DIFFERENT subnet actually
+        # exists.
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(
+                jump_host.os.environ, {"DJINN_SUBNET": "10.9.0.0/24"}, clear=False
+            ), mock.patch.object(
+                jump_host.ensure_net, "network_subnet", return_value="172.30.0.0/24"
+            ):
+                out = io.StringIO()
+                with mock.patch("sys.stdout", out):
+                    self.assertEqual(jump_host.cmd_ip(Path(home)), 0)
+            self.assertEqual(out.getvalue().strip(), "172.30.0.254")
+
+    def test_ip_falls_back_when_the_live_subnet_is_unreadable(self):
+        # Fresh install: djinn-net doesn't exist yet (no ./djinn up or
+        # ./djinn jump start has run). Falls back to the desired subnet
+        # rather than failing — this command must never be fatal to up.sh.
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(
+                jump_host.os.environ, {"DJINN_SUBNET": "10.9.0.0/24"}, clear=False
+            ), mock.patch.object(
+                jump_host.ensure_net, "network_subnet", return_value=None
+            ):
+                out = io.StringIO()
+                with mock.patch("sys.stdout", out):
+                    self.assertEqual(jump_host.cmd_ip(Path(home)), 0)
+            self.assertEqual(out.getvalue().strip(), "10.9.0.254")
+
+
 class ParserTests(unittest.TestCase):
     def test_every_subcommand_parses(self):
         parser = jump_host.build_parser()
-        for argv in (["start"], ["stop"], ["status"], ["logs"], ["logs", "-f"], ["pubkey"]):
+        for argv in (
+            ["start"], ["stop"], ["status"], ["logs"], ["logs", "-f"], ["pubkey"], ["ip"],
+        ):
             with self.subTest(argv=argv):
                 parser.parse_args(argv)
 

@@ -310,6 +310,23 @@ def cmd_pubkey(base_path: Path) -> int:
     return 0
 
 
+def cmd_ip(base_path: Path) -> int:
+    """Print the jump's static bridge address — one line, nothing else.
+
+    up.sh calls this (host-side, after ensure_net) to resolve DJINN_JUMP_IP,
+    the address init-firewall.sh scopes a bottle's inbound :22 ACCEPT to.
+    Mirrors cmd_start's own derivation: prefer the LIVE djinn-net subnet when
+    readable (ensure_net only WARNS on drift and still returns 0, so the
+    desired subnet alone is not a safe basis for a static address), falling
+    back to the desired subnet (resolve_jump_ip's default) when the bridge
+    cannot be read yet — e.g. before the first ./djinn up or
+    ./djinn jump start on a fresh install. JumpConfigError propagates to
+    main(), which prints "Error: …" and exits 1.
+    """
+    print(resolve_jump_ip(subnet=_live_subnet()))
+    return 0
+
+
 def resolve_base_path(explicit: str | None) -> Path:
     if explicit:
         return Path(explicit)
@@ -332,6 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs = sub.add_parser("logs", help="show jump container logs")
     logs.add_argument("-f", "--follow", action="store_true")
     sub.add_parser("pubkey", help="print the key bottles must authorise")
+    sub.add_parser("ip", help="print the jump's static bridge address")
     return parser
 
 
@@ -349,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_logs(base_path, args.follow)
         if args.command == "pubkey":
             return cmd_pubkey(base_path)
+        if args.command == "ip":
+            return cmd_ip(base_path)
     except (JumpHostError, JumpConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

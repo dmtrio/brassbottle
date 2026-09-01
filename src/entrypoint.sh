@@ -142,16 +142,39 @@ su -c "git config --global --add credential.'https://github.com'.helper ''" code
 su -c "git config --global --add credential.'https://github.com'.helper /usr/local/bin/git-credential-org" coder
 
 # ── SSH mode vs attach mode ───────────────────────────────────────────────────
+# Two independent paths can want sshd: explicit ssh: (host-published, fails
+# loud with no key) and the default jump path (bridge-only, degrades quietly
+# — a bottle with no key yet just isn't jump-reachable, never a crash loop).
+# START_SSHD collapses both into one key-build/banner/exec below so the two
+# paths cannot drift out of sync with each other.
+START_SSHD=false
 if [ "$SSH_ENABLED" = "true" ]; then
-    # Runtime key injection — same image everywhere, key comes from the
-    # manifest deploy (SSH_AUTHORIZED_KEY in secrets.env). Fail loud rather
-    # than start sshd nobody can log into.
+    # Explicit ssh: (host-published) — fail loud rather than start sshd
+    # nobody can log into.
     if [ -z "$SSH_AUTHORIZED_KEY" ]; then
         echo "FATAL: SSH_ENABLED=true but SSH_AUTHORIZED_KEY is empty."
         echo "Set SSH_AUTHORIZED_KEY in ~/djinn/secrets.env (your public key)."
         exit 1
     fi
-    echo "$SSH_AUTHORIZED_KEY" > /home/coder/.ssh/authorized_keys
+    START_SSHD=true
+elif [ "${REMOTE_JUMP:-true}" = "true" ]; then
+    # Default path: every bottle is jump-reachable unless remote.jump: false.
+    # Either key alone is enough (operator key or the jump's own); with
+    # neither, sshd simply doesn't start — the firewall rule init-firewall.sh
+    # adds is equally harmless in that case, since nothing is listening.
+    if [ -n "$SSH_AUTHORIZED_KEY" ] || [ -n "${JUMP_AUTHORIZED_KEY:-}" ]; then
+        START_SSHD=true
+    else
+        echo "⚠ Jump reachability: no SSH keys (JUMP_AUTHORIZED_KEY unset — run ./djinn jump start and add it to secrets.env); sshd not started"
+    fi
+fi
+
+if [ "$START_SSHD" = "true" ]; then
+    # Rebuilt from scratch every boot: a key dropped from the manifest/
+    # secrets.env must actually stop working, not survive in a stale file
+    # from a previous boot that never got a fresh truncate.
+    : > /home/coder/.ssh/authorized_keys
+    [ -n "$SSH_AUTHORIZED_KEY" ] && echo "$SSH_AUTHORIZED_KEY" >> /home/coder/.ssh/authorized_keys
     # The singleton jump container's own key (PLN - Djinn Admin Plane, PR 1).
     # Appended, never replacing: the operator key above must keep working so a
     # bottle stays reachable directly even when the jump is down. Optional —
@@ -173,20 +196,31 @@ if [ "$SSH_ENABLED" = "true" ]; then
     # ignores container env — persist the remote-access vars there so login
     # shells (and the tmux server/hooks they start) can see them. mosh
     # sessions inherit from their SSH bootstrap, so this covers both.
-    for var in REMOTE_TMUX MOSH_PORTS NTFY_URL NTFY_TOPIC CONTAINER_NAME; do
+    for var in REMOTE_SHELL MOSH_PORTS NTFY_URL NTFY_TOPIC CONTAINER_NAME; do
         val="${!var:-}"
         [ -n "$val" ] || continue
         sed -i "/^$var=/d" /etc/environment
         echo "$var=$val" >> /etc/environment
     done
-    [ "${REMOTE_TMUX:-false}" = "true" ] && echo "✓ Remote access: logins land in a fresh tmux session (picker when others exist)"
+    [ "${REMOTE_SHELL:-tmux}" = "tmux" ] && echo "✓ Remote access: logins land in a fresh tmux session (picker when others exist)"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Container:  djinn-${CONTAINER_NAME}   (sshd on :22, published"
-    echo "              on the host at the manifest's ssh.port)"
-    echo "  SSH:        ssh -p <ssh.port> coder@<docker-host>"
-    echo "  VS Code:    Remote-SSH to the same host/port"
+    if [ "$SSH_ENABLED" = "true" ]; then
+        echo "  Container:  djinn-${CONTAINER_NAME}   (sshd on :22, published"
+        echo "              on the host at the manifest's ssh.port)"
+        echo "  SSH:        ssh -p <ssh.port> coder@<docker-host>"
+        echo "  VS Code:    Remote-SSH to the same host/port"
+    else
+        # Default jump path: no host port at all — the firewall accepts :22
+        # ONLY from the jump's static bridge IP (init-firewall.sh), so a
+        # direct ssh/mosh to this bottle's bridge address is refused by
+        # design. DJINN_JUMP_IP arrives via compose (up.sh resolves it
+        # host-side); empty until a jump address has ever been derived.
+        echo "  Container:  djinn-${CONTAINER_NAME}   (sshd on the bridge :22,"
+        echo "              reachable ONLY from the jump — no host port)"
+        echo "  Jump:       mosh coder@${DJINN_JUMP_IP:-<jump ip>}  then  ssh djinn-${CONTAINER_NAME}"
+    fi
     echo "  Workspace:  /workspace"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
@@ -194,6 +228,12 @@ if [ "$SSH_ENABLED" = "true" ]; then
     echo "Starting sshd..."
     exec /usr/sbin/sshd -D
 else
+    # Not starting sshd: drop a stale authorized_keys file left by a previous
+    # boot (or a manifest edit that turned SSH off) so a later `docker exec`
+    # root shell can't find leftover key material implying reachability that
+    # no longer applies.
+    rm -f /home/coder/.ssh/authorized_keys
+
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Container:  djinn-${CONTAINER_NAME}   (attach mode, no sshd)"

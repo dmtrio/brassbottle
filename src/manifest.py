@@ -45,7 +45,11 @@ Behavioral fidelity notes (each is pinned by tests/test_manifest.py):
   longest suffix first so _cursor_agent beats _claude.
 - Error ordering matches the old top-to-bottom flow: forge → plugins list →
   ssh/remote → mosh ports → identity refs (aggregated) → per-plugin egress +
-  mcp entries (fail-fast) → ntfy. Messages are byte-identical to the bash.
+  mcp entries (fail-fast) → ntfy. Messages are byte-identical to the bash,
+  except the ssh/remote block, which PLN - default jump reachability P1
+  extended with remote.jump/remote.shell validation (new messages, no bash
+  precedent). Within that block: unknown keys → jump → shell/tmux →
+  mosh-without-ssh → notify kind → notify-needs-tmux → mosh ports.
 - Deliberate departures from the old bash, all loud-instead-of-silent: a
   section written as the wrong YAML type (capabilities:/identities:/… as a
   list) is a named error where yq used to emit a cryptic 'cannot index'
@@ -993,18 +997,65 @@ def derive(manifest, plugin_files, agent_files, env):
     out["SSH_BIND"] = _scalar(ssh.get("bind"), "ssh.bind") or "127.0.0.1"
 
     remote = _section(manifest, "remote")
-    remote_tmux = _raw_flag(remote.get("tmux"), "remote.tmux")
-    remote_mosh = _raw_flag(remote.get("mosh"), "remote.mosh")
-    remote_notify = _scalar(remote.get("notify"), "remote.notify")
-    if (remote_tmux == "true" or remote_mosh == "true" or remote_notify) and not ssh_port:
+    # Every bottle is jump-reachable by default now (PLN - default jump
+    # reachability P1), so `remote:` no longer needs `ssh:` to mean anything —
+    # only mosh (below) still rides ssh.port's published range.
+    known_remote_keys = ("jump", "shell", "mosh", "mosh_ports", "notify", "tmux")
+    unknown_remote = ",".join(k for k in remote if k not in known_remote_keys)
+    if unknown_remote:
         raise ManifestError(
-            "manifest has remote: but no ssh: section — remote access rides the SSH login path (add ssh.port)")
+            f"remote: unsupported field(s): {unknown_remote} "
+            "(only jump, shell, mosh, mosh_ports, notify — and the deprecated tmux)")
+
+    # remote.jump must be a real YAML boolean — unlike the flags below, "true"
+    # here isn't sugar for "opt in to a feature": it flips the firewall's
+    # default INPUT rule, so a stringly-typed "yes"/1 that silently read as
+    # false would leave a bottle believed reachable when it is not.
+    if "jump" not in remote or remote.get("jump") is None:
+        remote_jump = "true"
+    else:
+        remote_jump = _raw_flag(remote.get("jump"), "remote.jump")
+        if remote_jump not in ("true", "false"):
+            raise ManifestError(f"remote.jump must be true or false (got '{remote_jump}')")
+
+    # remote.tmux is a deprecated alias for shell: tmux; keeping both would
+    # leave the effective shell ambiguous (which one wins?), so the pair is a
+    # hard error rather than a silent precedence rule.
+    if "tmux" in remote and "shell" in remote:
+        raise ManifestError(
+            "remote.tmux and remote.shell are both set — drop remote.tmux "
+            "(deprecated alias of shell: tmux)")
+    remote_tmux = _raw_flag(remote.get("tmux"), "remote.tmux")
+    remote_shell = _scalar(remote.get("shell"), "remote.shell")
+    if remote_tmux == "true":
+        remote_shell = "tmux"
+        print("  ⚠ remote.tmux is deprecated — remote.shell: tmux is the default; "
+              "drop the key (shell: bash opts out)", file=sys.stderr)
+    elif not remote_shell:
+        remote_shell = "tmux"
+    # herdr gets its own message (a forward pointer, not a plain enum reject)
+    # because it names a real, coming value rather than a typo.
+    if remote_shell == "herdr":
+        raise ManifestError(
+            "remote.shell: herdr is not available yet (lands with PLN - herdr adoption) "
+            "— use tmux or bash")
+    if remote_shell not in ("tmux", "bash"):
+        raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
+
+    remote_mosh = _raw_flag(remote.get("mosh"), "remote.mosh")
+    if remote_mosh == "true" and not ssh_port:
+        raise ManifestError(
+            "manifest has remote.mosh but no ssh: section — the published mosh range "
+            "rides ssh.port (add ssh.port, or drop remote.mosh: the jump carries mosh)")
+
+    remote_notify = _scalar(remote.get("notify"), "remote.notify")
     if remote_notify not in ("", "ntfy"):
         raise ManifestError(f"remote.notify must be 'ntfy' (got '{remote_notify}')")
-    if remote_notify and remote_tmux != "true":
+    if remote_notify and remote_shell != "tmux":
         raise ManifestError(
-            "remote.notify requires remote.tmux: true (the idle monitor runs inside the tmux session)")
-    out["REMOTE_TMUX"] = remote_tmux
+            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
+    out["REMOTE_JUMP"] = remote_jump
+    out["REMOTE_SHELL"] = remote_shell
     out["REMOTE_MOSH"] = remote_mosh
     out["REMOTE_NOTIFY"] = remote_notify
 

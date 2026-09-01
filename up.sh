@@ -239,10 +239,35 @@ fi
 DESIRED_SUBNET="${DJINN_SUBNET:-172.30.0.0/24}"
 python3 "$SCRIPT_DIR/src/ensure_net.py" "$DESIRED_SUBNET" || exit 1
 
+# ── Jump IP resolution (host-side; never fatal) ───────────────────────────────
+# Must run AFTER ensure_net: jump_host.py's `ip` command prefers the LIVE
+# djinn-net bridge subnet (mirroring cmd_start's own derivation) and needs the
+# bridge to exist to read it. Never fatal — a bottle whose jump address can't
+# be derived yet (fresh install, ./djinn jump start never run) just isn't
+# jump-reachable this run, same quiet-degradation contract as the entrypoint's
+# own no-keys case; init-firewall.sh and the summary/banner below only warn.
+# common.sh sources ./.env WITHOUT exporting, so DJINN_SUBNET/DJINN_JUMP_IP
+# must be forwarded explicitly here, same as jump.sh does.
+JUMP_IP="$(env DJINN_SUBNET="${DJINN_SUBNET:-}" DJINN_JUMP_IP="${DJINN_JUMP_IP:-}" DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" ip 2>/dev/null)" || JUMP_IP=""
+
+# ── Jump reachability preflight (non-fatal) ───────────────────────────────────
+# Both are quiet-degradation warnings, not errors: the entrypoint and firewall
+# already degrade gracefully when either input is missing (no sshd started, or
+# sshd with no INPUT rule yet). Printed here — the one place with both pieces
+# of context (JUMP_IP just resolved above; JUMP_AUTHORIZED_KEY only reaches
+# this far via secrets.env) — so the operator sees WHY before hunting for it.
+if [ "$REMOTE_JUMP" = "true" ] && [ -z "${JUMP_AUTHORIZED_KEY:-}" ]; then
+    echo "  ⚠ jump: JUMP_AUTHORIZED_KEY is not in secrets.env — $NAME will not be jump-reachable (./djinn jump start, then add the printed key)"
+fi
+if [ "$REMOTE_JUMP" = "true" ] && [ -z "$JUMP_IP" ]; then
+    echo "  ⚠ jump: could not derive the jump address (DJINN_SUBNET/DJINN_JUMP_IP) — $NAME will not be jump-reachable"
+fi
+
 # ── Apply ─────────────────────────────────────────────────────────────────────
 echo "Applying $MANIFEST → $CNAME"
 REMOTE_SUMMARY=""
-[ "$REMOTE_TMUX" = "true" ] && REMOTE_SUMMARY="tmux"
+[ "$REMOTE_JUMP" = "true" ] && REMOTE_SUMMARY="jump"
+REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}$REMOTE_SHELL"
 [ "$REMOTE_MOSH" = "true" ] && REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}mosh"
 [ -n "$REMOTE_NOTIFY" ]     && REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}$REMOTE_NOTIFY"
 echo "  ports='${HOST_MCP_PORTS:-none}' egress='${EGRESS:-none}' plugins='${PLUGINS:-none}' remote='${REMOTE_SUMMARY:-none}' mem=$MEM_LIMIT"
@@ -269,7 +294,7 @@ ENABLE_EGRESS_BROKER="$ENABLE_EGRESS_BROKER" EGRESS_BROKER_TOKEN="$EGRESS_BROKER
 KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWSER_TMP_PATH" MEM_LIMIT="$MEM_LIMIT" \
 SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
   JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" \
-REMOTE_TMUX="$REMOTE_TMUX" \
+REMOTE_JUMP="$REMOTE_JUMP" REMOTE_SHELL="$REMOTE_SHELL" DJINN_JUMP_IP="$JUMP_IP" \
 MOSH_PORTS="$MOSH_PORTS" MOSH_PORTS_DASH="$MOSH_PORTS_DASH" \
 NTFY_URL="$CONTAINER_NTFY_URL" NTFY_TOPIC="$CONTAINER_NTFY_TOPIC" \
 IMAGE_TAG="$NAME" \
@@ -514,7 +539,12 @@ echo "  VS Code / Cursor:  Dev Containers: Attach to Running Container"
 echo "  Terminal:          docker exec -it -u coder $CNAME bash"
 echo "  Claude:            cd /workspace/repos && claude   (one session over every repo)"
 [ -n "$SSH_PORT" ] && echo "  SSH:               ssh -p $SSH_PORT coder@$( [ "$SSH_BIND" = "127.0.0.1" ] && echo localhost || echo '<this-host>' )"
-if [ "$REMOTE_TMUX" = "true" ] || [ "$REMOTE_MOSH" = "true" ]; then
+if [ "$REMOTE_JUMP" = "true" ] && [ -n "$JUMP_IP" ] && [ -n "${JUMP_AUTHORIZED_KEY:-}" ]; then
+    echo "  Jump:              mosh coder@$JUMP_IP  then  ssh djinn-$NAME"
+fi
+if [ -n "$SSH_PORT" ]; then
+    # Direct bridge access only works on the published path: the firewall
+    # otherwise accepts :22 from the jump alone, never the whole bridge/tunnel.
     TUNNEL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CNAME" 2>/dev/null || true)"
     echo "  Remote (tunnel):   ${TUNNEL_IP:-<no ip>} — $( [ "$REMOTE_MOSH" = "true" ] && echo "mosh coder@ip (UDP $MOSH_PORTS_DASH)" || echo "ssh coder@ip" ) over your WireGuard/VPN"
 fi

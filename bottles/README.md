@@ -33,7 +33,8 @@ Common keys:
 - `capabilities.egress:` and `egress_cidrs:` open outbound network access.
 - `plugins:` enables MCP/plugin directories from `plugins/`.
 - `common_secrets:` and `agent_secrets:` bind secret slots to env var names.
-- `ssh:` and `remote:` enable remote-host access.
+- `remote:` enables phone access (jump-reachable by default; opt-out with `jump: false`).
+- `ssh:` (optional) publishes sshd on the host for VS Code Remote-SSH.
 
 Secret values live in `.djinn/secrets.env` by default. Copy
 `secrets.env.example` only when your bottle references secrets.

@@ -31,6 +31,10 @@ REQUIRED_PREFIXES = [
     "KEYS_PATH",
     "RULES_PATH",
     "IMAGE_TAG",
+    "REMOTE_JUMP",
+    "REMOTE_SHELL",
+    "DJINN_JUMP_IP",
+    "JUMP_AUTHORIZED_KEY",
 ]
 
 
