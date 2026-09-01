@@ -180,12 +180,10 @@ class TestErrorTable(unittest.TestCase):
          "manifest plugins failed validation:\n"
          "  plugin '../evil': illegal characters (allowed: letters, digits, underscore, dash)\n"
          "  plugin 'ghost': no plugin file at plugins/ghost/plugin.yml"),
-        ("remote without ssh", {"remote": {"tmux": True}}, None,
-         "manifest has remote: but no ssh: section — remote access rides the SSH login path (add ssh.port)"),
-        ("bad notify kind", {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "slack"}}, None,
+        ("bad notify kind", {"remote": {"notify": "slack"}}, None,
          "remote.notify must be 'ntfy' (got 'slack')"),
-        ("notify without tmux", {"ssh": {"port": 22}, "remote": {"notify": "ntfy"}}, None,
-         "remote.notify requires remote.tmux: true (the idle monitor runs inside the tmux session)"),
+        ("notify without tmux", {"remote": {"shell": "bash", "notify": "ntfy"}}, None,
+         "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)"),
         ("malformed mosh ports",
          {"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "9:banana"}}, None,
          "remote.mosh_ports must be START:END (got '9:banana')"),
@@ -213,14 +211,14 @@ class TestErrorTable(unittest.TestCase):
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)\n"
         "  watch ref 'w_nobody': suffix is not a known agent (_cursor_agent/_claude/_gemini/_codex/_pi)"),
         ("ntfy url missing",
-         {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}}, ENV,
+         {"remote": {"notify": "ntfy"}}, ENV,
          "manifest has remote.notify: ntfy but NTFY_URL is missing from /sec/secrets.env"),
         ("ntfy url with hash",
-         {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}},
+         {"remote": {"notify": "ntfy"}},
          dict(ENV, NTFY_URL="https://x.com/#frag"),
          "NTFY_URL must be a bare origin (no '#', quotes) — put the topic in NTFY_TOPIC"),
         ("ntfy url unparseable",
-         {"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}},
+         {"remote": {"notify": "ntfy"}},
          dict(ENV, NTFY_URL="https:///path"),
          "cannot parse a host from NTFY_URL 'https:///path'"),
     ]
@@ -361,6 +359,100 @@ class TestErrorTable(unittest.TestCase):
             derive({"plugins": ["a", "b"]}, plugin_files=files)
         self.assertEqual(str(cm.exception),
                          "multiple enabled plugins define the same MCP server name: srv")
+
+
+class TestRemoteSchema(unittest.TestCase):
+    """remote.jump / remote.shell (PLN - default jump reachability P1)."""
+
+    def test_empty_manifest_defaults_jump_true_shell_tmux(self):
+        d = derive({})
+        self.assertEqual(d["REMOTE_JUMP"], "true")
+        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertNotIn("REMOTE_TMUX", d)
+
+    def test_jump_false(self):
+        d = derive({"remote": {"jump": False}})
+        self.assertEqual(d["REMOTE_JUMP"], "false")
+
+    def test_jump_non_boolean_rejected(self):
+        for bad in ("yes", 1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(m.ManifestError) as cm:
+                    derive({"remote": {"jump": bad}})
+                self.assertEqual(str(cm.exception),
+                                 f"remote.jump must be true or false (got '{bad}')")
+
+    def test_shell_bash(self):
+        d = derive({"remote": {"shell": "bash"}})
+        self.assertEqual(d["REMOTE_SHELL"], "bash")
+
+    def test_shell_herdr_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"shell": "herdr"}})
+        self.assertEqual(
+            str(cm.exception),
+            "remote.shell: herdr is not available yet (lands with PLN - herdr adoption) "
+            "— use tmux or bash")
+
+    def test_shell_other_value_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"shell": "zsh"}})
+        self.assertEqual(str(cm.exception),
+                         "remote.shell must be tmux, herdr, or bash (got 'zsh')")
+
+    def test_tmux_alias_sets_shell_and_warns(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"tmux": True}})
+        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertIn(
+            "remote.tmux is deprecated — remote.shell: tmux is the default; "
+            "drop the key (shell: bash opts out)",
+            err.getvalue())
+
+    def test_tmux_false_has_no_effect_and_no_warning(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"tmux": False}})
+        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_tmux_and_shell_both_set_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"tmux": True, "shell": "bash"}})
+        self.assertEqual(
+            str(cm.exception),
+            "remote.tmux and remote.shell are both set — drop remote.tmux "
+            "(deprecated alias of shell: tmux)")
+
+    def test_unknown_remote_key_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"foo": 1, "bar": 2}})
+        self.assertEqual(
+            str(cm.exception),
+            "remote: unsupported field(s): foo,bar "
+            "(only jump, shell, mosh, mosh_ports, notify — and the deprecated tmux)")
+
+    def test_notify_ntfy_with_shell_bash_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"shell": "bash", "notify": "ntfy"}})
+        self.assertEqual(
+            str(cm.exception),
+            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
+
+    def test_notify_ntfy_without_ssh_now_succeeds(self):
+        env = dict(ENV, NTFY_URL="https://ntfy.example.com")
+        d = derive({"remote": {"notify": "ntfy"}}, env=env)
+        self.assertEqual(d["REMOTE_NOTIFY"], "ntfy")
+        self.assertEqual(d["CONTAINER_NTFY_URL"], "https://ntfy.example.com")
+
+    def test_mosh_without_ssh_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"mosh": True}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest has remote.mosh but no ssh: section — the published mosh range "
+            "rides ssh.port (add ssh.port, or drop remote.mosh: the jump carries mosh)")
 
 
 class TestYqSemanticsPins(unittest.TestCase):
@@ -731,7 +823,7 @@ class TestDerivedValues(unittest.TestCase):
 
     def test_ntfy_host_strip_order_path_before_userinfo(self):
         env = dict(ENV, NTFY_URL="https://ntfy.example.com/a@b", NTFY_TOPIC="t")
-        d = derive({"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}}, env=env)
+        d = derive({"remote": {"notify": "ntfy"}}, env=env)
         # '@' in the PATH must not masquerade as userinfo
         self.assertIn("ntfy.example.com", d["EGRESS"].split(","))
         self.assertEqual(d["CONTAINER_NTFY_URL"], "https://ntfy.example.com/a@b")
@@ -739,12 +831,12 @@ class TestDerivedValues(unittest.TestCase):
 
     def test_ntfy_userinfo_and_port_stripped(self):
         env = dict(ENV, NTFY_URL="https://user@h.example.com:8443")
-        d = derive({"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"}}, env=env)
+        d = derive({"remote": {"notify": "ntfy"}}, env=env)
         self.assertIn("h.example.com", d["EGRESS"].split(","))
 
     def test_ntfy_ip_literal_goes_to_cidrs(self):
         env = dict(ENV, NTFY_URL="http://10.1.2.3:8080/p")
-        d = derive({"ssh": {"port": 22}, "remote": {"tmux": True, "notify": "ntfy"},
+        d = derive({"remote": {"notify": "ntfy"},
                     "capabilities": {"egress_cidrs": ["10.1.2.3/32"]}}, env=env)
         self.assertEqual(d["EGRESS_CIDRS"], "10.1.2.3/32")  # deduped
         self.assertNotIn("10.1.2.3", d["EGRESS"])

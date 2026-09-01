@@ -32,7 +32,7 @@ SECRETS_FILE="$BASE_PATH/secrets.env"
 
 if [ -z "${1:-}" ]; then
     echo "Usage: ./jump.sh <cmd> [args...]"
-    echo "  start | stop | status | logs [-f] | pubkey"
+    echo "  start | stop | status | logs [-f] | pubkey | ip"
     exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" --help
 fi
 

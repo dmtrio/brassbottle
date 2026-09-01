@@ -74,7 +74,8 @@ Then drill **only** when something implies it:
 
 | Trigger | Drill into |
 |---|---|
-| "phone access", "from my laptop", "long-running" | `ssh:` + `remote: {tmux, mosh, notify}` — and allocate ports (§4) |
+| "phone access", "from my laptop", "long-running" | `remote: {shell, mosh, notify}` — phone access is the default (jump-reachable); allocate ports only for optional features (§4) |
+| "also reachable from my Mac" | `ssh:` + port allocation (§4) — Mac Remote-SSH only |
 | repos owned by an org that isn't the default identity | `git.orgs.<owner>: {token, name, email}` — see `docs/secrets.md` |
 | a plugin whose README names a secret slot | `common_secrets:` / `agent_secrets:` (§5) |
 | an API/service the container must reach | `capabilities.egress:` — domains only, no scheme, no path |
@@ -91,9 +92,11 @@ bite are implicit: a plugin's `host_port` default in
 `plugins/<name>/plugin.yml` that no manifest ever mentions. Run the checker
 (§6) and take the next free value:
 
-- `ssh.port` — `2222`, `2223`, … Keep `bind: 127.0.0.1`; only front it with a
-  WireGuard/VPN tunnel, never the open internet.
+- `ssh.port` — Mac Remote-SSH only. `2222`, `2223`, … Keep `bind: 127.0.0.1`;
+  only front it with a WireGuard/VPN tunnel, never the open internet. Phone
+  access (jump-reachable) needs no port allocation.
 - `remote.mosh_ports` — 11-port UDP blocks: `60000:60010`, `60011:60021`, …
+  Only when `remote.mosh: true` is set.
 - `plugin_ports.<plugin>` — only when the default is taken by a container
   that will run at the same time. A browser bridge must stay **below 9222**:
   its Chrome debug port is derived as bridge+408.

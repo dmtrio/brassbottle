@@ -111,15 +111,16 @@ The host commands above live in `bin/`; `src/` is internal source — the
   runs tini as PID 1 through `init: true`, which forwards signals and reaps
   orphaned children while the entrypoint runs unchanged as its child (persists
   `~/.claude.json`, runs the firewall (fail-loud), applies git config, guarantees
-  `/workspace/repos` and `/workspace/worktrees` exist, then either starts sshd
-  (`SSH_ENABLED=true`) or idles for attach mode).
+  `/workspace/repos` and `/workspace/worktrees` exist, then starts sshd when
+  `SSH_ENABLED=true` [host-published] or the default jump path is active, or idles
+  for attach mode).
 - **`src/init-firewall.sh`** — builds the default-deny egress allowlist at boot
   (GitHub IP ranges + dnsmasq-mirrored zones), verifies itself, and exits non-zero
   on failure so the container never runs with open egress. `bin/allow-egress.sh` edits
   the same zone list live; the base `ALLOWED_ZONES` here is the durable default.
-- **`src/tmux.conf` / `src/tmux-landing.bashrc`** — remote access (RFC 04):
+- **`src/tmux.conf` / `src/tmux-landing.bashrc`** — remote access:
   mobile-friendly tmux defaults, and the guarded snippet that lands interactive
-  SSH/mosh logins in the shared durable `agent` session.
+  SSH/mosh logins in a fresh `login-*` session.
 - **`src/djinn_net_addr.py`** — shared djinn-net subnet/static-address rules
   (top-of-subnet derivation, reserved-address checks). Used by both the jump
   and the tunnel so the two cannot drift.
