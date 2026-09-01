@@ -828,12 +828,13 @@ class EgressBrokerHostTests(unittest.TestCase):
             wait_for_broker_open_request(b, count=2)
             with mock.patch("subprocess.run") as mocked:
                 mocked.return_value = mock.Mock(returncode=0)
-                decided = b.decide_allow_for_zone(
+                result = b.decide_allow_for_zone(
                     "coding-brassbottle",
                     "stripe.com",
                     scope="live",
                 )
-            self.assertEqual(len(decided), 1)
+            self.assertEqual(len(result.decided), 1)
+            self.assertEqual(result.apply_failures, [])
             github_id = next(
                 rid
                 for rid, state in b._requests.items()
@@ -874,9 +875,10 @@ class EgressBrokerHostTests(unittest.TestCase):
                 b, "decide", side_effect=broker.EgressBrokerHostError("already decided")
             ):
                 with self.assertLogs(broker.LOG, level="INFO") as captured:
-                    decided = b.decide_allow_for_zone("coding-brassbottle", "neon.tech")
+                    result = b.decide_allow_for_zone("coding-brassbottle", "neon.tech")
 
-            self.assertEqual(decided, [])
+            self.assertEqual(result.decided, [])
+            self.assertEqual(result.apply_failures, [])
             skip_lines = [
                 r.getMessage()
                 for r in captured.records
@@ -999,11 +1001,118 @@ class EgressBrokerHostTests(unittest.TestCase):
                     body = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp.status, HTTPStatus.OK)
                     self.assertEqual(len(body["decided"]), 1)
+                    self.assertEqual(body["apply_failures"], [])
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
             waiter_thread.join(timeout=5)
             self.assertEqual(result["body"], {"decision": "allow", "scope": "live"})
+
+    def test_decide_endpoint_allow_ip_literal_reports_apply_failure_and_keeps_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            waiter_result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, request_id = b.file_request("coding-brassbottle", "192.0.2.55", 443)
+                waiter_result["body"] = body
+                waiter_result["request_id"] = request_id
+
+            waiter_thread = threading.Thread(target=waiter)
+            waiter_thread.start()
+            request_id = wait_for_broker_open_request(b)
+            try:
+                status, body = self._post_decide(
+                    host,
+                    port,
+                    {
+                        "container": "coding-brassbottle",
+                        "host": "192.0.2.55",
+                        "decision": "allow",
+                        "scope": "live",
+                    },
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            self.assertEqual(status, HTTPStatus.OK, body)
+            self.assertEqual(body["decided"], [])
+            self.assertEqual(
+                body["apply_failures"],
+                [{"request_id": request_id, "reason": broker.IP_REQUIRES_CIDR_REASON}],
+            )
+            with b._lock:
+                self.assertIn(request_id, b._requests)
+            open_ids = egress_log.EgressLog(egress_root).fold_queue(now=b.now()).open_requests
+            self.assertIn(request_id, open_ids)
+            b.decide(request_id, "deny")
+            join_thread_or_fail(waiter_thread, label="file_request")
+            self.assertEqual(
+                waiter_result["body"],
+                {"decision": "error", "reason": broker.IP_REQUIRES_CIDR_REASON},
+            )
+
+    def test_decide_endpoint_allow_apply_failed_reports_failure_and_keeps_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            tokens_dir = egress_root / broker.TOKENS_DIRNAME
+            tokens_dir.mkdir(parents=True)
+            clock = FakeClock(NOW)
+            b = self._broker(egress_root, clock, hold_seconds=5)
+            server = self._http_server(egress_root, b, tokens_dir)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address
+            waiter_result: dict[str, object] = {}
+
+            def waiter() -> None:
+                body, request_id = b.file_request("coding-brassbottle", "docs.stripe.com", 443)
+                waiter_result["body"] = body
+                waiter_result["request_id"] = request_id
+
+            waiter_thread = threading.Thread(target=waiter)
+            waiter_thread.start()
+            request_id = wait_for_broker_open_request(b)
+            try:
+                with mock.patch("subprocess.run") as mocked:
+                    mocked.return_value = mock.Mock(returncode=1)
+                    status, body = self._post_decide(
+                        host,
+                        port,
+                        {
+                            "container": "coding-brassbottle",
+                            "host": "stripe.com",
+                            "decision": "allow",
+                            "scope": "live",
+                        },
+                    )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+            self.assertEqual(status, HTTPStatus.OK, body)
+            self.assertEqual(body["decided"], [])
+            self.assertEqual(
+                body["apply_failures"],
+                [{"request_id": request_id, "reason": broker.APPLY_FAILED_REASON}],
+            )
+            with b._lock:
+                self.assertIn(request_id, b._requests)
+            open_ids = egress_log.EgressLog(egress_root).fold_queue(now=b.now()).open_requests
+            self.assertIn(request_id, open_ids)
+            b.decide(request_id, "deny")
+            join_thread_or_fail(waiter_thread, label="file_request")
+            self.assertEqual(
+                waiter_result["body"],
+                {"decision": "error", "reason": broker.APPLY_FAILED_REASON},
+            )
 
     def test_decide_deny_for_zone_releases_matching_requests(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1127,6 +1236,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                     body = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp.status, HTTPStatus.OK)
                     self.assertEqual(len(body["decided"]), 1)
+                    self.assertNotIn("apply_failures", body)
                     mocked.assert_not_called()
             finally:
                 server.shutdown()
