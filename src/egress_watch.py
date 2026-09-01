@@ -30,6 +30,7 @@ from egress_broker_host import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PORT,
     DENYLIST_PERSIST_FAILED_REASON,
+    APPLY_IN_PROGRESS_REASON,
     IP_APPLY_FAILED_REASON,
     IP_REQUIRES_CIDR_REASON,
     LOCK_FILENAME,
@@ -289,6 +290,11 @@ def format_apply_failure(reason: str) -> str:
         return (
             "Egress rule NOT applied: destination is an IP address — "
             f"{IP_APPLY_FAILED_REASON}"
+        )
+    if reason == APPLY_IN_PROGRESS_REASON:
+        return (
+            "Egress apply already in progress for this request — "
+            "it resolves without further action"
         )
     if reason == DENYLIST_PERSIST_FAILED_REASON:
         return (
