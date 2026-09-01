@@ -85,3 +85,104 @@ class SessionsToKillTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeCompleted:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class KillStaleSessionsTests(unittest.TestCase):
+    """The kill path itself: exact-match targets and the attach re-check."""
+
+    def _run_tmux_factory(self, attached_now, kill_log):
+        def run_tmux(args):
+            if args[0] == "display-message":
+                name = args[3].lstrip("=")
+                if name not in attached_now:
+                    return FakeCompleted(returncode=1)  # session vanished
+                return FakeCompleted(stdout=f"{int(attached_now[name])}\n")
+            if args[0] == "kill-session":
+                kill_log.append(args[2])
+                return FakeCompleted()
+            raise AssertionError(f"unexpected tmux call: {args}")
+
+        return run_tmux
+
+    def test_kill_uses_exact_match_target(self):
+        kills = []
+        run_tmux = self._run_tmux_factory({"login-42": False}, kills)
+        killed = tmux_landing_gc.kill_stale_sessions(
+            [_row(name="login-42")], run_tmux=run_tmux, children=lambda pid: False
+        )
+        self.assertEqual(killed, ["login-42"])
+        self.assertEqual(kills, ["=login-42"])
+
+    def test_session_attached_since_snapshot_is_spared(self):
+        kills = []
+        run_tmux = self._run_tmux_factory({"login-42": True}, kills)
+        killed = tmux_landing_gc.kill_stale_sessions(
+            [_row(name="login-42")], run_tmux=run_tmux, children=lambda pid: False
+        )
+        self.assertEqual(killed, [])
+        self.assertEqual(kills, [])
+
+    def test_session_vanished_since_snapshot_is_skipped(self):
+        kills = []
+        run_tmux = self._run_tmux_factory({}, kills)
+        killed = tmux_landing_gc.kill_stale_sessions(
+            [_row(name="login-42")], run_tmux=run_tmux, children=lambda pid: False
+        )
+        self.assertEqual(killed, [])
+        self.assertEqual(kills, [])
+
+
+class ListRowsTests(unittest.TestCase):
+    def test_no_server_returns_none_not_empty(self):
+        result = tmux_landing_gc._list_rows(
+            run_tmux=lambda args: FakeCompleted(returncode=1, stderr="no server")
+        )
+        self.assertIsNone(result)
+
+    def test_missing_tmux_returns_none(self):
+        self.assertIsNone(tmux_landing_gc._list_rows(run_tmux=lambda args: None))
+
+    def test_rows_parsed_and_malformed_lines_dropped(self):
+        out = "login-1\t0\t1\t1\tbash\t10\ngarbage line\n"
+        rows = tmux_landing_gc._list_rows(
+            run_tmux=lambda args: FakeCompleted(stdout=out)
+        )
+        self.assertEqual(rows, [("login-1", 0, 1, 1, "bash", 10)])
+
+
+class HasChildrenProcTests(unittest.TestCase):
+    """Real /proc: a shell holding a child vs. a lone process."""
+
+    def test_shell_with_child_is_detected(self):
+        import subprocess as sp
+
+        proc = sp.Popen(["bash", "-c", "sleep 5"])
+        try:
+            # bash -c with a single command execs it, so probe the TEST
+            # process itself, which now parents `proc`.
+            import os
+
+            self.assertTrue(tmux_landing_gc.has_children(os.getpid()))
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_childless_process_is_detected(self):
+        import subprocess as sp
+
+        proc = sp.Popen(["sleep", "5"])
+        try:
+            self.assertFalse(tmux_landing_gc.has_children(proc.pid))
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_dead_pid_has_no_children(self):
+        self.assertFalse(tmux_landing_gc.has_children(2**22 - 3))

@@ -134,8 +134,10 @@ plain `bash`.
 
 Landing-session GC runs on login and on tmux detach/session-switch hooks:
 an unattached `login-*` session is removed only when it is still an idle bare
-shell in one window/one pane, so named sessions and sessions with real work
-are left untouched.
+shell in one window/one pane, so sessions with real work are left untouched.
+`login-` is a **reserved prefix** — name your own durable sessions anything
+else, or the GC will treat an idle one as an abandoned landing. The GC logs
+its kills (and failures) to `/tmp/djinn-tmux-landing-gc.log` in the bottle.
 
 ## The jump container (`./djinn jump`)
 

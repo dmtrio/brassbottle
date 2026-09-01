@@ -119,8 +119,9 @@ cat > /etc/motd <<'MOTD'
 
       ssh djinn-<bottle>          # e.g. ssh djinn-coding-tanks
 
-  The bottle's own tmux session ('agent') is what persists your work;
-  this container only carries the mosh leg from your phone.
+  Work persists in the bottle's own tmux sessions — each login lands
+  in a fresh one; Ctrl-b s picks up a session started elsewhere. This
+  container only carries the mosh leg from your phone.
 
 MOTD
 
