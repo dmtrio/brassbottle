@@ -121,6 +121,14 @@ class PersistDenyResult:
     error: str | None
 
 
+@dataclass(frozen=True)
+class ZoneDecisionResult:
+    """Outcome of deciding all currently-open requests for one zone."""
+
+    decided: list[str]
+    apply_failures: list[tuple[str, str]]
+
+
 @dataclass
 class _DenylistHitState:
     """Coalesce-window bookkeeping for one (container, matched zone) key hit
@@ -1375,14 +1383,15 @@ class EgressBroker:
         domain: str,
         *,
         scope: str = "live",
-    ) -> list[str]:
+    ) -> ZoneDecisionResult:
         """Release open requests whose host falls under domain (host-side only)."""
-        zone = normalize_host(domain)
+        zone, _is_ip = normalize_destination(domain)
         candidates = self._open_request_ids_for_zone(container, zone)
         decided: list[str] = []
+        apply_failures: list[tuple[str, str]] = []
         for request_id in candidates:
             try:
-                self.decide(request_id, "allow", scope=scope)
+                allow_error = self.decide(request_id, "allow", scope=scope)
             except EgressBrokerHostError as exc:
                 LOG.info(
                     "egress broker decide_allow_for_zone skip request_id=%s reason=%s",
@@ -1390,8 +1399,11 @@ class EgressBroker:
                     exc,
                 )
                 continue
-            decided.append(request_id)
-        return decided
+            if allow_error is None:
+                decided.append(request_id)
+                continue
+            apply_failures.append((request_id, allow_error))
+        return ZoneDecisionResult(decided=decided, apply_failures=apply_failures)
 
     def decide_deny_for_zone(
         self,
@@ -1854,12 +1866,13 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
             if decision == "deny":
                 # A persistent deny targets a zone that may be an IP literal
                 # (./djinn deny 93.0.2.55 --global is valid — the denylist
-                # has no CIDR concept but does exact-match IPs); allow never
-                # accepts one (CIDR grants are a separate manifest concept),
-                # so it keeps the domain-only check.
+                # has no CIDR concept but does exact-match IPs).
                 normalize_destination(host_raw)
             else:
-                normalize_host(host_raw)
+                # Allow requests may target IP literals too; these are surfaced
+                # as apply_failures (ip_requires_cidr) rather than rejected
+                # up front, so operator clients learn why nothing was installed.
+                normalize_destination(host_raw)
         except ValueError:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid host"})
             return
@@ -1876,12 +1889,21 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
 
         try:
             if decision == "allow":
-                decided = self.server.broker.decide_allow_for_zone(
+                result = self.server.broker.decide_allow_for_zone(
                     container,
                     host_raw,
                     scope=scope,
                 )
-                self._send_json(HTTPStatus.OK, {"decided": decided})
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "decided": result.decided,
+                        "apply_failures": [
+                            {"request_id": request_id, "reason": reason}
+                            for request_id, reason in result.apply_failures
+                        ],
+                    },
+                )
                 return
             if scope == "once":
                 decided = self.server.broker.decide_deny_for_zone(

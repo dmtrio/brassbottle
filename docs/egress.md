@@ -147,6 +147,26 @@ IP-literal destinations (for example `192.0.2.55:5432`) cannot be allowed via
 `/decide` (they require a manifest CIDR grant). Those pushes show a warning tag
 and only a **Deny** button.
 
+### `POST /decide` response shape
+
+Allow responses always include `decided` and `apply_failures`:
+
+- `decided` — request ids that were fully closed by the allow decision.
+- `apply_failures` — objects of `{request_id, reason}` for requests that matched
+  the zone but stayed open because no rule was installed.
+
+`reason` is one of:
+
+- `ip_requires_cidr` — request host is an IP literal; add a matching CIDR to
+  the bottle manifest (`capabilities.egress_cidrs`) by hand.
+- `apply_failed` — `allow-egress.sh` did not install the rule.
+
+When a request appears in `apply_failures`, it remains open and still appears in
+`GET /queue` until a later allow succeeds or it is denied.
+
+Deny responses are unchanged: they return `decided` (and `persisted` for
+`scope=bottle|global`) and do not include `apply_failures`.
+
 ## Persistent deny list
 
 `./djinn deny <zone> --bottle NAME|--global` writes an entry to
