@@ -39,8 +39,10 @@ comes from.
 
 Every bottle owns volumes prefixed `djinn-<bottle>_`:
 
-- `workspace` and `gh-auth` from `compose/docker-compose.local.yml`
-  (pinned in `STATIC_COMPOSE_VOLUME_NAMES`),
+- `workspace`, `gh-auth` and `ssh-host-keys` from
+  `compose/docker-compose.local.yml` (pinned in `STATIC_COMPOSE_VOLUME_NAMES`);
+  `ssh-host-keys` is tiny and holds the bottle's sshd identity — deleting
+  it makes the jump refuse the bottle with a changed-host-key warning,
 - one per enabled agent, from `state_dirs:` in `agents/<name>/agent.yml`,
 - any declared by an enabled plugin's `volumes:`.
 
@@ -58,6 +60,7 @@ shows zero links while holding the only copy of unpushed work.
 | Suffix | Holds | Risk |
 |---|---|---|
 | `*-auth`, `*-state`, `*-cache` | credentials, caches | low — worst case, re-login |
+| `_ssh-host-keys` | the bottle's sshd identity | low — regenerated on next `up`, then `ssh-keygen -R` on the jump |
 | `_workspace` | `repos/` and `worktrees/` | **high — may be the only copy of a branch** |
 
 ## Audit a workspace volume before deleting it
