@@ -160,11 +160,13 @@ herdr is also one click away on any bottle, whatever `remote.shell` says:
 Terminal" dropdown (the `˅` next to `+`) offers **herdr** next to **bash**
 and opens the bottle's workspace directly (launch-or-attach; detach with
 `ctrl+b q`). The profile sets `REMOTE_SHELL=bash` so herdr's own panes never
-re-land in tmux, and the workspace file also drops VS Code's sidebar toggle
-from `terminal.integrated.commandsToSkipShell` so `ctrl+b` reaches herdr (and
-tmux) instead of the editor. Both are add-if-missing like the other managed
-settings: edit them in the workspace file (a `--session` arg, say) and
-`djinn up` leaves your version alone.
+re-land in tmux. It is add-if-missing like the other managed settings: edit
+it in the workspace file (a `--session` arg, say) and `djinn up` leaves your
+version alone. On a Linux or Windows client VS Code binds `ctrl+b` to the
+sidebar toggle and swallows it in terminals; add
+`"terminal.integrated.commandsToSkipShell": ["-workbench.action.toggleSidebarVisibility"]`
+to your user settings there (on macOS the toggle is `cmd+b`, so `ctrl+b`
+already reaches herdr and tmux).
 
 Landing-session GC runs on login and on tmux detach/session-switch hooks:
 an unattached `login-*` session is removed only when it is still an idle bare

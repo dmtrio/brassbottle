@@ -260,39 +260,14 @@ class ManagedSettingsTests(unittest.TestCase):
             {"path": "herdr", "args": ["--session", "work"]},
         )
 
-    def test_fresh_file_lets_ctrl_b_reach_the_shell(self):
-        # herdr and tmux both use ctrl+b as prefix; VS Code's default
-        # commandsToSkipShell swallows it for the sidebar toggle.
-        _run(self.path, "app")
-        self.assertEqual(
-            self._settings()[code_workspace.SKIP_SHELL_KEY],
-            ["-workbench.action.toggleSidebarVisibility"],
-        )
-
-    def test_existing_file_gains_skip_shell_and_reports_it(self):
-        self.path.write_text(json.dumps({
-            "folders": [{"path": "repos/app", "name": "app"}],
-            "settings": {},
-        }), encoding="utf-8")
-        out = io.StringIO()
-        with redirect_stdout(out):
-            _run(self.path, "app")
-        self.assertEqual(
-            self._settings()[code_workspace.SKIP_SHELL_KEY],
-            code_workspace.SKIP_SHELL_VALUE,
-        )
-        self.assertIn(code_workspace.SKIP_SHELL_KEY, out.getvalue())
-
-    def test_never_overwrites_an_existing_skip_shell_list(self):
-        self.path.write_text(json.dumps({
-            "folders": [{"path": "repos/app", "name": "app"}],
-            "settings": {code_workspace.SKIP_SHELL_KEY: ["workbench.action.quickOpen"]},
-        }), encoding="utf-8")
-        _run(self.path, "app")
-        self.assertEqual(
-            self._settings()[code_workspace.SKIP_SHELL_KEY],
-            ["workbench.action.quickOpen"],
-        )
+    def test_herdr_profile_env_is_not_the_module_constant(self):
+        # Shallow copy would alias the nested env dict; a later in-place tweak
+        # would then corrupt the constant for every following call.
+        settings, _ = code_workspace.merge_settings({})
+        env = settings[code_workspace.PROFILES_KEY]["herdr"]["env"]
+        self.assertIsNot(env, code_workspace.HERDR_PROFILE_VALUE["env"])
+        env["X"] = "1"
+        self.assertNotIn("X", code_workspace.HERDR_PROFILE_VALUE["env"])
 
     def test_default_profile_is_plain_bash(self):
         # Load-bearing: VS Code runs tasks, debug consoles and git operations
