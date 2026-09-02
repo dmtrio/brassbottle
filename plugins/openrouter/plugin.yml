@@ -1,0 +1,7 @@
+# openrouter — env-only plugin. Delivers an OpenRouter API key to the selected
+# agent harnesses; Pi uses it through its native OpenRouter provider.
+
+secrets:
+  OPENROUTER_API_KEY: {hint: "OpenRouter API key"}
+
+egress: [openrouter.ai]
