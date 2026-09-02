@@ -35,6 +35,21 @@ DEFAULT_PROFILE_KEY = "terminal.integrated.defaultProfile.linux"
 # tmux landing behavior the default would drop every one of those interactive
 # and non-interactive shells into tmux, interleaving unrelated output.
 DEFAULT_PROFILE = "bash"
+# On-demand herdr: an extra profile in the "New Terminal" dropdown that opens
+# the bottle's herdr workspace (launch-or-attach) whatever remote.shell says.
+# It runs the binary directly, so the bash landing snippet is not involved;
+# the default profile stays bash for the reason above.
+# REMOTE_SHELL=bash in the profile env: herdr's panes inherit VS Code's
+# TERM_PROGRAM, so a bottle on `remote.shell: tmux` would otherwise land every
+# herdr pane in tmux. Overriding it to bash makes the landing snippet a no-op
+# inside the profile regardless of what the manifest says.
+HERDR_PROFILE = "herdr"
+HERDR_PROFILE_VALUE = {"path": "herdr", "env": {"REMOTE_SHELL": "bash"}}
+# VS Code keeps ctrl+b for itself (toggle sidebar) even when a terminal has
+# focus, which swallows herdr's prefix. The leading "-" removes that one
+# command from the skip-shell list, so ctrl+b reaches herdr (and tmux).
+SKIP_SHELL_KEY = "terminal.integrated.commandsToSkipShell"
+SKIP_SHELL_VALUE = ["-workbench.action.toggleSidebarVisibility"]
 
 
 def _dump_json(obj):
@@ -78,12 +93,22 @@ def merge_settings(settings):
             added.append(PROFILES_KEY)
         if DEFAULT_PROFILE not in profiles:
             profiles[DEFAULT_PROFILE] = {"path": "bash"}
+        if HERDR_PROFILE not in profiles:
+            profiles[HERDR_PROFILE] = dict(HERDR_PROFILE_VALUE)
+            if PROFILES_KEY not in added:
+                # Nested addition to a profiles map that already existed:
+                # name it, so a new dropdown entry is traceable to `djinn up`.
+                added.append(f"{PROFILES_KEY}.{HERDR_PROFILE}")
         # Existing containers can still have a previously written managed tmux
         # profile; merge is add-if-missing only, so we do not rewrite/remove it.
 
     if DEFAULT_PROFILE_KEY not in settings:
         settings[DEFAULT_PROFILE_KEY] = DEFAULT_PROFILE
         added.append(DEFAULT_PROFILE_KEY)
+
+    if SKIP_SHELL_KEY not in settings:
+        settings[SKIP_SHELL_KEY] = list(SKIP_SHELL_VALUE)
+        added.append(SKIP_SHELL_KEY)
 
     return settings, added
 
