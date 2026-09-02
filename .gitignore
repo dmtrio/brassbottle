@@ -30,3 +30,5 @@ __pycache__/
 # those fixture files tracked despite the top-level .mcp.json ignore.
 !tests/fixtures/golden/configs/**/.mcp.json
 !agents/*/golden/**/.mcp.json
+# pi-mcp-adapter: rebuilt at image build from package-lock.json (npm ci)
+agents/pi/mcp-adapter/node_modules/

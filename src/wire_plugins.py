@@ -136,10 +136,10 @@ CODEX_MANAGED_BLOCK_ENV_REFS = frozenset({False, "bearer_token_env_var"})
 # agent's plugin sync regardless (a standing caveat about the agent itself).
 _AGENT_NOTES = {
     "cursor-agent": "literal key: env interpolation broken for remote headers",
-    "pi": "inert until the pi-mcp-adapter extension is installed",
+    "pi": "tools bridged by the baked pi-mcp-adapter extension",
 }
 _AGENT_SYNC_NOTES = {
-    "pi": "pi: inert until the pi-mcp-adapter extension is installed",
+    "pi": "pi: MCP bridged by the baked pi-mcp-adapter extension",
 }
 
 

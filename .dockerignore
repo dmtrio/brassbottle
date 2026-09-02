@@ -14,3 +14,6 @@ plugins/*/test_*.py
 agents/*/test_*.py
 agents/agent_test_kit.py
 agents/*/golden/
+# Extension node_modules are reproducible from the committed package-lock via
+# npm ci at build; keep the build context (COPY agents /opt/agents) lean.
+agents/pi/mcp-adapter/node_modules
