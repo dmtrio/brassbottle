@@ -17,7 +17,7 @@ def completed(command, returncode=0, stdout=""):
 
 
 class RunningBottlesTests(unittest.TestCase):
-    def test_queries_running_jump_enabled_containers_and_sorts(self):
+    def test_queries_running_ready_containers_and_sorts(self):
         result = completed([], stdout="djinn-z\ndjinn-a\ndjinn-z\n")
         with tempfile.TemporaryDirectory() as home, mock.patch(
             "subprocess.run", return_value=result
@@ -27,17 +27,16 @@ class RunningBottlesTests(unittest.TestCase):
         self.assertEqual(
             run.call_args.args[0],
             [
-                "docker", "ps", "--filter", "label=djinn.remote.jump=true",
+                "docker", "ps", "--filter", "label=djinn.jump.ready=true",
                 "--filter", f"label=djinn.jump.scope={scope}", "--format", "{{.Names}}",
             ],
         )
 
-    def test_rejects_an_unexpected_container_name(self):
+    def test_skips_an_unexpected_container_name(self):
         with tempfile.TemporaryDirectory() as home, mock.patch(
             "subprocess.run", return_value=completed([], stdout="not-djinn\n")
         ):
-            with self.assertRaises(jump_registry.JumpRegistryError):
-                jump_registry.running_bottles(Path(home))
+            self.assertEqual(jump_registry.running_bottles(Path(home)), [])
 
     def test_surfaces_docker_failure(self):
         with tempfile.TemporaryDirectory() as home, mock.patch(

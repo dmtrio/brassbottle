@@ -280,7 +280,14 @@ fi
 
 # Scope the registry label to this DJINN_HOME. A shared Docker daemon may hold
 # several installations; a jump must never list another installation's bottles.
-JUMP_REGISTRY_SCOPE="$(DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" scope)"
+JUMP_SCOPE_ERR="$(mktemp 2>/dev/null || echo /dev/null)"
+if JUMP_REGISTRY_SCOPE="$(DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" scope 2>"$JUMP_SCOPE_ERR")"; then
+    :
+else
+    JUMP_REGISTRY_SCOPE="unscoped"
+    echo "  ⚠ jump: could not derive registry scope; bottle will stay unlisted" >&2
+fi
+[ "$JUMP_SCOPE_ERR" = "/dev/null" ] || rm -f "$JUMP_SCOPE_ERR"
 
 # ── Jump reachability preflight (non-fatal) ───────────────────────────────────
 # Both are quiet-degradation warnings, not errors: the entrypoint and firewall
@@ -293,6 +300,10 @@ if [ "$REMOTE_JUMP" = "true" ] && [ -z "${JUMP_AUTHORIZED_KEY:-}" ]; then
 fi
 if [ "$REMOTE_JUMP" = "true" ] && [ -z "$JUMP_IP" ]; then
     echo "  ⚠ jump: could not derive the jump address (DJINN_SUBNET/DJINN_JUMP_IP) — $NAME will not be jump-reachable"
+fi
+JUMP_REGISTRY_READY=false
+if [ "$REMOTE_JUMP" = "true" ] && [ -n "$JUMP_IP" ] && [ -n "${JUMP_AUTHORIZED_KEY:-}" ]; then
+    JUMP_REGISTRY_READY=true
 fi
 
 # ── Apply ─────────────────────────────────────────────────────────────────────
@@ -327,6 +338,7 @@ SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_K
   JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" \
 REMOTE_JUMP="$REMOTE_JUMP" REMOTE_SHELL="$REMOTE_SHELL" DJINN_JUMP_IP="$JUMP_IP" \
 JUMP_REGISTRY_SCOPE="$JUMP_REGISTRY_SCOPE" \
+JUMP_REGISTRY_READY="$JUMP_REGISTRY_READY" \
 NTFY_URL="$CONTAINER_NTFY_URL" NTFY_TOPIC="$CONTAINER_NTFY_TOPIC" \
 IMAGE_TAG="$NAME" \
 docker compose -p "$CNAME" --project-directory "$SCRIPT_DIR" \
@@ -383,8 +395,10 @@ fi
 # Refresh the jump selector only after this bottle is confirmed running. The
 # helper queries Docker on the HOST and writes into a directory mount, so the
 # jump gets the update without Docker-socket access or a restart.
-if ! DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" refresh; then
-    echo "  ⚠ jump: picker registry refresh failed — the bottle is up; rerun './djinn jump refresh' to retry" >&2
+if [ -f "$BASE_PATH/compose/jump.yml" ]; then
+    if ! DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" refresh; then
+        echo "  ⚠ jump: picker registry refresh failed — the bottle is up; rerun './djinn jump refresh' to retry" >&2
+    fi
 fi
 
 # ── Bootstrap workspace (idempotent; layout v2: /workspace/repos/<name>) ─────

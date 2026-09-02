@@ -3,7 +3,7 @@
 
 The jump container deliberately has no Docker socket. This module asks Docker
 on the host for only running containers bearing the manifest-derived
-``djinn.remote.jump=true`` label, validates their names, and atomically writes
+``djinn.jump.ready=true`` label, validates their names, and atomically writes
 a small registry into the directory mounted read-only by the jump.
 """
 
@@ -35,11 +35,11 @@ def running_bottles(base_path: Path) -> list[str]:
     started = time.monotonic()
     scope = jump_config.derive_identity(base_path).suffix
     command = [
-        "docker", "ps", "--filter", "label=djinn.remote.jump=true",
+        "docker", "ps", "--filter", "label=djinn.jump.ready=true",
         "--filter", f"label=djinn.jump.scope={scope}",
         "--format", "{{.Names}}",
     ]
-    print("jump registry query begin filters=jump-enabled,installation-scope")
+    print("jump registry query begin filters=jump-ready,installation-scope")
     try:
         result = subprocess.run(command, check=False, capture_output=True, text=True)
     except FileNotFoundError as exc:
@@ -60,8 +60,12 @@ def running_bottles(base_path: Path) -> list[str]:
         if not name:
             continue
         if not CONTAINER_RE.fullmatch(name):
-            print("jump registry query error reason=invalid-container-name", file=sys.stderr)
-            raise JumpRegistryError("docker returned an invalid djinn container name")
+            print(
+                "jump registry query skip reason=invalid-container-name "
+                f"name_length={len(name)}",
+                file=sys.stderr,
+            )
+            continue
         names.append(name)
     result_names = sorted(set(names))
     print(

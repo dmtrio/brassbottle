@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_REGISTRY = "/etc/djinn-jump/registry/bottles"
@@ -14,7 +15,8 @@ NAME_RE = re.compile(r"^djinn-[A-Za-z0-9_-]+$")
 
 
 def log(message: str) -> None:
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # timezone.utc works on the documented Python 3.9 floor; datetime.UTC does not.
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: UP017
     print(f"{now} jump picker {message}", file=sys.stderr)
 
 
@@ -58,14 +60,32 @@ def select(names: list[str], input_fn=input, output=sys.stdout) -> str | None:
         print("Choose a listed number or q.", file=output)
 
 
+def hop(target: str) -> int | None:
+    """Run one bottle SSH session without replacing the Mosh-side picker."""
+    try:
+        return subprocess.call(["ssh", target])
+    except OSError:
+        # Keep the Mosh session useful even if ssh itself cannot be started.
+        log(f"disconnect target={target} reason=ssh-exec-failed")
+        return None
+
+
 def main() -> int:
     os.environ["DJINN_JUMP_PICKER_DONE"] = "1"
     names = read_names(Path(os.environ.get("DJINN_JUMP_REGISTRY", DEFAULT_REGISTRY)))
-    target = select(names)
-    if target:
-        os.execvp("ssh", ["ssh", target])
-    os.execv("/bin/bash", ["/bin/bash"])
-    return 1  # pragma: no cover - exec only returns on error
+    while True:
+        target = select(names)
+        if target is None:
+            os.execv("/bin/bash", ["/bin/bash"])
+            return 1  # pragma: no cover - exec only returns on error
+        returncode = hop(target)
+        if returncode is None:
+            print("Could not start SSH; choose another bottle.")
+        elif returncode == 0:
+            print("Disconnected from bottle; choose another bottle.")
+        else:
+            print(f"SSH exited with status {returncode}; choose another bottle.")
+        log(f"disconnect target={target} exit_code={returncode}")
 
 
 if __name__ == "__main__":
