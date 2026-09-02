@@ -1,6 +1,6 @@
 """Guard the auth/state volume contract after agents-as-plugins Phase 1.
 
-Static compose keeps only workspace + gh-auth. Agent auth/state volumes now come
+Static compose keeps only workspace + gh-auth + ssh-host-keys. Agent auth/state volumes now come
 from agents/*/agent.yml state_dirs via generated overlays, and Dockerfile auth
 precreation must be descriptor-driven (not hardcoded paths).
 """
@@ -58,8 +58,8 @@ def agent_state_dirs():
 
 
 class AuthVolumeDirTests(unittest.TestCase):
-    def test_compose_static_volumes_are_workspace_and_gh_auth_only(self):
-        self.assertEqual(compose_top_level_volumes(), {"workspace", "gh-auth"})
+    def test_compose_static_volumes_are_workspace_gh_auth_and_ssh_host_keys_only(self):
+        self.assertEqual(compose_top_level_volumes(), {"workspace", "gh-auth", "ssh-host-keys"})
 
     def test_compose_keeps_only_static_home_named_mount(self):
         self.assertEqual(compose_named_home_mounts(), {"gh-auth": f"{HOME}/.config/gh"})

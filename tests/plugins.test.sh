@@ -138,7 +138,7 @@ EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
 
 echo "── static compose volumes + descriptor-derived agent volumes"
-# Static compose stays lean (workspace + gh-auth). manifest.py reserves this
+# Static compose stays lean (workspace + gh-auth + ssh-host-keys). manifest.py reserves this
 # STATIC set; enabled agents' state_dirs arrive via AGENTS_COMPOSE_YAML.
 COMPOSE_STATIC_VOLS=$(yq -r '.volumes | keys | .[]' compose/docker-compose.local.yml | LC_ALL=C sort | tr '\n' ' ')
 MANIFEST_STATIC_VOLS=$(python3 -c 'import sys; sys.path.insert(0, "src"); import manifest; print(" ".join(sorted(manifest.STATIC_COMPOSE_VOLUME_NAMES)) + " ")')

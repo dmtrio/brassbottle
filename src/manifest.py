@@ -120,10 +120,11 @@ def _host_port_ref_fields(spec):
 # tests/plugins.test.sh, so adding a volume there without updating these
 # fails loudly instead of re-opening the hole.
 STATIC_COMPOSE_VOLUME_NAMES = {
-    "workspace", "gh-auth",
+    "workspace", "gh-auth", "ssh-host-keys",
 }
 STATIC_COMPOSE_MOUNT_PATHS = {
     "/workspace", "/artifacts", "/artifacts/browser", "/agent-rules",
+    "/etc/ssh/host_keys",
     "/home/coder/.agent-keys",
     "/home/coder/.config/gh",
 }

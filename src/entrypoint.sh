@@ -159,11 +159,20 @@ eval "$SSHD_ARGS"
 if [ "$START_SSHD" = "true" ]; then
     chown coder:coder /home/coder/.ssh/authorized_keys
 
-    if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
-        echo "Generating SSH host keys..."
-        ssh-keygen -A
-        echo "✓ SSH host keys generated"
-    fi
+    # Host keys live on the ssh-host-keys volume (compose), not in the image
+    # layer: a regenerated key is a REMOTE HOST IDENTIFICATION HAS CHANGED
+    # refusal on the jump's next hop after every rebuild. sshd_config's
+    # HostKey lines (Dockerfile) point here; same loop as jump/entrypoint.sh.
+    host_keys_generated=0
+    for type in rsa ecdsa ed25519; do
+        key="/etc/ssh/host_keys/ssh_host_${type}_key"
+        if [ ! -f "$key" ]; then
+            ssh-keygen -q -t "$type" -N "" -f "$key" </dev/null
+            host_keys_generated=$((host_keys_generated + 1))
+        fi
+        chmod 600 "$key"
+    done
+    echo "✓ SSH host keys ready (generated=$host_keys_generated, persisted on the ssh-host-keys volume)"
 
     # RFC 04: sshd builds each session's env via PAM (/etc/environment) and
     # ignores container env — persist the remote-access vars there so login
