@@ -30,10 +30,10 @@ fi
 
 # Removal changes what the jump may offer. This stays host-side: the jump
 # receives only its read-only registry, never a Docker socket.
-if require_python3; then
+if [ -f "$BASE_PATH/compose/jump.yml" ] && require_python3; then
     if ! DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" refresh; then
         echo "WARNING: jump registry refresh failed; rerun './djinn jump refresh' to retry" >&2
     fi
-else
+elif [ -f "$BASE_PATH/compose/jump.yml" ]; then
     echo "WARNING: jump registry was not refreshed (python3 unavailable)" >&2
 fi

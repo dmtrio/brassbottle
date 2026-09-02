@@ -59,6 +59,9 @@ grep -qF 'DJINN_JUMP_PICKER_DONE' jump/entrypoint.sh \
 grep -qF 'exec python3 /usr/local/bin/djinn-jump-picker' jump/entrypoint.sh \
     && pass "jump picker owns interactive login shells" \
     || fail "jump/entrypoint.sh does not exec the picker"
+grep -qF 'subprocess.call(["ssh", target])' jump/picker.py \
+    && pass "jump picker returns to its menu after bottle SSH exits" \
+    || fail "jump picker replaces its Mosh process with bottle SSH"
 grep -qF 'update-locale LANG=en_US.UTF-8' jump/Dockerfile \
     && pass "jump image sets a UTF-8 native locale (mosh-server aborts without one)" \
     || fail "jump/Dockerfile is missing the UTF-8 locale setup"

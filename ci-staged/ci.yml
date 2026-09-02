@@ -1,0 +1,49 @@
+# Staged replacement for .github/workflows/ci.yml.  This repository's agent
+# token cannot update workflows; move this full copy into place manually, then
+# remove this file in the following commit.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+      - name: Run test suite
+        run: tests/plugins.test.sh
+      - name: Remote-access contract checks
+        run: bash tests/remote.test.sh
+      - name: Jump picker unit tests
+        run: python3 -m unittest tests.test_jump_config tests.test_jump_registry tests.test_jump_picker tests.test_jump_host -v
+      - name: Landing-GC unit tests
+        run: python3 -m unittest tests.test_tmux_landing_gc -v
+      - name: Image builds
+        run: docker build -t djinn-ci-smoke .
+      - name: Backup image builds
+        run: docker build -f backup/Dockerfile -t djinn-backup-ci-smoke .
+      - name: Jump image builds
+        run: docker build -f jump/Dockerfile -t djinn-jump-ci-smoke .
+      - name: Jump entry point exists and mosh is installed
+        run: |
+          docker run --rm --entrypoint test djinn-jump-ci-smoke -x /usr/local/bin/jump-entrypoint.sh
+          docker run --rm --entrypoint test djinn-jump-ci-smoke -x /usr/local/bin/mosh-server
+          docker run --rm --entrypoint /usr/bin/mosh-server djinn-jump-ci-smoke --version
+      - name: Pull pinned Backrest image
+        run: docker pull ghcr.io/garethgeorge/backrest:v1.14.1
+      - name: Pull pinned tunnel image
+        run: docker pull fosrl/newt:1.16.0
+      - name: Backup integration smoke
+        env:
+          DJINN_BACKUP_CI_IMAGE: djinn-backup-ci-smoke
+        run: python3 -m unittest tests.test_backup_integration -v
+      - name: Entry point exists
+        run: docker run --rm --entrypoint test djinn-ci-smoke -x /home/coder/entrypoint.sh

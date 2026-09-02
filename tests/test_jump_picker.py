@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "jump"))
 import picker  # noqa: E402
@@ -52,6 +53,17 @@ class SelectTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         self.assertIsNone(picker.select(["djinn-a"], input_fn=interrupt, output=io.StringIO()))
+
+
+class HopTests(unittest.TestCase):
+    def test_hop_waits_for_ssh_instead_of_replacing_picker_process(self):
+        with mock.patch.object(picker.subprocess, "call", return_value=0) as call:
+            self.assertEqual(picker.hop("djinn-a"), 0)
+        call.assert_called_once_with(["ssh", "djinn-a"])
+
+    def test_hop_keeps_picker_alive_when_ssh_cannot_start(self):
+        with mock.patch.object(picker.subprocess, "call", side_effect=OSError):
+            self.assertIsNone(picker.hop("djinn-a"))
 
 
 if __name__ == "__main__":

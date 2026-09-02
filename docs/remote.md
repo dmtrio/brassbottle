@@ -236,9 +236,14 @@ mosh coder@<jump-ip>           # e.g., mosh coder@172.30.0.254
 ```
 
 Use `./djinn jump ip` to get the jump's static bridge address. The jump shows
-a numbered list of running, jump-enabled bottles; selecting one automatically
-replaces the jump shell with `ssh djinn-<bottle>`, so Moshi needs only this one
-connection. Press `q` to keep a normal jump shell and make a manual SSH hop.
+a numbered list of running, reachable bottles; selecting one opens
+`ssh djinn-<bottle>` while keeping the Mosh connection and picker alive. When
+that SSH session exits (or cannot connect), the picker returns so you can choose
+another bottle. Press `q` to keep a normal jump shell and make a manual SSH hop.
+
+After upgrading, rerun `./djinn up <bottle>` for each existing bottle so it
+receives the picker labels, then run `./djinn jump start` (or
+`./djinn jump refresh`) to rebuild the list.
 For example: `ssh djinn-coding-tanks`.
 The selector is a host-generated, read-only registry — the jump never receives
 Docker socket access — and `djinn up` / `djinn down` refresh it as bottles

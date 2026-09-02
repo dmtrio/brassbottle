@@ -35,6 +35,9 @@ services:
       # picker registry for the jump. The jump itself never receives Docker
       # socket access.
       djinn.remote.jump: "${REMOTE_JUMP:-true}"
+      # A remote.jump opt-in becomes selectable only after up.sh has both the
+      # singleton jump address and its public key for this installation.
+      djinn.jump.ready: "${JUMP_REGISTRY_READY:-false}"
       # Direct compose debugging does not run up.sh's scope derivation; keep
       # such containers deliberately unlisted rather than letting interpolation
       # corrupt the merged compose config.
