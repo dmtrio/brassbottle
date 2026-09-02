@@ -35,12 +35,6 @@ DEFAULT_PROFILE_KEY = "terminal.integrated.defaultProfile.linux"
 # tmux landing behavior the default would drop every one of those interactive
 # and non-interactive shells into tmux, interleaving unrelated output.
 DEFAULT_PROFILE = "bash"
-# On-demand herdr: an extra profile in the "New Terminal" dropdown that opens
-# the bottle's herdr workspace (launch-or-attach) whatever remote.shell says.
-# It runs the binary directly, so the bash landing snippet is not involved;
-# the default profile stays bash for the reason above.
-HERDR_PROFILE = "herdr"
-HERDR_PROFILE_VALUE = {"path": "herdr"}
 
 
 def _dump_json(obj):
@@ -84,12 +78,6 @@ def merge_settings(settings):
             added.append(PROFILES_KEY)
         if DEFAULT_PROFILE not in profiles:
             profiles[DEFAULT_PROFILE] = {"path": "bash"}
-        if HERDR_PROFILE not in profiles:
-            profiles[HERDR_PROFILE] = dict(HERDR_PROFILE_VALUE)
-            if PROFILES_KEY not in added:
-                # Nested addition to a profiles map that already existed:
-                # name it, so a new dropdown entry is traceable to `djinn up`.
-                added.append(f"{PROFILES_KEY}.{HERDR_PROFILE}")
         # Existing containers can still have a previously written managed tmux
         # profile; merge is add-if-missing only, so we do not rewrite/remove it.
 

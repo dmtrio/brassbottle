@@ -7,7 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -220,38 +220,6 @@ class ManagedSettingsTests(unittest.TestCase):
         _run(self.path, "app")
         profiles = self._settings()[code_workspace.PROFILES_KEY]
         self.assertEqual(profiles["bash"], {"path": "bash"})
-
-    def test_fresh_file_gets_a_herdr_profile(self):
-        _run(self.path, "app")
-        profiles = self._settings()[code_workspace.PROFILES_KEY]
-        self.assertEqual(profiles["herdr"], {"path": "herdr"})
-
-    def test_existing_profiles_gain_herdr_and_report_it(self):
-        # An older workspace file (bash only) picks up the herdr dropdown
-        # entry on the next run, and the run names the nested addition.
-        self.path.write_text(json.dumps({
-            "folders": [{"path": "repos/app", "name": "app"}],
-            "settings": {code_workspace.PROFILES_KEY: {"bash": {"path": "bash"}}},
-        }), encoding="utf-8")
-        out = io.StringIO()
-        with redirect_stdout(out):
-            _run(self.path, "app")
-        profiles = self._settings()[code_workspace.PROFILES_KEY]
-        self.assertEqual(profiles["herdr"], {"path": "herdr"})
-        self.assertEqual(profiles["bash"], {"path": "bash"})
-        self.assertIn(f"{code_workspace.PROFILES_KEY}.herdr", out.getvalue())
-
-    def test_never_overwrites_an_existing_herdr_profile(self):
-        self.path.write_text(json.dumps({
-            "folders": [{"path": "repos/app", "name": "app"}],
-            "settings": {code_workspace.PROFILES_KEY: {
-                "herdr": {"path": "herdr", "args": ["--session", "work"]}}},
-        }), encoding="utf-8")
-        _run(self.path, "app")
-        self.assertEqual(
-            self._settings()[code_workspace.PROFILES_KEY]["herdr"],
-            {"path": "herdr", "args": ["--session", "work"]},
-        )
 
     def test_default_profile_is_plain_bash(self):
         # Load-bearing: VS Code runs tasks, debug consoles and git operations
