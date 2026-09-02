@@ -155,14 +155,6 @@ stay out of tmux or herdr because the landing snippet is gated on interactive
 shells (`$-` contains `i`), and `terminal.integrated.defaultProfile.linux`
 stays plain `bash`.
 
-herdr is also one click away on any bottle, whatever `remote.shell` says:
-`dev.code-workspace` carries a `herdr` terminal profile, so the "New
-Terminal" dropdown (the `˅` next to `+`) offers **herdr** next to **bash**
-and opens the bottle's workspace directly (launch-or-attach; detach with
-`ctrl+b q`). The profile is add-if-missing like the other managed settings:
-edit it in the workspace file (a `--session` arg, say) and `djinn up` leaves
-your version alone.
-
 Landing-session GC runs on login and on tmux detach/session-switch hooks:
 an unattached `login-*` session is removed only when it is still an idle bare
 shell in one window/one pane, so sessions with real work are left untouched.
