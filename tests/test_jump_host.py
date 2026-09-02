@@ -6,6 +6,7 @@ shape, the not-configured branches, docker-missing handling, and the pubkey
 command's read-from-the-host-side-of-the-mount behaviour.
 """
 
+import argparse
 import contextlib
 import io
 import subprocess
@@ -493,6 +494,57 @@ class ParserTests(unittest.TestCase):
     def test_missing_subcommand_exits(self):
         with self.assertRaises(SystemExit):
             jump_host.build_parser().parse_args([])
+
+
+class HelpTextDriftTests(unittest.TestCase):
+    """The operator-facing usage summaries (jump.sh, djinn, docs) must list
+    every public subcommand build_parser() exposes — they went stale once
+    (refresh/ip missing) and the shell wrapper printed one list while the
+    argparse --help it then exec'd printed another."""
+
+    ROOT = Path(__file__).parent.parent
+
+    @staticmethod
+    def _public_subcommands() -> list[str]:
+        parser = jump_host.build_parser()
+        for action in parser._actions:  # noqa: SLF001 - argparse has no public accessor
+            if isinstance(action, argparse.Action) and action.choices:
+                return [
+                    name for name, sub in action.choices.items()
+                    if sub.description is not None or any(
+                        ch.help != argparse.SUPPRESS
+                        for ch in action._choices_actions if ch.dest == name  # noqa: SLF001
+                    )
+                ]
+        raise AssertionError("no subparsers on jump parser")
+
+    def _assert_lists_all(self, rel: str, needle: str, public: list[str]) -> None:
+        text = (self.ROOT / rel).read_text()
+        line = next((ln for ln in text.splitlines() if needle in ln), None)
+        self.assertIsNotNone(line, f"{rel}: usage line containing {needle!r} not found")
+        for name in public:
+            with self.subTest(file=rel, subcommand=name):
+                self.assertIn(name, line, f"{rel} usage omits {name!r}: {line.strip()}")
+
+    def test_public_subcommands_are_the_expected_set(self):
+        self.assertEqual(
+            sorted(self._public_subcommands()),
+            sorted(["start", "refresh", "stop", "status", "logs", "pubkey", "ip"]),
+        )
+
+    def test_jump_sh_usage_lists_every_public_subcommand(self):
+        self._assert_lists_all("jump.sh", "start | ", self._public_subcommands())
+
+    def test_djinn_dispatcher_help_lists_every_public_subcommand(self):
+        self._assert_lists_all("djinn", "singleton mosh jump container", self._public_subcommands())
+
+    def test_script_doc_lists_every_public_subcommand(self):
+        text = (self.ROOT / "docs/script.md").read_text()
+        idx = text.index("`src/jump_host.py`")
+        blurb = text[idx: idx + 200]
+        for name in self._public_subcommands():
+            with self.subTest(subcommand=name):
+                self.assertIn(name, blurb)
 
 
 if __name__ == "__main__":

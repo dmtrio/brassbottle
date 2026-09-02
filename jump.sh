@@ -6,10 +6,12 @@
 # not have to live in every bottle image.
 #
 #   ./jump.sh start
+#   ./jump.sh refresh      # rebuild the bottle picker registry
 #   ./jump.sh stop
 #   ./jump.sh status
 #   ./jump.sh logs [-f]
 #   ./jump.sh pubkey
+#   ./jump.sh ip
 #
 # Unlike backup.sh this sources secrets.env, but only as a COMPATIBILITY SEED:
 # the operator's keys now live one-per-line in $DJINN_HOME/jump/authorized_keys
@@ -32,7 +34,7 @@ SECRETS_FILE="$BASE_PATH/secrets.env"
 
 if [ -z "${1:-}" ]; then
     echo "Usage: ./jump.sh <cmd> [args...]"
-    echo "  start | stop | status | logs [-f] | pubkey | ip"
+    echo "  start | refresh | stop | status | logs [-f] | pubkey | ip"
     exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" --help
 fi
 
