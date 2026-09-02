@@ -1039,17 +1039,23 @@ def derive(manifest, plugin_files, agent_files, env):
         remote_shell = "bash"
         print("  ⚠ remote.tmux is deprecated — use remote.shell: bash "
               "(tmux: false is read as shell: bash)", file=sys.stderr)
-    elif not remote_shell:
-        # herdr is the landing default (PLN - herdr adoption P4, default
-        # flip). tmux stays installed and selectable until P2/P3 move
-        # remote.notify and plugin jobs off it.
-        remote_shell = "herdr"
-    if remote_shell not in ("tmux", "herdr", "bash"):
-        raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
-
     remote_notify = _scalar(remote.get("notify"), "remote.notify")
     if remote_notify not in ("", "ntfy"):
         raise ManifestError(f"remote.notify must be 'ntfy' (got '{remote_notify}')")
+    if not remote_shell:
+        # herdr is the landing default (PLN - herdr adoption P4a, default
+        # flip). tmux stays installed and selectable until P2/P3 move
+        # remote.notify and plugin jobs off it — and a notify: ntfy manifest
+        # that predates the flip keeps working: the idle monitor only runs
+        # inside tmux, so notify implies it rather than failing the bottle.
+        if remote_notify:
+            remote_shell = "tmux"
+            print("  ⚠ remote.notify: ntfy implies remote.shell: tmux (herdr is the "
+                  "default otherwise) — set shell: tmux explicitly", file=sys.stderr)
+        else:
+            remote_shell = "herdr"
+    if remote_shell not in ("tmux", "herdr", "bash"):
+        raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
     if remote_notify and remote_shell != "tmux":
         raise ManifestError(
             "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")

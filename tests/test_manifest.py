@@ -364,15 +364,29 @@ class TestRemoteSchema(unittest.TestCase):
         d = derive({"remote": {"shell": "tmux"}})
         self.assertEqual(d["REMOTE_SHELL"], "tmux")
 
-    def test_notify_without_explicit_shell_rejected(self):
-        # notify: ntfy alone used to ride the tmux default; with herdr as
-        # the default it must name shell: tmux, not silently land in herdr
-        # where the idle monitor never runs.
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"remote": {"notify": "ntfy"}})
-        self.assertEqual(
-            str(cm.exception),
-            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
+    def test_notify_without_explicit_shell_implies_tmux_and_warns(self):
+        # notify: ntfy alone used to ride the tmux default; a manifest that
+        # predates the herdr flip must keep working — the idle monitor only
+        # runs inside tmux, so notify implies it (with a nudge) rather than
+        # silently landing in herdr or failing the bottle.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"notify": "ntfy"}},
+                       env=dict(ENV, NTFY_URL="https://ntfy.example.com"))
+        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertEqual(d["REMOTE_NOTIFY"], "ntfy")
+        self.assertIn(
+            "remote.notify: ntfy implies remote.shell: tmux (herdr is the "
+            "default otherwise) — set shell: tmux explicitly",
+            err.getvalue())
+
+    def test_notify_with_explicit_tmux_does_not_warn(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"shell": "tmux", "notify": "ntfy"}},
+                       env=dict(ENV, NTFY_URL="https://ntfy.example.com"))
+        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertEqual(err.getvalue(), "")
 
     def test_jump_false(self):
         d = derive({"remote": {"jump": False}})

@@ -71,8 +71,8 @@ memory: 10g
 # the keys into a single remote: block):
 #   notify: ntfy     push to your ntfy topic when a tmux session goes idle at
 #                    a prompt with nobody attached. Requires shell: tmux
-#                    (herdr is the default, so set it explicitly alongside
-#                    notify:) and NTFY_URL (+ optional
+#                    (implied when shell: is omitted, since herdr is the
+#                    default otherwise) and NTFY_URL (+ optional
 #                    NTFY_TOPIC) in secrets.env; the ntfy host is auto-added
 #                    to this bottle's egress allowlist (a self-hosted ntfy on
 #                    a plain LAN hostname needs its IP in
