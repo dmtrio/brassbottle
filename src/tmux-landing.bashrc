@@ -31,27 +31,36 @@ if [ "${REMOTE_SHELL:-tmux}" != "bash" ] && [ -z "${TMUX:-}" ] && [ -z "${HERDR_
     esac
     [ "${TERM_PROGRAM:-}" = "vscode" ] && should_land=true
 
+    if [ "$should_land" = "true" ]; then
+        # Best-effort GC first: clean stale empty login-* sessions before
+        # landing. Runs for BOTH shells — a bottle switched from tmux to
+        # herdr still has yesterday's idle login-* sessions, and nothing
+        # else would ever collect them. Output (incl. tracebacks) goes to
+        # the GC's own log — stdout here would print into the login banner.
+        python3 /usr/local/lib/djinn/tmux_landing_gc.py \
+            >>/tmp/djinn-tmux-landing-gc.log 2>&1 || true
+    fi
+
     if [ "$should_land" = "true" ] && [ "${REMOTE_SHELL:-tmux}" = "herdr" ]; then
         # herdr's model: one persistent server per bottle, not
         # fresh-per-login. Launch-or-attach the default session; the
         # server survives detach (ctrl+b q), so every login lands back
-        # in the same workspace. An image without the binary (built before
-        # the pin landed) lands in plain bash with a note rather than
-        # exec-ing into nothing and killing the login.
+        # in the same workspace. NOT exec'd: if herdr cannot start (image
+        # built before the pin, config error, socket failure) the login
+        # must fall through to a shell with a note, not die shell-less.
         if command -v herdr >/dev/null 2>&1; then
-            exec herdr
+            herdr
+            herdr_rc=$?
+            [ "$herdr_rc" -eq 0 ] && exit 0
+            echo "herdr exited with status $herdr_rc — landing in bash (see ~/.config/herdr/herdr*.log)" >&2
+            unset herdr_rc
+        else
+            echo "remote.shell: herdr, but this image has no herdr binary — landing in bash (re-run djinn up to rebuild)" >&2
         fi
-        echo "remote.shell: herdr, but this image has no herdr binary — landing in bash (re-run djinn up to rebuild)" >&2
         should_land=false
     fi
 
     if [ "$should_land" = "true" ]; then
-        # Best-effort GC first: clean stale empty login-* sessions before
-        # creating the next fresh one. Output (incl. tracebacks) goes to the
-        # GC's own log — stdout here would print into the login banner.
-        python3 /usr/local/lib/djinn/tmux_landing_gc.py \
-            >>/tmp/djinn-tmux-landing-gc.log 2>&1 || true
-
         # '=' forces an exact-name match — a bare -t prefix-matches, so
         # login-42 would false-positive against a live login-421.
         name="login-$$"

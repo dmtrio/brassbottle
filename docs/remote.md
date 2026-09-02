@@ -60,7 +60,9 @@ remote:
   You can always reopen the picker with `Ctrl-b s`.
 - **herdr** — agent-aware workspace: the sidebar shows every pane with its
   agent state (working / blocked / done / idle). One persistent server per
-  bottle, so every login lands in the same workspace; detach with `ctrl+b q`;
+  bottle, so every login lands in the same workspace — including every
+  interactive VS Code/Cursor terminal, which attaches as another client of
+  that one workspace (a mirror, not a fresh shell); detach with `ctrl+b q`;
   the prefix is `ctrl+b` like tmux; `herdr --help` and https://herdr.dev/docs
   cover the rest. Two things still need tmux for now: `remote.notify` and
   plugin background jobs (both move to herdr in later phases of
