@@ -6,6 +6,7 @@ shape, the not-configured branches, docker-missing handling, and the pubkey
 command's read-from-the-host-side-of-the-mount behaviour.
 """
 
+import contextlib
 import io
 import subprocess
 import sys
@@ -288,6 +289,52 @@ class PubkeyTests(unittest.TestCase):
             run.assert_not_called()
 
 
+class AuthorizedKeyTests(unittest.TestCase):
+    def test_authorized_key_prefers_secrets_env_override_and_warns(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            p["client_pubkey"].write_text("ssh-ed25519 AAAAjump djinn-jump\n", encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = jump_host.cmd_authorized_key(
+                    base, env={"JUMP_AUTHORIZED_KEY": "ssh-ed25519 AAAAover x\n"}
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.getvalue(), "ssh-ed25519 AAAAover x\n")
+            self.assertIn("overrides", err.getvalue())
+            self.assertIn(str(p["client_pubkey"]), err.getvalue())
+
+    def test_authorized_key_reads_the_file_when_unset(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            p["client_pubkey"].write_text("ssh-ed25519 AAAAjump djinn-jump\n", encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = jump_host.cmd_authorized_key(base, env={})
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.getvalue(), "ssh-ed25519 AAAAjump djinn-jump\n")
+            self.assertEqual(err.getvalue(), "")
+
+    def test_authorized_key_missing_file_explains_itself(self):
+        with tempfile.TemporaryDirectory() as home:
+            with self.assertRaises(jump_host.JumpHostError) as ctx:
+                jump_host.cmd_authorized_key(Path(home), env={})
+            self.assertIn("./djinn jump start", str(ctx.exception))
+
+    def test_pubkey_and_authorized_key_share_one_reader(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            p["client_pubkey"].write_text("ssh-ed25519 AAAAjump djinn-jump\n", encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(jump_host.cmd_authorized_key(base, env={}), 0)
+                self.assertEqual(jump_host.cmd_pubkey(base), 0)
+            self.assertEqual(out.getvalue(), "ssh-ed25519 AAAAjump djinn-jump\n" * 2)
+
+
 class IpTests(unittest.TestCase):
     def test_ip_prefers_the_live_bridge(self):
         # Same reasoning as cmd_start: ensure_net only WARNS on subnet drift
@@ -358,7 +405,7 @@ class ParserTests(unittest.TestCase):
     def test_every_subcommand_parses(self):
         parser = jump_host.build_parser()
         for argv in (
-            ["start"], ["stop"], ["status"], ["logs"], ["logs", "-f"], ["pubkey"], ["ip"],
+            ["start"], ["stop"], ["status"], ["logs"], ["logs", "-f"], ["pubkey"], ["authorized-key"], ["ip"],
         ):
             with self.subTest(argv=argv):
                 parser.parse_args(argv)

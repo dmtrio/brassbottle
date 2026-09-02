@@ -93,6 +93,27 @@ class TestComposeInvocation(unittest.TestCase):
             "of the command",
         )
 
+    def test_jump_key_is_resolved_before_compose(self):
+        text = UP_SH.read_text()
+        marker = 'jump_host.py" authorized-key'
+        self.assertIn(
+            marker,
+            text,
+            "up.sh must resolve the jump public key via jump_host.py authorized-key",
+        )
+        compose_idx = text.find("docker compose")
+        key_idx = text.find(marker)
+        self.assertLess(
+            key_idx,
+            compose_idx,
+            "the jump key resolution must run before the docker compose invocation",
+        )
+        self.assertIn(
+            'if JUMP_AUTHORIZED_KEY="$(',
+            text,
+            "key resolution must use the non-fatal `if VAR=$(...)` shape so set -e cannot abort",
+        )
+
     def test_compose_agents_enabled_default_is_fail_closed(self):
         compose_text = COMPOSE_LOCAL.read_text()
         self.assertIn(

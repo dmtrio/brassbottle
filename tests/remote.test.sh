@@ -74,6 +74,12 @@ grep -qF 'JUMP_AUTHORIZED_KEY' src/remote_access.py \
 grep -qF 'JUMP_AUTHORIZED_KEY=${JUMP_AUTHORIZED_KEY:-}' compose/docker-compose.local.yml \
     && pass "local compose passes JUMP_AUTHORIZED_KEY into the bottle" \
     || fail "compose/docker-compose.local.yml does not pass JUMP_AUTHORIZED_KEY"
+grep -qF 'jump_host.py" authorized-key' up.sh \
+    && pass "up.sh reads the jump key from DJINN_HOME" \
+    || fail "up.sh does not resolve the jump key via jump_host.py authorized-key"
+! grep -qF 'then add the printed key' up.sh \
+    && pass "up.sh no longer asks for a secrets.env paste" \
+    || fail "up.sh still tells the operator to paste the key into secrets.env"
 # The append itself moved into remote_access.py's _rebuild_authorized_keys
 # (Python over bash — src/entrypoint.sh no longer touches the file directly),
 # so pin the operator-then-jump ORDER there instead of the old

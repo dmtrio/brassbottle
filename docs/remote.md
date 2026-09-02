@@ -184,7 +184,7 @@ for the whole fleet instead of a UDP range baked into every bottle.
 ```bash
 ./djinn jump start      # build + start; prints the address and the key to authorise
 ./djinn jump ip         # print the jump's static bridge address
-./djinn jump pubkey     # the key your bottles must trust
+./djinn jump pubkey     # the key bottles authorise (read by ./djinn up itself)
 ./djinn jump status
 ./djinn jump logs -f
 ./djinn jump stop
@@ -229,18 +229,14 @@ for the whole fleet instead of a UDP range baked into every bottle.
 2. `./djinn jump start` — creates `djinn-net` if it does not exist yet, then
    generates the jump's own ed25519 keypair (persisted under
    `$DJINN_HOME/jump/ssh/`, so a rebuild keeps it) and prints it.
-3. Put that line in `secrets.env` as `JUMP_AUTHORIZED_KEY`, **quoted** — the
-   file is sourced by every host script, so an unquoted key's spaces would
-   try to run its comment as a command:
+3. `./djinn up <bottle>` for each bottle you want reachable — it reads the
+   jump key from `$DJINN_HOME/jump/ssh/id_ed25519.pub` itself, so no
+   `secrets.env` entry is needed. The bottle *appends* it to
+   `authorized_keys` — your own `SSH_AUTHORIZED_KEY` keeps working, so a
+   bottle stays directly reachable even when the jump is down.
 
-   ```bash
-   JUMP_AUTHORIZED_KEY="ssh-ed25519 AAAA... djinn-jump"
-   ```
-4. `./djinn up <bottle>` for each bottle you want reachable. The bottle
-   picks up the jump key automatically on its next `./djinn up` — no manifest
-   edit needed. The bottle *appends* it to `authorized_keys` — your own
-   `SSH_AUTHORIZED_KEY` keeps working, so a bottle stays directly reachable
-   even when the jump is down.
+`JUMP_AUTHORIZED_KEY` in `secrets.env` overrides the file for a jump on
+another machine (deprecated; `djinn up` warns while it is set).
 
 **Then, from a phone over your tunnel:**
 
