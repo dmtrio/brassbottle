@@ -175,7 +175,10 @@ if [ "$START_SSHD" = "true" ]; then
         sed -i "/^$var=/d" /etc/environment
         echo "$var=$val" >> /etc/environment
     done
-    [ "${REMOTE_SHELL:-tmux}" = "tmux" ] && echo "✓ Remote access: logins land in a fresh tmux session (picker when others exist)"
+    case "${REMOTE_SHELL:-tmux}" in
+        tmux)  echo "✓ Remote access: logins land in a fresh tmux session (picker when others exist)" ;;
+        herdr) echo "✓ Remote access: logins land in the bottle's herdr workspace (detach ctrl+b q)" ;;
+    esac
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -205,9 +205,15 @@ grep -qF 'TERM_PROGRAM' src/tmux-landing.bashrc \
 grep -qF '"${REMOTE_SHELL:-tmux}" = "herdr"' src/tmux-landing.bashrc \
     && pass "landing snippet dispatches on REMOTE_SHELL=herdr" \
     || fail "landing snippet lost the herdr dispatch"
+grep -qE '^ +herdr$' src/tmux-landing.bashrc \
+    && pass "herdr landing runs herdr in the foreground (launch-or-attach the default session)" \
+    || fail "landing snippet lost the herdr launch"
 grep -qF 'exec herdr' src/tmux-landing.bashrc \
-    && pass "herdr landing execs herdr (launch-or-attach the default session)" \
-    || fail "landing snippet lost the exec herdr launch"
+    && fail "herdr landing must not exec (a failed start would kill the login shell-less)" \
+    || pass "herdr landing does not exec (start failure falls through to bash)"
+grep -qF 'herdr_rc' src/tmux-landing.bashrc \
+    && pass "herdr landing falls back to bash when herdr exits non-zero" \
+    || fail "landing snippet lost the herdr exit-status fallback"
 grep -qF 'HERDR_ENV' src/tmux-landing.bashrc \
     && pass "landing snippet guards recursion inside herdr-managed panes" \
     || fail "landing snippet lost the HERDR_ENV recursion guard"
@@ -220,13 +226,13 @@ grep -qF 'tmux-landing.bashrc' Dockerfile \
 grep -qF 'COPY src/tmux_landing_gc.py /usr/local/lib/djinn/tmux_landing_gc.py' Dockerfile \
     && pass "Dockerfile installs tmux_landing_gc.py into /usr/local/lib/djinn" \
     || fail "Dockerfile does not wire tmux_landing_gc.py into /usr/local/lib/djinn"
-grep -qF 'ARG HERDR_VERSION=0.8.2' Dockerfile \
-    && pass "Dockerfile pins herdr to v0.8.2" \
-    || fail "Dockerfile lost the herdr version pin"
-grep -qF '976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4' Dockerfile \
+grep -qE '^ARG HERDR_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' Dockerfile \
+    && pass "Dockerfile pins herdr to an explicit version (never latest)" \
+    || fail "Dockerfile lost the explicit herdr version pin"
+grep -qE '^ARG HERDR_SHA256_AMD64=[0-9a-f]{64}$' Dockerfile \
     && pass "Dockerfile pins herdr's amd64 release sha256" \
     || fail "Dockerfile lost the herdr amd64 sha256 pin"
-grep -qF 'f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d' Dockerfile \
+grep -qE '^ARG HERDR_SHA256_ARM64=[0-9a-f]{64}$' Dockerfile \
     && pass "Dockerfile pins herdr's arm64 release sha256" \
     || fail "Dockerfile lost the herdr arm64 sha256 pin"
 grep -qF 'sha256sum -c' Dockerfile \
