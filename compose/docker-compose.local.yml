@@ -30,6 +30,13 @@ services:
     container_name: djinn-${CONTAINER_NAME}
     hostname: ${CONTAINER_NAME}
 
+    labels:
+      # Host-side jump_registry.py queries this label and writes a read-only
+      # picker registry for the jump. The jump itself never receives Docker
+      # socket access.
+      djinn.remote.jump: "${REMOTE_JUMP:-true}"
+      djinn.jump.scope: "${JUMP_REGISTRY_SCOPE}"
+
     restart: unless-stopped
 
     # Egress firewall (init-firewall.sh) needs these; entrypoint fails loud

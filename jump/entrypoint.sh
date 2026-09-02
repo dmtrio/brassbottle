@@ -55,6 +55,19 @@ if [ "$key_count" -eq 0 ]; then
 fi
 log "authorized_keys installed keys=$key_count"
 
+# Every interactive SSH/mosh shell gets one selector before the prompt. `exec`
+# in .bashrc makes the selected downstream SSH own the Mosh terminal; a quit
+# from the picker re-execs bash with the guard set, yielding the normal jump
+# shell as an escape hatch. Non-interactive SSH commands never source it.
+if ! grep -q 'DJINN_JUMP_PICKER_DONE' /home/coder/.bashrc; then
+cat >> /home/coder/.bashrc <<'BASHRC'
+if [[ $- == *i* ]] && [ -z "${DJINN_JUMP_PICKER_DONE:-}" ]; then
+    exec python3 /usr/local/bin/djinn-jump-picker
+fi
+BASHRC
+fi
+chown coder:coder /home/coder/.bashrc
+
 # Host keys live on the mount, not in the image layer: a regenerated host key
 # is a scary warning on the operator's phone every time the jump is rebuilt.
 host_keys_generated=0
@@ -115,13 +128,14 @@ done
 
 cat > /etc/motd <<'MOTD'
 
-  djinn jump — hop onward to a bottle by container name:
+  djinn jump — choose a running bottle from the automatic picker.
 
-      ssh djinn-<bottle>          # e.g. ssh djinn-coding-tanks
+  Press q to stay on this shell; manual hops remain available:
 
-  Work persists in the bottle's own tmux sessions — each login lands
-  in a fresh one; Ctrl-b s picks up a session started elsewhere. This
-  container only carries the mosh leg from your phone.
+      ssh djinn-<bottle>
+
+  This container carries the mosh leg from your phone; work persists
+  in the selected bottle's own tmux sessions.
 
 MOTD
 

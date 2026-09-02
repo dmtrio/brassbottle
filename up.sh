@@ -278,6 +278,10 @@ if [ "$JUMP_IP_FAILED" = "true" ] || [ -s "$JUMP_IP_ERR" ]; then
 fi
 [ "$JUMP_IP_ERR" = "/dev/null" ] || rm -f "$JUMP_IP_ERR"
 
+# Scope the registry label to this DJINN_HOME. A shared Docker daemon may hold
+# several installations; a jump must never list another installation's bottles.
+JUMP_REGISTRY_SCOPE="$(DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" scope)"
+
 # ── Jump reachability preflight (non-fatal) ───────────────────────────────────
 # Both are quiet-degradation warnings, not errors: the entrypoint and firewall
 # already degrade gracefully when either input is missing (no sshd started, or
@@ -322,6 +326,7 @@ KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWS
 SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
   JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" \
 REMOTE_JUMP="$REMOTE_JUMP" REMOTE_SHELL="$REMOTE_SHELL" DJINN_JUMP_IP="$JUMP_IP" \
+JUMP_REGISTRY_SCOPE="$JUMP_REGISTRY_SCOPE" \
 NTFY_URL="$CONTAINER_NTFY_URL" NTFY_TOPIC="$CONTAINER_NTFY_TOPIC" \
 IMAGE_TAG="$NAME" \
 docker compose -p "$CNAME" --project-directory "$SCRIPT_DIR" \
@@ -374,6 +379,11 @@ if [ "$READY" = "false" ]; then
     docker logs "$CNAME" 2>&1 | tail -20
     exit 1
 fi
+
+# Refresh the jump selector only after this bottle is confirmed running. The
+# helper queries Docker on the HOST and writes into a directory mount, so the
+# jump gets the update without Docker-socket access or a restart.
+DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" refresh
 
 # ── Bootstrap workspace (idempotent; layout v2: /workspace/repos/<name>) ─────
 # A v1 workspace (/workspace/main) cannot migrate in place — worktree metadata

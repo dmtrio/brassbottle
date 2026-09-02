@@ -233,13 +233,19 @@ for the whole fleet instead of a UDP range baked into every bottle.
 
 ```
 mosh coder@<jump-ip>           # e.g., mosh coder@172.30.0.254
-ssh djinn-coding-tanks         # hop onward; fresh tmux landing + picker
 ```
 
-Use `./djinn jump ip` to get the jump's static bridge address. The hop must
-be **SSH**, not `docker exec` — the landing snippet applies to sshd
-logins and interactive editor terminals. `docker exec` deliberately
-stays a bare shell.
+Use `./djinn jump ip` to get the jump's static bridge address. The jump shows
+a numbered list of running, jump-enabled bottles; selecting one automatically
+replaces the jump shell with `ssh djinn-<bottle>`, so Moshi needs only this one
+connection. Press `q` to keep a normal jump shell and make a manual SSH hop.
+The selector is a host-generated, read-only registry — the jump never receives
+Docker socket access — and `djinn up` / `djinn down` refresh it as bottles
+change.
+
+The downstream hop is **SSH**, not `docker exec`: the bottle's landing logic
+applies to sshd logins and interactive editor terminals. `docker exec`
+deliberately stays a bare shell.
 
 **Why no published host ports.** The jump is reached at its bridge IP over
 the tunnel, so nothing is published to the host at all. Its address is
