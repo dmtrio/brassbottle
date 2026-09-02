@@ -445,16 +445,22 @@ def build_parser() -> argparse.ArgumentParser:
         description="Singleton mosh jump container for this djinn installation.",
     )
     parser.add_argument("--base-path", default=None, help=argparse.SUPPRESS)
-    sub = parser.add_subparsers(dest="command", required=True)
+    # metavar="<command>" keeps the {a,b,c} choice list out of the usage line,
+    # so the internal subcommands below stay out of --help entirely. They are
+    # added WITHOUT help= on purpose: argparse renders help=SUPPRESS on a
+    # subparser as a literal "==SUPPRESS==" row, while a subparser with no
+    # help= at all gets no row. tests/test_jump_host.py derives the public
+    # subcommand set from exactly this distinction.
+    sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
     sub.add_parser("start", help="build and start the jump container")
     sub.add_parser("refresh", help="refresh the jump bottle picker registry")
-    sub.add_parser("scope", help=argparse.SUPPRESS)
+    sub.add_parser("scope")  # internal: up.sh
     sub.add_parser("stop", help="stop and remove the jump container")
     sub.add_parser("status", help="report whether the jump container is running")
     logs = sub.add_parser("logs", help="show jump container logs")
     logs.add_argument("-f", "--follow", action="store_true")
     sub.add_parser("pubkey", help="print the key bottles must authorise")
-    sub.add_parser("authorized-key", help=argparse.SUPPRESS)
+    sub.add_parser("authorized-key")  # internal: up.sh
     sub.add_parser("ip", help="print the jump's static bridge address")
     return parser
 

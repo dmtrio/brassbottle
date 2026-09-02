@@ -497,54 +497,93 @@ class ParserTests(unittest.TestCase):
 
 
 class HelpTextDriftTests(unittest.TestCase):
-    """The operator-facing usage summaries (jump.sh, djinn, docs) must list
-    every public subcommand build_parser() exposes — they went stale once
-    (refresh/ip missing) and the shell wrapper printed one list while the
-    argparse --help it then exec'd printed another."""
+    """Every operator-facing usage summary must list every public subcommand
+    build_parser() exposes. They went stale once (refresh/ip missing from
+    three copies of the same list), so the public set is derived from the
+    parser and each summary is checked against it."""
 
     ROOT = Path(__file__).parent.parent
+    EXPECTED_PUBLIC = ["start", "refresh", "stop", "status", "logs", "pubkey", "ip"]
+    EXPECTED_HIDDEN = ["scope", "authorized-key"]
 
     @staticmethod
-    def _public_subcommands() -> list[str]:
-        parser = jump_host.build_parser()
-        for action in parser._actions:  # noqa: SLF001 - argparse has no public accessor
-            if isinstance(action, argparse.Action) and action.choices:
-                return [
-                    name for name, sub in action.choices.items()
-                    if sub.description is not None or any(
-                        ch.help != argparse.SUPPRESS
-                        for ch in action._choices_actions if ch.dest == name  # noqa: SLF001
-                    )
-                ]
+    def _subparsers() -> argparse._SubParsersAction:  # noqa: SLF001 - no public accessor
+        for action in jump_host.build_parser()._actions:  # noqa: SLF001
+            if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+                return action
         raise AssertionError("no subparsers on jump parser")
 
-    def _assert_lists_all(self, rel: str, needle: str, public: list[str]) -> None:
-        text = (self.ROOT / rel).read_text()
+    @classmethod
+    def _public_subcommands(cls) -> list[str]:
+        # A subparser gets a --help row only when added with a non-SUPPRESS
+        # help=; that row is what makes it "public".
+        sub = cls._subparsers()
+        return [a.dest for a in sub._choices_actions if a.help is not argparse.SUPPRESS]  # noqa: SLF001
+
+    @staticmethod
+    def _line_containing(text: str, needle: str, where: str) -> str:
         line = next((ln for ln in text.splitlines() if needle in ln), None)
-        self.assertIsNotNone(line, f"{rel}: usage line containing {needle!r} not found")
-        for name in public:
+        assert line is not None, f"{where}: no line containing {needle!r}"
+        return line
+
+    def _assert_line_lists_all(self, rel: str, needle: str) -> None:
+        line = self._line_containing((self.ROOT / rel).read_text(), needle, rel)
+        for name in self._public_subcommands():
             with self.subTest(file=rel, subcommand=name):
                 self.assertIn(name, line, f"{rel} usage omits {name!r}: {line.strip()}")
 
-    def test_public_subcommands_are_the_expected_set(self):
+    def _assert_block_lists_all(self, rel: str, prefix: str) -> None:
+        # One `<prefix><name>` line per public subcommand (comment/code blocks).
+        text = (self.ROOT / rel).read_text()
+        listed = {
+            ln.strip()[len(prefix):].split()[0]
+            for ln in text.splitlines()
+            if ln.strip().startswith(prefix) and ln.strip()[len(prefix):].split()
+        }
+        for name in self._public_subcommands():
+            with self.subTest(file=rel, subcommand=name):
+                self.assertIn(name, listed, f"{rel}: no '{prefix}{name}' line")
+
+    def test_public_and_hidden_sets_are_the_expected_ones(self):
+        sub = self._subparsers()
+        self.assertEqual(sorted(self._public_subcommands()), sorted(self.EXPECTED_PUBLIC))
         self.assertEqual(
-            sorted(self._public_subcommands()),
-            sorted(["start", "refresh", "stop", "status", "logs", "pubkey", "ip"]),
+            sorted(set(sub.choices) - set(self._public_subcommands())),
+            sorted(self.EXPECTED_HIDDEN),
         )
 
-    def test_jump_sh_usage_lists_every_public_subcommand(self):
-        self._assert_lists_all("jump.sh", "start | ", self._public_subcommands())
+    def test_help_output_hides_internal_subcommands(self):
+        help_text = jump_host.build_parser().format_help()
+        self.assertNotIn("SUPPRESS", help_text)
+        for name in self.EXPECTED_HIDDEN:
+            with self.subTest(subcommand=name):
+                self.assertNotIn(name, help_text)
+        for name in self.EXPECTED_PUBLIC:
+            with self.subTest(subcommand=name):
+                self.assertIn(name, help_text)
 
-    def test_djinn_dispatcher_help_lists_every_public_subcommand(self):
-        self._assert_lists_all("djinn", "singleton mosh jump container", self._public_subcommands())
+    def test_jump_sh_usage_line(self):
+        self._assert_line_lists_all("jump.sh", "start | ")
 
-    def test_script_doc_lists_every_public_subcommand(self):
+    def test_jump_sh_header_comment(self):
+        self._assert_block_lists_all("jump.sh", "#   ./jump.sh ")
+
+    def test_djinn_dispatcher_help(self):
+        self._assert_line_lists_all("djinn", "singleton mosh jump container")
+
+    def test_remote_doc_command_block(self):
+        self._assert_block_lists_all("docs/remote.md", "./djinn jump ")
+
+    def test_script_doc_bullet(self):
         text = (self.ROOT / "docs/script.md").read_text()
-        idx = text.index("`src/jump_host.py`")
-        blurb = text[idx: idx + 200]
+        marker = "`src/jump_host.py`"
+        self.assertIn(marker, text, "docs/script.md: jump_host bullet missing")
+        idx = text.index(marker)
+        nxt = text.find("\n- ", idx)
+        bullet = text[idx: nxt if nxt != -1 else len(text)]
         for name in self._public_subcommands():
             with self.subTest(subcommand=name):
-                self.assertIn(name, blurb)
+                self.assertIn(name, bullet, f"docs/script.md jump_host bullet omits {name!r}")
 
 
 if __name__ == "__main__":
