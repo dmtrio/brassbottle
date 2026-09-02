@@ -328,6 +328,11 @@ RUN apt-get update && apt-get install -y openssh-server \
         -e 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' \
         /etc/ssh/sshd_config \
     && echo "AllowUsers $USERNAME" >> /etc/ssh/sshd_config \
+    # openssh-server's postinst bakes host keys into the image layer, shared
+    # by every bottle built from that cached layer. sshd is pointed at the
+    # per-bottle volume instead (entrypoint generates there); drop the baked
+    # keys so a private key nobody uses does not ship in the image.
+    && rm -f /etc/ssh/ssh_host_* \
     && mkdir -p /etc/ssh/host_keys \
     && printf 'HostKey /etc/ssh/host_keys/ssh_host_%s_key\n' rsa ecdsa ed25519 \
         >> /etc/ssh/sshd_config

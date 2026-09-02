@@ -44,6 +44,12 @@ class SshHostKeyPersistenceTests(unittest.TestCase):
         self.assertEqual(types, KEY_TYPES)
         self.assertIn(f"mkdir -p {KEY_DIR}", DOCKERFILE)
 
+    def test_dockerfile_drops_the_keys_the_apt_postinst_baked(self):
+        # openssh-server's postinst runs ssh-keygen -A at build time; those
+        # keys are shared by every bottle from the cached layer and unused
+        # once HostKey points at the volume, so they must not ship.
+        self.assertIn("rm -f /etc/ssh/ssh_host_*", DOCKERFILE)
+
     def test_entrypoint_generates_into_key_dir_never_the_image_default(self):
         self.assertNotIn("ssh-keygen -A", ENTRYPOINT,
                          "-A writes to /etc/ssh in the image layer, not the volume")

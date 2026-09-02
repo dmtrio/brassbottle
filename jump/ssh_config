@@ -1,12 +1,11 @@
 # Outbound SSH from the jump to bottles, over djinn-net's embedded DNS.
 #
-# accept-new, not `no`: a bottle regenerates its host keys on every recreate
-# (src/entrypoint.sh runs ssh-keygen -A only when they are absent, and the
-# container filesystem does not survive), so strict checking would fail on
-# every ./djinn up. accept-new still refuses a CHANGED key for a host already
-# known within one bottle lifetime, which is the attack this protects against
-# on a private bridge. Persisting bottle host keys is the real fix and is
-# tracked as a follow-up; until then `ssh-keygen -R <bottle>` after a recreate.
+# accept-new, not `no`: a bottle's host keys persist on its ssh-host-keys
+# volume (src/entrypoint.sh generates them there on first boot), so a first
+# hop to a new bottle must be able to learn its key unattended, and a hop to
+# a known bottle refuses a CHANGED key — the attack this protects against on
+# a private bridge. Keys change only when the bottle is purged (down -v);
+# `ssh-keygen -R <bottle>` in known_hosts after that (docs/remote.md).
 Host djinn-*
     User coder
     UserKnownHostsFile /etc/djinn-jump/ssh/known_hosts
