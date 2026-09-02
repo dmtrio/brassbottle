@@ -76,6 +76,23 @@ class StartTests(unittest.TestCase):
             self.assertIn("client_key=ready", out.getvalue())
             self.assertNotIn("client-key-pending", err.getvalue())
 
+    def test_wait_for_client_key_ignores_an_empty_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            p["client_pubkey"].write_text("", encoding="utf-8")
+            calls = []
+
+            def fill_on_first_poll(_seconds):
+                calls.append(1)
+                p["client_pubkey"].write_text("k\n", encoding="utf-8")
+
+            with mock.patch.object(jump_host, "KEY_WAIT_SECONDS", 60.0), mock.patch.object(
+                jump_host.time, "sleep", side_effect=fill_on_first_poll
+            ):
+                self.assertTrue(jump_host._wait_for_client_key(base))
+            self.assertEqual(len(calls), 1)
+
     def test_wait_for_client_key_polls_until_the_file_appears(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)
@@ -341,6 +358,18 @@ class PubkeyTests(unittest.TestCase):
 
 
 class AuthorizedKeyTests(unittest.TestCase):
+    def test_empty_key_file_fails_like_a_missing_one(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            p["client_pubkey"].write_text("\n", encoding="utf-8")
+            with self.assertRaises(jump_host.JumpHostError) as ctx:
+                jump_host.cmd_authorized_key(base, env={})
+            self.assertIn("empty", str(ctx.exception))
+            self.assertIn("./djinn jump start", str(ctx.exception))
+            with self.assertRaises(jump_host.JumpHostError):
+                jump_host.cmd_pubkey(base)
+
     def test_authorized_key_prefers_secrets_env_override_and_warns(self):
         with tempfile.TemporaryDirectory() as home:
             base = Path(home)

@@ -244,15 +244,19 @@ def cmd_start(base_path: Path) -> int:
 def _wait_for_client_key(base_path: Path) -> bool:
     """Poll for the entrypoint-generated client key; never fatal.
 
-    Returns True once the file exists, False after KEY_WAIT_SECONDS with a
-    stderr warning — the container is up either way, only the first
-    `./djinn up` would need re-running.
+    Returns True once the file has content (an empty file is ssh-keygen mid
+    write — keep waiting), False after KEY_WAIT_SECONDS with a stderr warning
+    — the container is up either way, only the first `./djinn up` would need
+    re-running.
     """
     pub = paths(base_path)["client_pubkey"]
     deadline = time.monotonic() + KEY_WAIT_SECONDS
     while True:
-        if pub.exists():
-            return True
+        try:
+            if pub.read_text(encoding="utf-8").strip():
+                return True
+        except OSError:
+            pass
         if time.monotonic() >= deadline:
             print(
                 f"jump start warn reason=client-key-pending path={pub} "
@@ -356,9 +360,18 @@ def read_client_pubkey(base_path: Path) -> str:
             f"(the container writes it as uid 1000)"
         ) from exc
     try:
-        return pub.read_text(encoding="utf-8").strip()
+        text = pub.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise JumpHostError(f"cannot read {pub}: {exc}") from exc
+    # An empty or truncated file must fail like a missing one: returning ""
+    # would exit 0, up.sh would pass an empty JUMP_AUTHORIZED_KEY, and the
+    # bottle would quietly come up without jump reachability and no reason.
+    if not text:
+        raise JumpHostError(
+            f"jump key file is empty at {pub} — restart the jump "
+            f"(./djinn jump stop && ./djinn jump start) to regenerate it"
+        )
+    return text
 
 
 def cmd_pubkey(base_path: Path) -> int:
