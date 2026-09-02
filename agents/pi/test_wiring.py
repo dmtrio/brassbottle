@@ -1,5 +1,4 @@
 """Wiring contract for agents/pi/agent.yml — run via agent_test_kit.wire()."""
-import json
 import os
 import sys
 import unittest
@@ -8,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent_test_kit as kit
 
-ADAPTER_DIR = Path(__file__).parent / "mcp-adapter"
+AGENT_DIR = Path(__file__).parent
+ADAPTER_NPM_SPEC = "npm:pi-mcp-adapter@"
 
 
 class PiWiring(unittest.TestCase):
@@ -29,43 +29,31 @@ class PiWiring(unittest.TestCase):
 
 
 class PiMcpAdapter(unittest.TestCase):
-    """The pi-mcp-adapter extension contract: source, pinned deps, install.
+    """pi's MCP consumer contract: the upstream pi-mcp-adapter package.
 
-    The extension is what turns the wired ~/.pi/agent/mcp.json from inert
-    bytes into live tools — wiring is only half the story, so the contract
-    pins the other half beside it.
+    The wired ~/.pi/agent/mcp.json is inert without an MCP client;
+    pi-mcp-adapter (npm package, pinned) reads that file natively and
+    bridges its servers. The contract pins the version in the install
+    block — pi skips pinned npm packages on update, so the image build
+    decides the version and bumping is a deliberate edit here.
     """
 
-    def adapter(self, name: str) -> str:
-        return (ADAPTER_DIR / name).read_text(encoding="utf-8")
+    def read_agent_yml(self) -> str:
+        return (AGENT_DIR / "agent.yml").read_text()
 
-    def test_extension_source_exists(self):
-        self.assertTrue((ADAPTER_DIR / "index.ts").is_file(), "index.ts missing")
-        self.assertIn("export default function", self.adapter("index.ts"))
-        source = self.adapter("index.ts")
-        # The adapter must read the djinn-wired config and register tools.
-        self.assertIn(".pi", source)
-        self.assertIn("mcp.json", source)
-        self.assertIn("registerTool", source)
+    def read_install(self) -> str:
+        return self.read_agent_yml().split("install: |", 1)[1].split("\nmcp:", 1)[0]
 
-    def test_sdk_dependency_is_pinned_in_lockfile(self):
-        pkg = json.loads(self.adapter("package.json"))
-        self.assertIn("@modelcontextprotocol/sdk", pkg.get("dependencies", {}))
-        lock = json.loads(self.adapter("package-lock.json"))
-        locked = lock.get("packages", {}).get("node_modules/@modelcontextprotocol/sdk")
-        self.assertIsNotNone(locked, "SDK not in package-lock.json")
-        self.assertEqual(
-            pkg["dependencies"]["@modelcontextprotocol/sdk"].lstrip("^~"),
-            locked["version"],
-            "package.json and lockfile disagree on the SDK version",
-        )
+    def test_install_pins_the_adapter_package(self):
+        install = self.read_install()
+        self.assertIn("pi install npm:pi-mcp-adapter@", install)
+        version = install.split(ADAPTER_NPM_SPEC, 1)[1].split('"', 1)[0].strip()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$", "pinned semver version required")
 
-    def test_install_bakes_the_extension(self):
-        agent_yml = (Path(__file__).parent / "agent.yml").read_text()
-        install = agent_yml.split("install: |", 1)[1].split("\nmcp:", 1)[0]
-        self.assertIn("mcp-adapter", install)
-        self.assertIn("npm ci", install)
-        self.assertIn(".pi/agent/extensions", install)
+    def test_wired_config_path_is_the_file_the_adapter_reads(self):
+        # The adapter reads <Pi agent dir>/mcp.json (Pi-global override in its
+        # merge chain) — the descriptor must keep pointing wiring there.
+        self.assertIn("config_path: .pi/agent/mcp.json", self.read_agent_yml())
 
 
 if __name__ == "__main__":
