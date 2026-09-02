@@ -8,14 +8,12 @@ edit bottles, not these files.
 - `docker-compose.local.yml` is the base container definition.
 - `docker-compose.ssh.yml` is added when the bottle has an `ssh:` section
   (Mac Remote-SSH publishing).
-- `docker-compose.mosh.yml` is added when `remote.mosh: true`.
 
 `up.sh` builds the compose command from the bottle-derived settings:
 
 ```text
 docker-compose.local.yml
 + docker-compose.ssh.yml   when ssh: is enabled (Mac direct access)
-+ docker-compose.mosh.yml  when remote.mosh is enabled
 ```
 
 Plugin-declared named volumes are generated into a temporary overlay under the

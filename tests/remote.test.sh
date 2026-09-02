@@ -90,7 +90,7 @@ grep -qF 'DJINN_SUBNET="${DJINN_SUBNET:-}"' tunnel.sh \
     || fail "tunnel.sh does not forward DJINN_SUBNET"
 
 echo "── compose overlays"
-for f in compose/docker-compose.local.yml compose/docker-compose.ssh.yml compose/docker-compose.mosh.yml; do
+for f in compose/docker-compose.local.yml compose/docker-compose.ssh.yml; do
     yq '.' "$f" >/dev/null 2>&1 && pass "$f parses" || fail "$f is not valid YAML"
 done
 [ "$(yq '.networks.default.name' compose/docker-compose.local.yml)" = "djinn-net" ] \
@@ -111,30 +111,27 @@ yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q '
     && pass "ssh overlay carries ONLY SSH_ENABLED (keys/shell/notify moved to local compose)" \
     || fail "ssh overlay environment: has drifted from just SSH_ENABLED"
 
-echo "── mosh port-range agreement (manifest.py is the source; defaults must align)"
-# The overlay carries fallbacks (${MOSH_PORTS:-...} / ${MOSH_PORTS_DASH:-...})
-# for the values manifest.py computes from remote.mosh_ports. All defaults — env
-# (colon form), publish (dash form), wrapper, manifest.py — must be one range.
-ENV_DEFAULT=$(yq -r '.services.djinn.environment[]' compose/docker-compose.mosh.yml | sed -n 's/^MOSH_PORTS=${MOSH_PORTS:-\(.*\)}$/\1/p')
-[ "$ENV_DEFAULT" = "60000:60010" ] \
-    && pass "mosh overlay env default is 60000:60010" \
-    || fail "mosh overlay env default unexpected: '$ENV_DEFAULT'"
-DASH_DEFAULT=$(yq -r '.services.djinn.ports[0]' compose/docker-compose.mosh.yml | grep -o '{MOSH_PORTS_DASH:-[0-9-]*}' | head -1 | sed 's/.*:-\([0-9-]*\)}/\1/')
-[ "$DASH_DEFAULT" = "${ENV_DEFAULT/:/-}" ] \
-    && pass "publish default ($DASH_DEFAULT) matches env default" \
-    || fail "publish default '$DASH_DEFAULT' != env default '${ENV_DEFAULT/:/-}'"
-grep -qF "\${MOSH_PORTS:-$ENV_DEFAULT}" src/mosh-server-wrapper.sh \
-    && pass "mosh-server wrapper default matches the overlay default" \
-    || fail "wrapper default range drifted from the overlay"
-grep -qF '"60000:60010"' src/manifest.py \
-    && pass "manifest.py default range matches the overlay" \
-    || fail "manifest.py default range drifted"
+echo "── bottle image no longer carries mosh"
+# grep -q mosh Dockerfile still matches (the RFC 04 comment explains mosh now
+# lives on the jump) — the check that matters is the apt-get install line
+# itself, pinned via the locale-gen line two lines below it.
+grep -B2 'locale-gen en_US.UTF-8' Dockerfile | grep -qw mosh \
+    && fail "Dockerfile still apt-installs mosh into the bottle image" \
+    || pass "Dockerfile does not apt-install mosh"
+! test -f compose/docker-compose.mosh.yml \
+    && pass "compose/docker-compose.mosh.yml is gone" \
+    || fail "compose/docker-compose.mosh.yml still exists (bottles no longer publish mosh UDP)"
 
-# manifest.py's remote.mosh_ports validation (MOSH_PORTS_RE) must reject malformed/reversed ranges
-check_range() { printf '%s' "$1" | grep -qE '^[0-9]{1,5}:[0-9]{1,5}$'; }
-check_range "60000:60010" && pass "range validation accepts 60000:60010" || fail "validation rejects the default range"
-check_range "60000-60010" && fail "range validation accepted dash form" || pass "range validation rejects dash form"
-check_range "abc:123"     && fail "range validation accepted junk" || pass "range validation rejects junk"
+echo "── mosh-server wrapper (jump-only; jump/entrypoint.sh is the default source)"
+# Bottles no longer run mosh-server or publish a UDP range — the wrapper
+# lives on for the jump alone (jump/Dockerfile COPYs it). Pin its default
+# range literal against jump/entrypoint.sh's default, not a bottle overlay.
+grep -qF '${MOSH_PORTS:-60000:60010}' src/mosh-server-wrapper.sh \
+    && pass "mosh-server wrapper default is 60000:60010" \
+    || fail "wrapper default range drifted"
+grep -qF '${MOSH_PORTS:-60000:60010}' jump/entrypoint.sh \
+    && pass "jump/entrypoint.sh default matches the wrapper default" \
+    || fail "jump/entrypoint.sh default range drifted from the wrapper"
 
 # wrapper: the -p pin must be spliced BEFORE any '--' (a trailing pin lands
 # in the remote command's argv and is silently ignored by getopt)
@@ -147,7 +144,7 @@ awk '/for a in "\$@"/,/^fi$/' src/mosh-server-wrapper.sh | grep -qF '"--"' \
 
 echo "── manifest plumbing simulation (same expressions as up.sh)"
 M=$(mktemp); trap 'rm -f "$M"' EXIT
-printf 'ssh:\n  port: 2222\nremote:\n  jump: false\n  shell: bash\n  mosh: true\n  notify: ntfy\n' > "$M"
+printf 'ssh:\n  port: 2222\nremote:\n  jump: false\n  shell: bash\n  notify: ntfy\n' > "$M"
 # Read directly, no `// true` default: yq/jq's `//` treats `false` itself as
 # falsy and would silently substitute the default, masking exactly the
 # opt-out case (remote.jump: false) this is meant to prove reads back
@@ -155,7 +152,6 @@ printf 'ssh:\n  port: 2222\nremote:\n  jump: false\n  shell: bash\n  mosh: true\
 # default off "jump" not in remote, not off falsiness).
 [ "$(yq '.remote.jump' "$M")" = "false" ]   && pass "remote.jump reads back"   || fail "remote.jump read broken"
 [ "$(yq -r '.remote.shell // "tmux"' "$M")" = "bash" ] && pass "remote.shell reads back" || fail "remote.shell read broken"
-[ "$(yq '.remote.mosh // false' "$M")" = "true" ]  && pass "remote.mosh reads back"  || fail "remote.mosh read broken"
 [ "$(yq -r '.remote.notify // ""' "$M")" = "ntfy" ] && pass "remote.notify reads back" || fail "remote.notify read broken"
 
 # ntfy host extraction (same sed as up.sh; drift-guarded below)
@@ -193,8 +189,8 @@ grep -qF 'choose-tree -Zs' src/tmux-landing.bashrc \
 grep -qF '/usr/local/lib/djinn/tmux_landing_gc.py' src/tmux-landing.bashrc \
     && pass "landing snippet runs tmux landing GC before creating a session" \
     || fail "landing snippet lost tmux landing GC invocation"
-grep -qE 'sshd\|sshd-session\|mosh-server' src/tmux-landing.bashrc \
-    && pass "landing gates on sshd/sshd-session/mosh-server parents (OpenSSH >=9.8 split)" \
+grep -qE 'sshd\|sshd-session' src/tmux-landing.bashrc \
+    && pass "landing gates on sshd/sshd-session parents (OpenSSH >=9.8 split)" \
     || fail "landing snippet lost the parent-process gate (must include sshd-session)"
 grep -qF '/proc/$PPID/comm' src/tmux-landing.bashrc \
     && pass "parent check reads /proc directly (no procps dependency)" \
@@ -291,20 +287,14 @@ done <<'DRIFT'
 src/manifest.py	remote.get("tmux")
 src/manifest.py	remote.get("jump")
 src/manifest.py	remote.get("shell")
-src/manifest.py	remote.get("mosh")
 src/manifest.py	remote.get("notify")
-src/manifest.py	remote.get("mosh_ports")
-up.sh	compose/docker-compose.mosh.yml
 src/ensure_net.py	djinn-net
 src/manifest.py	remote.notify requires remote.shell: tmux
 src/manifest.py	re.sub(r"^[A-Za-z]+://", "", ntfy_url)
-src/manifest.py	[0-9]{1,5}:[0-9]{1,5}
-src/init-firewall.sh	^[0-9]+:[0-9]+$
-src/init-firewall.sh	--dport "$MOSH_PORTS"
 src/init-firewall.sh	-s "$HOST_IP"
 src/init-firewall.sh	-s "$DJINN_JUMP_IP"
 src/init-firewall.sh	--state NEW ! -s "$DJINN_JUMP_IP" -j DROP
-src/entrypoint.sh	REMOTE_SHELL MOSH_PORTS NTFY_URL NTFY_TOPIC CONTAINER_NAME
+src/entrypoint.sh	REMOTE_SHELL NTFY_URL NTFY_TOPIC CONTAINER_NAME
 Dockerfile	update-locale LANG=en_US.UTF-8
 DRIFT
 

@@ -160,7 +160,7 @@ containing `/home/coder/.cursor`.
 Nothing outside `plugins/<name>/` names the plugin. At `up`, `src/manifest.py`
 renders the volumes of the **enabled** plugins into a generated compose overlay
 under `$BASE_PATH/compose/<container>.plugins.yml` and `up.sh` adds it as one
-more `-f`, the same way the ssh/mosh overlays work. De-list the plugin and the
+more `-f`, the same way the ssh overlay works. De-list the plugin and the
 next `up` drops the mount (the volume itself waits for a `--purge`).
 
 Ownership is handled centrally, not by each plugin: docker seeds a fresh named
@@ -215,7 +215,7 @@ Rules, enforced by `src/manifest.py` at derive time:
 
 Host-service plugins (`host_port:` in `plugin.yml`) listen on a Mac port. Host
 ports are exclusive, so two containers running the same plugin need different
-values — the same reason `ssh.port` and `remote.mosh_ports` are per-container.
+values — the same reason `ssh.port` is per-container.
 
 Set `plugin_ports:` in the **manifest** (not in `plugin.yml`):
 

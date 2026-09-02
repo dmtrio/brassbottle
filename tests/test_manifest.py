@@ -184,18 +184,6 @@ class TestErrorTable(unittest.TestCase):
          "remote.notify must be 'ntfy' (got 'slack')"),
         ("notify without tmux", {"remote": {"shell": "bash", "notify": "ntfy"}}, None,
          "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)"),
-        ("malformed mosh ports",
-         {"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "9:banana"}}, None,
-         "remote.mosh_ports must be START:END (got '9:banana')"),
-        ("mosh ports below 1024",
-         {"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "500:600"}}, None,
-         "remote.mosh_ports '500:600' out of range (need 1024 <= START <= END <= 65535)"),
-        ("mosh ports above 65535",
-         {"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "60000:70000"}}, None,
-         "remote.mosh_ports '60000:70000' out of range (need 1024 <= START <= END <= 65535)"),
-        ("mosh ports inverted",
-         {"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "3000:2000"}}, None,
-         "remote.mosh_ports '3000:2000' out of range (need 1024 <= START <= END <= 65535)"),
         ("illegal ref char", {"identities": {"obsidian": ["bad-dash_claude"]}}, None,
          "manifest identity references failed validation:\n"
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)"),
@@ -464,13 +452,33 @@ class TestRemoteSchema(unittest.TestCase):
         self.assertEqual(d["REMOTE_NOTIFY"], "ntfy")
         self.assertEqual(d["CONTAINER_NTFY_URL"], "https://ntfy.example.com")
 
-    def test_mosh_without_ssh_rejected(self):
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"remote": {"mosh": True}})
+    def test_mosh_keys_warn_and_derive_nothing(self):
+        # Both retired keys present, no ssh: section — no error (no more
+        # ssh-required check) and the single warning fires once, not per key.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"mosh": True, "mosh_ports": "9:banana"}})
+        self.assertNotIn("REMOTE_MOSH", d)
+        self.assertNotIn("MOSH_PORTS", d)
+        self.assertNotIn("MOSH_PORTS_DASH", d)
         self.assertEqual(
-            str(cm.exception),
-            "manifest has remote.mosh but no ssh: section — the published mosh range "
-            "rides ssh.port (add ssh.port, or drop remote.mosh: the jump carries mosh)")
+            err.getvalue().count(
+                "remote.mosh is retired — the jump carries mosh (mosh coder@<jump ip>, "
+                "then ssh djinn-<bottle>); drop remote.mosh / remote.mosh_ports"),
+            1)
+
+    def test_mosh_ports_alone_warns(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"mosh_ports": "60000:60010"}})
+        self.assertNotIn("REMOTE_MOSH", d)
+        self.assertNotIn("MOSH_PORTS", d)
+        self.assertNotIn("MOSH_PORTS_DASH", d)
+        self.assertEqual(
+            err.getvalue().count(
+                "remote.mosh is retired — the jump carries mosh (mosh coder@<jump ip>, "
+                "then ssh djinn-<bottle>); drop remote.mosh / remote.mosh_ports"),
+            1)
 
 
 class TestYqSemanticsPins(unittest.TestCase):
@@ -833,11 +841,6 @@ class TestDerivedValues(unittest.TestCase):
         self.assertEqual(json.loads(lines[0]), SERENA["mcp"])
         self.assertEqual(json.loads(lines[1]), OTHER["mcp"])
         self.assertTrue(d["PLUGIN_MCP_ENTRIES"].endswith("\n"))
-
-    def test_mosh_defaults_and_dash_form(self):
-        d = derive({"ssh": {"port": 22}, "remote": {"mosh": True}})
-        self.assertEqual(d["MOSH_PORTS"], "60000:60010")
-        self.assertEqual(d["MOSH_PORTS_DASH"], "60000-60010")
 
     def test_ntfy_host_strip_order_path_before_userinfo(self):
         env = dict(ENV, NTFY_URL="https://ntfy.example.com/a@b", NTFY_TOPIC="t")
@@ -1271,8 +1274,6 @@ class TestReviewFixes(unittest.TestCase):
         files = {"p": {"mcp": {"srv\n": {"command": "x"}}}}
         with self.assertRaises(m.ManifestError):
             derive({"plugins": ["p"]}, plugin_files=files)
-        with self.assertRaises(m.ManifestError):
-            derive({"ssh": {"port": 22}, "remote": {"mosh": True, "mosh_ports": "2000:3000\n"}})
 
     def test_null_entries_drop_from_word_lists(self):
         # plugins: [serena,] parses as [serena, null]; old join+word-split

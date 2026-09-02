@@ -374,18 +374,17 @@ RUN useradd --system --no-create-home --shell /usr/sbin/nologin djinnbroker
 
 ENV SSH_ENABLED=false
 
-# ── Remote session tools: tmux + mosh (RFC 04) ───────────────────────────────
+# ── Remote session tools: tmux + herdr landing (RFC 04) ──────────────────────
 # tmux gives every SSH-reachable container fresh-per-login landing sessions.
 # Each login starts in an empty session and can jump to other sessions from
-# tmux's picker. mosh rides UDP for flaky mobile networks — reached only over
-# the operator's
-# WireGuard/VPN tunnel, never a public listener. mosh requires a UTF-8
-# locale — update-locale writes /etc/default/locale, which PAM reads for
-# SSH sessions (the ENV below only covers entrypoint/docker-exec processes;
-# sshd builds its env from PAM and would otherwise run C/POSIX and make
-# mosh-server abort with 'needs a UTF-8 native locale').
+# tmux's picker; herdr (below) is the agent-aware alternative. mosh lives on
+# the jump (mosh coder@<jump ip>, then ssh djinn-<bottle>). locales is
+# needed: update-locale writes /etc/default/locale, which PAM reads for SSH
+# sessions (the ENV below only covers entrypoint/docker-exec processes; sshd
+# builds its env from PAM and would otherwise run C/POSIX and break UTF-8
+# terminal output for sshd/herdr sessions).
 RUN apt-get update && apt-get install -y \
-    tmux mosh locales \
+    tmux locales \
     && rm -rf /var/lib/apt/lists/* \
     && locale-gen en_US.UTF-8 \
     && update-locale LANG=en_US.UTF-8
@@ -418,12 +417,6 @@ COPY --chown=$USERNAME:$USERNAME src/tmux.conf /home/$USERNAME/.tmux.conf
 COPY src/tmux_landing_gc.py /usr/local/lib/djinn/tmux_landing_gc.py
 RUN chmod 644 /usr/local/lib/djinn/tmux_landing_gc.py
 
-# Pin mosh-server to the firewalled/published UDP range: /usr/local/bin wins
-# over /usr/bin, so the client-launched `mosh-server new` resolves to the
-# wrapper regardless of client configuration.
-COPY src/mosh-server-wrapper.sh /usr/local/bin/mosh-server
-RUN chmod +x /usr/local/bin/mosh-server
-
 # Agent-blind idle notifier: tmux.conf's silence hook runs it when NTFY_URL
 # is present in the environment (remote.notify: ntfy).
 COPY src/tmux-notify.sh /usr/local/bin/tmux-notify.sh
@@ -451,12 +444,12 @@ RUN echo '' >> /home/$USERNAME/.bashrc \
     && echo '# PLN Container Freshness: one-line dim config-age readout (interactive)' >> /home/$USERNAME/.bashrc \
     && echo '. /usr/local/share/freshness-landing.bashrc' >> /home/$USERNAME/.bashrc
 
-# Land interactive SSH/mosh logins in a fresh tmux session. The logic
+# Land interactive SSH logins in a fresh tmux session. The logic
 # lives in a sourced file (lintable, readable); the hook must be the LAST
 # line of .bashrc so fnm/shim PATH setup has already run when tmux execs.
 COPY src/tmux-landing.bashrc /usr/local/share/tmux-landing.bashrc
 RUN echo '' >> /home/$USERNAME/.bashrc \
-    && echo '# RFC 04: SSH/mosh logins land in a fresh tmux session (keep last)' >> /home/$USERNAME/.bashrc \
+    && echo '# RFC 04: SSH logins land in a fresh tmux session (keep last)' >> /home/$USERNAME/.bashrc \
     && echo '. /usr/local/share/tmux-landing.bashrc' >> /home/$USERNAME/.bashrc
 
 # VS Code / Cursor "Attach to Running Container" reads this: attach as

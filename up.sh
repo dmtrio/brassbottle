@@ -152,10 +152,9 @@ if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 
 COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
 [ -n "$SSH_PORT" ] && COMPOSE_FILES="$COMPOSE_FILES -f $SCRIPT_DIR/compose/docker-compose.ssh.yml"
-[ "$REMOTE_MOSH" = "true" ] && COMPOSE_FILES="$COMPOSE_FILES -f $SCRIPT_DIR/compose/docker-compose.mosh.yml"
 
 # Plugin-declared volumes (plugins/<name>/volumes:) ride in as one more overlay,
-# the same mechanism as ssh/mosh — except this one is DERIVED per container from
+# the same mechanism as ssh — except this one is DERIVED per container from
 # its manifest, which is what keeps compose/ free of any plugin's name.
 # manifest.py renders the YAML (unit-tested); up.sh only places the file and
 # adds the -f. Written under BASE_PATH, not the repo: it is per-container
@@ -297,7 +296,6 @@ echo "Applying $MANIFEST → $CNAME"
 REMOTE_SUMMARY=""
 [ "$REMOTE_JUMP" = "true" ] && REMOTE_SUMMARY="jump"
 REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}$REMOTE_SHELL"
-[ "$REMOTE_MOSH" = "true" ] && REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}mosh"
 [ -n "$REMOTE_NOTIFY" ]     && REMOTE_SUMMARY="${REMOTE_SUMMARY:+$REMOTE_SUMMARY+}$REMOTE_NOTIFY"
 echo "  ports='${HOST_MCP_PORTS:-none}' egress='${EGRESS:-none}' plugins='${PLUGINS:-none}' remote='${REMOTE_SUMMARY:-none}' mem=$MEM_LIMIT"
 
@@ -324,7 +322,6 @@ KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWS
 SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
   JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" \
 REMOTE_JUMP="$REMOTE_JUMP" REMOTE_SHELL="$REMOTE_SHELL" DJINN_JUMP_IP="$JUMP_IP" \
-MOSH_PORTS="$MOSH_PORTS" MOSH_PORTS_DASH="$MOSH_PORTS_DASH" \
 NTFY_URL="$CONTAINER_NTFY_URL" NTFY_TOPIC="$CONTAINER_NTFY_TOPIC" \
 IMAGE_TAG="$NAME" \
 docker compose -p "$CNAME" --project-directory "$SCRIPT_DIR" \
@@ -575,6 +572,6 @@ if [ -n "$SSH_PORT" ]; then
     # Direct bridge access only works on the published path: the firewall
     # otherwise accepts :22 from the jump alone, never the whole bridge/tunnel.
     TUNNEL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CNAME" 2>/dev/null || true)"
-    echo "  Remote (tunnel):   ${TUNNEL_IP:-<no ip>} — $( [ "$REMOTE_MOSH" = "true" ] && echo "mosh coder@ip (UDP $MOSH_PORTS_DASH)" || echo "ssh coder@ip" ) over your WireGuard/VPN"
+    echo "  Remote (tunnel):   ${TUNNEL_IP:-<no ip>} — ssh coder@ip over your WireGuard/VPN"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

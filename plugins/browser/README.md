@@ -72,4 +72,4 @@ For a one-off, pass an absolute path in place of `brave|chrome`:
 - CDP debug port binds localhost only; the bridge requires `X-API-Key`.
 - When two containers both enable `browser`, give each a distinct
   `plugin_ports.browser` value (host ports are exclusive, same idea as
-  `ssh.port` / `remote.mosh_ports`).
+  `ssh.port`).

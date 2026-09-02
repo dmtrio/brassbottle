@@ -41,15 +41,14 @@ memory: 10g
 # container (./djinn jump start; JUMP_AUTHORIZED_KEY in secrets.env). Phone
 # flow: mosh coder@<jump ip>, then ssh djinn-<bottle>. Nothing to write here
 # for that — a normal bottle omits the whole section. The keys below are the
-# opt-outs (the mosh/notify extras — which need ssh: below — are shown after
-# the #ssh: block further down):
+# opt-outs; the notify extra is shown after the #ssh: block further down:
 #   jump: false      not reachable from the jump (no sshd unless ssh: is set)
-#   shell: herdr     interactive ssh/mosh/editor terminals land in herdr, an
+#   shell: herdr     interactive ssh/editor terminals land in herdr, an
 #                    agent-aware workspace (one persistent server per bottle,
 #                    sidebar shows each pane's agent state; detach ctrl+b q)
 #   shell: bash      land in plain bash instead of a fresh tmux session with
-#                    the picker (tmux is the default; remote.tmux: true is a
-#                    deprecated alias)
+#                    the picker (tmux is the default for interactive ssh/editor
+#                    terminals; remote.tmux: true is a deprecated alias)
 #remote:
 #  jump: false
 #  shell: bash
@@ -65,15 +64,10 @@ memory: 10g
 #  port: 2222
 #  bind: 127.0.0.1
 
-# Optional — mosh + idle notify extras, both riding the ssh: block above (a
-# manifest has ONE remote: map — if you want these together with the jump
-# opt-outs above, merge the keys into a single remote: block; as written,
-# this block is valid paired with ssh: alone):
-#   mosh: true       publish a per-bottle mosh UDP range NEXT TO ssh.port
-#                    (requires ssh: above; the jump already carries mosh, so
-#                    most bottles never need this). mosh_ports (START:END,
-#                    default 60000:60010) must be disjoint per bottle — host
-#                    UDP ports are exclusive, like ssh.port.
+# Optional — idle notify extra, riding the ssh: block above (a manifest has
+# ONE remote: map — if you want this together with the jump opt-outs above,
+# merge the keys into a single remote: block; as written, this block is valid
+# paired with ssh: alone):
 #   notify: ntfy     push to your ntfy topic when a tmux session goes idle at
 #                    a prompt with nobody attached. Requires shell: tmux (the
 #                    default — omit shell: here) and NTFY_URL (+ optional
@@ -83,8 +77,6 @@ memory: 10g
 #                    capabilities.egress_cidrs instead — the domain allowlist
 #                    is DNS-driven; an IP-literal NTFY_URL is handled).
 #remote:
-#  mosh: true
-#  mosh_ports: 60000:60010
 #  notify: ntfy
 
 # Agent CLIs baked into the image. Names are exact agents/<dir> matches.
@@ -118,9 +110,9 @@ plugins: []
 
 # Per-container host port for a host-service plugin (optional). Host ports are
 # exclusive, so two containers running the same plugin need different values —
-# same reason each container has its own ssh.port / remote.mosh_ports. Overrides
-# the plugin's default host_port in plugin.yml and re-points any ${HOST_PORT} in
-# the plugin's remote url or local bridge command/args; the resolved port also
+# same reason each container has its own ssh.port. Overrides the plugin's
+# default host_port in plugin.yml and re-points any ${HOST_PORT} in the
+# plugin's remote url or local bridge command/args; the resolved port also
 # feeds the firewall grant.
 # Keep a browser bridge port BELOW 9222: the launcher derives that container's
 # Chrome debug port as bridge+408, so a bridge at or above 9222 could collide

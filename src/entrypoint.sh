@@ -167,9 +167,8 @@ if [ "$START_SSHD" = "true" ]; then
 
     # RFC 04: sshd builds each session's env via PAM (/etc/environment) and
     # ignores container env — persist the remote-access vars there so login
-    # shells (and the tmux server/hooks they start) can see them. mosh
-    # sessions inherit from their SSH bootstrap, so this covers both.
-    for var in REMOTE_SHELL MOSH_PORTS NTFY_URL NTFY_TOPIC CONTAINER_NAME; do
+    # shells (and the tmux server/hooks they start) can see them.
+    for var in REMOTE_SHELL NTFY_URL NTFY_TOPIC CONTAINER_NAME; do
         val="${!var:-}"
         [ -n "$val" ] || continue
         sed -i "/^$var=/d" /etc/environment

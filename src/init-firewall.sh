@@ -273,18 +273,6 @@ case "$SSH_INPUT_RULE" in
         ;;
 esac
 
-# Inbound mosh UDP range when enabled (RFC 04). Set by the mosh compose
-# overlay; reached only over the operator's WireGuard/VPN tunnel — the
-# range is never published on a public interface.
-if [ "${SSH_ENABLED:-false}" = "true" ] && [ -n "${MOSH_PORTS:-}" ]; then
-    if [[ ! "$MOSH_PORTS" =~ ^[0-9]+:[0-9]+$ ]]; then
-        echo "ERROR: Invalid MOSH_PORTS (want START:END): $MOSH_PORTS"
-        exit 1
-    fi
-    echo "Allowing inbound mosh UDP $MOSH_PORTS"
-    iptables -A INPUT -p udp --dport "$MOSH_PORTS" -j ACCEPT
-fi
-
 # Allow outbound traffic to allowed domains
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 

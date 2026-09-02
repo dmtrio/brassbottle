@@ -27,8 +27,9 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
 - `init-firewall.sh` applies the default-deny egress firewall.
 - `freshness.py` and `freshness-landing.bashrc` print config/image age without
   requiring network access.
-- `tmux-*`, `tmux.conf`, and `mosh-server-wrapper.sh` support remote agent
-  sessions.
+- `tmux-*`, `tmux.conf`, and `herdr-config.toml` support remote agent
+  sessions. `mosh-server-wrapper.sh` is built into the jump image only
+  (`jump/Dockerfile`).
 - `git-credential-org.sh` routes GitHub credentials by repo owner.
 
 ## Testing

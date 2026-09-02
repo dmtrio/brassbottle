@@ -11,7 +11,8 @@ user to a working container; this directory holds the extra context.
   overrides, and persistence.
 - `secrets.md` explains secret values, per-agent shim env files, and per-org
   Git identity routing.
-- `remote.md` explains jump-reachable containers, tmux/herdr landing, mosh, and ntfy notifications.
+- `remote.md` explains the mosh jump, jump-reachable containers, tmux/herdr
+  landing, and ntfy notifications.
 - `disk.md` explains where Docker disk goes (images vs. volumes), how to
   audit a workspace volume for unpushed work before deleting it, and how to
   reclaim space safely.

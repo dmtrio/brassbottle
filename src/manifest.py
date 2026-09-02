@@ -44,12 +44,12 @@ Behavioral fidelity notes (each is pinned by tests/test_manifest.py):
 - agent_for_ref suffix matching is descriptor-derived per mcp-capable agent,
   longest suffix first so _cursor_agent beats _claude.
 - Error ordering matches the old top-to-bottom flow: forge → plugins list →
-  ssh/remote → mosh ports → identity refs (aggregated) → per-plugin egress +
+  ssh/remote → identity refs (aggregated) → per-plugin egress +
   mcp entries (fail-fast) → ntfy. Messages are byte-identical to the bash,
   except the ssh/remote block, which PLN - default jump reachability P1
   extended with remote.jump/remote.shell validation (new messages, no bash
   precedent). Within that block: unknown keys → jump → shell/tmux →
-  mosh-without-ssh → notify kind → notify-needs-tmux → mosh ports.
+  notify kind → notify-needs-tmux.
 - Deliberate departures from the old bash, all loud-instead-of-silent: a
   section written as the wrong YAML type (capabilities:/identities:/… as a
   list) is a named error where yq used to emit a cryptic 'cannot index'
@@ -169,7 +169,6 @@ DOMAIN_RE = re.compile(
     r"[A-Za-z][A-Za-z0-9-]{0,61}[A-Za-z0-9]\Z"
 )
 IPV4_RE = re.compile(r"^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\Z")
-MOSH_PORTS_RE = re.compile(r"^[0-9]{1,5}:[0-9]{1,5}\Z")
 
 AGENT_TOP_LEVEL_KEYS = frozenset({
     "binary", "install", "state_dirs", "rules_file", "egress", "mcp",
@@ -971,7 +970,7 @@ def derive(manifest, plugin_files, agent_files, env):
     # ── plugin_ports: per-container host port for a host-service plugin ──
     # Host ports are exclusive, so two containers running the same host-service
     # plugin (two browsers, say) need different ports — the same reason ssh.port
-    # and remote.mosh_ports are per-container. An override re-points BOTH the
+    # is per-container. An override re-points BOTH the
     # firewall grant (HOST_MCP_PORTS) and the ${HOST_PORT} placeholder in the
     # plugin's url, so the port stays a single value with one source of truth.
     plugin_ports_val = manifest.get("plugin_ports")
@@ -998,8 +997,7 @@ def derive(manifest, plugin_files, agent_files, env):
 
     remote = _section(manifest, "remote")
     # Every bottle is jump-reachable by default now (PLN - default jump
-    # reachability P1), so `remote:` no longer needs `ssh:` to mean anything —
-    # only mosh (below) still rides ssh.port's published range.
+    # reachability P1), so `remote:` no longer needs `ssh:` to mean anything.
     known_remote_keys = ("jump", "shell", "mosh", "mosh_ports", "notify", "tmux")
     unknown_remote = ",".join(k for k in remote if k not in known_remote_keys)
     if unknown_remote:
@@ -1045,12 +1043,6 @@ def derive(manifest, plugin_files, agent_files, env):
     if remote_shell not in ("tmux", "herdr", "bash"):
         raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
 
-    remote_mosh = _raw_flag(remote.get("mosh"), "remote.mosh")
-    if remote_mosh == "true" and not ssh_port:
-        raise ManifestError(
-            "manifest has remote.mosh but no ssh: section — the published mosh range "
-            "rides ssh.port (add ssh.port, or drop remote.mosh: the jump carries mosh)")
-
     remote_notify = _scalar(remote.get("notify"), "remote.notify")
     if remote_notify not in ("", "ntfy"):
         raise ManifestError(f"remote.notify must be 'ntfy' (got '{remote_notify}')")
@@ -1059,22 +1051,15 @@ def derive(manifest, plugin_files, agent_files, env):
             "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
     out["REMOTE_JUMP"] = remote_jump
     out["REMOTE_SHELL"] = remote_shell
-    out["REMOTE_MOSH"] = remote_mosh
     out["REMOTE_NOTIFY"] = remote_notify
 
-    mosh_ports = ""
-    mosh_ports_dash = ""
-    if remote_mosh == "true":
-        mosh_ports = _scalar(remote.get("mosh_ports"), "remote.mosh_ports") or "60000:60010"
-        if not MOSH_PORTS_RE.match(mosh_ports):
-            raise ManifestError(f"remote.mosh_ports must be START:END (got '{mosh_ports}')")
-        lo, hi = (int(x) for x in mosh_ports.split(":"))
-        if lo > hi or hi > 65535 or lo < 1024:
-            raise ManifestError(
-                f"remote.mosh_ports '{mosh_ports}' out of range (need 1024 <= START <= END <= 65535)")
-        mosh_ports_dash = f"{lo}-{hi}"
-    out["MOSH_PORTS"] = mosh_ports
-    out["MOSH_PORTS_DASH"] = mosh_ports_dash
+    # remote.mosh / remote.mosh_ports are retired (the jump carries mosh for
+    # the whole fleet now) but stay accepted keys — a fleet of manifests still
+    # carries them — as no-ops: no value validation, no derived vars, just one
+    # nudge to drop them.
+    if "mosh" in remote or "mosh_ports" in remote:
+        print("  ⚠ remote.mosh is retired — the jump carries mosh (mosh coder@<jump ip>, "
+              "then ssh djinn-<bottle>); drop remote.mosh / remote.mosh_ports", file=sys.stderr)
 
     # ── identities: sugar → agent_secrets bindings (aggregated errors) ──────
     # The old ref-suffix form still validates byte-for-byte, then converts to

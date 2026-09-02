@@ -120,7 +120,7 @@ The host commands above live in `bin/`; `src/` is internal source — the
   the same zone list live; the base `ALLOWED_ZONES` here is the durable default.
 - **`src/tmux.conf` / `src/tmux-landing.bashrc` / `src/herdr-config.toml`** —
   remote access: mobile-friendly tmux defaults, herdr configuration, and the
-  guarded snippet that lands interactive SSH/mosh logins in a fresh `login-*`
+  guarded snippet that lands interactive SSH logins in a fresh `login-*`
   session (or herdr workspace).
 - **`src/djinn_net_addr.py`** — shared djinn-net subnet/static-address rules
   (top-of-subnet derivation, reserved-address checks). Used by both the jump
@@ -137,8 +137,8 @@ The host commands above live in `bin/`; `src/` is internal source — the
   image: sshd + mosh only. The entrypoint generates and persists both the
   host keys and the jump's own client key on the mounted volume, so neither
   changes across a rebuild.
-- **`src/mosh-server-wrapper.sh`** — pins client-launched mosh servers to the
-  firewalled/published UDP range.
+- **`src/mosh-server-wrapper.sh`** — jump image only; pins client-launched
+  mosh servers to the jump's firewalled UDP range.
 - **`src/tmux-notify.sh`** — agent-blind idle notifier; fired by the tmux
   silence hook when `remote.notify: ntfy` is on, pushes to your ntfy topic
   unless a client is attached.
