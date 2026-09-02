@@ -239,6 +239,7 @@ Use `./djinn jump ip` to get the jump's static bridge address. The jump shows
 a numbered list of running, jump-enabled bottles; selecting one automatically
 replaces the jump shell with `ssh djinn-<bottle>`, so Moshi needs only this one
 connection. Press `q` to keep a normal jump shell and make a manual SSH hop.
+For example: `ssh djinn-coding-tanks`.
 The selector is a host-generated, read-only registry — the jump never receives
 Docker socket access — and `djinn up` / `djinn down` refresh it as bottles
 change.

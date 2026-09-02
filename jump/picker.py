@@ -45,8 +45,8 @@ def select(names: list[str], input_fn=input, output=sys.stdout) -> str | None:
     while True:
         try:
             choice = input_fn("Select a bottle: ").strip()
-        except EOFError:
-            log("cancel reason=eof")
+        except (EOFError, KeyboardInterrupt):
+            log("cancel reason=input-interrupted")
             return None
         if choice.lower() == "q":
             log("cancel reason=operator")

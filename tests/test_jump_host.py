@@ -70,6 +70,12 @@ class StartTests(unittest.TestCase):
             registry = jump_config.paths(base)["registry_file"]
             self.assertEqual(registry.read_text(), "djinn-a\ndjinn-z\n")
 
+    def test_scope_matches_the_installation_identity(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            base = Path(home)
+            self.assertEqual(jump_host.cmd_scope(base), 0)
+            self.assertEqual(out.getvalue().strip(), jump_config.derive_identity(base).suffix)
+
     def test_start_bootstraps_the_external_bridge_first(self):
         # djinn-net is declared external, and `jump start` is documented as the
         # FIRST step of a fresh install — before any ./djinn up has created it.
