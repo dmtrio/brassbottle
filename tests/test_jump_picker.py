@@ -65,6 +65,10 @@ class HopTests(unittest.TestCase):
         with mock.patch.object(picker.subprocess, "call", side_effect=OSError):
             self.assertIsNone(picker.hop("djinn-a"))
 
+    def test_hop_keeps_picker_alive_when_ssh_is_cancelled(self):
+        with mock.patch.object(picker.subprocess, "call", side_effect=KeyboardInterrupt):
+            self.assertIsNone(picker.hop("djinn-a"))
+
 
 if __name__ == "__main__":
     unittest.main()
