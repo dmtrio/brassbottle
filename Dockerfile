@@ -391,6 +391,29 @@ RUN apt-get update && apt-get install -y \
     && update-locale LANG=en_US.UTF-8
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
+# ── herdr: agent-aware terminal workspace (PLN - herdr adoption P0/P1) ───────
+# Pinned release binary, verified by sha256 — never `latest`, never the
+# upstream install.sh (which resolves the version at build time). Installed in
+# every image so the manifest switch (remote.shell: herdr) only selects the
+# landing; tmux stays for plugin_services (herdr P3) and remote.notify (P2).
+ARG HERDR_VERSION=0.8.2
+ARG HERDR_SHA256_AMD64=976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4
+ARG HERDR_SHA256_ARM64=f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d
+RUN set -eu; arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) asset=linux-x86_64;  sha="$HERDR_SHA256_AMD64" ;; \
+      arm64) asset=linux-aarch64; sha="$HERDR_SHA256_ARM64" ;; \
+      *) echo "herdr: no release asset for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/herdrdev/herdr/releases/download/v${HERDR_VERSION}/herdr-${asset}" \
+        -o /usr/local/bin/herdr \
+    && echo "${sha}  /usr/local/bin/herdr" | sha256sum -c - \
+    && chmod 755 /usr/local/bin/herdr
+# Baked config: no onboarding wizard on a phone screen, and both background
+# update checks OFF — bottle egress is default-deny and herdr.dev is not
+# allowlisted; a check that can never succeed is noise in the log.
+COPY --chown=$USERNAME:$USERNAME src/herdr-config.toml /home/$USERNAME/.config/herdr/config.toml
+
 COPY --chown=$USERNAME:$USERNAME src/tmux.conf /home/$USERNAME/.tmux.conf
 COPY src/tmux_landing_gc.py /usr/local/lib/djinn/tmux_landing_gc.py
 RUN chmod 644 /usr/local/lib/djinn/tmux_landing_gc.py

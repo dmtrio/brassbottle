@@ -202,12 +202,48 @@ grep -qF '/proc/$PPID/comm' src/tmux-landing.bashrc \
 grep -qF 'TERM_PROGRAM' src/tmux-landing.bashrc \
     && pass "landing supports interactive TERM_PROGRAM=vscode terminals" \
     || fail "landing snippet lost TERM_PROGRAM=vscode gate"
+grep -qF '"${REMOTE_SHELL:-tmux}" = "herdr"' src/tmux-landing.bashrc \
+    && pass "landing snippet dispatches on REMOTE_SHELL=herdr" \
+    || fail "landing snippet lost the herdr dispatch"
+grep -qF 'exec herdr' src/tmux-landing.bashrc \
+    && pass "herdr landing execs herdr (launch-or-attach the default session)" \
+    || fail "landing snippet lost the exec herdr launch"
+grep -qF 'HERDR_ENV' src/tmux-landing.bashrc \
+    && pass "landing snippet guards recursion inside herdr-managed panes" \
+    || fail "landing snippet lost the HERDR_ENV recursion guard"
+grep -qF 'command -v herdr' src/tmux-landing.bashrc \
+    && pass "herdr landing falls back to bash when the image has no herdr binary" \
+    || fail "landing snippet lost the missing-herdr fallback (exec into nothing kills the login)"
 grep -qF 'tmux-landing.bashrc' Dockerfile \
     && pass "Dockerfile installs + sources the landing snippet" \
     || fail "Dockerfile no longer wires tmux-landing.bashrc"
 grep -qF 'COPY src/tmux_landing_gc.py /usr/local/lib/djinn/tmux_landing_gc.py' Dockerfile \
     && pass "Dockerfile installs tmux_landing_gc.py into /usr/local/lib/djinn" \
     || fail "Dockerfile does not wire tmux_landing_gc.py into /usr/local/lib/djinn"
+grep -qF 'ARG HERDR_VERSION=0.8.2' Dockerfile \
+    && pass "Dockerfile pins herdr to v0.8.2" \
+    || fail "Dockerfile lost the herdr version pin"
+grep -qF '976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4' Dockerfile \
+    && pass "Dockerfile pins herdr's amd64 release sha256" \
+    || fail "Dockerfile lost the herdr amd64 sha256 pin"
+grep -qF 'f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d' Dockerfile \
+    && pass "Dockerfile pins herdr's arm64 release sha256" \
+    || fail "Dockerfile lost the herdr arm64 sha256 pin"
+grep -qF 'sha256sum -c' Dockerfile \
+    && pass "Dockerfile verifies the herdr binary against its pinned sha256" \
+    || fail "Dockerfile no longer verifies the herdr binary checksum"
+grep -qF 'COPY --chown=$USERNAME:$USERNAME src/herdr-config.toml /home/$USERNAME/.config/herdr/config.toml' Dockerfile \
+    && pass "Dockerfile bakes herdr-config.toml to ~/.config/herdr/config.toml" \
+    || fail "Dockerfile no longer wires src/herdr-config.toml into the image"
+grep -qF 'version_check = false' src/herdr-config.toml \
+    && pass "herdr-config.toml disables the version_check phone-home" \
+    || fail "herdr-config.toml lost version_check = false"
+grep -qF 'manifest_check = false' src/herdr-config.toml \
+    && pass "herdr-config.toml disables the manifest_check phone-home" \
+    || fail "herdr-config.toml lost manifest_check = false"
+grep -qF 'onboarding = false' src/herdr-config.toml \
+    && pass "herdr-config.toml skips the first-run onboarding wizard" \
+    || fail "herdr-config.toml lost onboarding = false"
 grep -qF '/usr/local/bin/tmux-notify.sh' src/tmux.conf \
     && pass "tmux.conf silence hook points at tmux-notify.sh" \
     || fail "tmux.conf hook target drifted"

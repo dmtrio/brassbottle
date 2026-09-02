@@ -44,9 +44,12 @@ memory: 10g
 # opt-outs (the mosh/notify extras — which need ssh: below — are shown after
 # the #ssh: block further down):
 #   jump: false      not reachable from the jump (no sshd unless ssh: is set)
-#   shell: bash      interactive ssh/mosh/editor terminals land in plain bash
-#                    instead of a fresh tmux session with the picker (tmux is
-#                    the default; remote.tmux: true is a deprecated alias)
+#   shell: herdr     interactive ssh/mosh/editor terminals land in herdr, an
+#                    agent-aware workspace (one persistent server per bottle,
+#                    sidebar shows each pane's agent state; detach ctrl+b q)
+#   shell: bash      land in plain bash instead of a fresh tmux session with
+#                    the picker (tmux is the default; remote.tmux: true is a
+#                    deprecated alias)
 #remote:
 #  jump: false
 #  shell: bash

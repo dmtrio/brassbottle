@@ -118,9 +118,10 @@ The host commands above live in `bin/`; `src/` is internal source — the
   (GitHub IP ranges + dnsmasq-mirrored zones), verifies itself, and exits non-zero
   on failure so the container never runs with open egress. `bin/allow-egress.sh` edits
   the same zone list live; the base `ALLOWED_ZONES` here is the durable default.
-- **`src/tmux.conf` / `src/tmux-landing.bashrc`** — remote access:
-  mobile-friendly tmux defaults, and the guarded snippet that lands interactive
-  SSH/mosh logins in a fresh `login-*` session.
+- **`src/tmux.conf` / `src/tmux-landing.bashrc` / `src/herdr-config.toml`** —
+  remote access: mobile-friendly tmux defaults, herdr configuration, and the
+  guarded snippet that lands interactive SSH/mosh logins in a fresh `login-*`
+  session (or herdr workspace).
 - **`src/djinn_net_addr.py`** — shared djinn-net subnet/static-address rules
   (top-of-subnet derivation, reserved-address checks). Used by both the jump
   and the tunnel so the two cannot drift.

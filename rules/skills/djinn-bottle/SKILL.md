@@ -74,7 +74,7 @@ Then drill **only** when something implies it:
 
 | Trigger | Drill into |
 |---|---|
-| "phone access", "from my laptop", "long-running" | `remote: {shell, mosh, notify}` — phone access is the default (jump-reachable); allocate ports only for optional features (§4) |
+| "phone access", "from my laptop", "long-running" | `remote.shell: tmux \| herdr \| bash`; `remote: {mosh, notify}` — phone access is the default (jump-reachable); allocate ports only for optional features (§4) |
 | "also reachable from my Mac" | `ssh:` + port allocation (§4) — Mac Remote-SSH only |
 | repos owned by an org that isn't the default identity | `git.orgs.<owner>: {token, name, email}` — see `docs/secrets.md` |
 | a plugin whose README names a secret slot | `common_secrets:` / `agent_secrets:` (§5) |
