@@ -4,32 +4,24 @@
 #
 # MCP: pi has no built-in MCP client. djinn wires every enabled plugin's
 # servers into ~/.pi/agent/mcp.json (same mcpServers shape as Claude's
-# .mcp.json); the pi-mcp-adapter extension (./mcp-adapter, baked into
-# ~/.pi/agent/extensions/ by the install block below) is the consumer — it
-# connects at session_start and registers each server's tools. See
-# ./mcp-adapter/README.md.
-#
-# Remote servers render as mcp-remote shims (like cursor: pi can't expand
-# ${VAR} refs in remote headers, so agent-scoped remotes keep the ref in the
-# shim args and mcp-remote expands it from pi's process env). The adapter
-# spawns those shims as ordinary stdio servers, so they work unchanged; it
-# also handles native {type: http, url, headers} entries, expanding ${VAR}
-# refs itself — the shape wiring can switch to whenever pi stops being
-# shimmed. No persisted state volume today (login state is per-container-
-# lifetime), and no composed rules file.
+# .mcp.json); the upstream pi-mcp-adapter package is the consumer — it reads
+# that file natively (Pi-global override in its merge chain), expands ${VAR}
+# refs from the process env, and exposes servers lazily through one proxy
+# `mcp` tool (~200 tokens instead of every server's full tool surface).
+# Pinned versioned spec: pi skips pinned npm packages on `pi update`, so the
+# image build decides the version; bump it here deliberately.
+# See ./README.md.
 
 binary: pi
 
 install: |
   npm install -g @earendil-works/pi-coding-agent
-  # pi-mcp-adapter: MCP client bridge — makes the wired ~/.pi/agent/mcp.json
-  # live (see ./mcp-adapter/README.md). npm ci from the committed lockfile,
-  # then bake into pi's extension auto-discovery dir (extensions/<dir>/ with
-  # index.ts + node_modules). Build runs as coder, so $HOME needs no chown.
-  npm ci --omit=dev --prefix /opt/agents/pi/mcp-adapter
-  install -d "$HOME/.pi/agent/extensions"
-  rm -rf "$HOME/.pi/agent/extensions/pi-mcp-adapter"
-  cp -R /opt/agents/pi/mcp-adapter "$HOME/.pi/agent/extensions/pi-mcp-adapter"
+  # MCP bridge — makes the wired ~/.pi/agent/mcp.json live (see ./README.md).
+  # Versioned spec = pinned: pi skips it on package updates, so the version
+  # changes only when this line does. Writes the pin into
+  # ~/.pi/agent/settings.json and installs under ~/.pi/agent/npm/. Build
+  # runs as coder, so $HOME needs no chown.
+  pi install npm:pi-mcp-adapter@2.32.1
 
 mcp:
   config_path: .pi/agent/mcp.json
