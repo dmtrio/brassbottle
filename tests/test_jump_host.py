@@ -22,7 +22,9 @@ KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 operator@mac"
 
 
 def _completed(cmd, returncode=0, stdout="", stderr=""):
-    return subprocess.CompletedProcess(args=cmd, returncode=returncode, stdout=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(
+        args=cmd, returncode=returncode, stdout=stdout, stderr=stderr
+    )
 
 
 class ComposeArgvTests(unittest.TestCase):
@@ -59,6 +61,15 @@ class StartTests(unittest.TestCase):
             overlay = jump_config.paths(Path(home))["compose_file"].read_text()
             self.assertIn("djinn.authorized_keys_sha256", overlay)
 
+    def test_refresh_writes_running_jump_enabled_bottles(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            docker_ps = _completed([], stdout="djinn-z\ndjinn-a\n")
+            with mock.patch("subprocess.run", return_value=docker_ps):
+                self.assertEqual(jump_host.cmd_refresh(base), 0)
+            registry = jump_config.paths(base)["registry_file"]
+            self.assertEqual(registry.read_text(), "djinn-a\ndjinn-z\n")
+
     def test_start_bootstraps_the_external_bridge_first(self):
         # djinn-net is declared external, and `jump start` is documented as the
         # FIRST step of a fresh install — before any ./djinn up has created it.
@@ -85,7 +96,8 @@ class StartTests(unittest.TestCase):
             with mock.patch.dict(
                 jump_host.os.environ, {"SSH_AUTHORIZED_KEY": KEY}, clear=False
             ), mock.patch(
-                "subprocess.run", side_effect=lambda cmd, **kw: (calls.append(cmd), _completed(cmd))[1]
+                "subprocess.run",
+                side_effect=lambda cmd, **kw: (calls.append(cmd), _completed(cmd))[1],
             ):
                 jump_host.cmd_start(Path(home))
         ensure = next(c for c in calls if "ensure_net.py" in " ".join(c))

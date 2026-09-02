@@ -20,16 +20,16 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import ensure_net  # noqa: E402
-
+import jump_registry  # noqa: E402
 from jump_config import (  # noqa: E402
+    SERVICE_NAME,
     JumpConfigError,
     JumpIdentity,
-    SERVICE_NAME,
     derive_identity,
     paths,
+    resolve_authorized_keys,
     resolve_jump_ip,
     resolve_mosh_ports,
-    resolve_authorized_keys,
     resolve_subnet,
     write_compose_file,
 )
@@ -119,7 +119,7 @@ def _authorized_keys(base_path: Path) -> tuple[list[str], bool]:
     return keys, source == "env"
 
 
-def _live_subnet() -> "ipaddress.IPv4Network | None":
+def _live_subnet() -> ipaddress.IPv4Network | None:
     """The subnet djinn-net actually has, or None if it cannot be read.
 
     ensure_net only WARNS when a pre-existing bridge disagrees with
@@ -193,13 +193,14 @@ def cmd_start(base_path: Path) -> int:
                 f"desired={resolve_subnet()} — using the live bridge"
             )
         try:
+            jump_registry.refresh(base_path)
             if live is not None:
                 if live != resolve_subnet():
                     jump_ip = resolve_jump_ip(subnet=live)
                 write_compose_file(base_path, keys, subnet=live, seed=seed)
             else:
                 write_compose_file(base_path, keys, seed=seed)
-        except JumpConfigError as exc:
+        except (JumpConfigError, jump_registry.JumpRegistryError) as exc:
             print(f"jump start error reason={exc}", file=sys.stderr)
             return 1
         result = _run(
@@ -223,9 +224,26 @@ def cmd_start(base_path: Path) -> int:
     )
     print("")
     print(f"  Reach it over your tunnel:  mosh coder@{jump_ip}")
-    print(f"  Then hop to a bottle:       ssh djinn-<bottle>")
+    print("  Pick a bottle after login (q keeps the manual SSH shell).")
     print("")
     print("  Run './djinn jump pubkey' for the key your bottles must authorise.")
+    return 0
+
+
+def cmd_refresh(base_path: Path) -> int:
+    """Refresh the picker registry without recreating the jump container."""
+    print(f"jump refresh begin base={base_path}")
+    try:
+        jump_registry.refresh(base_path)
+    except jump_registry.JumpRegistryError as exc:
+        print(f"jump refresh error reason={exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_scope(base_path: Path) -> int:
+    """Print the opaque installation scope used by bottle registry labels."""
+    print(derive_identity(base_path).suffix)
     return 0
 
 
@@ -353,6 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-path", default=None, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("start", help="build and start the jump container")
+    sub.add_parser("refresh", help="refresh the jump bottle picker registry")
+    sub.add_parser("scope", help=argparse.SUPPRESS)
     sub.add_parser("stop", help="stop and remove the jump container")
     sub.add_parser("status", help="report whether the jump container is running")
     logs = sub.add_parser("logs", help="show jump container logs")
@@ -368,6 +388,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "start":
             return cmd_start(base_path)
+        if args.command == "refresh":
+            return cmd_refresh(base_path)
+        if args.command == "scope":
+            return cmd_scope(base_path)
         if args.command == "stop":
             return cmd_stop(base_path)
         if args.command == "status":

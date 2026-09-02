@@ -11,7 +11,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        openssh-server mosh locales ca-certificates \
+        openssh-server mosh locales ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen \
     && locale-gen en_US.UTF-8 \
@@ -30,7 +30,8 @@ RUN useradd -m -s /bin/bash -u 1000 coder \
     && chown -R coder:coder /home/coder/.ssh
 
 COPY jump/entrypoint.sh /usr/local/bin/jump-entrypoint.sh
+COPY jump/picker.py /usr/local/bin/djinn-jump-picker
 COPY jump/ssh_config /etc/ssh/ssh_config.d/djinn-jump.conf
-RUN chmod +x /usr/local/bin/jump-entrypoint.sh
+RUN chmod +x /usr/local/bin/jump-entrypoint.sh /usr/local/bin/djinn-jump-picker
 
 ENTRYPOINT ["/usr/local/bin/jump-entrypoint.sh"]

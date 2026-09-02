@@ -11,6 +11,7 @@ NAME="$1"
 
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/src/common.sh"   # sets BASE_PATH + DJINN_CTR_PREFIX
 CNAME="$DJINN_CTR_PREFIX$NAME"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 if [ "$2" = "--purge" ]; then
     # IMAGE_TAG passed so compose can resolve (and we can remove) the
@@ -25,4 +26,13 @@ if [ "$2" = "--purge" ]; then
 else
     docker compose -p "$CNAME" down
     echo "Stopped $CNAME (workspace volume kept — ./djinn up $NAME to restore)"
+fi
+
+# Removal changes what the jump may offer. This stays host-side: the jump
+# receives only its read-only registry, never a Docker socket.
+if require_python3; then
+    DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" refresh
+else
+    echo "WARNING: jump registry was not refreshed (python3 unavailable)" >&2
+    exit 1
 fi

@@ -374,6 +374,7 @@ class ComposeRenderTests(unittest.TestCase):
             identity=jump_config.derive_identity(Path(home)),
             ssh_dir=p["ssh_dir"],
             authorized_keys_file=keys_file,
+            registry_dir=p["registry_dir"],
             keys_digest=jump_config.authorized_keys_digest(keys),
             jump_ip="172.30.0.254",
             mosh_ports="60000:60010",
@@ -390,6 +391,13 @@ class ComposeRenderTests(unittest.TestCase):
             self.assertIn("name: djinn-net", out)
             self.assertIn("external: true", out)
             self.assertIn('MOSH_PORTS: "60000:60010"', out)
+            self.assertIn(jump_config.REGISTRY_MOUNT, out)
+
+    def test_registry_directory_is_mounted_read_only(self):
+        with tempfile.TemporaryDirectory() as home:
+            out = self._render(home)
+            line = [ln for ln in out.splitlines() if jump_config.REGISTRY_MOUNT in ln][0]
+            self.assertTrue(line.rstrip().endswith(':ro"'), line)
 
     def test_key_material_is_mounted_never_embedded(self):
         # The whole point of the file: no key content in the compose overlay,
@@ -440,6 +448,7 @@ class ComposeRenderTests(unittest.TestCase):
                 identity=jump_config.derive_identity(odd),
                 ssh_dir=odd / "jump" / "ssh",
                 authorized_keys_file=keys_file,
+                registry_dir=odd / "jump" / "registry",
                 keys_digest=jump_config.authorized_keys_digest([self.KEY]),
                 jump_ip="172.30.0.254",
                 mosh_ports="60000:60010",
@@ -471,6 +480,7 @@ class ComposeRenderTests(unittest.TestCase):
                     identity=jump_config.derive_identity(Path(home)),
                     ssh_dir=Path(home) / "absent",
                     authorized_keys_file=keys_file,
+                    registry_dir=jump_config.paths(Path(home))["registry_dir"],
                     keys_digest=jump_config.authorized_keys_digest([self.KEY]),
                     jump_ip="172.30.0.2",
                     mosh_ports="60000:60010",
