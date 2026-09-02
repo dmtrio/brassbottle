@@ -201,8 +201,8 @@ printf '%s' "ntfy.example.com" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.
     || pass "hostnames stay on the zone path"
 
 echo "── landing + notify wiring"
-grep -qF '${REMOTE_SHELL:-tmux}' src/tmux-landing.bashrc \
-    && pass "landing snippet gates on REMOTE_SHELL (tmux default)" \
+grep -qF '${REMOTE_SHELL:-herdr}' src/tmux-landing.bashrc \
+    && pass "landing snippet gates on REMOTE_SHELL (herdr default)" \
     || fail "landing snippet lost the REMOTE_SHELL gate"
 grep -qF 'login-' src/tmux-landing.bashrc \
     && pass "landing snippet names fresh sessions with login-* prefix" \
@@ -222,7 +222,7 @@ grep -qF '/proc/$PPID/comm' src/tmux-landing.bashrc \
 grep -qF 'TERM_PROGRAM' src/tmux-landing.bashrc \
     && pass "landing supports interactive TERM_PROGRAM=vscode terminals" \
     || fail "landing snippet lost TERM_PROGRAM=vscode gate"
-grep -qF '"${REMOTE_SHELL:-tmux}" = "herdr"' src/tmux-landing.bashrc \
+grep -qF '"${REMOTE_SHELL:-herdr}" = "herdr"' src/tmux-landing.bashrc \
     && pass "landing snippet dispatches on REMOTE_SHELL=herdr" \
     || fail "landing snippet lost the herdr dispatch"
 grep -qE '^ +herdr$' src/tmux-landing.bashrc \

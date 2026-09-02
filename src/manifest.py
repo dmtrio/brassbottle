@@ -1028,8 +1028,8 @@ def derive(manifest, plugin_files, agent_files, env):
     remote_shell = _scalar(remote.get("shell"), "remote.shell")
     if remote_tmux == "true":
         remote_shell = "tmux"
-        print("  ⚠ remote.tmux is deprecated — remote.shell: tmux is the default; "
-              "drop the key (shell: bash opts out)", file=sys.stderr)
+        print("  ⚠ remote.tmux is deprecated — use remote.shell: tmux "
+              "(herdr is the default now; shell: bash opts out)", file=sys.stderr)
     elif "tmux" in remote and remote.get("tmux") is False:
         # An explicit `tmux: false` was the OLD opt-out spelling (before
         # shell: existed) — _raw_flag alone can't tell it apart from
@@ -1040,7 +1040,10 @@ def derive(manifest, plugin_files, agent_files, env):
         print("  ⚠ remote.tmux is deprecated — use remote.shell: bash "
               "(tmux: false is read as shell: bash)", file=sys.stderr)
     elif not remote_shell:
-        remote_shell = "tmux"
+        # herdr is the landing default (PLN - herdr adoption P4, default
+        # flip). tmux stays installed and selectable until P2/P3 move
+        # remote.notify and plugin jobs off it.
+        remote_shell = "herdr"
     if remote_shell not in ("tmux", "herdr", "bash"):
         raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
 

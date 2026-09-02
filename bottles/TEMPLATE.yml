@@ -44,12 +44,13 @@ memory: 10g
 # for that — a normal bottle omits the whole section. The keys below are the
 # opt-outs; the notify extra is shown after the #ssh: block further down:
 #   jump: false      not reachable from the jump (no sshd unless ssh: is set)
-#   shell: herdr     interactive ssh/editor terminals land in herdr, an
-#                    agent-aware workspace (one persistent server per bottle,
-#                    sidebar shows each pane's agent state; detach ctrl+b q)
-#   shell: bash      land in plain bash instead of a fresh tmux session with
-#                    the picker (tmux is the default for interactive ssh/editor
-#                    terminals; remote.tmux: true is a deprecated alias)
+#   shell: tmux      land in a fresh tmux session with the picker instead of
+#                    herdr (herdr is the default for interactive ssh/editor
+#                    terminals: an agent-aware workspace, one persistent
+#                    server per bottle, sidebar shows each pane's agent
+#                    state; detach ctrl+b q). remote.tmux: true is a
+#                    deprecated alias of shell: tmux.
+#   shell: bash      land in plain bash — no workspace at all
 #remote:
 #  jump: false
 #  shell: bash
@@ -69,14 +70,16 @@ memory: 10g
 # remote: map — if you want this together with the jump opt-outs above, merge
 # the keys into a single remote: block):
 #   notify: ntfy     push to your ntfy topic when a tmux session goes idle at
-#                    a prompt with nobody attached. Requires shell: tmux (the
-#                    default — omit shell: here) and NTFY_URL (+ optional
+#                    a prompt with nobody attached. Requires shell: tmux
+#                    (herdr is the default, so set it explicitly alongside
+#                    notify:) and NTFY_URL (+ optional
 #                    NTFY_TOPIC) in secrets.env; the ntfy host is auto-added
 #                    to this bottle's egress allowlist (a self-hosted ntfy on
 #                    a plain LAN hostname needs its IP in
 #                    capabilities.egress_cidrs instead — the domain allowlist
 #                    is DNS-driven; an IP-literal NTFY_URL is handled).
 #remote:
+#  shell: tmux
 #  notify: ntfy
 
 # Agent CLIs baked into the image. Names are exact agents/<dir> matches.

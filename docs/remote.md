@@ -44,29 +44,30 @@ remote:
   jump: false
 ```
 
-**Landing shell.** Interactive SSH logins land in a fresh `login-*`
-session by default. Customize with `remote.shell`:
+**Landing shell.** Interactive SSH logins land in the bottle's herdr
+workspace by default. Customize with `remote.shell`:
 
 ```yaml
 remote:
-  shell: tmux     # default; interactive terminals land in tmux picker
-  # shell: herdr  # agent-aware terminal workspace
+  shell: herdr    # default; agent-aware terminal workspace
+  # shell: tmux   # fresh tmux session per login, picker when others exist
   # shell: bash   # opt out — land in plain bash
 ```
 
-- **tmux (default)** — SSH and VS Code/Cursor terminals land in a fresh
-  `login-*` session. If other sessions already exist, tmux opens the
-  session picker automatically; press Esc to keep the fresh landing session.
+- **herdr (default)** — agent-aware workspace: the sidebar shows every pane
+  with its agent state (working / blocked / done / idle). One persistent
+  server per bottle, so every login lands in the same workspace — including
+  every interactive VS Code/Cursor terminal, which attaches as another
+  client of that one workspace (a mirror, not a fresh shell); detach with
+  `ctrl+b q`; the prefix is `ctrl+b` like tmux; `herdr --help` and
+  https://herdr.dev/docs cover the rest. Two things still need tmux for
+  now: `remote.notify` and plugin background jobs (both move to herdr in
+  later phases of PLN - herdr adoption).
+- **tmux** — SSH and VS Code/Cursor terminals land in a fresh `login-*`
+  session. If other sessions already exist, tmux opens the session picker
+  automatically (it lists plugin background sessions too, which is why it
+  is no longer the default); press Esc to keep the fresh landing session.
   You can always reopen the picker with `Ctrl-b s`.
-- **herdr** — agent-aware workspace: the sidebar shows every pane with its
-  agent state (working / blocked / done / idle). One persistent server per
-  bottle, so every login lands in the same workspace — including every
-  interactive VS Code/Cursor terminal, which attaches as another client of
-  that one workspace (a mirror, not a fresh shell); detach with `ctrl+b q`;
-  the prefix is `ctrl+b` like tmux; `herdr --help` and https://herdr.dev/docs
-  cover the rest. Two things still need tmux for now: `remote.notify` and
-  plugin background jobs (both move to herdr in later phases of
-  PLN - herdr adoption).
 - **bash** — land in a plain bash shell; no session picker or shared view.
 - **notify: ntfy** (optional) — an agent-blind monitor pushes to your ntfy
   topic when the session goes idle at a prompt and nobody is attached. Set
@@ -146,9 +147,10 @@ and are removed on `./djinn tunnel stop`.
 ### Sharing sessions across devices
 
 Interactive editor terminals use the same landing gate as SSH logins:
-`src/tmux-landing.bashrc` triggers for `TERM_PROGRAM=vscode`, creates a fresh
-session, and opens the picker when other sessions exist so you can jump into a
-session opened elsewhere.
+`src/tmux-landing.bashrc` triggers for `TERM_PROGRAM=vscode` and lands in
+the bottle's herdr workspace (or, under `shell: tmux`, creates a fresh
+session and opens the picker when other sessions exist so you can jump into
+a session opened elsewhere).
 
 Non-interactive VS Code terminals (tasks, debug consoles, git operations)
 stay out of tmux or herdr because the landing snippet is gated on interactive

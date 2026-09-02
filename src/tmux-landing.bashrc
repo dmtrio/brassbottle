@@ -1,12 +1,12 @@
 # tmux-landing.bashrc — sourced at the END of ~/.bashrc (RFC 04).
-# Interactive remote/editor terminals land in a workspace per login: tmux
-# (a FRESH session per login, so each shell starts empty while still letting
-# you jump into existing work) or herdr (launch-or-attach the one persistent
-# per-bottle session — that's herdr's model, not fresh-per-login). Picked by
-# $REMOTE_SHELL.
+# Interactive remote/editor terminals land in a workspace per login: herdr
+# (the default — launch-or-attach the one persistent per-bottle session;
+# that's herdr's model, not fresh-per-login) or tmux (a FRESH session per
+# login, so each shell starts empty while still letting you jump into
+# existing work via the picker). Picked by $REMOTE_SHELL.
 #
 # Scope guards, in order:
-#   $REMOTE_SHELL  — tmux (default) or herdr land; bash opts out (the
+#   $REMOTE_SHELL  — herdr (default) or tmux land; bash opts out (the
 #                    entrypoint persists it to /etc/environment for PAM)
 #   $TMUX/$HERDR_ENV — panes already inside tmux or herdr must not recurse
 #                    (herdr sets HERDR_ENV=1 inside its own managed panes)
@@ -25,7 +25,7 @@
 #                    agents rely on bare shells there. ntfy notifications are
 #                    per-window via tmux hook and unaffected by session names
 #                    (remote.notify: ntfy still requires shell: tmux).
-if [ "${REMOTE_SHELL:-tmux}" != "bash" ] && [ -z "${TMUX:-}" ] && [ -z "${HERDR_ENV:-}" ] && [[ $- == *i* ]]; then
+if [ "${REMOTE_SHELL:-herdr}" != "bash" ] && [ -z "${TMUX:-}" ] && [ -z "${HERDR_ENV:-}" ] && [[ $- == *i* ]]; then
     should_land=false
     case "$(cat "/proc/$PPID/comm" 2>/dev/null)" in
         sshd|sshd-session) should_land=true ;;
@@ -42,7 +42,7 @@ if [ "${REMOTE_SHELL:-tmux}" != "bash" ] && [ -z "${TMUX:-}" ] && [ -z "${HERDR_
             >>/tmp/djinn-tmux-landing-gc.log 2>&1 || true
     fi
 
-    if [ "$should_land" = "true" ] && [ "${REMOTE_SHELL:-tmux}" = "herdr" ]; then
+    if [ "$should_land" = "true" ] && [ "${REMOTE_SHELL:-herdr}" = "herdr" ]; then
         # herdr's model: one persistent server per bottle, not
         # fresh-per-login. Launch-or-attach the default session; the
         # server survives detach (ctrl+b q), so every login lands back
