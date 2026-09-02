@@ -113,6 +113,12 @@ class TestComposeInvocation(unittest.TestCase):
             text,
             "key resolution must use the non-fatal `if VAR=$(...)` shape so set -e cannot abort",
         )
+        self.assertIn(
+            'if [ "$REMOTE_JUMP" != "true" ] && [ -z "$SSH_PORT" ]; then',
+            text,
+            "the skip must require BOTH remote.jump: false and no published ssh: — "
+            "remote_access.py appends the jump key in published mode too",
+        )
 
     def test_compose_agents_enabled_default_is_fail_closed(self):
         compose_text = COMPOSE_LOCAL.read_text()

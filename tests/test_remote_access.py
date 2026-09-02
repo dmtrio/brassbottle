@@ -179,7 +179,7 @@ class CmdSshdTests(unittest.TestCase):
         self.assertEqual(out, "SSHD_MODE=jump\nSTART_SSHD=false\n")
         self.assertIn(
             "⚠ Jump reachability: no SSH keys (JUMP_AUTHORIZED_KEY unset — "
-            "run ./djinn jump start and add it to secrets.env); sshd not started",
+            "run ./djinn jump start, then ./djinn up again); sshd not started",
             err,
         )
         self.assertIn("remote_access sshd mode=jump start=false reason=no-keys", err)

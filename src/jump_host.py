@@ -46,6 +46,14 @@ class DockerCommandMissing(Exception):
     exit_code = 127
 
 
+# How long `jump start` waits for the container entrypoint to write the
+# client key before returning. Every `./djinn up` reads that key, and the old
+# paste-into-secrets.env step is gone, so nothing else serialises "jump start"
+# and the first "up" — a fleet script running them back to back would
+# otherwise see "no jump key yet" and come up non-jump-reachable.
+KEY_WAIT_SECONDS = 15.0
+KEY_WAIT_POLL_SECONDS = 0.5
+
 DOCKER_MISSING_EXIT = DockerCommandMissing.exit_code
 
 
@@ -219,16 +227,41 @@ def cmd_start(base_path: Path) -> int:
             file=sys.stderr,
         )
         return result.returncode
+    key_ready = _wait_for_client_key(base_path)
     print(
         f"jump start ok container={identity.container_name} ip={jump_ip} "
-        f"mosh_ports={mosh_ports}"
+        f"mosh_ports={mosh_ports} client_key={'ready' if key_ready else 'pending'}"
     )
     print("")
     print(f"  Reach it over your tunnel:  mosh coder@{jump_ip}")
     print("  Pick a bottle after login (q keeps the manual SSH shell).")
     print("")
-    print("  Run './djinn jump pubkey' for the key your bottles must authorise.")
+    print("  Bottles authorise this jump on their next ./djinn up")
+    print("  (./djinn jump pubkey prints the key).")
     return 0
+
+
+def _wait_for_client_key(base_path: Path) -> bool:
+    """Poll for the entrypoint-generated client key; never fatal.
+
+    Returns True once the file exists, False after KEY_WAIT_SECONDS with a
+    stderr warning — the container is up either way, only the first
+    `./djinn up` would need re-running.
+    """
+    pub = paths(base_path)["client_pubkey"]
+    deadline = time.monotonic() + KEY_WAIT_SECONDS
+    while True:
+        if pub.exists():
+            return True
+        if time.monotonic() >= deadline:
+            print(
+                f"jump start warn reason=client-key-pending path={pub} "
+                f"waited={KEY_WAIT_SECONDS:.0f}s — bottles started before it "
+                f"appears need another ./djinn up",
+                file=sys.stderr,
+            )
+            return False
+        time.sleep(KEY_WAIT_POLL_SECONDS)
 
 
 def cmd_refresh(base_path: Path) -> int:
