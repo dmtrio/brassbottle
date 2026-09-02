@@ -15,6 +15,7 @@ with REPO_NAMES in the environment. Stdlib only; atomic writes (tmp + replace).
 Parse failures refuse to touch the file — an agent may have hand-edited it.
 """
 
+import copy
 import json
 import os
 import sys
@@ -45,11 +46,6 @@ DEFAULT_PROFILE = "bash"
 # inside the profile regardless of what the manifest says.
 HERDR_PROFILE = "herdr"
 HERDR_PROFILE_VALUE = {"path": "herdr", "env": {"REMOTE_SHELL": "bash"}}
-# VS Code keeps ctrl+b for itself (toggle sidebar) even when a terminal has
-# focus, which swallows herdr's prefix. The leading "-" removes that one
-# command from the skip-shell list, so ctrl+b reaches herdr (and tmux).
-SKIP_SHELL_KEY = "terminal.integrated.commandsToSkipShell"
-SKIP_SHELL_VALUE = ["-workbench.action.toggleSidebarVisibility"]
 
 
 def _dump_json(obj):
@@ -94,7 +90,7 @@ def merge_settings(settings):
         if DEFAULT_PROFILE not in profiles:
             profiles[DEFAULT_PROFILE] = {"path": "bash"}
         if HERDR_PROFILE not in profiles:
-            profiles[HERDR_PROFILE] = dict(HERDR_PROFILE_VALUE)
+            profiles[HERDR_PROFILE] = copy.deepcopy(HERDR_PROFILE_VALUE)
             if PROFILES_KEY not in added:
                 # Nested addition to a profiles map that already existed:
                 # name it, so a new dropdown entry is traceable to `djinn up`.
@@ -105,10 +101,6 @@ def merge_settings(settings):
     if DEFAULT_PROFILE_KEY not in settings:
         settings[DEFAULT_PROFILE_KEY] = DEFAULT_PROFILE
         added.append(DEFAULT_PROFILE_KEY)
-
-    if SKIP_SHELL_KEY not in settings:
-        settings[SKIP_SHELL_KEY] = list(SKIP_SHELL_VALUE)
-        added.append(SKIP_SHELL_KEY)
 
     return settings, added
 
