@@ -327,7 +327,10 @@ RUN apt-get update && apt-get install -y openssh-server \
         -e 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' \
         -e 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' \
         /etc/ssh/sshd_config \
-    && echo "AllowUsers $USERNAME" >> /etc/ssh/sshd_config
+    && echo "AllowUsers $USERNAME" >> /etc/ssh/sshd_config \
+    && mkdir -p /etc/ssh/host_keys \
+    && printf 'HostKey /etc/ssh/host_keys/ssh_host_%s_key\n' rsa ecdsa ed25519 \
+        >> /etc/ssh/sshd_config
 
 # ── Agent-config wiring module (up.sh execs it after boot) ──────────────────
 # Stdlib-only python3; up.sh pipes it a JSON payload over docker exec -i.
