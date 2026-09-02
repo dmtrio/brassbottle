@@ -73,7 +73,9 @@ remote:
   topic when the session goes idle at a prompt and nobody is attached. Set
   `NTFY_URL` (+ optional `NTFY_TOPIC`) in `secrets.env` and use
   `remote.notify: ntfy`; the host is auto-allowlisted. Requires
-  `remote.shell: tmux` (the idle monitor runs inside the tmux session).
+  `remote.shell: tmux` (the idle monitor runs inside the tmux session) —
+  implied with a nudge when `shell:` is omitted, rejected with `herdr` or
+  `bash`.
 
 **Reach.** All containers sit on one shared bridge (`djinn-net`,
 `172.30.0.0/24` by default, `DJINN_SUBNET` in `./.env` to override; created
