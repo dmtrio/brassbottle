@@ -383,7 +383,9 @@ fi
 # Refresh the jump selector only after this bottle is confirmed running. The
 # helper queries Docker on the HOST and writes into a directory mount, so the
 # jump gets the update without Docker-socket access or a restart.
-DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" refresh
+if ! DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" refresh; then
+    echo "  ⚠ jump: picker registry refresh failed — the bottle is up; rerun './djinn jump refresh' to retry" >&2
+fi
 
 # ── Bootstrap workspace (idempotent; layout v2: /workspace/repos/<name>) ─────
 # A v1 workspace (/workspace/main) cannot migrate in place — worktree metadata

@@ -47,6 +47,12 @@ class SelectTests(unittest.TestCase):
 
         self.assertIsNone(picker.select(["djinn-a"], input_fn=eof, output=output))
 
+    def test_interrupt_stays_on_jump(self):
+        def interrupt(_):
+            raise KeyboardInterrupt
+
+        self.assertIsNone(picker.select(["djinn-a"], input_fn=interrupt, output=io.StringIO()))
+
 
 if __name__ == "__main__":
     unittest.main()

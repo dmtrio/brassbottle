@@ -50,6 +50,15 @@ echo "── jump container (PLN - Djinn Admin Plane PR 1)"
 grep -qF 'COPY src/mosh-server-wrapper.sh /usr/local/bin/mosh-server' jump/Dockerfile \
     && pass "jump image reuses the bottle's mosh-server wrapper" \
     || fail "jump/Dockerfile does not install src/mosh-server-wrapper.sh"
+grep -qF 'COPY jump/picker.py /usr/local/bin/djinn-jump-picker' jump/Dockerfile \
+    && pass "jump image installs the picker" \
+    || fail "jump/Dockerfile does not install jump/picker.py"
+grep -qF 'DJINN_JUMP_PICKER_DONE' jump/entrypoint.sh \
+    && pass "jump entrypoint installs the interactive picker once" \
+    || fail "jump/entrypoint.sh does not install the picker guard"
+grep -qF 'exec python3 /usr/local/bin/djinn-jump-picker' jump/entrypoint.sh \
+    && pass "jump picker owns interactive login shells" \
+    || fail "jump/entrypoint.sh does not exec the picker"
 grep -qF 'update-locale LANG=en_US.UTF-8' jump/Dockerfile \
     && pass "jump image sets a UTF-8 native locale (mosh-server aborts without one)" \
     || fail "jump/Dockerfile is missing the UTF-8 locale setup"
