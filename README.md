@@ -87,7 +87,12 @@ Prefer the IDE? Attach with VS Code or Cursor:
 ./djinn down <name> [--purge]     stop it; --purge removes generated state
 ./djinn service <plugin> [...]    start a host-side plugin bridge
 ./djinn allow <name> <domain...>  add live egress domains
+./djinn deny / undeny ...         persist or remove an egress deny entry
 ./djinn keys <name> ...           inspect or temporarily edit agent keys
+./djinn jump <cmd>                singleton mosh jump container (docs/remote.md)
+./djinn tunnel <cmd>              singleton VPN/tunnel connector (docs/remote.md)
+./djinn backup <cmd>              singleton artifact backup
+./djinn admin [--port N]          admin plane UI daemon
 ```
 
 `up.sh`, `down.sh`, and `service.sh` remain runnable directly; `djinn` is the

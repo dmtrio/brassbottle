@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Interactive selector for the host-generated djinn-jump bottle registry."""
+"""Interactive selector for the host-generated djinn-jump bottle registry.
+
+The registry is read from DEFAULT_REGISTRY; DJINN_JUMP_REGISTRY overrides
+the path (a manual-testing hook for running the picker outside the jump —
+nothing in the jump's compose environment sets it).
+"""
 
 from __future__ import annotations
 

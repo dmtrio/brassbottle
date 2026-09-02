@@ -131,8 +131,8 @@ The host commands above live in `bin/`; `src/` is internal source — the
 - **`src/tunnel_host.py`** — `./djinn tunnel` operator commands.
 - **`src/jump_config.py`** — singleton jump container: identity, host paths,
   bridge address resolution and compose generation (host-side, stdlib).
-- **`src/jump_host.py`** — `./djinn jump` operator commands (start/stop/
-  status/logs/pubkey); thin docker-compose glue over `jump_config`.
+- **`src/jump_host.py`** — `./djinn jump` operator commands (start/refresh/
+  stop/status/logs/pubkey/ip); thin docker-compose glue over `jump_config`.
 - **`jump/Dockerfile`, `jump/entrypoint.sh`, `jump/ssh_config`** — the jump
   image: sshd + mosh only. The entrypoint generates and persists both the
   host keys and the jump's own client key on the mounted volume, so neither
