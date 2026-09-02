@@ -64,16 +64,17 @@ def hop(target: str) -> int | None:
     """Run one bottle SSH session without replacing the Mosh-side picker."""
     try:
         return subprocess.call(["ssh", target])
-    except OSError:
-        # Keep the Mosh session useful even if ssh itself cannot be started.
-        log(f"disconnect target={target} reason=ssh-exec-failed")
+    except (OSError, KeyboardInterrupt):
+        # Keep the Mosh session useful even if ssh cannot start or is cancelled.
         return None
 
 
 def main() -> int:
     os.environ["DJINN_JUMP_PICKER_DONE"] = "1"
-    names = read_names(Path(os.environ.get("DJINN_JUMP_REGISTRY", DEFAULT_REGISTRY)))
+    registry_path = Path(os.environ.get("DJINN_JUMP_REGISTRY", DEFAULT_REGISTRY))
     while True:
+        # The host atomically replaces this file after bottle lifecycle changes.
+        names = read_names(registry_path)
         target = select(names)
         if target is None:
             os.execv("/bin/bash", ["/bin/bash"])
@@ -85,7 +86,10 @@ def main() -> int:
             print("Disconnected from bottle; choose another bottle.")
         else:
             print(f"SSH exited with status {returncode}; choose another bottle.")
-        log(f"disconnect target={target} exit_code={returncode}")
+        if returncode is None:
+            log(f"disconnect target={target} reason=ssh-not-started-or-cancelled")
+        else:
+            log(f"disconnect target={target} exit_code={returncode}")
 
 
 if __name__ == "__main__":
