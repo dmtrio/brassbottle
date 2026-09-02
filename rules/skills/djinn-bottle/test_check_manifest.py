@@ -2,9 +2,9 @@
 """Unit tests for check_manifest.py — python3 -m unittest discover in this dir.
 
 Two things are worth pinning hard. First the port arithmetic: an implicit
-plugin default, a quoted port, or a mosh range overlapping by one is exactly
-the collision a human misses, and on the Mac it surfaces as a silently
-unpublished port rather than an error. Second the severity split — a sibling
+plugin default or a quoted port is exactly the collision a human misses, and
+on the Mac it surfaces as a silently unpublished port rather than an error.
+Second the severity split — a sibling
 clash is a warning because nothing here knows whether the two containers ever
 run at once, while a manifest clashing with itself can never come up and is
 therefore fatal.
@@ -47,11 +47,6 @@ class Scalars(unittest.TestCase):
         self.assertFalse(cm.flag_true(None))
         self.assertFalse(cm.flag_true("yes"))
 
-    def test_parse_mosh_ports(self):
-        self.assertEqual(cm.parse_mosh_ports("60000:60010"), (60000, 60010))
-        for value in (None, "", "60000", "a:b", 60000, "60000-60010"):
-            self.assertIsNone(cm.parse_mosh_ports(value), value)
-
 
 class EnabledPlugins(unittest.TestCase):
     def test_plain_list(self):
@@ -83,18 +78,6 @@ class EffectivePorts(unittest.TestCase):
     def test_quoted_ssh_port_is_still_a_port(self):
         tcp, _ = cm.effective_ports({"ssh": {"port": "2223"}}, DEFAULTS)
         self.assertIn(2223, tcp)
-
-    def test_mosh_defaults_when_enabled_without_a_range(self):
-        _, udp = cm.effective_ports({"remote": {"mosh": True}}, DEFAULTS)
-        self.assertEqual(udp, [(60000, 60010, "remote.mosh_ports")])
-
-    def test_quoted_mosh_flag_still_enables(self):
-        _, udp = cm.effective_ports({"remote": {"mosh": "true"}}, DEFAULTS)
-        self.assertEqual(len(udp), 1)
-
-    def test_mosh_absent_when_not_enabled(self):
-        _, udp = cm.effective_ports({"remote": {"tmux": True}}, DEFAULTS)
-        self.assertEqual(udp, [])
 
     def test_plugin_default_is_claimed_though_unmentioned(self):
         tcp, _ = cm.effective_ports({"plugins": ["gateway", "serena"]}, DEFAULTS)
@@ -159,28 +142,6 @@ class Collisions(unittest.TestCase):
         errors, warnings = cm.scan_collisions(
             "new", {"ssh": {"port": 2224}, "plugins": ["gateway"]},
             {"rhino": {"ssh": {"port": 2223}}}, DEFAULTS)
-        self.assertEqual((errors, warnings), ([], []))
-
-    def test_overlapping_mosh_ranges_warn(self):
-        _, warnings = cm.scan_collisions(
-            "new", {"remote": {"mosh": True, "mosh_ports": "60010:60020"}},
-            {"trip-research": {"remote": {"mosh": True,
-                                          "mosh_ports": "60000:60010"}}},
-            DEFAULTS)
-        self.assertTrue(any("60010" in w for w in warnings))
-
-    def test_adjacent_mosh_ranges_are_clean(self):
-        errors, warnings = cm.scan_collisions(
-            "new", {"remote": {"mosh": True, "mosh_ports": "60011:60021"}},
-            {"trip-research": {"remote": {"mosh": True,
-                                          "mosh_ports": "60000:60010"}}},
-            DEFAULTS)
-        self.assertEqual((errors, warnings), ([], []))
-
-    def test_udp_range_never_collides_with_a_tcp_port(self):
-        errors, warnings = cm.scan_collisions(
-            "new", {"remote": {"mosh": True, "mosh_ports": "8811:8815"}},
-            {"gate": {"plugins": ["gateway"]}}, DEFAULTS)
         self.assertEqual((errors, warnings), ([], []))
 
     def test_browser_bridge_at_ceiling_is_fatal(self):

@@ -13,7 +13,8 @@
 #   $- has i       — non-interactive channels (scp, VS Code Remote-SSH's
 #                    command channel, tasks/debug/git shells) stay untouched
 #   trigger source — sshd (ssh logins; 'sshd-session' since OpenSSH 9.8 split
-#                    the per-session binary), mosh-server (mosh logins), OR
+#                    the per-session binary; bottle logins arrive via sshd
+#                    only now — mosh lives on the jump), OR
 #                    TERM_PROGRAM=vscode (interactive VS Code/Cursor terminals —
 #                    BOTH Remote-SSH and attach-to-running-container flows: the
 #                    editor sets that var in every integrated terminal, so the
@@ -27,7 +28,7 @@
 if [ "${REMOTE_SHELL:-tmux}" != "bash" ] && [ -z "${TMUX:-}" ] && [ -z "${HERDR_ENV:-}" ] && [[ $- == *i* ]]; then
     should_land=false
     case "$(cat "/proc/$PPID/comm" 2>/dev/null)" in
-        sshd|sshd-session|mosh-server) should_land=true ;;
+        sshd|sshd-session) should_land=true ;;
     esac
     [ "${TERM_PROGRAM:-}" = "vscode" ] && should_land=true
 

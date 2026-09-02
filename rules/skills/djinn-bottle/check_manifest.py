@@ -17,8 +17,8 @@ Two independent passes, both reported in one run:
      isolation and cannot see the fleet, but host ports are exclusive among
      RUNNING containers: two claiming ssh 2222 or browser 8814 both come up
      and the second one's publish silently fails. Every sibling manifest is
-     read for its effective ports — explicit (ssh.port, remote.mosh_ports,
-     plugin_ports) AND implicit (a plugin's host_port default in
+     read for its effective ports — explicit (ssh.port, plugin_ports) AND
+     implicit (a plugin's host_port default in
      plugins/<name>/plugin.yml, which a manifest never mentions, plus the
      deprecated capabilities: {gateway|proxyman|browser} sugar).
 
@@ -41,9 +41,6 @@ import shutil
 import subprocess
 import sys
 
-# Mosh's default UDP range when remote.mosh is on and mosh_ports is omitted.
-# Mirrors src/manifest.py; tests/remote.test.sh pins the two together.
-DEFAULT_MOSH_PORTS = (60000, 60010)
 # The browser launcher derives a container's Chrome debug port from its bridge
 # port. Documented in TEMPLATE.yml as the reason to keep a bridge below 9222.
 BROWSER_DEBUG_OFFSET = 408
@@ -119,7 +116,7 @@ def as_port(value):
 
 def flag_true(value):
     """Mirror manifest.py's _raw_flag: anything rendering as 'true' is on,
-    so `mosh: "true"` (a quoted string) enables mosh just as `mosh: true`
+    so `browser: "true"` (a quoted string) enables it just as `browser: true`
     does."""
     if value is None or value is False:
         return False
@@ -154,16 +151,6 @@ def plugin_host_ports(brassbottle):
 
 # ── Effective ports of one manifest ──────────────────────────────────────────
 
-def parse_mosh_ports(value):
-    """'60000:60010' → (60000, 60010). None when unparseable."""
-    if not isinstance(value, str) or ":" not in value:
-        return None
-    start, _, end = value.partition(":")
-    if not (start.strip().isdigit() and end.strip().isdigit()):
-        return None
-    return int(start), int(end)
-
-
 def enabled_plugins(manifest):
     """plugins: plus the deprecated capabilities: sugar, in manifest.py order.
 
@@ -196,11 +183,6 @@ def effective_ports(manifest, defaults):
     ssh_port = as_port(_get(manifest, "ssh", "port"))
     if ssh_port is not None:
         claim(ssh_port, "ssh.port")
-
-    if flag_true(_get(manifest, "remote", "mosh")):
-        rng = parse_mosh_ports(_get(manifest, "remote", "mosh_ports")) \
-            or DEFAULT_MOSH_PORTS
-        udp.append((rng[0], rng[1], "remote.mosh_ports"))
 
     overrides = _get(manifest, "plugin_ports", default={})
     if not isinstance(overrides, dict):

@@ -44,7 +44,7 @@ remote:
   jump: false
 ```
 
-**Landing shell.** Interactive SSH/mosh logins land in a fresh `login-*`
+**Landing shell.** Interactive SSH logins land in a fresh `login-*`
 session by default. Customize with `remote.shell`:
 
 ```yaml
@@ -54,8 +54,8 @@ remote:
   # shell: bash   # opt out — land in plain bash
 ```
 
-- **tmux (default)** — SSH, mosh, and VS Code/Cursor terminals land in a
-  fresh `login-*` session. If other sessions already exist, tmux opens the
+- **tmux (default)** — SSH and VS Code/Cursor terminals land in a fresh
+  `login-*` session. If other sessions already exist, tmux opens the
   session picker automatically; press Esc to keep the fresh landing session.
   You can always reopen the picker with `Ctrl-b s`.
 - **herdr** — agent-aware workspace: the sidebar shows every pane with its
@@ -68,11 +68,6 @@ remote:
   plugin background jobs (both move to herdr in later phases of
   PLN - herdr adoption).
 - **bash** — land in a plain bash shell; no session picker or shared view.
-- **mosh** (optional, needs `ssh:`) — `remote.mosh: true` publishes a
-  per-manifest UDP range (`remote.mosh_ports`, default `60000:60010`;
-  disjoint per bottle, like `ssh.port`) next to the published sshd, pinned
-  server-side. Most bottles never need it: the jump carries mosh for the
-  whole fleet, and mosh's reconnect-through-sleep survives the hop.
 - **notify: ntfy** (optional) — an agent-blind monitor pushes to your ntfy
   topic when the session goes idle at a prompt and nobody is attached. Set
   `NTFY_URL` (+ optional `NTFY_TOPIC`) in `secrets.env` and use
@@ -85,8 +80,8 @@ automatically by `djinn up`). Point your WireGuard/VPN layer at that CIDR
 once; enrolled devices then reach the jump at its static address, and the
 jump reaches every bottle. A bottle's own sshd answers only the jump unless
 the manifest has an `ssh:` section (then the firewall admits the whole
-bridge and a direct `ssh`/`mosh coder@<bridge ip>` over the tunnel works
-too — `djinn up` prints the IP). Nothing listens publicly.
+bridge and direct SSH over the tunnel works — `djinn up` prints the IP).
+Nothing listens publicly.
 
 ## The tunnel connector (`./djinn tunnel`)
 
@@ -150,7 +145,7 @@ and are removed on `./djinn tunnel stop`.
 
 ### Sharing sessions across devices
 
-Interactive editor terminals now use the same landing gate as SSH/mosh:
+Interactive editor terminals use the same landing gate as SSH logins:
 `src/tmux-landing.bashrc` triggers for `TERM_PROGRAM=vscode`, creates a fresh
 session, and opens the picker when other sessions exist so you can jump into a
 session opened elsewhere.
@@ -242,14 +237,12 @@ ssh djinn-coding-tanks         # hop onward; fresh tmux landing + picker
 ```
 
 Use `./djinn jump ip` to get the jump's static bridge address. The hop must
-be **SSH**, not `docker exec` — the landing snippet applies to
-sshd/mosh-server and interactive editor terminals. `docker exec` deliberately
+be **SSH**, not `docker exec` — the landing snippet applies to sshd
+logins and interactive editor terminals. `docker exec` deliberately
 stays a bare shell.
 
 **Why no published host ports.** The jump is reached at its bridge IP over
-the tunnel, so nothing is published to the host at all. That also removes the
-host-port exclusivity that forced a disjoint `remote.mosh_ports` range per
-bottle: one in-container range now serves every session. Its address is
+the tunnel, so nothing is published to the host at all. Its address is
 static so the tunnel target survives a recreate.
 
 **Which address.** The *last* usable address in `DJINN_SUBNET` (`.254` on the
@@ -278,5 +271,5 @@ Per-bottle jump users (one Unix user per bottle, each holding only that
 bottle's key) are a planned follow-up — see *PLN - Djinn Admin Plane* §D8.
 Today the jump holds one key that opens every bottle that authorises it.
 
-Per-bottle `remote.mosh` still works and is unchanged; the two paths coexist
-so the jump can be proven before anything is removed.
+The jump is the fleet's only mosh endpoint: bottles run sshd alone, and the
+mosh leg from your phone always terminates on the jump.
