@@ -64,10 +64,9 @@ memory: 10g
 #  port: 2222
 #  bind: 127.0.0.1
 
-# Optional — idle notify extra, riding the ssh: block above (a manifest has
-# ONE remote: map — if you want this together with the jump opt-outs above,
-# merge the keys into a single remote: block; as written, this block is valid
-# paired with ssh: alone):
+# Optional — idle notify extra. Needs no ssh: section (a manifest has ONE
+# remote: map — if you want this together with the jump opt-outs above, merge
+# the keys into a single remote: block):
 #   notify: ntfy     push to your ntfy topic when a tmux session goes idle at
 #                    a prompt with nobody attached. Requires shell: tmux (the
 #                    default — omit shell: here) and NTFY_URL (+ optional

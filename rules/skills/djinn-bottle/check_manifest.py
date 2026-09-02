@@ -171,11 +171,11 @@ def enabled_plugins(manifest):
 def effective_ports(manifest, defaults):
     """Host ports this manifest claims.
 
-    Returns (tcp, udp): tcp maps port → [what claims it], a LIST because one
-    manifest can claim the same port twice (ssh.port 8811 with the gateway
-    plugin, say) and that self-collision is the one this script can call
-    fatal. udp is a list of (start, end, what-claims-it)."""
-    tcp, udp = {}, []
+    Returns tcp: port → [what claims it], a LIST because one manifest can
+    claim the same port twice (ssh.port 8811 with the gateway plugin, say)
+    and that self-collision is the one this script can call fatal. Bottles
+    publish no UDP (mosh lives on the jump), so TCP is the whole story."""
+    tcp = {}
 
     def claim(port, source):
         tcp.setdefault(port, []).append(source)
@@ -198,7 +198,7 @@ def effective_ports(manifest, defaults):
         if name == "browser":
             claim(port + BROWSER_DEBUG_OFFSET,
                   "browser debug (%d+%d)" % (port, BROWSER_DEBUG_OFFSET))
-    return tcp, udp
+    return tcp
 
 
 # ── Pass 2: collision scan ───────────────────────────────────────────────────
@@ -206,7 +206,7 @@ def effective_ports(manifest, defaults):
 def scan_collisions(draft_name, draft, siblings, defaults):
     """siblings: {container name: manifest}. Returns (errors, warnings)."""
     errors, warnings = [], []
-    mine_tcp, mine_udp = effective_ports(draft, defaults)
+    mine_tcp = effective_ports(draft, defaults)
 
     # Self-collision: fatal regardless of what else is running.
     for port, sources in sorted(mine_tcp.items()):
@@ -218,20 +218,13 @@ def scan_collisions(draft_name, draft, siblings, defaults):
     for name, other in sorted(siblings.items()):
         if name == draft_name:
             continue
-        their_tcp, their_udp = effective_ports(other, defaults)
+        their_tcp = effective_ports(other, defaults)
         for port, sources in sorted(mine_tcp.items()):
             if port in their_tcp:
                 warnings.append(
                     "host TCP port %d: %s here also claimed by %s in %s.yml — "
                     "fine only if the two never run at the same time"
                     % (port, sources[0], their_tcp[port][0], name))
-        for start, end, mine in mine_udp:
-            for o_start, o_end, theirs in their_udp:
-                if start <= o_end and o_start <= end:
-                    warnings.append(
-                        "host UDP %d:%d (%s) overlaps %d:%d (%s) in %s.yml — "
-                        "fine only if the two never run at the same time"
-                        % (start, end, mine, o_start, o_end, theirs, name))
 
     bridge = next((p for p, sources in mine_tcp.items()
                    if any(s.startswith(("plugin_ports.browser", "plugin browser"))

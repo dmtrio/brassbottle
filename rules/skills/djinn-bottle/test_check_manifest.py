@@ -71,42 +71,41 @@ class EnabledPlugins(unittest.TestCase):
 
 class EffectivePorts(unittest.TestCase):
     def test_ssh_port_is_claimed(self):
-        tcp, udp = cm.effective_ports({"ssh": {"port": 2223}}, DEFAULTS)
+        tcp = cm.effective_ports({"ssh": {"port": 2223}}, DEFAULTS)
         self.assertEqual(tcp, {2223: ["ssh.port"]})
-        self.assertEqual(udp, [])
 
     def test_quoted_ssh_port_is_still_a_port(self):
-        tcp, _ = cm.effective_ports({"ssh": {"port": "2223"}}, DEFAULTS)
+        tcp = cm.effective_ports({"ssh": {"port": "2223"}}, DEFAULTS)
         self.assertIn(2223, tcp)
 
     def test_plugin_default_is_claimed_though_unmentioned(self):
-        tcp, _ = cm.effective_ports({"plugins": ["gateway", "serena"]}, DEFAULTS)
+        tcp = cm.effective_ports({"plugins": ["gateway", "serena"]}, DEFAULTS)
         self.assertEqual(tcp, {8811: ["plugin gateway (default)"]})
 
     def test_plugin_ports_override_wins(self):
-        tcp, _ = cm.effective_ports(
+        tcp = cm.effective_ports(
             {"plugins": ["browser"], "plugin_ports": {"browser": 8815}}, DEFAULTS)
         self.assertEqual(tcp[8815], ["plugin_ports.browser"])
         self.assertNotIn(8814, tcp)
 
     def test_browser_also_claims_its_derived_debug_port(self):
-        tcp, _ = cm.effective_ports({"plugins": ["browser"]}, DEFAULTS)
+        tcp = cm.effective_ports({"plugins": ["browser"]}, DEFAULTS)
         self.assertIn(8814 + 408, tcp)
 
     def test_capabilities_sugar_claims_the_host_port(self):
-        tcp, _ = cm.effective_ports({"capabilities": {"browser": True}}, DEFAULTS)
+        tcp = cm.effective_ports({"capabilities": {"browser": True}}, DEFAULTS)
         self.assertIn(8814, tcp)
 
     def test_one_port_claimed_twice_keeps_both_sources(self):
-        tcp, _ = cm.effective_ports(
+        tcp = cm.effective_ports(
             {"ssh": {"port": 8811}, "plugins": ["gateway"]}, DEFAULTS)
         self.assertEqual(len(tcp[8811]), 2)
 
     def test_wrong_yaml_types_do_not_explode(self):
-        tcp, udp = cm.effective_ports(
+        tcp = cm.effective_ports(
             {"plugins": "browser", "plugin_ports": ["browser"], "ssh": []},
             DEFAULTS)
-        self.assertEqual((tcp, udp), ({}, []))
+        self.assertEqual(tcp, {})
 
 
 class Collisions(unittest.TestCase):

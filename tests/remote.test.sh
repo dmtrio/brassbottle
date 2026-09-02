@@ -112,26 +112,32 @@ yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q '
     || fail "ssh overlay environment: has drifted from just SSH_ENABLED"
 
 echo "── bottle image no longer carries mosh"
-# grep -q mosh Dockerfile still matches (the RFC 04 comment explains mosh now
-# lives on the jump) — the check that matters is the apt-get install line
-# itself, pinned via the locale-gen line two lines below it.
-grep -B2 'locale-gen en_US.UTF-8' Dockerfile | grep -qw mosh \
+# grep -q mosh Dockerfile still matches (the RFC 04 comment explains mosh
+# lives on the jump) — the check that matters is every apt-get install
+# package list, so scan each RUN apt-get block up to its cache purge.
+awk '/apt-get install/,/rm -rf \/var\/lib\/apt\/lists/' Dockerfile | grep -v '^\s*#' | grep -qw mosh \
     && fail "Dockerfile still apt-installs mosh into the bottle image" \
     || pass "Dockerfile does not apt-install mosh"
 ! test -f compose/docker-compose.mosh.yml \
     && pass "compose/docker-compose.mosh.yml is gone" \
     || fail "compose/docker-compose.mosh.yml still exists (bottles no longer publish mosh UDP)"
 
-echo "── mosh-server wrapper (jump-only; jump/entrypoint.sh is the default source)"
+echo "── mosh-server wrapper (jump-only; src/jump_config.py DEFAULT_MOSH_PORTS is the source)"
 # Bottles no longer run mosh-server or publish a UDP range — the wrapper
-# lives on for the jump alone (jump/Dockerfile COPYs it). Pin its default
-# range literal against jump/entrypoint.sh's default, not a bottle overlay.
-grep -qF '${MOSH_PORTS:-60000:60010}' src/mosh-server-wrapper.sh \
-    && pass "mosh-server wrapper default is 60000:60010" \
-    || fail "wrapper default range drifted"
-grep -qF '${MOSH_PORTS:-60000:60010}' jump/entrypoint.sh \
-    && pass "jump/entrypoint.sh default matches the wrapper default" \
-    || fail "jump/entrypoint.sh default range drifted from the wrapper"
+# lives on for the jump alone (jump/Dockerfile COPYs it). jump_config.py
+# always sets MOSH_PORTS in the jump container, so the wrapper's and the
+# jump entrypoint's ${MOSH_PORTS:-…} fallbacks are pinned to THAT default:
+# changing DEFAULT_MOSH_PORTS must fail here, not leave stale fallbacks.
+JUMP_DEFAULT=$(sed -n 's/^DEFAULT_MOSH_PORTS = "\(.*\)"$/\1/p' src/jump_config.py)
+[ -n "$JUMP_DEFAULT" ] \
+    && pass "src/jump_config.py declares DEFAULT_MOSH_PORTS ($JUMP_DEFAULT)" \
+    || fail "could not read DEFAULT_MOSH_PORTS from src/jump_config.py"
+grep -qF "\${MOSH_PORTS:-$JUMP_DEFAULT}" src/mosh-server-wrapper.sh \
+    && pass "mosh-server wrapper fallback matches DEFAULT_MOSH_PORTS" \
+    || fail "wrapper fallback range drifted from src/jump_config.py DEFAULT_MOSH_PORTS"
+grep -qF "\${MOSH_PORTS:-$JUMP_DEFAULT}" jump/entrypoint.sh \
+    && pass "jump/entrypoint.sh fallback matches DEFAULT_MOSH_PORTS" \
+    || fail "jump/entrypoint.sh fallback range drifted from src/jump_config.py DEFAULT_MOSH_PORTS"
 
 # wrapper: the -p pin must be spliced BEFORE any '--' (a trailing pin lands
 # in the remote command's argv and is silently ignored by getopt)
