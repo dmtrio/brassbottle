@@ -35,7 +35,10 @@ services:
       # picker registry for the jump. The jump itself never receives Docker
       # socket access.
       djinn.remote.jump: "${REMOTE_JUMP:-true}"
-      djinn.jump.scope: "${JUMP_REGISTRY_SCOPE}"
+      # Direct compose debugging does not run up.sh's scope derivation; keep
+      # such containers deliberately unlisted rather than letting interpolation
+      # corrupt the merged compose config.
+      djinn.jump.scope: "${JUMP_REGISTRY_SCOPE:-unscoped}"
 
     restart: unless-stopped
 
