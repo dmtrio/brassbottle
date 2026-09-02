@@ -143,13 +143,8 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  djinn-jump is up (sshd :22, mosh UDP ${MOSH_PORTS:-60000:60010})"
 echo ""
-echo "  Authorise this key in your bottles — set in secrets.env:"
-# QUOTED: secrets.env is sourced by every host script under `set -e`, so an
-# unquoted key's spaces would make bash run its comment as a command and abort
-# every ./djinn up. Printing the line the operator copies is exactly where
-# that has to be right.
-echo "    JUMP_AUTHORIZED_KEY=\"$(cat "$CLIENT_KEY.pub")\""
-echo "  then re-run ./djinn up <bottle> for each bottle you want reachable."
+echo "  Bottles authorise this jump automatically on their next ./djinn up"
+echo "  (key: \$DJINN_HOME/jump/ssh/id_ed25519.pub — ./djinn jump pubkey prints it)."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 

@@ -38,8 +38,9 @@ memory: 10g
 
 # Optional — remote access. Every bottle is jump-reachable by default: sshd
 # listens on the bridge :22 and the firewall accepts it only from the jump
-# container (./djinn jump start; JUMP_AUTHORIZED_KEY in secrets.env). Phone
-# flow: mosh coder@<jump ip>, then ssh djinn-<bottle>. Nothing to write here
+# container (./djinn jump start once; every bottle picks up its key on the
+# next ./djinn up). Phone flow: mosh coder@<jump ip>, then ssh
+# djinn-<bottle>. Nothing to write here
 # for that — a normal bottle omits the whole section. The keys below are the
 # opt-outs; the notify extra is shown after the #ssh: block further down:
 #   jump: false      not reachable from the jump (no sshd unless ssh: is set)

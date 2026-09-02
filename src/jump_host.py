@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent
@@ -299,11 +300,11 @@ def cmd_logs(base_path: Path, follow: bool) -> int:
         return DOCKER_MISSING_EXIT
 
 
-def cmd_pubkey(base_path: Path) -> int:
-    """Print the jump's client public key — what bottles authorise.
+def read_client_pubkey(base_path: Path) -> str:
+    """Read the jump's client public key from the host side of the mount.
 
-    Read from the host side of the mount, so it works whether or not the
-    container is running (it is generated on first start).
+    Works whether or not the container is running (the key is generated on
+    first start). Raises JumpHostError when the key is missing or unreadable.
     """
     pub = paths(base_path)["client_pubkey"]
     # Path.exists() swallows PermissionError and returns False, which would
@@ -322,10 +323,39 @@ def cmd_pubkey(base_path: Path) -> int:
             f"(the container writes it as uid 1000)"
         ) from exc
     try:
-        text = pub.read_text(encoding="utf-8").strip()
+        return pub.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise JumpHostError(f"cannot read {pub}: {exc}") from exc
-    print(text)
+
+
+def cmd_pubkey(base_path: Path) -> int:
+    """Print the jump's client public key — what bottles authorise."""
+    print(read_client_pubkey(base_path))
+    return 0
+
+
+def cmd_authorized_key(
+    base_path: Path, env: Mapping[str, str] | None = None
+) -> int:
+    """Print the key up.sh should pass to bottles as JUMP_AUTHORIZED_KEY.
+
+    Resolution order: an explicit JUMP_AUTHORIZED_KEY in the environment wins
+    (override for a jump that runs elsewhere — deprecated, warned on stderr);
+    else the key file under $DJINN_HOME/jump/ssh/; else JumpHostError (up.sh
+    treats that as "not jump-reachable this run").
+    """
+    env = os.environ if env is None else env
+    override = (env.get("JUMP_AUTHORIZED_KEY") or "").strip()
+    if override:
+        pub = paths(base_path)["client_pubkey"]
+        print(
+            f"⚠ jump: JUMP_AUTHORIZED_KEY in secrets.env overrides {pub} "
+            f"— drop it unless the jump runs elsewhere",
+            file=sys.stderr,
+        )
+        print(override)
+        return 0
+    print(read_client_pubkey(base_path))
     return 0
 
 
@@ -378,6 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs = sub.add_parser("logs", help="show jump container logs")
     logs.add_argument("-f", "--follow", action="store_true")
     sub.add_parser("pubkey", help="print the key bottles must authorise")
+    sub.add_parser("authorized-key", help=argparse.SUPPRESS)
     sub.add_parser("ip", help="print the jump's static bridge address")
     return parser
 
@@ -400,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_logs(base_path, args.follow)
         if args.command == "pubkey":
             return cmd_pubkey(base_path)
+        if args.command == "authorized-key":
+            return cmd_authorized_key(base_path)
         if args.command == "ip":
             return cmd_ip(base_path)
     except (JumpHostError, JumpConfigError) as exc:

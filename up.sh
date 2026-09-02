@@ -289,14 +289,39 @@ else
 fi
 [ "$JUMP_SCOPE_ERR" = "/dev/null" ] || rm -f "$JUMP_SCOPE_ERR"
 
+# ── Jump public key (host-side; never fatal) ─────────────────────────────────
+# The jump generates its own client key on first start and persists it under
+# $DJINN_HOME/jump/ssh/. A public key is not a secret, so read it from there
+# instead of asking the operator to paste `./djinn jump pubkey` output into
+# secrets.env. A JUMP_AUTHORIZED_KEY set in secrets.env still wins (override
+# for a jump that runs elsewhere) — jump_host.py prints the deprecation note.
+# Skipped for an opted-out bottle (remote.jump: false): it never authorises
+# the jump, so a fresh install without a jump key must not nag it every up.
+JUMP_KEY_ERR="$(mktemp 2>/dev/null || echo /dev/null)"
+if [ "$REMOTE_JUMP" != "true" ]; then
+    JUMP_KEY_FAILED=false
+    JUMP_AUTHORIZED_KEY=""
+elif JUMP_AUTHORIZED_KEY="$(env JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" authorized-key 2>"$JUMP_KEY_ERR")"; then
+    JUMP_KEY_FAILED=false
+else
+    JUMP_KEY_FAILED=true
+    JUMP_AUTHORIZED_KEY=""
+fi
+if [ "$JUMP_KEY_FAILED" = "true" ] || [ -s "$JUMP_KEY_ERR" ]; then
+    while IFS= read -r line; do
+        echo "  jump: $line"
+    done < "$JUMP_KEY_ERR"
+fi
+[ "$JUMP_KEY_ERR" = "/dev/null" ] || rm -f "$JUMP_KEY_ERR"
+
 # ── Jump reachability preflight (non-fatal) ───────────────────────────────────
 # Both are quiet-degradation warnings, not errors: the entrypoint and firewall
 # already degrade gracefully when either input is missing (no sshd started, or
 # sshd with no INPUT rule yet). Printed here — the one place with both pieces
-# of context (JUMP_IP just resolved above; JUMP_AUTHORIZED_KEY only reaches
-# this far via secrets.env) — so the operator sees WHY before hunting for it.
+# of context (JUMP_IP and the key, both just resolved above) — so the operator
+# sees WHY before hunting for it.
 if [ "$REMOTE_JUMP" = "true" ] && [ -z "${JUMP_AUTHORIZED_KEY:-}" ]; then
-    echo "  ⚠ jump: JUMP_AUTHORIZED_KEY is not in secrets.env — $NAME will not be jump-reachable (./djinn jump start, then add the printed key)"
+    echo "  ⚠ jump: $NAME will not be jump-reachable until ./djinn jump start has run"
 fi
 if [ "$REMOTE_JUMP" = "true" ] && [ -z "$JUMP_IP" ]; then
     echo "  ⚠ jump: could not derive the jump address (DJINN_SUBNET/DJINN_JUMP_IP) — $NAME will not be jump-reachable"
