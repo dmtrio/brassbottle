@@ -437,7 +437,7 @@ class TestRemoteSchema(unittest.TestCase):
         self.assertEqual(
             str(cm.exception),
             "remote: unsupported field(s): foo,bar "
-            "(only jump, shell, mosh, mosh_ports, notify — and the deprecated tmux)")
+            "(only jump, shell, notify — and the deprecated tmux, mosh, mosh_ports)")
 
     def test_notify_ntfy_with_shell_bash_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -466,6 +466,13 @@ class TestRemoteSchema(unittest.TestCase):
                 "remote.mosh is retired — the jump carries mosh (mosh coder@<jump ip>, "
                 "then ssh djinn-<bottle>); drop remote.mosh / remote.mosh_ports"),
             1)
+
+    def test_mosh_false_is_silent(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"remote": {"mosh": False}})
+        self.assertNotIn("remote.mosh is retired", err.getvalue())
+        self.assertNotIn("REMOTE_MOSH", d)
 
     def test_mosh_ports_alone_warns(self):
         err = io.StringIO()

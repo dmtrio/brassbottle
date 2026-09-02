@@ -1003,7 +1003,7 @@ def derive(manifest, plugin_files, agent_files, env):
     if unknown_remote:
         raise ManifestError(
             f"remote: unsupported field(s): {unknown_remote} "
-            "(only jump, shell, mosh, mosh_ports, notify — and the deprecated tmux)")
+            "(only jump, shell, notify — and the deprecated tmux, mosh, mosh_ports)")
 
     # remote.jump must be a real YAML boolean — unlike the flags below, "true"
     # here isn't sugar for "opt in to a feature": it flips the firewall's
@@ -1056,8 +1056,9 @@ def derive(manifest, plugin_files, agent_files, env):
     # remote.mosh / remote.mosh_ports are retired (the jump carries mosh for
     # the whole fleet now) but stay accepted keys — a fleet of manifests still
     # carries them — as no-ops: no value validation, no derived vars, just one
-    # nudge to drop them.
-    if "mosh" in remote or "mosh_ports" in remote:
+    # nudge to drop them. An explicit `mosh: false` was an opt-out and is not
+    # nagged.
+    if _raw_flag(remote.get("mosh"), "remote.mosh") == "true" or "mosh_ports" in remote:
         print("  ⚠ remote.mosh is retired — the jump carries mosh (mosh coder@<jump ip>, "
               "then ssh djinn-<bottle>); drop remote.mosh / remote.mosh_ports", file=sys.stderr)
 
