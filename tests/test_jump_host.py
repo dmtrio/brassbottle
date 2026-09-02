@@ -42,6 +42,57 @@ class ComposeArgvTests(unittest.TestCase):
 
 
 class StartTests(unittest.TestCase):
+    def setUp(self):
+        # The key is written by the (mocked-away) container; do not wait for it.
+        patcher = mock.patch.object(jump_host, "KEY_WAIT_SECONDS", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_start_reports_the_client_key_pending_when_it_never_appears(self):
+        with tempfile.TemporaryDirectory() as home:
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(
+                jump_host.os.environ, {"SSH_AUTHORIZED_KEY": KEY}, clear=False
+            ), mock.patch(
+                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
+            ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(jump_host.cmd_start(Path(home)), 0)
+            self.assertIn("client_key=pending", out.getvalue())
+            self.assertIn("client-key-pending", err.getvalue())
+            self.assertNotIn("secrets.env", out.getvalue())
+
+    def test_start_reports_the_client_key_ready_when_it_exists(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            p["client_pubkey"].write_text("ssh-ed25519 AAAAjump djinn-jump\n", encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(
+                jump_host.os.environ, {"SSH_AUTHORIZED_KEY": KEY}, clear=False
+            ), mock.patch(
+                "subprocess.run", side_effect=lambda cmd, **kw: _completed(cmd)
+            ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(jump_host.cmd_start(base), 0)
+            self.assertIn("client_key=ready", out.getvalue())
+            self.assertNotIn("client-key-pending", err.getvalue())
+
+    def test_wait_for_client_key_polls_until_the_file_appears(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            p = jump_config.ensure_layout(base)
+            calls = []
+
+            def write_on_second_poll(_seconds):
+                calls.append(1)
+                if len(calls) == 2:
+                    p["client_pubkey"].write_text("k\n", encoding="utf-8")
+
+            with mock.patch.object(jump_host, "KEY_WAIT_SECONDS", 60.0), mock.patch.object(
+                jump_host.time, "sleep", side_effect=write_on_second_poll
+            ):
+                self.assertTrue(jump_host._wait_for_client_key(base))
+            self.assertEqual(len(calls), 2)
+
     def test_start_requires_authorized_key(self):
         with tempfile.TemporaryDirectory() as home:
             with mock.patch.dict(jump_host.os.environ, {"SSH_AUTHORIZED_KEY": ""}, clear=False):

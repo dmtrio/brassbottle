@@ -182,7 +182,7 @@ mosh session and hops onward to bottles over `djinn-net`. One mosh endpoint
 for the whole fleet instead of a UDP range baked into every bottle.
 
 ```bash
-./djinn jump start      # build + start; prints the address and the key to authorise
+./djinn jump start      # build + start; prints the address
 ./djinn jump ip         # print the jump's static bridge address
 ./djinn jump pubkey     # the key bottles authorise (read by ./djinn up itself)
 ./djinn jump status

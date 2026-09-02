@@ -295,10 +295,12 @@ fi
 # instead of asking the operator to paste `./djinn jump pubkey` output into
 # secrets.env. A JUMP_AUTHORIZED_KEY set in secrets.env still wins (override
 # for a jump that runs elsewhere) — jump_host.py prints the deprecation note.
-# Skipped for an opted-out bottle (remote.jump: false): it never authorises
-# the jump, so a fresh install without a jump key must not nag it every up.
+# Skipped only when the bottle authorises no keys at all (remote.jump: false
+# AND no published ssh:): a published-ssh bottle still appends the jump key
+# (remote_access.py writes both in published mode), and a fresh install must
+# not nag an opted-out bottle about a jump key it would never use.
 JUMP_KEY_ERR="$(mktemp 2>/dev/null || echo /dev/null)"
-if [ "$REMOTE_JUMP" != "true" ]; then
+if [ "$REMOTE_JUMP" != "true" ] && [ -z "$SSH_PORT" ]; then
     JUMP_KEY_FAILED=false
     JUMP_AUTHORIZED_KEY=""
 elif JUMP_AUTHORIZED_KEY="$(env JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/jump_host.py" authorized-key 2>"$JUMP_KEY_ERR")"; then
@@ -315,14 +317,10 @@ fi
 [ "$JUMP_KEY_ERR" = "/dev/null" ] || rm -f "$JUMP_KEY_ERR"
 
 # ── Jump reachability preflight (non-fatal) ───────────────────────────────────
-# Both are quiet-degradation warnings, not errors: the entrypoint and firewall
-# already degrade gracefully when either input is missing (no sshd started, or
-# sshd with no INPUT rule yet). Printed here — the one place with both pieces
-# of context (JUMP_IP and the key, both just resolved above) — so the operator
-# sees WHY before hunting for it.
-if [ "$REMOTE_JUMP" = "true" ] && [ -z "${JUMP_AUTHORIZED_KEY:-}" ]; then
-    echo "  ⚠ jump: $NAME will not be jump-reachable until ./djinn jump start has run"
-fi
+# A quiet-degradation warning, not an error: the entrypoint and firewall
+# already degrade gracefully when the address is missing (sshd with no INPUT
+# rule yet). A missing KEY needs no line here — the resolver above already
+# printed "no jump key yet … run: ./djinn jump start" for it.
 if [ "$REMOTE_JUMP" = "true" ] && [ -z "$JUMP_IP" ]; then
     echo "  ⚠ jump: could not derive the jump address (DJINN_SUBNET/DJINN_JUMP_IP) — $NAME will not be jump-reachable"
 fi

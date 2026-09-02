@@ -158,7 +158,7 @@ def cmd_sshd(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> 
     elif mode == "jump" and not start:
         print(
             "⚠ Jump reachability: no SSH keys (JUMP_AUTHORIZED_KEY unset — "
-            "run ./djinn jump start and add it to secrets.env); sshd not started",
+            "run ./djinn jump start, then ./djinn up again); sshd not started",
             file=sys.stderr,
         )
 
