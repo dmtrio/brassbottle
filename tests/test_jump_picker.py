@@ -48,26 +48,35 @@ class SelectTests(unittest.TestCase):
 
         self.assertIsNone(picker.select(["djinn-a"], input_fn=eof, output=output))
 
-    def test_interrupt_stays_on_jump(self):
-        def interrupt(_):
-            raise KeyboardInterrupt
+    def test_interrupt_keeps_the_operator_in_the_picker(self):
+        choices = iter([KeyboardInterrupt, "q"])
+        output = io.StringIO()
 
-        self.assertIsNone(picker.select(["djinn-a"], input_fn=interrupt, output=io.StringIO()))
+        def interrupt_then_quit(_):
+            choice = next(choices)
+            if choice is KeyboardInterrupt:
+                raise KeyboardInterrupt
+            return choice
+
+        self.assertIsNone(
+            picker.select(["djinn-a"], input_fn=interrupt_then_quit, output=output)
+        )
+        self.assertIn("Selection cancelled; choose a bottle or q.", output.getvalue())
 
 
 class HopTests(unittest.TestCase):
     def test_hop_waits_for_ssh_instead_of_replacing_picker_process(self):
         with mock.patch.object(picker.subprocess, "call", return_value=0) as call:
-            self.assertEqual(picker.hop("djinn-a"), 0)
+            self.assertEqual(picker.hop("djinn-a"), (0, None))
         call.assert_called_once_with(["ssh", "djinn-a"])
 
     def test_hop_keeps_picker_alive_when_ssh_cannot_start(self):
         with mock.patch.object(picker.subprocess, "call", side_effect=OSError):
-            self.assertIsNone(picker.hop("djinn-a"))
+            self.assertEqual(picker.hop("djinn-a"), (None, "ssh-not-started"))
 
     def test_hop_keeps_picker_alive_when_ssh_is_cancelled(self):
         with mock.patch.object(picker.subprocess, "call", side_effect=KeyboardInterrupt):
-            self.assertIsNone(picker.hop("djinn-a"))
+            self.assertEqual(picker.hop("djinn-a"), (None, "cancelled"))
 
 
 if __name__ == "__main__":

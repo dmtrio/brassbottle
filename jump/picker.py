@@ -47,9 +47,13 @@ def select(names: list[str], input_fn=input, output=sys.stdout) -> str | None:
     while True:
         try:
             choice = input_fn("Select a bottle: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            log("cancel reason=input-interrupted")
+        except EOFError:
+            log("cancel reason=input-closed")
             return None
+        except KeyboardInterrupt:
+            log("cancel reason=operator-interrupted")
+            print("Selection cancelled; choose a bottle or q.", file=output)
+            continue
         if choice.lower() == "q":
             log("cancel reason=operator")
             return None
@@ -60,13 +64,16 @@ def select(names: list[str], input_fn=input, output=sys.stdout) -> str | None:
         print("Choose a listed number or q.", file=output)
 
 
-def hop(target: str) -> int | None:
+def hop(target: str) -> tuple[int | None, str | None]:
     """Run one bottle SSH session without replacing the Mosh-side picker."""
     try:
-        return subprocess.call(["ssh", target])
-    except (OSError, KeyboardInterrupt):
-        # Keep the Mosh session useful even if ssh cannot start or is cancelled.
-        return None
+        return subprocess.call(["ssh", target]), None
+    except KeyboardInterrupt:
+        # Keep the Mosh session useful if the operator cancels a stalled hop.
+        return None, "cancelled"
+    except OSError:
+        # Keep the Mosh session useful if ssh itself cannot be started.
+        return None, "ssh-not-started"
 
 
 def main() -> int:
@@ -79,15 +86,17 @@ def main() -> int:
         if target is None:
             os.execv("/bin/bash", ["/bin/bash"])
             return 1  # pragma: no cover - exec only returns on error
-        returncode = hop(target)
-        if returncode is None:
+        returncode, reason = hop(target)
+        if reason == "cancelled":
+            print("SSH cancelled; choose another bottle.")
+        elif reason == "ssh-not-started":
             print("Could not start SSH; choose another bottle.")
         elif returncode == 0:
             print("Disconnected from bottle; choose another bottle.")
         else:
             print(f"SSH exited with status {returncode}; choose another bottle.")
-        if returncode is None:
-            log(f"disconnect target={target} reason=ssh-not-started-or-cancelled")
+        if reason:
+            log(f"disconnect target={target} reason={reason}")
         else:
             log(f"disconnect target={target} exit_code={returncode}")
 
