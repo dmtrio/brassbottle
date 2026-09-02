@@ -199,14 +199,14 @@ class TestErrorTable(unittest.TestCase):
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)\n"
         "  watch ref 'w_nobody': suffix is not a known agent (_cursor_agent/_claude/_gemini/_codex/_pi)"),
         ("ntfy url missing",
-         {"remote": {"notify": "ntfy"}}, ENV,
+         {"remote": {"shell": "tmux", "notify": "ntfy"}}, ENV,
          "manifest has remote.notify: ntfy but NTFY_URL is missing from /sec/secrets.env"),
         ("ntfy url with hash",
-         {"remote": {"notify": "ntfy"}},
+         {"remote": {"shell": "tmux", "notify": "ntfy"}},
          dict(ENV, NTFY_URL="https://x.com/#frag"),
          "NTFY_URL must be a bare origin (no '#', quotes) — put the topic in NTFY_TOPIC"),
         ("ntfy url unparseable",
-         {"remote": {"notify": "ntfy"}},
+         {"remote": {"shell": "tmux", "notify": "ntfy"}},
          dict(ENV, NTFY_URL="https:///path"),
          "cannot parse a host from NTFY_URL 'https:///path'"),
     ]
@@ -352,11 +352,27 @@ class TestErrorTable(unittest.TestCase):
 class TestRemoteSchema(unittest.TestCase):
     """remote.jump / remote.shell (PLN - default jump reachability P1)."""
 
-    def test_empty_manifest_defaults_jump_true_shell_tmux(self):
+    def test_empty_manifest_defaults_jump_true_shell_herdr(self):
+        # PLN - herdr adoption P4 (default flip): the tmux picker is mostly
+        # noise (background plugin sessions), herdr is the landing default.
         d = derive({})
         self.assertEqual(d["REMOTE_JUMP"], "true")
-        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertEqual(d["REMOTE_SHELL"], "herdr")
         self.assertNotIn("REMOTE_TMUX", d)
+
+    def test_shell_tmux_explicit(self):
+        d = derive({"remote": {"shell": "tmux"}})
+        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+
+    def test_notify_without_explicit_shell_rejected(self):
+        # notify: ntfy alone used to ride the tmux default; with herdr as
+        # the default it must name shell: tmux, not silently land in herdr
+        # where the idle monitor never runs.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"notify": "ntfy"}})
+        self.assertEqual(
+            str(cm.exception),
+            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
 
     def test_jump_false(self):
         d = derive({"remote": {"jump": False}})
@@ -397,8 +413,8 @@ class TestRemoteSchema(unittest.TestCase):
             d = derive({"remote": {"tmux": True}})
         self.assertEqual(d["REMOTE_SHELL"], "tmux")
         self.assertIn(
-            "remote.tmux is deprecated — remote.shell: tmux is the default; "
-            "drop the key (shell: bash opts out)",
+            "remote.tmux is deprecated — use remote.shell: tmux "
+            "(herdr is the default now; shell: bash opts out)",
             err.getvalue())
 
     def test_tmux_false_sets_shell_bash_and_warns(self):
@@ -416,11 +432,11 @@ class TestRemoteSchema(unittest.TestCase):
 
     def test_tmux_null_has_no_effect_and_no_warning(self):
         # Distinct from tmux: false — YAML null/absent both mean "the key
-        # isn't really set", so this stays the ordinary tmux default.
+        # isn't really set", so this stays the ordinary herdr default.
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             d = derive({"remote": {"tmux": None}})
-        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertEqual(d["REMOTE_SHELL"], "herdr")
         self.assertEqual(err.getvalue(), "")
 
     def test_tmux_and_shell_both_set_rejected(self):
@@ -448,7 +464,7 @@ class TestRemoteSchema(unittest.TestCase):
 
     def test_notify_ntfy_without_ssh_now_succeeds(self):
         env = dict(ENV, NTFY_URL="https://ntfy.example.com")
-        d = derive({"remote": {"notify": "ntfy"}}, env=env)
+        d = derive({"remote": {"shell": "tmux", "notify": "ntfy"}}, env=env)
         self.assertEqual(d["REMOTE_NOTIFY"], "ntfy")
         self.assertEqual(d["CONTAINER_NTFY_URL"], "https://ntfy.example.com")
 
@@ -851,7 +867,7 @@ class TestDerivedValues(unittest.TestCase):
 
     def test_ntfy_host_strip_order_path_before_userinfo(self):
         env = dict(ENV, NTFY_URL="https://ntfy.example.com/a@b", NTFY_TOPIC="t")
-        d = derive({"remote": {"notify": "ntfy"}}, env=env)
+        d = derive({"remote": {"shell": "tmux", "notify": "ntfy"}}, env=env)
         # '@' in the PATH must not masquerade as userinfo
         self.assertIn("ntfy.example.com", d["EGRESS"].split(","))
         self.assertEqual(d["CONTAINER_NTFY_URL"], "https://ntfy.example.com/a@b")
@@ -859,12 +875,12 @@ class TestDerivedValues(unittest.TestCase):
 
     def test_ntfy_userinfo_and_port_stripped(self):
         env = dict(ENV, NTFY_URL="https://user@h.example.com:8443")
-        d = derive({"remote": {"notify": "ntfy"}}, env=env)
+        d = derive({"remote": {"shell": "tmux", "notify": "ntfy"}}, env=env)
         self.assertIn("h.example.com", d["EGRESS"].split(","))
 
     def test_ntfy_ip_literal_goes_to_cidrs(self):
         env = dict(ENV, NTFY_URL="http://10.1.2.3:8080/p")
-        d = derive({"remote": {"notify": "ntfy"},
+        d = derive({"remote": {"shell": "tmux", "notify": "ntfy"},
                     "capabilities": {"egress_cidrs": ["10.1.2.3/32"]}}, env=env)
         self.assertEqual(d["EGRESS_CIDRS"], "10.1.2.3/32")  # deduped
         self.assertNotIn("10.1.2.3", d["EGRESS"])
