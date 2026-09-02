@@ -50,6 +50,7 @@ session by default. Customize with `remote.shell`:
 ```yaml
 remote:
   shell: tmux     # default; interactive terminals land in tmux picker
+  # shell: herdr  # agent-aware terminal workspace
   # shell: bash   # opt out — land in plain bash
 ```
 
@@ -57,6 +58,13 @@ remote:
   fresh `login-*` session. If other sessions already exist, tmux opens the
   session picker automatically; press Esc to keep the fresh landing session.
   You can always reopen the picker with `Ctrl-b s`.
+- **herdr** — agent-aware workspace: the sidebar shows every pane with its
+  agent state (working / blocked / done / idle). One persistent server per
+  bottle, so every login lands in the same workspace; detach with `ctrl+b q`;
+  the prefix is `ctrl+b` like tmux; `herdr --help` and https://herdr.dev/docs
+  cover the rest. Two things still need tmux for now: `remote.notify` and
+  plugin background jobs (both move to herdr in later phases of
+  PLN - herdr adoption).
 - **bash** — land in a plain bash shell; no session picker or shared view.
 - **mosh** (optional, needs `ssh:`) — `remote.mosh: true` publishes a
   per-manifest UDP range (`remote.mosh_ports`, default `60000:60010`;
@@ -146,9 +154,9 @@ session, and opens the picker when other sessions exist so you can jump into a
 session opened elsewhere.
 
 Non-interactive VS Code terminals (tasks, debug consoles, git operations)
-stay out of tmux because the landing snippet is gated on interactive shells
-(`$-` contains `i`), and `terminal.integrated.defaultProfile.linux` stays
-plain `bash`.
+stay out of tmux or herdr because the landing snippet is gated on interactive
+shells (`$-` contains `i`), and `terminal.integrated.defaultProfile.linux`
+stays plain `bash`.
 
 Landing-session GC runs on login and on tmux detach/session-switch hooks:
 an unattached `login-*` session is removed only when it is still an idle bare
@@ -232,7 +240,7 @@ ssh djinn-coding-tanks         # hop onward; fresh tmux landing + picker
 ```
 
 Use `./djinn jump ip` to get the jump's static bridge address. The hop must
-be **SSH**, not `docker exec` — `src/tmux-landing.bashrc` only applies to
+be **SSH**, not `docker exec` — the landing snippet applies to
 sshd/mosh-server and interactive editor terminals. `docker exec` deliberately
 stays a bare shell.
 

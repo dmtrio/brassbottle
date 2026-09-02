@@ -1042,14 +1042,8 @@ def derive(manifest, plugin_files, agent_files, env):
               "(tmux: false is read as shell: bash)", file=sys.stderr)
     elif not remote_shell:
         remote_shell = "tmux"
-    # herdr gets its own message (a forward pointer, not a plain enum reject)
-    # because it names a real, coming value rather than a typo.
-    if remote_shell == "herdr":
-        raise ManifestError(
-            "remote.shell: herdr is not available yet (lands with PLN - herdr adoption) "
-            "— use tmux or bash")
-    if remote_shell not in ("tmux", "bash"):
-        raise ManifestError(f"remote.shell must be tmux or bash (got '{remote_shell}')")
+    if remote_shell not in ("tmux", "herdr", "bash"):
+        raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
 
     remote_mosh = _raw_flag(remote.get("mosh"), "remote.mosh")
     if remote_mosh == "true" and not ssh_port:

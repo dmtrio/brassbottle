@@ -386,19 +386,22 @@ class TestRemoteSchema(unittest.TestCase):
         d = derive({"remote": {"shell": "bash"}})
         self.assertEqual(d["REMOTE_SHELL"], "bash")
 
-    def test_shell_herdr_rejected(self):
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"remote": {"shell": "herdr"}})
-        self.assertEqual(
-            str(cm.exception),
-            "remote.shell: herdr is not available yet (lands with PLN - herdr adoption) "
-            "— use tmux or bash")
+    def test_shell_herdr(self):
+        d = derive({"remote": {"shell": "herdr"}})
+        self.assertEqual(d["REMOTE_SHELL"], "herdr")
 
     def test_shell_other_value_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
             derive({"remote": {"shell": "zsh"}})
         self.assertEqual(str(cm.exception),
-                         "remote.shell must be tmux or bash (got 'zsh')")
+                         "remote.shell must be tmux, herdr, or bash (got 'zsh')")
+
+    def test_notify_requires_tmux_rejects_herdr(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"remote": {"shell": "herdr", "notify": "ntfy"}})
+        self.assertEqual(
+            str(cm.exception),
+            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
 
     def test_tmux_alias_sets_shell_and_warns(self):
         err = io.StringIO()

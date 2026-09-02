@@ -1,0 +1,13 @@
+# herdr-config.toml — baked to /home/coder/.config/herdr/config.toml
+# (Dockerfile). Minimal on purpose: keybindings/theme are upstream defaults
+# (prefix ctrl+b, same as tmux). `herdr --default-config` prints every key.
+
+# No first-run wizard: the landing execs straight into the workspace.
+onboarding = false
+
+[update]
+# Bottle egress is default-deny and herdr.dev is not allowlisted, so both
+# background checks would only ever fail. The version is pinned in the
+# Dockerfile; bumping it is a rebuild, never `herdr update`.
+version_check = false
+manifest_check = false

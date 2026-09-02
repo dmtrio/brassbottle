@@ -1,11 +1,15 @@
 # tmux-landing.bashrc — sourced at the END of ~/.bashrc (RFC 04).
-# Interactive remote/editor terminals land in a FRESH tmux session per login,
-# so each shell starts empty while still letting you jump into existing work.
+# Interactive remote/editor terminals land in a workspace per login: tmux
+# (a FRESH session per login, so each shell starts empty while still letting
+# you jump into existing work) or herdr (launch-or-attach the one persistent
+# per-bottle session — that's herdr's model, not fresh-per-login). Picked by
+# $REMOTE_SHELL.
 #
 # Scope guards, in order:
-#   $REMOTE_SHELL  — tmux (default) lands; bash opts out (the entrypoint
-#                    persists it to /etc/environment for PAM)
-#   $TMUX          — shells inside tmux must not recurse
+#   $REMOTE_SHELL  — tmux (default) or herdr land; bash opts out (the
+#                    entrypoint persists it to /etc/environment for PAM)
+#   $TMUX/$HERDR_ENV — panes already inside tmux or herdr must not recurse
+#                    (herdr sets HERDR_ENV=1 inside its own managed panes)
 #   $- has i       — non-interactive channels (scp, VS Code Remote-SSH's
 #                    command channel, tasks/debug/git shells) stay untouched
 #   trigger source — sshd (ssh logins; 'sshd-session' since OpenSSH 9.8 split
@@ -13,18 +17,33 @@
 #                    TERM_PROGRAM=vscode (interactive VS Code/Cursor terminals —
 #                    BOTH Remote-SSH and attach-to-running-container flows: the
 #                    editor sets that var in every integrated terminal, so the
-#                    attach flow lands in tmux too, by request).
+#                    attach flow lands in tmux/herdr too, by request).
 #                    /proc/<pid>/comm is what `ps -o comm=` reads — used
 #                    directly so the check needs no extra package.
 #                    Plain docker exec shells (no TERM_PROGRAM) remain exempt:
 #                    agents rely on bare shells there. ntfy notifications are
-#                    per-window via tmux hook and unaffected by session names.
-if [ "${REMOTE_SHELL:-tmux}" = "tmux" ] && [ -z "${TMUX:-}" ] && [[ $- == *i* ]]; then
+#                    per-window via tmux hook and unaffected by session names
+#                    (remote.notify: ntfy still requires shell: tmux).
+if [ "${REMOTE_SHELL:-tmux}" != "bash" ] && [ -z "${TMUX:-}" ] && [ -z "${HERDR_ENV:-}" ] && [[ $- == *i* ]]; then
     should_land=false
     case "$(cat "/proc/$PPID/comm" 2>/dev/null)" in
         sshd|sshd-session|mosh-server) should_land=true ;;
     esac
     [ "${TERM_PROGRAM:-}" = "vscode" ] && should_land=true
+
+    if [ "$should_land" = "true" ] && [ "${REMOTE_SHELL:-tmux}" = "herdr" ]; then
+        # herdr's model: one persistent server per bottle, not
+        # fresh-per-login. Launch-or-attach the default session; the
+        # server survives detach (ctrl+b q), so every login lands back
+        # in the same workspace. An image without the binary (built before
+        # the pin landed) lands in plain bash with a note rather than
+        # exec-ing into nothing and killing the login.
+        if command -v herdr >/dev/null 2>&1; then
+            exec herdr
+        fi
+        echo "remote.shell: herdr, but this image has no herdr binary — landing in bash (re-run djinn up to rebuild)" >&2
+        should_land=false
+    fi
 
     if [ "$should_land" = "true" ]; then
         # Best-effort GC first: clean stale empty login-* sessions before
