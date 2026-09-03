@@ -9,6 +9,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -20,6 +21,7 @@ FAKE_HERDR = """#!/bin/bash
 echo "$3" >> "$FAKE_HERDR_CALLS"
 case "$3" in
   *fail*) echo "boom: $3" >&2; exit 3 ;;
+  *hang*) sleep 30 ;;
   *) echo "installed $3 integration hook"; exit 0 ;;
 esac
 """
@@ -89,6 +91,56 @@ class TestInstall(Fixture):
         _, log = self.run_main(["kimi\tkimi"])
         self.assertRegex(log, r"stage=install target=kimi status=ok code=0 duration_ms=\d+ "
                               r"stdout_bytes=\d+ stderr_bytes=0")
+
+
+class TestBudget(Fixture):
+    """The setup: wrapper kills the whole process at plugin_setup.TIMEOUT_SECS;
+    the helper must finish — every agent lined, summary printed — inside its
+    own smaller budget however many installs hang."""
+
+    def test_total_budget_sits_below_the_setup_wrapper_ceiling(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+        import plugin_setup
+        self.assertLess(hi.TOTAL_BUDGET_SECS, plugin_setup.TIMEOUT_SECS)
+        # Even with every supported agent enabled, the per-agent cap alone
+        # cannot blow the budget — the share rule below is the backstop for
+        # whatever the caps do not cover.
+        self.assertGreater(hi.TOTAL_BUDGET_SECS / len(hi.HERDR_TARGETS),
+                           hi.MIN_INSTALL_TIMEOUT_SECS)
+
+    def test_per_install_timeout_is_min_of_cap_and_even_share(self):
+        self.assertEqual(30, hi.per_install_timeout(240, 6))    # cap wins
+        self.assertEqual(10, hi.per_install_timeout(30, 3))     # share wins
+        self.assertEqual(1, hi.per_install_timeout(0.2, 5))     # floor
+        self.assertEqual(30, hi.per_install_timeout(240, 0))    # no div-by-zero
+
+    def test_hanging_installs_all_get_a_line_and_the_summary_prints_in_budget(self):
+        # Three agents that hang forever against a 3 s total budget: each gets
+        # ~1 s, the run ends near the budget (not 3 × 30 s), and every agent is
+        # accounted for in the summary.
+        os.environ["HERDR_INTEGRATIONS_BUDGET_SECS"] = "3"
+        self.addCleanup(os.environ.pop, "HERDR_INTEGRATIONS_BUDGET_SECS", None)
+        hangers = {"hang-a", "hang-b", "hang-c"}
+        start = time.monotonic()
+        with unittest.mock.patch.object(hi, "HERDR_TARGETS", hi.HERDR_TARGETS | hangers):
+            code, log = self.run_main([f"{h}\tx" for h in sorted(hangers)])
+        elapsed = time.monotonic() - start
+        self.assertEqual(1, code)
+        self.assertLess(elapsed, 8, f"run took {elapsed:.1f}s; budget was 3 s")
+        for h in sorted(hangers):
+            self.assertRegex(log, rf"target={h} status=(timeout|skipped)")
+        self.assertIn("stage=summary installed=- skipped=- failed=hang-a,hang-b,hang-c", log)
+
+    def test_a_hang_does_not_starve_the_healthy_agents_after_it(self):
+        os.environ["HERDR_INTEGRATIONS_BUDGET_SECS"] = "4"
+        self.addCleanup(os.environ.pop, "HERDR_INTEGRATIONS_BUDGET_SECS", None)
+        with unittest.mock.patch.object(hi, "HERDR_TARGETS", hi.HERDR_TARGETS | {"hang-1"}):
+            code, log = self.run_main(["hang-1\tx", "claude\tclaude", "codex\tcodex"])
+        self.assertEqual(1, code)
+        self.assertIn("target=hang-1 status=timeout", log)
+        self.assertEqual(["hang-1", "claude", "codex"], self.recorded_calls())
+        self.assertIn("installed=claude,codex", log)
+        self.assertIn("failed=hang-1", log)
 
 
 class TestEdges(Fixture):
