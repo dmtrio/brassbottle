@@ -92,17 +92,27 @@ watch you work). Consequences:
   flake — say so instead of retrying, and ask the user to add the zone or
   CIDR to the container's manifest if it's genuinely needed.
 - The host is unreachable except for ports listed in `HOST_MCP_PORTS`.
-- Run long tasks and helper agents in **herdr**, never a hand-started tmux
-  session, so a dropped editor never orphans them and their state shows in
-  the sidebar. tmux remains only for plugin `services:`.
-  - **One helper:** split the caller's pane
-    (`herdr pane split --current --direction <dir> --cwd "$PWD" --no-focus`).
-    Pick `right` when the caller's width is at least twice its height per
-    `herdr pane layout --pane "$HERDR_PANE_ID"`, else `down`. If the new
-    pane would fall under ~80 columns or ~24 rows, use a tab instead.
-  - **Many helpers:** one `herdr tab create --no-focus --cwd "$PWD" --label
-    <name>` per helper so the user's view never moves.
-  - Start with `herdr agent start <name> --kind <claude|pi|cursor|…> --pane
-    <id> -- <agent args>`, drive it with `herdr agent prompt --wait`,
-    `herdr agent wait`, `herdr agent read`, and `herdr tab close` (or `pane
-    close`) when done. The flow is identical across harnesses.
+- **Run interactive or long-running helper agents in herdr.** herdr shows
+  each helper's state in the sidebar, and a dropped editor does not orphan
+  it. When `HERDR_ENV` is not `1`, run them in tmux instead. tmux also
+  remains the supervisor for plugin `services:`.
+  - For one helper, split the caller's pane with
+    `herdr pane split --current --direction <dir> --cwd "$PWD" --no-focus`.
+    Read the caller's rect from its own `panes[]` entry in
+    `herdr pane layout --pane "$HERDR_PANE_ID"`, not from `area`. Use
+    `right` when the width is at least twice the height. Use `down`
+    otherwise. Use a tab instead when the new pane would have fewer than 80
+    columns or 24 rows.
+  - For many helpers, create one tab per helper with
+    `herdr tab create --no-focus --cwd "$PWD" --label <name>`.
+  - The pane id is `.result.pane.pane_id` from a split and
+    `.result.root_pane.pane_id` from a tab. The tab id is
+    `.result.tab.tab_id`.
+  - Start the helper with an explicit cheap model:
+    `herdr agent start <name> --kind <claude|pi|cursor> --pane <pane-id> -- --model haiku`.
+  - Drive it with `herdr agent prompt <name> <text> --wait --timeout <ms>`,
+    `herdr agent wait <name> --timeout <ms>`, and `herdr agent read <name>`.
+    Always pass `--timeout`, because the default wait is indefinite.
+  - Close the tab or pane when the helper is done.
+  - The installed binary is the authority for syntax. Run `herdr --skill`
+    when a command here differs from `herdr --help`.
