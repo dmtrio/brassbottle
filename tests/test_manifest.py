@@ -182,8 +182,8 @@ class TestErrorTable(unittest.TestCase):
          "  plugin 'ghost': no plugin file at plugins/ghost/plugin.yml"),
         ("bad notify kind", {"remote": {"notify": "slack"}}, None,
          "remote.notify must be 'ntfy' (got 'slack')"),
-        ("notify without tmux", {"remote": {"shell": "bash", "notify": "ntfy"}}, None,
-         "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)"),
+        ("notify with bash rejected", {"remote": {"shell": "bash", "notify": "ntfy"}}, None,
+         "remote.notify requires remote.shell: herdr or tmux (bash has no agent monitor)"),
         ("illegal ref char", {"identities": {"obsidian": ["bad-dash_claude"]}}, None,
          "manifest identity references failed validation:\n"
          "  obsidian ref 'bad-dash_claude': illegal characters (allowed: letters, digits, underscore)"),
@@ -364,21 +364,16 @@ class TestRemoteSchema(unittest.TestCase):
         d = derive({"remote": {"shell": "tmux"}})
         self.assertEqual(d["REMOTE_SHELL"], "tmux")
 
-    def test_notify_without_explicit_shell_implies_tmux_and_warns(self):
-        # notify: ntfy alone used to ride the tmux default; a manifest that
-        # predates the herdr flip must keep working — the idle monitor only
-        # runs inside tmux, so notify implies it (with a nudge) rather than
-        # silently landing in herdr or failing the bottle.
+    def test_notify_without_explicit_shell_derives_herdr(self):
+        # notify: ntfy now works with herdr (event-driven via herdr_notify.py)
+        # with no warning or implication — herdr is the default shell.
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             d = derive({"remote": {"notify": "ntfy"}},
                        env=dict(ENV, NTFY_URL="https://ntfy.example.com"))
-        self.assertEqual(d["REMOTE_SHELL"], "tmux")
+        self.assertEqual(d["REMOTE_SHELL"], "herdr")
         self.assertEqual(d["REMOTE_NOTIFY"], "ntfy")
-        self.assertIn(
-            "remote.notify: ntfy implies remote.shell: tmux (herdr is the "
-            "default otherwise) — set shell: tmux explicitly",
-            err.getvalue())
+        self.assertEqual(err.getvalue(), "")
 
     def test_notify_with_explicit_tmux_does_not_warn(self):
         err = io.StringIO()
@@ -414,12 +409,12 @@ class TestRemoteSchema(unittest.TestCase):
         self.assertEqual(str(cm.exception),
                          "remote.shell must be tmux, herdr, or bash (got 'zsh')")
 
-    def test_notify_requires_tmux_rejects_herdr(self):
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"remote": {"shell": "herdr", "notify": "ntfy"}})
-        self.assertEqual(
-            str(cm.exception),
-            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
+    def test_notify_with_herdr_succeeds(self):
+        # notify: ntfy now works with herdr (event-driven via herdr_notify.py)
+        d = derive({"remote": {"shell": "herdr", "notify": "ntfy"}},
+                   env=dict(ENV, NTFY_URL="https://ntfy.example.com"))
+        self.assertEqual(d["REMOTE_SHELL"], "herdr")
+        self.assertEqual(d["REMOTE_NOTIFY"], "ntfy")
 
     def test_tmux_alias_sets_shell_and_warns(self):
         err = io.StringIO()
@@ -474,7 +469,7 @@ class TestRemoteSchema(unittest.TestCase):
             derive({"remote": {"shell": "bash", "notify": "ntfy"}})
         self.assertEqual(
             str(cm.exception),
-            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
+            "remote.notify requires remote.shell: herdr or tmux (bash has no agent monitor)")
 
     def test_notify_ntfy_without_ssh_now_succeeds(self):
         env = dict(ENV, NTFY_URL="https://ntfy.example.com")

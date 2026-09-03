@@ -1,9 +1,10 @@
 #!/bin/bash
-# tmux-notify.sh — agent-blind idle notifier (RFC 04 Phase B).
+# tmux-notify.sh — idle notifier for remote.shell: tmux (RFC 04 Phase B).
 # Fired by tmux's alert-silence hook (armed in tmux.conf only when NTFY_URL
 # is present): the pane produced no output for the monitor-silence window,
 # which for an agent means "waiting at a prompt" or "finished". Deliberately
 # knows nothing about WHICH agent runs in the pane — works for all of them.
+# For herdr shells, use herdr_notify.py instead (event-driven).
 #
 # Suppression: if any client is attached you are already looking at the
 # session — pushing would self-notify on every pause. Only push when nobody

@@ -313,7 +313,7 @@ src/manifest.py	remote.get("jump")
 src/manifest.py	remote.get("shell")
 src/manifest.py	remote.get("notify")
 src/ensure_net.py	djinn-net
-src/manifest.py	remote.notify requires remote.shell: tmux
+src/manifest.py	remote.notify requires remote.shell: herdr or tmux
 src/manifest.py	re.sub(r"^[A-Za-z]+://", "", ntfy_url)
 src/init-firewall.sh	-s "$HOST_IP"
 src/init-firewall.sh	-s "$DJINN_JUMP_IP"
@@ -321,6 +321,23 @@ src/init-firewall.sh	--state NEW ! -s "$DJINN_JUMP_IP" -j DROP
 src/entrypoint.sh	REMOTE_SHELL NTFY_URL NTFY_TOPIC CONTAINER_NAME
 Dockerfile	update-locale LANG=en_US.UTF-8
 DRIFT
+
+echo "── herdr notify integration checks"
+grep -qF 'herdr_notify.py /usr/local/lib/djinn/herdr_notify.py' Dockerfile \
+    && pass "Dockerfile installs herdr_notify.py" \
+    || fail "herdr_notify.py not in Dockerfile"
+
+grep -qF '/usr/local/lib/djinn/herdr_notify.py' src/entrypoint.sh \
+    && pass "entrypoint starts herdr_notify.py for herdr shell" \
+    || fail "herdr_notify.py not wired into entrypoint.sh"
+
+grep -qF 'herdr-client.sock' src/herdr_notify.py \
+    && pass "herdr_notify.py reads herdr-client.sock for attached clients" \
+    || fail "herdr_notify.py doesn't check attached clients"
+
+grep -qF 'pane.agent_status_changed' src/herdr_notify.py \
+    && pass "herdr_notify.py subscribes to pane.agent_status_changed" \
+    || fail "herdr_notify.py doesn't subscribe to status changes"
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then

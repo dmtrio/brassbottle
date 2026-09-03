@@ -139,6 +139,10 @@ The host commands above live in `bin/`; `src/` is internal source — the
   changes across a rebuild.
 - **`src/mosh-server-wrapper.sh`** — jump image only; pins client-launched
   mosh servers to the jump's firewalled UDP range.
+- **`src/herdr_notify.py`** — event-driven agent state notifier daemon; started
+  as a background subprocess when `remote.shell: herdr` and `remote.notify: ntfy`
+  are on. Subscribes to herdr socket events and pushes to ntfy on state
+  transitions (blocked, done, idle) unless a client is attached.
 - **`src/tmux-notify.sh`** — agent-blind idle notifier; fired by the tmux
-  silence hook when `remote.notify: ntfy` is on, pushes to your ntfy topic
-  unless a client is attached.
+  silence hook when `remote.shell: tmux` and `remote.notify: ntfy` are on,
+  pushes to your ntfy topic unless a client is attached.

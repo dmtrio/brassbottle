@@ -402,7 +402,10 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # Pinned release binary, verified by sha256 — never `latest`, never the
 # upstream install.sh (which resolves the version at build time). Installed in
 # every image so the manifest switch (remote.shell: herdr) only selects the
-# landing; tmux stays for plugin_services (herdr P3) and remote.notify (P2).
+# landing; tmux stays as the headless supervisor for plugin_services (herdr
+# P3 dropped: plugin daemons would clutter the agent sidebar). notify is event-driven
+# via herdr_notify.py under herdr (P2), and silence-hook via tmux-notify.sh
+# when remote.shell is tmux.
 ARG HERDR_VERSION=0.8.2
 ARG HERDR_SHA256_AMD64=976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4
 ARG HERDR_SHA256_ARM64=f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d
@@ -425,8 +428,13 @@ COPY --chown=$USERNAME:$USERNAME src/tmux.conf /home/$USERNAME/.tmux.conf
 COPY src/tmux_landing_gc.py /usr/local/lib/djinn/tmux_landing_gc.py
 RUN chmod 644 /usr/local/lib/djinn/tmux_landing_gc.py
 
-# Agent-blind idle notifier: tmux.conf's silence hook runs it when NTFY_URL
-# is present in the environment (remote.notify: ntfy).
+# herdr event-driven notify daemon: subscribes to herdr socket events and
+# pushes ntfy on agent state transitions (remote.notify: ntfy with herdr).
+COPY src/herdr_notify.py /usr/local/lib/djinn/herdr_notify.py
+RUN chmod 644 /usr/local/lib/djinn/herdr_notify.py
+
+# tmux idle notifier: tmux.conf's silence hook runs it when NTFY_URL is
+# present in the environment and remote.shell is tmux (remote.notify: ntfy).
 COPY src/tmux-notify.sh /usr/local/bin/tmux-notify.sh
 RUN chmod +x /usr/local/bin/tmux-notify.sh
 
