@@ -1121,6 +1121,7 @@ def derive(manifest, plugin_files, agent_files, env):
     path_owner = {}        # container path -> plugin
     plugin_services = {}   # service name -> {"command": ..., "plugin": ...} (enabled plugins only)
     service_owner = {}     # service name -> plugin, for collision messages
+    plugin_setup = {}      # plugin -> one-shot setup command (enabled plugins only)
     for p in plugins:
         doc = plugin_files[p]
         if doc is None:
@@ -1303,6 +1304,24 @@ def derive(manifest, plugin_files, agent_files, env):
             service_owner[sname] = p
             plugin_services[sname] = {"command": scmd, "plugin": p}
 
+        # ── setup: a ONE-SHOT, idempotent command run inside the container at
+        # the end of `./djinn up` (after the MCP wiring, before services:) —
+        # see src/plugin_setup.py and up.sh's "Plugin setup" section. Optional;
+        # absent from every plugin today (PLN "plugin setup hook" §[2/3]). One
+        # command per plugin (chain with && or ship a script in install:) — a
+        # map here would suggest ordering that the per-plugin docker exec loop
+        # in up.sh does not define.
+        setup = doc.get("setup")
+        if not _falsy(setup):
+            if not isinstance(setup, str) or not setup.strip():
+                raise ManifestError(f"plugin '{p}' setup must be a non-empty string")
+            if any(ch in setup for ch in "\t\n\r"):
+                raise ManifestError(
+                    f"plugin '{p}' setup must not contain tabs or newlines (the "
+                    "PLUGIN_SETUP export is TAB-separated lines; use one command, "
+                    "e.g. `bash -lc '...'`)")
+            plugin_setup[p] = setup
+
         hp = doc.get("host_port")
         if not _falsy(hp):
             # A host grant needs a server that actually dials the host: a
@@ -1415,6 +1434,14 @@ def derive(manifest, plugin_files, agent_files, env):
     out["PLUGIN_SERVICES"] = "".join(
         f"{name}\t{plugin_services[name]['command']}\t{plugin_services[name]['plugin']}\n"
         for name in sorted(plugin_services)
+    )
+    # One "plugin<TAB>command" line per ENABLED plugin declaring setup:, sorted
+    # by plugin (no service-name layer here — a plugin has at most one setup
+    # command, and the plugin name is already the log/tmux-free namespace
+    # src/plugin_setup.py files things under). up.sh reads this with the same
+    # `while IFS=$'\t' read` idiom as PLUGIN_SERVICES.
+    out["PLUGIN_SETUP"] = "".join(
+        f"{p}\t{plugin_setup[p]}\n" for p in sorted(plugin_setup)
     )
     # Core egress broker (not plugin-gated): host port for filing blocked egress.
     if enable_egress_broker == "true":
