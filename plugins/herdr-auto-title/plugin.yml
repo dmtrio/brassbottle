@@ -37,17 +37,19 @@ install: |
   sudo apt-get purge -y golang-1.24-go && sudo apt-get autoremove -y && sudo rm -rf /var/lib/apt/lists/*
   herdr plugin link /opt/herdr-auto-title
 
-# One-shot, live-container step at the end of `./djinn up` (re-runs every up,
-# so it must be — and upstream is — idempotent: `herdr integration status`
-# reports `current` when already installed). The image build cannot
-# pre-populate ~/.claude: it is a mounted volume, so the image layer's copy is
-# shadowed at runtime. Installing herdr's Claude Code hook here means
-# slash-command-only sessions (no `herdr` landing involved) still get a topic
-# title. The firewall is already up at setup time, which is fine — the hook
-# install is purely local file work. Claude Code only: it is the one agent
-# whose transcript upstream reads for a topic (see README); other agents' tabs
-# are still named from terminal title, directory and branch without a hook.
-setup: "herdr integration install claude"
+# One-shot, live-container step at the end of `./djinn up`: install herdr's
+# agent-state hook for EVERY agent this bottle enables (herdr_integrations.py,
+# beside this file, baked at /opt/plugins/herdr-auto-title/ with the rest of
+# the plugin dir). The hook is what tells herdr — and so Auto Title — which
+# session a pane holds and whether the agent is working, blocked or done.
+# Hooks land in the agents' state dirs (~/.claude, ~/.codex, …), which are
+# volumes the image build cannot pre-populate, hence setup: and not install:.
+# Enabled agents come from /usr/local/lib/djinn/agents-index.tsv; an agent
+# herdr has no hook for (aider) is skipped with a log line. Idempotent —
+# upstream re-installs in place — and each agent is its own subprocess, so one
+# failure neither stops the others nor hides (exit 1 → one loud up line). The
+# firewall is already up at setup time, which is fine: purely local file work.
+setup: "python3 /opt/plugins/herdr-auto-title/herdr_integrations.py"
 
 # State that must outlive a container recreate: manual-names.json (tabs the
 # user renamed by hand) and the optional config.env tuning file. The registry

@@ -14,9 +14,12 @@ landing shows the work, not a cwd path. Tabs you rename by hand are left alone. 
   `~/.config/herdr/plugins.json`, an image layer. herdr launches the plugin
   when the server restores a session, so there is no `services:` entry.
 - **`setup:`** runs once per `./djinn up` in the live container and installs
-  herdr's Claude Code hook into `~/.claude` — a volume the image build cannot
-  pre-populate. Without it, only sessions started from the `herdr` landing get
-  titled.
+  herdr's agent-state hook for **every agent the bottle enables** (Claude
+  Code, Codex, cursor, kimi, pi, antigravity-cli — whichever the manifest
+  lists) into their state dirs, volumes the image build cannot pre-populate.
+  The hook is how herdr learns which session a pane holds and whether the
+  agent is working or blocked; without it, tabs fall back to directory and
+  branch. Agents herdr has no hook for (aider) are skipped.
 - **`volumes:`** keeps `manual-names.json` (tabs you renamed by hand) and an
   optional `config.env` across container recreates.
 
@@ -37,9 +40,10 @@ Then rebuild the image and `./djinn up <container>`.
 - **At image build** (`install:`): the plugin is built and linked into the
   herdr registry — every rebuild re-registers it, so the registry never needs
   to be a volume.
-- **At `./djinn up`** (`setup:`): the Claude Code hook is installed into the
-  `~/.claude` volume. Idempotent — re-running `up` reports `current` and
-  changes nothing.
+- **At `./djinn up`** (`setup:`): herdr's hook is installed for each enabled
+  agent (`herdr_integrations.py`, logged per agent to
+  `/tmp/djinn-setup/herdr-auto-title.log`). Idempotent — re-running `up`
+  re-installs in place.
 - **At the first `herdr` landing**: the herdr server restores a session,
   launches the plugin binary it finds in the registry, and tabs start renaming
   from live transcript topics.
@@ -48,7 +52,7 @@ Then rebuild the image and `./djinn up <container>`.
 
 ```bash
 herdr plugin list            # shows herdr.auto-title
-herdr integration status     # claude: current (after the setup: step ran)
+herdr integration status     # every enabled agent: current (after setup: ran)
 ```
 
 Then `cd` somewhere in a Claude session and watch the tab rename within about
@@ -73,8 +77,7 @@ or re-running `./djinn up` does not restart the plugin.
   volume, so the next `./djinn up` silently re-enables it. The declared off
   switch is to de-list the plugin from the manifest and rebuild — the bake
   loop then skips it and the registry entry goes away with the image layer.
-- `setup:` installs herdr's session hook for **Claude Code only**. herdr ships
-  the same hook for other agents (`herdr integration status` lists them), but
-  Auto Title reads only Claude Code transcripts for a topic, so other agents'
-  tabs gain nothing from the hook — they are still named from terminal title,
-  directory and branch.
+- Every enabled agent gets herdr's hook, but Auto Title reads only **Claude
+  Code** transcripts for a topic. Other agents' tabs still benefit from the
+  hook (herdr knows their state and session) and are named from terminal
+  title, directory and branch.
