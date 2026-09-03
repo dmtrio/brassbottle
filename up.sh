@@ -580,6 +580,34 @@ docker exec "$CNAME" bash -c '
     printf "DJINN_UP_AT=%s\nDJINN_IMAGE_BUILT=%s\n" "$1" "$2" >> /etc/environment
 ' _ "$UP_AT" "$IMAGE_BUILT" || true
 
+# ── Plugin setup (setup: in plugin.yml — PLN "plugin setup hook" §[2/3]) ──────
+# One `docker exec` PER plugin with a setup command, after the enabled-plugins
+# file and MCP wiring above (a setup step may wire into what those write) and
+# BEFORE the services section below (a service may depend on what setup
+# wired). src/plugin_setup.py renders one flat script per (plugin, command)
+# pair and up.sh pipes it in on stdin (never `bash -c "<script>"` — see that
+# module's docstring for why); PLUGIN_SETUP already carries only ENABLED
+# plugins, one command each, cross-plugin uniqueness is the plugin name
+# itself. The command re-runs on every `./djinn up` and must be idempotent
+# (docs say so); it exits with the command's exit code and a failure here is
+# loud but non-fatal to `up` — the same posture as a failed service start.
+if [ -n "$PLUGIN_SETUP" ]; then
+    echo "  Plugin setup:"
+    while IFS=$'\t' read -r SETUP_PLUGIN SETUP_CMD; do
+        [ -n "$SETUP_PLUGIN" ] || continue
+        # Generate first, exec second: a pipeline would take docker exec's
+        # exit status and mask a generator failure (no pipefail in up.sh).
+        if SETUP_SCRIPT=$("$PYTHON3" "$SCRIPT_DIR/src/plugin_setup.py" "$SETUP_PLUGIN" "$SETUP_CMD"); then
+            printf '%s\n' "$SETUP_SCRIPT" | docker exec -i -u coder "$CNAME" bash \
+                || echo "  ! setup $SETUP_PLUGIN failed — see above"
+        else
+            echo "  ! setup $SETUP_PLUGIN: script generation failed — see above"
+        fi
+    done <<EOF
+$PLUGIN_SETUP
+EOF
+fi
+
 # ── Plugin services (services: in plugin.yml — Phase 1 Hardening PLN §2) ──────
 # One `docker exec` PER service, after everything above so the container,
 # repos, and MCP wiring are already in place. src/plugin_services.py renders

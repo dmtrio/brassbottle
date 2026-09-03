@@ -87,6 +87,7 @@ agent's own key):
 | `secrets: {<SLOT>: {hint: "…"}}` | Secret slots. Every slot resolves through the same common-default / per-agent-override model. `hint` is shown when a declared common source is missing. A plugin may have `secrets:` and **no** `mcp:` (env-only). |
 | `volumes: {<name>: /container/path}` | Per-container named volume(s) for state that must outlive a container recreate — see below. Mounted only in containers that enable the plugin. |
 | `services: {<name>: "<command>"}` | In-container process(es) started at `up` — see below. Mounted only for enabled plugins. |
+| `setup: "<command>"` | One command run once per `up` inside the container, before `services:` start — see below. One command per plugin; re-runs every `up` and must be idempotent. |
 | `requires: [<SLOT>, …]` | Optional MCP-server field making the server **agent-scoped**: configured only for agents holding every required slot, each from its own resolved key. The key stays a `${SLOT}` ref in every config file — a native entry's ref is expanded by the agent, a shim's by `mcp-remote` from the agent's own process env — so it reaches no file and no command line. |
 | `egress: [host, …]` | Bare hostnames added to this container's firewall allowlist. |
 
@@ -212,6 +213,46 @@ Rules, enforced by `src/manifest.py` at derive time:
 | Command: a non-empty string | It runs verbatim inside the restart loop; an empty command would loop forever doing nothing while still "restarting" every 5s. |
 | Unique across every **enabled** plugin | Service names share one tmux/log namespace — two plugins racing for `svc-<name>` would silently restart each other's process. Two containers each running a different plugin that happens to reuse a name are unaffected (only enabled plugins contend). |
 
+## `setup` — one-shot wiring at `up`
+
+Some plugins need a **live container** to finish wiring: `herdr integration
+install claude` writes into the `~/.claude` volume (which the image cannot
+pre-populate), `gh extension install` mutates a user config on a volume. That
+is what `setup:` is for — one command, run inside the container:
+
+```yaml
+setup: "herdr integration install claude"
+```
+
+At the end of `./djinn up`, for each **enabled** plugin declaring `setup:`,
+`src/plugin_setup.py` (host-side, like `src/plugin_services.py`) renders one
+script and `up.sh` pipes it into one `docker exec … bash` per plugin — after
+the MCP wiring is written, **before** `services:` start:
+
+- Runs as **coder**, in the foreground — `up` waits for it. Re-runs on
+  **every `./djinn up`**, so the command MUST be idempotent (`herdr
+  integration install claude` is: it reports `current` instead of rewriting).
+- The firewall is already up, so `setup:` **wires what `install:` already
+  fetched** at image build — it never downloads anything.
+- **One command per plugin.** A plugin needing several commands chains them
+  (`cmd1 && cmd2`) or ships a script in `install:` and calls it.
+- The command's output is appended to `/tmp/djinn-setup/<plugin>.log`
+  **inside the container** (start/end timestamps, duration and exit code per
+  run), so the `up` console carries one summary line per plugin. The log does
+  not survive a recreate; a plugin wanting durable logs writes them itself
+  under its own `volumes:` mount.
+- A failure prints `! setup <plugin> FAILED code=N — see /tmp/djinn-setup/<plugin>.log`
+  and is **non-fatal to `up`** — the same posture as a failed service start.
+
+Rules, enforced by `src/manifest.py` at derive time:
+
+| Rule | Why |
+|---|---|
+| Command: a non-empty string | It runs verbatim at `up`; an empty command is always a typo. |
+| No tabs or newlines in the command | The `PLUGIN_SETUP` export is TAB-separated lines — a tab or newline corrupts it. Chain with `&&` or call a script. |
+| One command per plugin | The plugin name is the namespace (log file, script file); a map would suggest an ordering the per-plugin exec loop does not define. |
+| No uniqueness constraint between plugins | Each command runs in its own exec under its own name — plugins cannot collide the way `services:` names can. |
+
 ## `plugin_ports` — per-container host port
 
 Host-service plugins (`host_port:` in `plugin.yml`) listen on a Mac port. Host
@@ -264,8 +305,10 @@ warns and yields no binding.
 - **Compose** gets a generated overlay when an enabled plugin declares
   `volumes:` (`$BASE_PATH/compose/<container>.plugins.yml`, one more `-f`); the
   entrypoint chowns its mountpoints to coder.
-- At the end of `up.sh`, each declared `services:` entry of an enabled plugin
-  is started (idempotently) inside the container — see `services` above.
+- At the end of `up.sh`, each declared `setup:` command of an enabled plugin
+  runs once inside the container (before `services:` start) — see `setup`
+  above. Then each declared `services:` entry of an enabled plugin is started
+  (idempotently) — see `services` above.
 - **`djinn service <name>`** (via `service.sh`) runs `plugins/<name>/run.sh` on
   the host (resolves `BASE_PATH` and hands it down); it never touches docker.
   Not to be confused with `services:` above — `run.sh` is a **host**-side

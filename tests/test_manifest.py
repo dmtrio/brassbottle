@@ -1974,6 +1974,72 @@ class TestPluginServices(unittest.TestCase):
         self.assertEqual(d["PLUGIN_SERVICES"], "one\trun-one\tp\ntwo\trun-two\tp\n")
 
 
+class TestPluginSetup(unittest.TestCase):
+    """setup: — one command run once per `up` inside the container, after the
+    MCP wiring and before services: (PLN "plugin setup hook" [2/3]). One
+    command per plugin — not a map, which would suggest an ordering the
+    per-plugin docker exec loop in up.sh does not define."""
+
+    FILES = {"p": {"setup": "herdr integration install claude"}}
+
+    def _derive(self, man, files=None):
+        return derive(man, plugin_files=self.FILES if files is None else files)
+
+    def test_absent_setup_key_is_a_noop(self):
+        # Every existing PLUGIN_FILES fixture declares no setup: — this pins
+        # zero behavior change for containers that don't opt in.
+        self.assertEqual(derive({"plugins": ["serena"]})["PLUGIN_SETUP"], "")
+
+    def test_setup_export_line_shape(self):
+        out = self._derive({"plugins": ["p"]})["PLUGIN_SETUP"]
+        self.assertEqual(out, "p\therdr integration install claude\n")
+
+    def test_export_sorted_by_plugin_independent_of_manifest_order(self):
+        two = {"zz": {"setup": "run-z"}, "aa": {"setup": "run-a"}}
+        forward = derive({"plugins": ["zz", "aa"]}, plugin_files=two)
+        reverse = derive({"plugins": ["aa", "zz"]}, plugin_files=two)
+        self.assertEqual(forward["PLUGIN_SETUP"], reverse["PLUGIN_SETUP"])
+        self.assertEqual(forward["PLUGIN_SETUP"], "aa\trun-a\nzz\trun-z\n")
+
+    def test_setup_of_unenabled_plugins_is_absent(self):
+        d = derive({"plugins": ["serena"]},
+                   plugin_files={**PLUGIN_FILES, "p": {"setup": "run-it"}})
+        self.assertEqual(d["PLUGIN_SETUP"], "")
+
+    def test_a_plugin_may_declare_setup_alone(self):
+        # setup wires what install: already fetched — it needs no mcp: server
+        # of its own (and install: is only required by a local command server).
+        d = derive({"plugins": ["p"]}, plugin_files=self.FILES)
+        self.assertEqual(d["PLUGIN_SETUP"], "p\therdr integration install claude\n")
+
+    ERROR_CASES = [
+        ("empty command", {"setup": ""}, "plugin 'p' setup must be a non-empty string"),
+        ("whitespace-only command", {"setup": "   "},
+         "plugin 'p' setup must be a non-empty string"),
+        ("non-string command", {"setup": ["herdr", "install"]},
+         "plugin 'p' setup must be a non-empty string"),
+        ("tab in command", {"setup": "echo a\tb"},
+         "plugin 'p' setup must not contain tabs or newlines (the PLUGIN_SETUP "
+         "export is TAB-separated lines; use one command, e.g. "
+         "`bash -lc '...'`)"),
+        ("newline in command", {"setup": "export FOO=bar\nexec myserver"},
+         "plugin 'p' setup must not contain tabs or newlines (the PLUGIN_SETUP "
+         "export is TAB-separated lines; use one command, e.g. "
+         "`bash -lc '...'`)"),
+        ("carriage return in command", {"setup": "echo a\rb"},
+         "plugin 'p' setup must not contain tabs or newlines (the PLUGIN_SETUP "
+         "export is TAB-separated lines; use one command, e.g. "
+         "`bash -lc '...'`)"),
+    ]
+
+    def test_error_cases(self):
+        for name, doc, message in self.ERROR_CASES:
+            with self.subTest(name):
+                with self.assertRaises(m.ManifestError) as cm:
+                    derive({"plugins": ["p"]}, plugin_files={"p": doc})
+                self.assertEqual(str(cm.exception), message)
+
+
 if __name__ == "__main__":
     unittest.main()
 
