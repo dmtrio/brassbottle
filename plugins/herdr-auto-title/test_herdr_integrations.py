@@ -106,8 +106,21 @@ class TestEdges(Fixture):
     def test_missing_herdr_binary_is_a_logged_failure(self):
         code, log = self.run_main(["claude\tclaude"], herdr=str(Path(self.td.name) / "nope"))
         self.assertEqual(1, code)
-        self.assertIn("status=error", log)
-        self.assertIn("not found", log)
+        self.assertIn("target=claude status=error", log)
+        self.assertIn("No such file or directory", log)
+        self.assertIn("failed=claude", log)
+
+    def test_non_executable_herdr_is_a_per_agent_failure_not_a_traceback(self):
+        # Review finding: only FileNotFoundError was caught, so an existing but
+        # non-executable binary escaped as PermissionError and aborted the run
+        # before the summary. Every agent must still get its line.
+        self.herdr.chmod(0o644)
+        code, log = self.run_main(["claude\tclaude", "codex\tcodex"])
+        self.assertEqual(1, code)
+        self.assertIn("target=claude status=error", log)
+        self.assertIn("target=codex status=error", log)
+        self.assertIn("Permission denied", log)
+        self.assertIn("stage=summary installed=- skipped=- failed=claude,codex", log)
 
     def test_targets_match_herdr_0_8_2_help_text(self):
         # The list herdr 0.8.2 prints for `integration install --help`; a
