@@ -60,22 +60,21 @@ remote:
   every interactive VS Code/Cursor terminal, which attaches as another
   client of that one workspace (a mirror, not a fresh shell); detach with
   `ctrl+b q`; the prefix is `ctrl+b` like tmux; `herdr --help` and
-  https://herdr.dev/docs cover the rest. Two things still need tmux for
-  now: `remote.notify` and plugin background jobs (both move to herdr in
-  later phases of PLN - herdr adoption).
+  https://herdr.dev/docs cover the rest. Plugin background jobs stay on tmux
+  as a headless supervisor (they are not agents, so they do not belong in
+  the herdr sidebar).
 - **tmux** — SSH and VS Code/Cursor terminals land in a fresh `login-*`
   session. If other sessions already exist, tmux opens the session picker
   automatically (it lists plugin background sessions too, which is why it
   is no longer the default); press Esc to keep the fresh landing session.
   You can always reopen the picker with `Ctrl-b s`.
 - **bash** — land in a plain bash shell; no session picker or shared view.
-- **notify: ntfy** (optional) — an agent-blind monitor pushes to your ntfy
-  topic when the session goes idle at a prompt and nobody is attached. Set
-  `NTFY_URL` (+ optional `NTFY_TOPIC`) in `secrets.env` and use
-  `remote.notify: ntfy`; the host is auto-allowlisted. Requires
-  `remote.shell: tmux` (the idle monitor runs inside the tmux session) —
-  implied with a nudge when `shell:` is omitted, rejected with `herdr` or
-  `bash`.
+- **notify: ntfy** (optional) — an event-driven agent state monitor pushes to
+  your ntfy topic on transitions (blocked, done, idle) when nobody is attached.
+  Set `NTFY_URL` (+ optional `NTFY_TOPIC`) in `secrets.env` and use
+  `remote.notify: ntfy`; the host is auto-allowlisted. Works with herdr
+  (default, event-driven on herdr agent states) and tmux (silence heuristic);
+  rejected with bash (no agent monitor).
 
 **Reach.** All containers sit on one shared bridge (`djinn-net`,
 `172.30.0.0/24` by default, `DJINN_SUBNET` in `./.env` to override; created

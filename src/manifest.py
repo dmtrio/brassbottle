@@ -1044,21 +1044,15 @@ def derive(manifest, plugin_files, agent_files, env):
         raise ManifestError(f"remote.notify must be 'ntfy' (got '{remote_notify}')")
     if not remote_shell:
         # herdr is the landing default (PLN - herdr adoption P4a, default
-        # flip). tmux stays installed and selectable until P2/P3 move
-        # remote.notify and plugin jobs off it — and a notify: ntfy manifest
-        # that predates the flip keeps working: the idle monitor only runs
-        # inside tmux, so notify implies it rather than failing the bottle.
-        if remote_notify:
-            remote_shell = "tmux"
-            print("  ⚠ remote.notify: ntfy implies remote.shell: tmux (herdr is the "
-                  "default otherwise) — set shell: tmux explicitly", file=sys.stderr)
-        else:
-            remote_shell = "herdr"
+        # flip). tmux stays installed and selectable. notify works under herdr
+        # (event-driven via herdr_notify.py) and tmux (silence hook); bash has
+        # no agent monitor so notify is rejected.
+        remote_shell = "herdr"
     if remote_shell not in ("tmux", "herdr", "bash"):
         raise ManifestError(f"remote.shell must be tmux, herdr, or bash (got '{remote_shell}')")
-    if remote_notify and remote_shell != "tmux":
+    if remote_notify and remote_shell == "bash":
         raise ManifestError(
-            "remote.notify requires remote.shell: tmux (the idle monitor runs inside the tmux session)")
+            "remote.notify requires remote.shell: herdr or tmux (bash has no agent monitor)")
     out["REMOTE_JUMP"] = remote_jump
     out["REMOTE_SHELL"] = remote_shell
     out["REMOTE_NOTIFY"] = remote_notify

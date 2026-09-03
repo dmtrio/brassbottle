@@ -188,6 +188,12 @@ if [ "$START_SSHD" = "true" ]; then
         herdr) echo "✓ Remote access: logins land in the bottle's herdr workspace (detach ctrl+b q)" ;;
     esac
 
+    # Start herdr event-driven notify daemon when herdr is the shell and NTFY_URL is set
+    if [ "${REMOTE_SHELL:-herdr}" = "herdr" ] && [ -n "${NTFY_URL:-}" ]; then
+        su coder -c "HOME=/home/coder NTFY_URL='$NTFY_URL' NTFY_TOPIC='$NTFY_TOPIC' NTFY_TOKEN='${NTFY_TOKEN:-}' CONTAINER_NAME='$CONTAINER_NAME' exec python3 /usr/local/lib/djinn/herdr_notify.py" &
+        echo "✓ herdr notify watcher started (ntfy)"
+    fi
+
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     if [ "$SSHD_MODE" = "published" ]; then
