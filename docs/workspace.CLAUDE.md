@@ -92,4 +92,17 @@ watch you work). Consequences:
   flake — say so instead of retrying, and ask the user to add the zone or
   CIDR to the container's manifest if it's genuinely needed.
 - The host is unreachable except for ports listed in `HOST_MCP_PORTS`.
-- Run long tasks inside `tmux` so a dropped editor window never orphans them.
+- Run long tasks and helper agents in **herdr**, never a hand-started tmux
+  session, so a dropped editor never orphans them and their state shows in
+  the sidebar. tmux remains only for plugin `services:`.
+  - **One helper:** split the caller's pane
+    (`herdr pane split --current --direction <dir> --cwd "$PWD" --no-focus`).
+    Pick `right` when the caller's width is at least twice its height per
+    `herdr pane layout --pane "$HERDR_PANE_ID"`, else `down`. If the new
+    pane would fall under ~80 columns or ~24 rows, use a tab instead.
+  - **Many helpers:** one `herdr tab create --no-focus --cwd "$PWD" --label
+    <name>` per helper so the user's view never moves.
+  - Start with `herdr agent start <name> --kind <claude|pi|cursor|…> --pane
+    <id> -- <agent args>`, drive it with `herdr agent prompt --wait`,
+    `herdr agent wait`, `herdr agent read`, and `herdr tab close` (or `pane
+    close`) when done. The flow is identical across harnesses.
