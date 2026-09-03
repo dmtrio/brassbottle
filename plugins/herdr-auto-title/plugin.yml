@@ -10,8 +10,10 @@
 
 # Baked at build (full network). Build the Go plugin binary from a pinned
 # upstream commit — never a moving branch — using Ubuntu 24.04's apt
-# golang-1.24-go, which meets the plugin's `go 1.24` floor, so no go.dev
-# egress is needed. The toolchain is purged and the build caches removed in
+# golang-1.24-go, which meets the plugin's `go 1.24` floor, so the toolchain
+# needs no go.dev download. `go build` still fetches the two upstream modules
+# (rivo/uniseg, joho/godotenv — no vendor/) from proxy.golang.org and checks
+# sum.golang.org; that is a BUILD-time dependency, full network, not egress. The toolchain is purged and the build caches removed in
 # the SAME block (one image layer; cleaning in a later RUN would shrink
 # nothing — see tests/test_dockerfile_cache_clean.py).
 #
