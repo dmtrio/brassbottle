@@ -1,9 +1,10 @@
 # herdr-auto-title
 
 A **herdr plugin, not an MCP server.** [herdr-auto-title](https://github.com/kryptamine/herdr-auto-title)
-watches Claude Code transcripts and renames each herdr tab to the session's
-actual topic, so a phone-screen landing shows "Fix egress broker race" instead
-of a cwd path. Unlike everything else in this directory it is not wired through
+polls the herdr session twice a second and names every tab after what is
+happening in it — directory and branch, the program running, or an agent's
+own topic (`dashboard › claude › Implement OAuth scopes`) — so a phone-screen
+landing shows the work, not a cwd path. Tabs you rename by hand are left alone. Unlike everything else in this directory it is not wired through
 `mcp:` at all — herdr supervises the plugin itself.
 
 - **`install:`** clones the upstream repo at a pinned commit (`4d4554f` =
@@ -19,9 +20,9 @@ of a cwd path. Unlike everything else in this directory it is not wired through
 - **`volumes:`** keeps `manual-names.json` (tabs you renamed by hand) and an
   optional `config.env` across container recreates.
 
-Because it carries an `install:` block, the plugin is **baked into the shared
-image**: enabling it in a new manifest needs an **image rebuild**, not just
-`./djinn up`.
+Because it carries an `install:` block, the plugin is **baked into the
+bottle's image**: enabling it in a manifest needs an **image rebuild**, not
+just `./djinn up`.
 
 ## Enable it
 
@@ -55,11 +56,15 @@ a second.
 
 ## Configuration
 
-Tuning (which transcripts to watch, rename cadence, …) goes in
-`~/.config/herdr-auto-title/config.env` — persisted by the plugin's volume, so
-it survives a recreate. The herdr server reads the plugin's config at startup,
-so after editing it run `herdr server stop` and land again (or re-run
-`./djinn up`).
+Tuning goes in `~/.config/herdr-auto-title/config.env` — persisted by the
+plugin's volume, so it survives a recreate. Upstream's
+[`config.env.example`](https://github.com/kryptamine/herdr-auto-title/blob/main/config.env.example)
+lists every knob: poll interval (`HERDR_AUTO_TITLE_POLL_MS`, 500), title
+length (`_MAX_LENGTH`, 50), branch width (`_BRANCH_MAX`, 12, `0` hides
+branches), the leading tab number (`_POSITION`), and whether agent transcripts
+are read at all (`_TRANSCRIPT`). The plugin reads the file once at startup, so
+after editing it run `herdr server stop` and land again — reopening a terminal
+or re-running `./djinn up` does not restart the plugin.
 
 ## Known caveats
 
@@ -67,5 +72,5 @@ so after editing it run `herdr server stop` and land again (or re-run
   the declared way to remove the plugin is to de-list it from the manifest and
   rebuild — the bake loop then skips it and the registry entry goes away with
   the image layer.
-- Only **Claude Code** transcripts are read for topics. Other agents' sessions
-  keep their default titles.
+- Only **Claude Code** transcripts are read for topics. Other agents' tabs are
+  still named, from their terminal title, directory and branch.
