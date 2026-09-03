@@ -1,9 +1,9 @@
 # herdr-auto-title — a herdr plugin that renames every agent tab after the
 # session's actual topic. NOT an MCP server.
 #
-# A herdr plugin is supervised by herdr itself: the server launches it when a
-# session is restored and restarts it if it exits. That means no `services:`
-# entry — brassbottle would only race herdr's own supervision. It is also not
+# A herdr plugin is launched by herdr itself: the server starts it (one-shot,
+# the process stays alive on its own) when it restores a session. That means
+# no `services:` entry — brassbottle would only race herdr's own launch. It is also not
 # an MCP server (no `mcp:`) and makes no runtime network calls (no `egress:`):
 # the only network use — cloning the repo and building the binary — happens
 # here at image build, before the egress firewall exists.

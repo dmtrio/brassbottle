@@ -12,9 +12,9 @@ relies on, and each is one edit away from silently breaking:
   here to a plugin's own install: block);
 - `herdr plugin link` runs in the install: block, i.e. registration is
   baked, not deferred to a services: entry (the plugin is herdr-supervised);
-- the setup: command exists verbatim — until PR [2/3] makes manifest.py
-  consume setup:, it is an unknown key (ignored, not rejected); this test
-  pins the value so that PR cannot wire the wrong command;
+- the setup: command exists verbatim, and whenever manifest.py consumes
+  setup: (PR [2/3]) it must export exactly that command — before [2/3] the
+  key is unknown to manifest.py and must be ignored, not rejected;
 - the config volume points at the directory upstream actually reads;
 - a manifest enabling the plugin passes the real src/manifest.py --derive.
 
@@ -89,14 +89,15 @@ class HerdrAutoTitlePluginTests(unittest.TestCase):
     def test_setup_is_the_verbatim_claude_hook_install(self):
         self.assertEqual(_yq(".setup"), "herdr integration install claude")
 
-    def test_setup_is_currently_an_unknown_key_to_manifest_py(self):
-        # PR [2/3] adds setup: handling; until it lands, manifest.py must
-        # IGNORE (not reject) the key — derive still succeeds and emits no
-        # setup variable. When [2/3] merges, this test flips to asserting
-        # the PLUGIN_SETUP export instead.
+    def test_setup_reaches_derive_verbatim_once_manifest_knows_the_key(self):
+        # Valid on both sides of PR [2/3]: before it, setup: is an unknown key
+        # manifest.py ignores (derive still succeeds); after it, the
+        # PLUGIN_SETUP export must carry this plugin's command verbatim.
         result = _derive()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("PLUGIN_SETUP", result.stdout)
+        if "PLUGIN_SETUP=" in result.stdout:
+            self.assertIn("herdr-auto-title\therdr integration install claude",
+                          result.stdout)
 
     def test_volume_keeps_the_upstream_config_dir(self):
         self.assertEqual(
