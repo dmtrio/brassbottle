@@ -80,6 +80,46 @@ class CountAttachedClientsTests(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+class ConfigFromEnvTests(unittest.TestCase):
+    """compose emits NTFY_TOPIC=${NTFY_TOPIC:-}: present but empty is the
+    common case and must mean the default topic, not topic ''."""
+
+    def test_empty_topic_means_default(self):
+        cfg = notify.config_from_env({"NTFY_URL": "https://ntfy.example/", "NTFY_TOPIC": ""})
+        self.assertEqual(cfg.ntfy_topic, "djinn-agents")
+
+    def test_missing_topic_means_default(self):
+        cfg = notify.config_from_env({"NTFY_URL": "https://ntfy.example"})
+        self.assertEqual(cfg.ntfy_topic, "djinn-agents")
+
+    def test_explicit_values_are_kept_and_stripped(self):
+        cfg = notify.config_from_env({
+            "NTFY_URL": " https://ntfy.example ",
+            "NTFY_TOPIC": " mine ",
+            "NTFY_TOKEN": "tk",
+            "CONTAINER_NAME": "coding",
+            "HERDR_NOTIFY_STATES": "blocked, done",
+            "HERDR_NOTIFY_COOLDOWN_SECONDS": "7",
+        })
+        self.assertEqual(cfg.ntfy_url, "https://ntfy.example")
+        self.assertEqual(cfg.ntfy_topic, "mine")
+        self.assertEqual(cfg.ntfy_token, "tk")
+        self.assertEqual(cfg.container_name, "coding")
+        self.assertEqual(cfg.notify_states, ["blocked", "done"])
+        self.assertEqual(cfg.cooldown_seconds, 7.0)
+
+    def test_defaults_for_everything_else(self):
+        cfg = notify.config_from_env({"NTFY_URL": "https://ntfy.example", "NTFY_TOKEN": "",
+                                      "HERDR_NOTIFY_COOLDOWN_SECONDS": "soon"})
+        self.assertIsNone(cfg.ntfy_token)
+        self.assertEqual(cfg.container_name, "container")
+        self.assertEqual(cfg.notify_states, ["blocked", "done", "idle"])
+        self.assertEqual(cfg.cooldown_seconds, 30.0)
+
+    def test_empty_url_disables(self):
+        self.assertEqual(notify.config_from_env({"NTFY_URL": " "}).ntfy_url, "")
+
+
 class ShouldNotifyTests(unittest.TestCase):
     """Tests for should_notify status transition logic."""
 
@@ -413,6 +453,11 @@ class FakeHerdrServer(threading.Thread):
         # subscribe_error: answer events.subscribe with an error instead of
         # subscription_started (e.g. a stale pane_id).
         self.subscribe_error: str | None = None
+        # stall: accept, read the request, then never answer (wedged server).
+        self.stall = False
+        # keep_open_after_response: answer but do not close (a server that
+        # multiplexes on one connection) — the client must not wait for EOF.
+        self.keep_open_after_response = False
         self._stop_event = threading.Event()
         self._ready = threading.Event()
 
@@ -455,6 +500,10 @@ class FakeHerdrServer(threading.Thread):
 
             method = request.get("method")
             request_id = request.get("id")
+
+            if self.stall:
+                self._stop_event.wait()
+                return
 
             if method == "events.subscribe":
                 if self.subscribe_error is not None:
@@ -513,6 +562,16 @@ class FakeHerdrServer(threading.Thread):
                 conn.sendall(
                     (json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8")
                 )
+                if self.keep_open_after_response:
+                    conn.settimeout(0.05)
+                    while not self._stop_event.is_set():
+                        try:
+                            if conn.recv(4096) == b"":
+                                break
+                        except socket.timeout:
+                            continue
+                        except OSError:
+                            break
         except Exception:
             pass
         finally:
@@ -604,6 +663,34 @@ class HerdrClientTests(unittest.TestCase):
             self.assertEqual(len(envelopes), 2)
             self.assertEqual(envelopes[0]["event"], "pane_created")
             self.assertEqual(envelopes[1]["event"], "pane.agent_status_changed")
+        finally:
+            server.stop()
+            server.join(timeout=1.0)
+
+    def test_request_times_out_on_wedged_server(self):
+        server = FakeHerdrServer(self.socket_path)
+        server.stall = True
+        server.start()
+        self.assertTrue(server.wait_ready(timeout=2.0))
+        try:
+            client = notify.HerdrClient(self.socket_path, timeout=0.2)
+            with self.assertRaises(OSError):
+                client.request("ping", {})
+        finally:
+            server.stop()
+            server.join(timeout=1.0)
+
+    def test_request_returns_after_one_line_without_eof(self):
+        # A server that answers but keeps the connection open must not make
+        # request() wait for EOF.
+        server = FakeHerdrServer(self.socket_path)
+        server.keep_open_after_response = True
+        server.responses["ping"] = {"id": "", "result": {"type": "pong", "version": "0.8.2"}}
+        server.start()
+        self.assertTrue(server.wait_ready(timeout=2.0))
+        try:
+            client = notify.HerdrClient(self.socket_path, timeout=2.0)
+            self.assertEqual(client.request("ping", {})["result"]["type"], "pong")
         finally:
             server.stop()
             server.join(timeout=1.0)

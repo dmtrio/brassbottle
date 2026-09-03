@@ -8,8 +8,9 @@ client is attached.
 
 Configuration via environment (argparse overrides for paths in tests):
   NTFY_URL (required; empty = no-op exit 0)
-  NTFY_TOPIC (default: djinn-agents)
-  NTFY_TOKEN (optional bearer token)
+  NTFY_TOPIC (empty or unset = djinn-agents; compose always sets it, often empty)
+  NTFY_TOKEN (optional bearer; honoured if present, but nothing in compose or
+              manifest.py forwards it today — parity with tmux-notify.sh)
   CONTAINER_NAME (default: container)
   HERDR_SOCKET (default: ~/.config/herdr/herdr.sock)
   HERDR_CLIENT_SOCKET (default: ~/.config/herdr/herdr-client.sock)
@@ -38,8 +39,47 @@ LOG = logging.getLogger(__name__)
 
 # Constants
 NTFY_TIMEOUT_SECONDS = 5.0
+NTFY_DEFAULT_TOPIC = "djinn-agents"
+REQUEST_TIMEOUT_SECONDS = 10.0
 STARTUP_BACKOFF_INITIAL = 1.0
 STARTUP_BACKOFF_MAX = 30.0
+DEFAULT_NOTIFY_STATES = "blocked,done,idle"
+DEFAULT_COOLDOWN_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class Config:
+    ntfy_url: str
+    ntfy_topic: str
+    ntfy_token: str | None
+    container_name: str
+    notify_states: list[str]
+    cooldown_seconds: float
+
+
+def config_from_env(env: dict[str, str] | os._Environ[str]) -> Config:
+    """Read the daemon's settings from the environment.
+
+    Empty strings count as unset: compose emits `NTFY_TOPIC=${NTFY_TOPIC:-}`,
+    so the variable is present-but-empty on every bottle that did not name a
+    topic, and a bare `.get(name, default)` would post to topic "".
+    """
+
+    def _value(name: str, default: str = "") -> str:
+        return (env.get(name) or "").strip() or default
+
+    try:
+        cooldown = float(_value("HERDR_NOTIFY_COOLDOWN_SECONDS", str(DEFAULT_COOLDOWN_SECONDS)))
+    except ValueError:
+        cooldown = DEFAULT_COOLDOWN_SECONDS
+    return Config(
+        ntfy_url=_value("NTFY_URL"),
+        ntfy_topic=_value("NTFY_TOPIC", NTFY_DEFAULT_TOPIC),
+        ntfy_token=_value("NTFY_TOKEN") or None,
+        container_name=_value("CONTAINER_NAME", "container"),
+        notify_states=parse_states(_value("HERDR_NOTIFY_STATES", DEFAULT_NOTIFY_STATES)),
+        cooldown_seconds=cooldown,
+    )
 
 
 @dataclass(frozen=True)
@@ -277,23 +317,21 @@ class HerdrClient:
     except for events.subscribe which streams events on a single connection.
     """
 
-    def __init__(self, socket_path: str) -> None:
+    def __init__(self, socket_path: str, *, timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
         self._socket_path = socket_path
+        self._timeout = timeout
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Send a single request and return the response.
 
-        Opens a fresh connection for each request (per herdr protocol).
-
-        Args:
-            method: The method name (e.g., "session.snapshot").
-            params: The parameters dict.
-
-        Returns:
-            The response dict (result or error).
+        Opens a fresh connection for each request (per herdr protocol) and
+        reads exactly one newline-terminated response, so it works whether
+        the server closes afterwards (herdr 0.8.2 does) or keeps the
+        connection open. Bounded by the socket timeout: a wedged server
+        raises OSError (socket.timeout) instead of hanging the caller.
 
         Raises:
-            OSError: If socket operations fail.
+            OSError: connect/send/recv failure or timeout.
             json.JSONDecodeError: If response is not valid JSON.
         """
         request_id = str(int(time.time() * 1000000))
@@ -305,11 +343,12 @@ class HerdrClient:
         request_text = json.dumps(request_obj, separators=(",", ":")) + "\n"
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self._timeout)
         try:
             sock.connect(self._socket_path)
             sock.sendall(request_text.encode("utf-8"))
             response_text = b""
-            while True:
+            while b"\n" not in response_text:
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
@@ -317,11 +356,10 @@ class HerdrClient:
         finally:
             sock.close()
 
-        response_text_str = response_text.decode("utf-8").strip()
-        if not response_text_str:
+        line = response_text.split(b"\n", 1)[0].decode("utf-8").strip()
+        if not line:
             raise OSError("herdr server closed connection without response")
-        response = json.loads(response_text_str)
-        return response
+        return json.loads(line)
 
     def subscribe(
         self, subscriptions: list[dict[str, Any]]
@@ -726,24 +764,16 @@ def main(argv: list[str] | None = None) -> None:
         stream=sys.stderr,
     )
 
-    # Load config from environment
-    ntfy_url = os.environ.get("NTFY_URL", "").strip()
-    if not ntfy_url:
+    config = config_from_env(os.environ)
+    if not config.ntfy_url:
         LOG.info("herdr notify disabled reason=NTFY_URL_empty")
         sys.exit(0)
-
-    ntfy_topic = os.environ.get("NTFY_TOPIC", "djinn-agents").strip()
-    ntfy_token = os.environ.get("NTFY_TOKEN", "").strip() or None
-    container_name = os.environ.get("CONTAINER_NAME", "container").strip()
-    states_str = os.environ.get("HERDR_NOTIFY_STATES", "blocked,done,idle").strip()
-    notify_states = parse_states(states_str)
-
-    try:
-        cooldown_seconds = float(
-            os.environ.get("HERDR_NOTIFY_COOLDOWN_SECONDS", "30")
-        )
-    except ValueError:
-        cooldown_seconds = 30.0
+    ntfy_url = config.ntfy_url
+    ntfy_topic = config.ntfy_topic
+    ntfy_token = config.ntfy_token
+    container_name = config.container_name
+    notify_states = config.notify_states
+    cooldown_seconds = config.cooldown_seconds
 
     # Resolve socket paths
     home = Path.home()

@@ -156,6 +156,19 @@ SSHD_ARGS=$(python3 /usr/local/lib/djinn/remote_access.py sshd \
     --authorized-keys /home/coder/.ssh/authorized_keys)
 eval "$SSHD_ARGS"
 
+# ── herdr notify watcher (PLN - herdr adoption P2) ───────────────────────────
+# Event-driven remote.notify for the herdr landing: pushes to ntfy on agent
+# state transitions while nobody is attached. Independent of sshd — attach-
+# mode bottles land VS Code terminals in herdr too — so it starts before the
+# sshd/attach fork below (both branches exec and never return). Non-login su
+# keeps the container env (NTFY_URL, NTFY_TOPIC, CONTAINER_NAME) and sets
+# HOME; nothing is interpolated into the command string, so a quote in a
+# secrets.env value cannot become shell. Its stdout is docker logs.
+if [ "${REMOTE_SHELL:-herdr}" = "herdr" ] && [ -n "${NTFY_URL:-}" ]; then
+    su coder -c 'exec python3 /usr/local/lib/djinn/herdr_notify.py' &
+    echo "✓ herdr notify watcher started (ntfy, pid $!)"
+fi
+
 if [ "$START_SSHD" = "true" ]; then
     chown coder:coder /home/coder/.ssh/authorized_keys
 
@@ -187,12 +200,6 @@ if [ "$START_SSHD" = "true" ]; then
         tmux)  echo "✓ Remote access: logins land in a fresh tmux session (picker when others exist)" ;;
         herdr) echo "✓ Remote access: logins land in the bottle's herdr workspace (detach ctrl+b q)" ;;
     esac
-
-    # Start herdr event-driven notify daemon when herdr is the shell and NTFY_URL is set
-    if [ "${REMOTE_SHELL:-herdr}" = "herdr" ] && [ -n "${NTFY_URL:-}" ]; then
-        su coder -c "HOME=/home/coder NTFY_URL='$NTFY_URL' NTFY_TOPIC='$NTFY_TOPIC' NTFY_TOKEN='${NTFY_TOKEN:-}' CONTAINER_NAME='$CONTAINER_NAME' exec python3 /usr/local/lib/djinn/herdr_notify.py" &
-        echo "✓ herdr notify watcher started (ntfy)"
-    fi
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
