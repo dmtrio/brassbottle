@@ -31,7 +31,9 @@ install: |
   git -C /opt/herdr-auto-title checkout --detach 4d4554fb9706a29032cb2082be32f2061b96f2c6   # v0.3.3
   (cd /opt/herdr-auto-title && GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/gopath \
      /usr/lib/go-1.24/bin/go build -trimpath -o herdr-auto-title ./cmd/herdr-auto-title)
-  rm -rf /opt/herdr-auto-title/.git /tmp/gocache /tmp/gopath
+  # Go marks module-cache dirs read-only (0555); a plain rm -rf exits non-zero
+  # there and, under the loop's `bash -e`, would fail the whole image build.
+  sudo rm -rf /opt/herdr-auto-title/.git /tmp/gocache /tmp/gopath
   sudo apt-get purge -y golang-1.24-go && sudo apt-get autoremove -y && sudo rm -rf /var/lib/apt/lists/*
   herdr plugin link /opt/herdr-auto-title
 
@@ -42,7 +44,9 @@ install: |
 # shadowed at runtime. Installing herdr's Claude Code hook here means
 # slash-command-only sessions (no `herdr` landing involved) still get a topic
 # title. The firewall is already up at setup time, which is fine — the hook
-# install is purely local file work.
+# install is purely local file work. Claude Code only: it is the one agent
+# whose transcript upstream reads for a topic (see README); other agents' tabs
+# are still named from terminal title, directory and branch without a hook.
 setup: "herdr integration install claude"
 
 # State that must outlive a container recreate: manual-names.json (tabs the
