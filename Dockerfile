@@ -158,7 +158,10 @@ RUN eval "$(fnm env)" \
 # via herdr_notify.py under herdr (P2), and silence-hook via tmux-notify.sh
 # when remote.shell is tmux.
 # It sits above the plugin bake loop because a plugin's install: block may
-# call herdr, and that loop runs later in the build than this layer.
+# call herdr, and that loop runs later in the build than this layer. Cache
+# cost, accepted: a HERDR_VERSION/sha bump or an edit to src/herdr-config.toml
+# now invalidates the plugin and agent bake loops below (network-bound,
+# minutes) — the ordering constraint is real, the bumps are rare.
 ARG HERDR_VERSION=0.8.2
 ARG HERDR_SHA256_AMD64=976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4
 ARG HERDR_SHA256_ARM64=f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d
