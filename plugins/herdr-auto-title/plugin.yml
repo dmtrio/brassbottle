@@ -1,0 +1,53 @@
+# herdr-auto-title — a herdr plugin that renames every agent tab after the
+# session's actual topic. NOT an MCP server.
+#
+# A herdr plugin is supervised by herdr itself: the server launches it when a
+# session is restored and restarts it if it exits. That means no `services:`
+# entry — brassbottle would only race herdr's own supervision. It is also not
+# an MCP server (no `mcp:`) and makes no runtime network calls (no `egress:`):
+# the only network use — cloning the repo and building the binary — happens
+# here at image build, before the egress firewall exists.
+
+# Baked at build (full network). Build the Go plugin binary from a pinned
+# upstream commit — never a moving branch — using Ubuntu 24.04's apt
+# golang-1.24-go, which meets the plugin's `go 1.24` floor, so no go.dev
+# egress is needed. The toolchain is purged and the build caches removed in
+# the SAME block (one image layer; cleaning in a later RUN would shrink
+# nothing — see tests/test_dockerfile_cache_clean.py).
+#
+# The last line is the point of the whole block: `herdr plugin link` registers
+# the plugin by writing ~/.config/herdr/plugins.json — no running server and
+# no Go toolchain required. That file is an image layer (coder-owned, not a
+# volume), so a plugin linked at build is registered in every container of
+# every manifest that enables this plugin, and herdr launches it on the first
+# `herdr` landing. The prebuilt binary sits at ./herdr-auto-title under the
+# plugin root, exactly where the upstream manifest's [[startup]] expects it.
+# (Requires herdr to be installed ABOVE the bake loop in the Dockerfile —
+# see PLN - plugin setup hook and herdr-auto-title [1/3].)
+install: |
+  sudo apt-get update && sudo apt-get install -y --no-install-recommends golang-1.24-go git
+  sudo mkdir -p /opt/herdr-auto-title && sudo chown coder:coder /opt/herdr-auto-title
+  git clone https://github.com/kryptamine/herdr-auto-title /opt/herdr-auto-title
+  git -C /opt/herdr-auto-title checkout --detach 4d4554fb9706a29032cb2082be32f2061b96f2c6   # v0.3.3
+  (cd /opt/herdr-auto-title && GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/gopath \
+     /usr/lib/go-1.24/bin/go build -trimpath -o herdr-auto-title ./cmd/herdr-auto-title)
+  rm -rf /opt/herdr-auto-title/.git /tmp/gocache /tmp/gopath
+  sudo apt-get purge -y golang-1.24-go && sudo apt-get autoremove -y && sudo rm -rf /var/lib/apt/lists/*
+  herdr plugin link /opt/herdr-auto-title
+
+# One-shot, live-container step at the end of `./djinn up` (re-runs every up,
+# so it must be — and upstream is — idempotent: `herdr integration status`
+# reports `current` when already installed). The image build cannot
+# pre-populate ~/.claude: it is a mounted volume, so the image layer's copy is
+# shadowed at runtime. Installing herdr's Claude Code hook here means
+# slash-command-only sessions (no `herdr` landing involved) still get a topic
+# title. The firewall is already up at setup time, which is fine — the hook
+# install is purely local file work.
+setup: "herdr integration install claude"
+
+# State that must outlive a container recreate: manual-names.json (tabs the
+# user renamed by hand) and the optional config.env tuning file. The registry
+# file `herdr plugin link` writes deliberately does NOT live here — it is
+# declared (this install: block) and baked, and a rebuild re-registers it.
+volumes:
+  herdr-auto-title: /home/coder/.config/herdr-auto-title
