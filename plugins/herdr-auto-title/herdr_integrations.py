@@ -38,7 +38,11 @@ HERDR_TARGETS = frozenset({
     "opencode", "kilo", "hermes", "qodercli", "qwen", "cursor", "mastracode",
     "antigravity-cli", "grok",
 })
-PER_INSTALL_TIMEOUT_SECS = 60
+# Per-agent cap. Must fit inside plugin_setup.TIMEOUT_SECS (300 s) for every
+# supported agent at once — 6 agents × 30 s leaves headroom, so a couple of
+# hangs still end with a per-agent line and a summary instead of the outer
+# wrapper's bare code=124.
+PER_INSTALL_TIMEOUT_SECS = 30
 
 
 def log(stage, **fields):
@@ -77,8 +81,11 @@ def install_one(target, herdr="herdr", timeout=PER_INSTALL_TIMEOUT_SECS):
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
         )
         code, out, err = proc.returncode, proc.stdout, proc.stderr
-    except FileNotFoundError:
-        log("install", target=target, status="error", reason=f"{herdr}: not found")
+    except OSError as e:
+        # Not found, not executable, … — anything the exec itself refuses.
+        # Caught per agent so the others still run and the summary still
+        # prints; a traceback here would be the one silent path.
+        log("install", target=target, status="error", reason=f"{herdr}: {e.strerror or e}")
         return 127
     except subprocess.TimeoutExpired:
         log("install", target=target, status="timeout", after_s=timeout)

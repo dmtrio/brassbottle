@@ -33,7 +33,11 @@ just `./djinn up`.
 plugins: [herdr-auto-title]
 ```
 
-Then rebuild the image and `./djinn up <container>`.
+Then rebuild the image and `./djinn up <container>`. The plugin renames tabs
+whenever the herdr server is running, so it pairs with `remote.shell: herdr`
+(the default). With `remote.shell: tmux` or `bash` nothing is wrong, nothing
+warns, and nothing renames until you start herdr yourself (the `herdr` VS Code
+terminal profile, or `herdr` in a shell).
 
 ## What happens, and when
 

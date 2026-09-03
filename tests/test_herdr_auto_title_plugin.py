@@ -123,8 +123,12 @@ class HerdrAutoTitlePluginTests(unittest.TestCase):
         # this FAILS on purpose: merging this plugin first would break the
         # image build of every bottle enabling it with "herdr: command not
         # found", and a skipped test would not guard that.
-        herdr_run = DOCKERFILE.index("releases/download/v${HERDR_VERSION}")
-        bake_loop = DOCKERFILE.index("for f in /opt/plugins/*/plugin.yml")
+        herdr_marker = "releases/download/v${HERDR_VERSION}"
+        loop_marker = "for f in /opt/plugins/*/plugin.yml"
+        self.assertIn(herdr_marker, DOCKERFILE)
+        self.assertIn(loop_marker, DOCKERFILE)
+        herdr_run = DOCKERFILE.index(herdr_marker)
+        bake_loop = DOCKERFILE.index(loop_marker)
         self.assertLess(herdr_run, bake_loop,
                         "Dockerfile installs herdr AFTER the plugin bake loop; "
                         "merge #114 first")
