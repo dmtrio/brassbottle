@@ -24,6 +24,7 @@ the pipeline reads.
 """
 
 import json
+import re
 import subprocess
 import sys
 import unittest
@@ -35,6 +36,11 @@ sys.path.insert(0, str(REPO / "src"))
 import manifest  # noqa: E402
 
 PINNED_COMMIT = "4d4554fb9706a29032cb2082be32f2061b96f2c6"
+# Upstream herdr-plugin.toml at PINNED_COMMIT: min_herdr_version = "0.8.2".
+# Kept beside the commit pin because the repo is only cloned at image build;
+# bump both together.
+UPSTREAM_MIN_HERDR_VERSION = (0, 8, 2)
+DOCKERFILE = (REPO / "Dockerfile").read_text(encoding="utf-8")
 
 
 def _yq(expr):
@@ -105,6 +111,32 @@ class HerdrAutoTitlePluginTests(unittest.TestCase):
         self.assertEqual(
             _yq(".volumes.\"herdr-auto-title\""),
             "/home/coder/.config/herdr-auto-title")
+
+    def test_herdr_is_installed_before_the_plugin_bake_loop(self):
+        # `herdr plugin link` runs inside the bake loop, so the herdr layer
+        # must come first (PR [1/3], brassbottle #114). On a main without it
+        # this FAILS on purpose: merging this plugin first would break the
+        # image build of every bottle enabling it with "herdr: command not
+        # found", and a skipped test would not guard that.
+        herdr_run = DOCKERFILE.index("releases/download/v${HERDR_VERSION}")
+        bake_loop = DOCKERFILE.index("for f in /opt/plugins/*/plugin.yml")
+        self.assertLess(herdr_run, bake_loop,
+                        "Dockerfile installs herdr AFTER the plugin bake loop; "
+                        "merge #114 first")
+
+    def test_image_herdr_meets_upstream_min_version(self):
+        # herdr silently declines to load a plugin whose min_herdr_version
+        # exceeds its own — no build error, no runtime error, tabs just never
+        # rename. Pin the floor against the Dockerfile's ARG.
+        m = re.search(r"^ARG HERDR_VERSION=(\d+)\.(\d+)\.(\d+)\s*$", DOCKERFILE, re.M)
+        self.assertIsNotNone(m, "ARG HERDR_VERSION=x.y.z not found in Dockerfile")
+        self.assertGreaterEqual(tuple(int(x) for x in m.groups()),
+                                UPSTREAM_MIN_HERDR_VERSION)
+
+    def test_cleanup_survives_read_only_go_module_cache(self):
+        # go build leaves 0555 dirs under GOPATH/pkg/mod; an unprivileged
+        # rm -rf exits non-zero there and `bash -e` fails the image build.
+        self.assertRegex(_yq(".install"), r"sudo rm -rf [^\n]*/tmp/gopath")
 
     def test_derive_accepts_a_manifest_enabling_the_plugin(self):
         result = _derive()

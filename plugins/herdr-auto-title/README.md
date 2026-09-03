@@ -68,9 +68,13 @@ or re-running `./djinn up` does not restart the plugin.
 
 ## Known caveats
 
-- `herdr plugin disable herdr.auto-title` is the **runtime off switch**, but
-  the declared way to remove the plugin is to de-list it from the manifest and
-  rebuild — the bake loop then skips it and the registry entry goes away with
-  the image layer.
-- Only **Claude Code** transcripts are read for topics. Other agents' tabs are
-  still named, from their terminal title, directory and branch.
+- `herdr plugin disable herdr.auto-title` turns it off **only until the
+  container is recreated**: the registry it edits is an image layer, not a
+  volume, so the next `./djinn up` silently re-enables it. The declared off
+  switch is to de-list the plugin from the manifest and rebuild — the bake
+  loop then skips it and the registry entry goes away with the image layer.
+- `setup:` installs herdr's session hook for **Claude Code only**. herdr ships
+  the same hook for other agents (`herdr integration status` lists them), but
+  Auto Title reads only Claude Code transcripts for a topic, so other agents'
+  tabs gain nothing from the hook — they are still named from terminal title,
+  directory and branch.
