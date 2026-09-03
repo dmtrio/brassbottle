@@ -339,6 +339,18 @@ grep -qF 'pane.agent_status_changed' src/herdr_notify.py \
     && pass "herdr_notify.py subscribes to pane.agent_status_changed" \
     || fail "herdr_notify.py doesn't subscribe to status changes"
 
+grep -qF "su coder -c 'exec python3 /usr/local/lib/djinn/herdr_notify.py'" src/entrypoint.sh \
+    && pass "entrypoint starts herdr_notify.py with nothing interpolated into the su command" \
+    || fail "entrypoint interpolates env into the herdr_notify.py su command (quote in secrets.env = shell)"
+
+awk '/herdr_notify.py/ {found=NR} /^if \[ "\$START_SSHD" = "true" \]/ {sshd=NR} END {exit !(found && sshd && found < sshd)}' src/entrypoint.sh \
+    && pass "herdr_notify.py starts before the sshd/attach fork (both branches exec)" \
+    || fail "herdr_notify.py start is inside or after the START_SSHD fork — attach-mode bottles never get notify"
+
+grep -qF 'REMOTE_SHELL:-herdr}" = tmux ]' src/tmux.conf \
+    && pass "tmux.conf silence hook is gated on REMOTE_SHELL=tmux (herdr bottles: plugin tmux sessions must not push)" \
+    || fail "tmux.conf silence hook arms on NTFY_URL alone — fires for plugin sessions under herdr"
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
     echo "FAILED: $FAILURES check(s)"
