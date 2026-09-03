@@ -581,8 +581,10 @@ def _handle_status_change(
             "pane.read",
             {"pane_id": pane_id, "source": "visible", "format": "text", "strip_ansi": True},
         )
-        pane_text = response.get("result", {}).get("text", "")
-    except (OSError, json.JSONDecodeError, KeyError) as exc:
+        # Wrapped like session.snapshot: {"result": {"type": "read", "read": {..., "text"}}}
+        result = response.get("result", {})
+        pane_text = result.get("read", result).get("text", "")
+    except (OSError, json.JSONDecodeError, KeyError, AttributeError) as exc:
         LOG.warning(
             "herdr notify failed to read pane_id=%s reason=%s",
             pane_id,

@@ -777,7 +777,7 @@ class RunOnceIntegrationTests(unittest.TestCase):
         }
         server.responses["pane.read"] = {
             "id": "",
-            "result": {"text": "prompt> "},
+            "result": {"type": "read", "read": {"pane_id": "w1:p1", "text": "old line\n\nprompt> "}},
         }
         server.subscription_envelopes = [
             {
@@ -836,7 +836,9 @@ class RunOnceIntegrationTests(unittest.TestCase):
         self.assertEqual(len(posted_payloads), 1)
         payload = posted_payloads[0]
         self.assertEqual(payload["title"], "djinn-test: claude idle")
-        self.assertIn("main", payload["message"])
+        # workspace label, pane id, then the pane's last non-blank lines
+        # (pane.read wraps them under result.read like session.snapshot).
+        self.assertEqual(payload["message"], "main · w1:p1\nold line\nprompt> ")
         subscribe = [r for r in server.requests if r["method"] == "events.subscribe"]
         self.assertEqual(len(subscribe), 1)
         self.assertIn(
@@ -867,7 +869,7 @@ class RunOnceIntegrationTests(unittest.TestCase):
         }
         server.responses["pane.read"] = {
             "id": "",
-            "result": {"text": "prompt> "},
+            "result": {"type": "read", "read": {"pane_id": "w1:p1", "text": "old line\n\nprompt> "}},
         }
         server.subscription_envelopes = [
             {
