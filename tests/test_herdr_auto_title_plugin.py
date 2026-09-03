@@ -92,8 +92,13 @@ class HerdrAutoTitlePluginTests(unittest.TestCase):
         # root; -o must land the binary there (relative to the build cwd).
         self.assertRegex(_yq(".install"), r"go build [^\n]*-o herdr-auto-title")
 
-    def test_setup_is_the_verbatim_claude_hook_install(self):
-        self.assertEqual(_yq(".setup"), "herdr integration install claude")
+    def test_setup_runs_the_baked_integrations_script(self):
+        # The script ships in the plugin dir, which the Dockerfile bakes at
+        # /opt/plugins/<name>/ — so the path in setup: must match that layout
+        # and the file must exist beside plugin.yml.
+        self.assertEqual(_yq(".setup"),
+                         "python3 /opt/plugins/herdr-auto-title/herdr_integrations.py")
+        self.assertTrue((PLUGIN_DIR / "herdr_integrations.py").is_file())
 
     def test_setup_reaches_derive_verbatim_once_manifest_knows_the_key(self):
         # Valid on both sides of PR [2/3]: before it, setup: is an unknown key
@@ -102,8 +107,8 @@ class HerdrAutoTitlePluginTests(unittest.TestCase):
         result = _derive()
         self.assertEqual(result.returncode, 0, result.stderr)
         if "PLUGIN_SETUP=" in result.stdout:
-            self.assertIn("herdr-auto-title\therdr integration install claude",
-                          result.stdout)
+            self.assertIn("herdr-auto-title\tpython3 /opt/plugins/herdr-auto-title/"
+                          "herdr_integrations.py", result.stdout)
 
     def test_volume_keeps_the_upstream_config_dir(self):
         self.assertEqual(
