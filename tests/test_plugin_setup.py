@@ -119,11 +119,14 @@ class TestRuntime(unittest.TestCase):
     substituted, like test_plugin_services.py does) and a fake command: the
     exit code must land in the log AND propagate as the script's status."""
 
-    def _run(self, command):
+    def _run(self, command, timeout_secs=psetup.TIMEOUT_SECS):
         with tempfile.TemporaryDirectory() as td:
-            script = psetup.setup_script("demo", command).replace(
+            script = psetup.setup_script("demo", command, timeout_secs).replace(
                 psetup.LOG_DIR, td)
-            proc = subprocess.run(["/bin/bash", "-c", script],
+            # Feed the script on STDIN, exactly as up.sh does through
+            # `docker exec -i … bash` — a `bash -c` run would hide the
+            # stdin-inheritance bug the stdin tests below pin.
+            proc = subprocess.run(["/bin/bash"], input=script,
                                   capture_output=True, text=True)
             log_path = Path(td) / "demo.log"
             log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
@@ -135,10 +138,10 @@ class TestRuntime(unittest.TestCase):
     def test_ok_command_exit_zero_lands_in_log(self):
         proc, log, _ = self._run("true")
         self.assertEqual(0, proc.returncode)
-        self.assertIn("  + setup demo ok (0s)", proc.stdout)
+        self.assertRegex(proc.stdout, r"  \+ setup demo ok \(\ds\)")
         # start + exit stamps with duration and code, both timestamped.
         self.assertIn("start", log)
-        self.assertIn("exit code=0 after 0s", log)
+        self.assertRegex(log, r"exit code=0 after \ds")
         for line in log.splitlines():
             self.assertRegex(line, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
@@ -166,13 +169,29 @@ class TestRuntime(unittest.TestCase):
         self.assertIn("oops", log)
         self.assertNotIn("oops", proc.stderr)
 
+    def test_command_does_not_inherit_the_script_stdin(self):
+        # Review finding on PR #115: with the script arriving on stdin, a
+        # command that reads stdin used to swallow the rest of the script —
+        # no exit code logged, no summary, exit 0 for a setup that did nothing.
+        proc, log, _ = self._run("cat")
+        self.assertEqual(0, proc.returncode)
+        self.assertIn("exit code=0 after", log)
+        self.assertRegex(proc.stdout, r"  \+ setup demo ok")
+        self.assertNotIn("exit \"$code\"", log)  # nothing of the script leaked into the log
+
+    def test_timeout_is_reported_as_failure_with_code_124(self):
+        proc, log, _ = self._run("sleep 5", timeout_secs=1)
+        self.assertEqual(124, proc.returncode)
+        self.assertIn("FAILED code=124 (timed out after 1s)", proc.stderr)
+        self.assertIn("timed out after 1s", log)
+
     def test_re_run_appends_second_run_to_log(self):
         # Idempotency posture: setup re-runs every up; the log accumulates,
         # it never truncates.
         with tempfile.TemporaryDirectory() as td:
             script = psetup.setup_script("demo", "true").replace(psetup.LOG_DIR, td)
-            subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
-            subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
+            subprocess.run(["/bin/bash"], input=script, capture_output=True, text=True)
+            subprocess.run(["/bin/bash"], input=script, capture_output=True, text=True)
             log = (Path(td) / "demo.log").read_text(encoding="utf-8")
         self.assertEqual(2, log.count("exit code=0"))
 

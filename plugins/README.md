@@ -243,6 +243,9 @@ the MCP wiring is written, **before** `services:` start:
   under its own `volumes:` mount.
 - A failure prints `! setup <plugin> FAILED code=N — see /tmp/djinn-setup/<plugin>.log`
   and is **non-fatal to `up`** — the same posture as a failed service start.
+- The command runs with **stdin from `/dev/null`** and under a **300 s
+  `timeout`** (exit 124, reported as a failure): `up` waits for it, so a
+  command that prompts or hangs must fail, not stall `up`.
 
 Rules, enforced by `src/manifest.py` at derive time:
 
