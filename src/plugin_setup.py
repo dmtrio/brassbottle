@@ -35,22 +35,34 @@ LOG_DIR = "/tmp/djinn-setup"
 # LOG_DIR and the heredoc tag suffix — the same boring-charset reasoning as
 # plugin_services.SERVICE_NAME_RE.
 PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
+# A setup command runs synchronously — `up` waits for it — so a hang (a TTY
+# prompt, a post-firewall network call that never returns) would stall `up`
+# with no output past "Plugin setup:". coreutils `timeout` in the container
+# caps it; 124 is timeout's own exit code and the summary line names it.
+TIMEOUT_SECS = 300
 
 
-def setup_script(plugin, command):
+def setup_script(plugin, command, timeout_secs=TIMEOUT_SECS):
     """The full, self-contained bash script for ONE plugin's setup command:
     write the command to a script file under LOG_DIR, run it with output
     appended to the plugin's log (timestamps, duration, exit code), echo one
     summary line, and exit with the command's exit code.
 
     Feed the result to `docker exec -i -u coder <container> bash` on stdin
-    (see module docstring for why not `bash -c "<script>"`)."""
+    (see module docstring for why not `bash -c "<script>"`). Because the
+    script itself arrives on stdin, the command runs with stdin from
+    /dev/null — otherwise it would inherit the unread tail of this very
+    script (a `cat`, `read`, or interactive `gh`/`ssh` prompt would swallow
+    the exit-code logging and the summary, and `up` would report success for
+    a setup that did nothing)."""
     if not isinstance(plugin, str) or not PLUGIN_NAME_RE.match(plugin):
         raise ValueError(
             f"plugin name {plugin!r} is not a plugin dir name "
             "(letters, digits, dash, underscore only)")
     if not isinstance(command, str) or not command.strip():
         raise ValueError(f"plugin '{plugin}': setup command must be a non-empty string")
+    if not isinstance(timeout_secs, int) or timeout_secs <= 0:
+        raise ValueError(f"plugin '{plugin}': timeout must be a positive integer of seconds")
 
     log_path = f"{LOG_DIR}/{plugin}.log"
     cmd_path = f"{LOG_DIR}/{plugin}.cmd.sh"
@@ -68,13 +80,17 @@ cat > {cmd_path} <<'{heredoc_tag}'
 start_ts=$(date +%s)
 log "start"
 # Command output joins the log (start/end stamps, duration, exit code in one
-# place); the up console only ever sees the summary line below.
-bash {cmd_path} >> {log_path} 2>&1
+# place); the up console only ever sees the summary line below. stdin is
+# /dev/null: this script is itself arriving on stdin (see setup_script).
+timeout {timeout_secs} bash {cmd_path} >> {log_path} 2>&1 < /dev/null
 code=$?
 dur=$(( $(date +%s) - start_ts ))
 log "exit code=$code after ${{dur}}s"
 if [ "$code" -eq 0 ]; then
   echo "  + setup {plugin} ok (${{dur}}s)"
+elif [ "$code" -eq 124 ]; then
+  log "timed out after {timeout_secs}s"
+  echo "  ! setup {plugin} FAILED code=124 (timed out after {timeout_secs}s) — see {log_path}" >&2
 else
   echo "  ! setup {plugin} FAILED code=$code — see {log_path}" >&2
 fi
