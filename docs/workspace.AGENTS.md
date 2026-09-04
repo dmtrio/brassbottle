@@ -1,7 +1,8 @@
 # Workspace Contract — Agent Dev Container
 
-This file governs every session in this container. It lives at
-`/workspace/CLAUDE.md` so it applies to every repo and worktree beneath it.
+This file governs every session in this container. `djinn up` installs it at
+`/workspace/AGENTS.md`, and `compose_rules.py` appends it to every agent's
+global rules file, so every harness reads the same contract.
 
 ## Layout (v2)
 
