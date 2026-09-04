@@ -121,8 +121,11 @@ watch you work). Consequences:
     `herdr agent wait <name> --timeout <ms>`, and `herdr agent read <name>`.
     Always pass `--timeout`, because the default wait is indefinite.
   - `herdr agent read` returns only what is still on the helper's screen.
-    For a result longer than one screen, ask the helper to write its answer
-    to a file and reply with the path.
+    For the full result, read the helper's own transcript instead of asking
+    it to write files: `herdr agent get <name>` reports `agent_session`.
+    Claude: `~/.claude/projects/<cwd-slug>/<id>.jsonl`, last `assistant`
+    entry. pi: the reported path. Cursor:
+    `~/.cursor/projects/<cwd-slug>/agent-transcripts/<id>/<id>.jsonl`.
   - Close the tab or pane when the helper is done.
   - The installed binary is the authority for syntax. Run `herdr --skill`
     when a command here differs from `herdr --help`.
