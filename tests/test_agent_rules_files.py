@@ -28,7 +28,7 @@ def declared_rules_files():
     """agent -> rules_file for every descriptor that declares a truthy one.
 
     Mirrors manifest.py's reading: a quoted scalar is unquoted, and a value
-    manifest treats as falsy ("", null, false, ...) counts as undeclared, so
+    manifest treats as falsy (null, false) or an empty scalar counts as undeclared, so
     the pin tracks what compose_rules will actually write."""
     found = {}
     for agent_yml in sorted((ROOT / "agents").glob("*/agent.yml")):
@@ -38,7 +38,7 @@ def declared_rules_files():
         value = m.group(1).strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        if manifest._falsy(value):
+        if value == "" or value in ("null", "~", "false") or manifest._falsy(value):
             continue
         found[agent_yml.parent.name] = value
     return found
