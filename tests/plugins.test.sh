@@ -401,7 +401,7 @@ done <<'DRIFT'
 yq -o=json -I=0 "$MANIFEST"
 src/manifest.py" --derive
 --build-payload
-docs/workspace.AGENTS.md" "$CNAME:/workspace/AGENTS.md"
+docs/workspace.CONTRACT.md" "$CNAME:/workspace/CONTRACT.md"
 rm -f /workspace/CLAUDE.md
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
 src/pull_manifests.py" "$BOTTLES_PATH"
