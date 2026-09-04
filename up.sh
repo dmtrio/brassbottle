@@ -4,7 +4,7 @@
 #
 # Kept:     the bottle (bottles/*.yml) and ~/djinn/secrets.env
 # Derived:  ~/djinn/keys/<name>/ (recomposed every run), the container,
-#           generated .mcp.json / dev.code-workspace / workspace AGENTS.md
+#           generated .mcp.json / dev.code-workspace / workspace CONTRACT.md
 # Survives: workspace volume (code), ~/djinn/artifacts/<name>/
 #
 # Requires: docker, yq (brew install yq / static binary on Linux), python3
