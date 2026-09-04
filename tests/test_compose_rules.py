@@ -219,6 +219,28 @@ class RunTests(unittest.TestCase):
             self.assertIn("worktrees only", out)
         self.assertEqual(self.t1.read_bytes(), self.t2.read_bytes(), "same text for every harness")
 
+    def test_blank_workspace_is_not_announced_and_warns(self):
+        (self.d / "workspace-AGENTS.md").write_text("\n\n")
+        self.enabled.write_text("")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            compose_rules.run(self.base, self.plugins, self.enabled, [self.t1],
+                              index=self.index, announce=True,
+                              workspace=self.d / "workspace-AGENTS.md")
+        self.assertNotIn("workspace contract", out.getvalue())
+        self.assertIn("absent or empty", err.getvalue())
+        self.assertEqual(self.t1.read_bytes(), self.base.read_bytes())
+
+    def test_absent_workspace_warns_but_still_composes(self):
+        self.enabled.write_text("")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = compose_rules.run(self.base, self.plugins, self.enabled, [self.t1],
+                                   index=self.index, workspace=self.d / "missing")
+        self.assertEqual(rc, 0)
+        self.assertIn("workspace contract", err.getvalue())
+        self.assertEqual(self.t1.read_bytes(), self.base.read_bytes())
+
     def test_workspace_contract_comes_after_plugin_fragments(self):
         (self.plugins / "serena").mkdir()
         (self.plugins / "serena" / "AGENTS.md").write_text("## Serena\n")

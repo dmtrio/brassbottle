@@ -20,7 +20,7 @@ user to a working container; this directory holds the extra context.
 - `backup.md` documents the singleton artifact backup service (restic lifecycle,
   Backrest browse-only UI, paths, retention, restore, and disaster-recovery checks).
 - `workspace.AGENTS.md` is copied into containers as `/workspace/AGENTS.md`, appended
-  to every agent's global rules file by `compose_rules.py`, and
+  by `compose_rules.py` to the global rules file of every agent with a `rules_file`, and
   defines the workspace/worktree contract for agents.
 
 ## Assets
