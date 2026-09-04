@@ -92,10 +92,10 @@ watch you work). Consequences:
   flake — say so instead of retrying, and ask the user to add the zone or
   CIDR to the container's manifest if it's genuinely needed.
 - The host is unreachable except for ports listed in `HOST_MCP_PORTS`.
-- **Run interactive or long-running helper agents in herdr.** herdr shows
-  each helper's state in the sidebar, and a dropped editor does not orphan
-  it. When `HERDR_ENV` is not `1`, run them in tmux instead. tmux also
-  remains the supervisor for plugin `services:`.
+- **Run long tasks and helper agents in herdr.** herdr shows each pane's
+  state in the sidebar, and a dropped editor does not orphan it. When
+  `HERDR_ENV` is not `1`, run them in tmux instead. tmux also remains the
+  supervisor for plugin `services:`.
   - For one helper, split the caller's pane with
     `herdr pane split --current --direction <dir> --cwd "$PWD" --no-focus`.
     Read the caller's rect from its own `panes[]` entry in
@@ -108,11 +108,21 @@ watch you work). Consequences:
   - The pane id is `.result.pane.pane_id` from a split and
     `.result.root_pane.pane_id` from a tab. The tab id is
     `.result.tab.tab_id`.
-  - Start the helper with an explicit cheap model:
-    `herdr agent start <name> --kind <claude|pi|cursor> --pane <pane-id> -- --model haiku`.
+  - For a long command rather than an agent, split or create a pane the same
+    way, then `herdr pane run <pane-id> <command>` and
+    `herdr pane wait-output <pane-id> --match <text> --timeout <ms>`.
+  - Start a helper agent with
+    `herdr agent start <name> --kind <claude|pi|cursor|codex> --pane <pane-id> -- <model flag>`.
+    Never name a model in a rule or prompt. Pass the harness's model for the
+    class the task needs: `min` for mechanical helpers, `default` for
+    coding, `frontier` for planning and review judgment. The per-harness
+    table is `/agent-rules/models.yml`.
   - Drive it with `herdr agent prompt <name> <text> --wait --timeout <ms>`,
     `herdr agent wait <name> --timeout <ms>`, and `herdr agent read <name>`.
     Always pass `--timeout`, because the default wait is indefinite.
+  - `herdr agent read` returns only what is still on the helper's screen.
+    For a result longer than one screen, ask the helper to write its answer
+    to a file and reply with the path.
   - Close the tab or pane when the helper is done.
   - The installed binary is the authority for syntax. Run `herdr --skill`
     when a command here differs from `herdr --help`.
