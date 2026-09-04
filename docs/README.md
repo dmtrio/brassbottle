@@ -19,7 +19,7 @@ user to a working container; this directory holds the extra context.
 - `egress.md` documents the egress approval watcher/daemon and ntfy push notifications.
 - `backup.md` documents the singleton artifact backup service (restic lifecycle,
   Backrest browse-only UI, paths, retention, restore, and disaster-recovery checks).
-- `workspace.AGENTS.md` is copied into containers as `/workspace/AGENTS.md`, appended
+- `workspace.CONTRACT.md` is copied into containers as `/workspace/CONTRACT.md`, appended
   by `compose_rules.py` to the global rules file of every agent with a `rules_file`, and
   defines the workspace/worktree contract for agents.
 

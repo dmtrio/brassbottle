@@ -506,13 +506,14 @@ REPO_NAMES="$(printf '%s' "$REPOS" | cut -f1 | tr '\n' ' ')"
 docker exec -u coder -e REPO_NAMES="${REPO_NAMES:-scratch}" "$CNAME" \
     python3 /usr/local/lib/djinn/code_workspace.py /workspace/dev.code-workspace
 
-# Workspace contract: an agent-neutral file no harness auto-loads. compose_rules
+# Workspace contract: a file no harness auto-loads (pi and codex walk ancestor
+# directories for AGENTS.md, so that name would load it twice). compose_rules
 # (below) appends it to the global rules file of every agent with a rules_file,
 # so those harnesses read it through the same channel as the base rules. The
 # old /workspace/CLAUDE.md copy is removed so Claude does not load the contract
 # twice (this script generated it).
-docker cp "$SCRIPT_DIR/docs/workspace.AGENTS.md" "$CNAME:/workspace/AGENTS.md"
-docker exec "$CNAME" sh -c 'chown coder:coder /workspace/AGENTS.md && rm -f /workspace/CLAUDE.md'
+docker cp "$SCRIPT_DIR/docs/workspace.CONTRACT.md" "$CNAME:/workspace/CONTRACT.md"
+docker exec "$CNAME" sh -c 'chown coder:coder /workspace/CONTRACT.md && rm -f /workspace/CLAUDE.md'
 
 # ── Global rules fan-out (compose base rules + enabled-plugin fragments) ─────
 # Each tool's global file is GENERATED (was a symlink to the read-only
