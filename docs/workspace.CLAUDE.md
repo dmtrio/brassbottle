@@ -114,9 +114,9 @@ watch you work). Consequences:
   - Start a helper agent with
     `herdr agent start <name> --kind <claude|pi|cursor|codex> --pane <pane-id> -- <model flag>`.
     Never name a model in a rule or prompt. Pass the harness's model for the
-    tier the task needs from `/agent-rules/models.yml`: `min` for mechanical
-    fan-out, `high` for planning and review, `max` for senior review, else
-    `default`. A tier the harness omits resolves to its `default`.
+    task key from `/agent-rules/models.yml` (`coding`, `review`, `research`,
+    `summarize`, `automation`, `plan`, `senior-review`). A key the harness
+    omits resolves to its `default`.
   - Drive it with `herdr agent prompt <name> <text> --wait --timeout <ms>`,
     `herdr agent wait <name> --timeout <ms>`, and `herdr agent read <name>`.
     Always pass `--timeout`, because the default wait is indefinite.
