@@ -14,9 +14,10 @@ how to use only the plugins its manifest turned on. up.sh writes that list (the
 derived PLUGINS var) to the enabled-file, the single source of truth both the
 `up`-time and shell-start composes read.
 
-Byte-identical when no enabled plugin ships a fragment: the base is written
-through verbatim, so replacing the symlink with this generator is a no-op until
-a plugins/<name>/AGENTS.md actually exists.
+The workspace contract (/workspace/AGENTS.md, installed by up.sh) is appended
+after the fragments, so every agent with a rules_file reads it through the same
+channel as the base rules. Byte-identical when no enabled plugin ships a
+fragment AND the contract is absent: the base is written through verbatim.
 
 Stdlib only (matches wire_plugins.py). Writes are atomic (tmp + rename), which
 also swaps a pre-existing symlink target for a regular file WITHOUT ever writing
@@ -193,6 +194,10 @@ def run(base, plugins_root, enabled_file, targets=None, index=DEFAULT_INDEX, ann
     base_text = _read_text(base_path)
     fragments = load_fragments(plugins_root, names)
     workspace_text = load_workspace(workspace)
+    has_workspace = bool(workspace_text and workspace_text.strip())
+    if not has_workspace:
+        print(f"  ⚠ workspace contract {workspace} absent or empty — composing without it",
+              file=sys.stderr)
     composed = compose(base_text, fragments, workspace_text)
 
     for target in targets:
@@ -200,7 +205,7 @@ def run(base, plugins_root, enabled_file, targets=None, index=DEFAULT_INDEX, ann
 
     if announce:
         parts = [n for n, _ in fragments]
-        if workspace_text is not None:
+        if has_workspace:
             parts.append("workspace contract")
         if parts:
             print("  ✓ agent rules composed (base + " + ", ".join(parts) + ")")
