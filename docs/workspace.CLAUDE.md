@@ -105,6 +105,10 @@ watch you work). Consequences:
     columns or 24 rows.
   - For many helpers, create one tab per helper with
     `herdr tab create --no-focus --cwd "$PWD" --label <name>`.
+  - Run at most eight helpers at once, counting herdr panes and in-process
+    subagents together. Queue the rest and start each one as an earlier helper
+    finishes. A wider fan-out multiplies cost across every spawned agent, and
+    its tabs stop fitting the sidebar.
   - The pane id is `.result.pane.pane_id` from a split and
     `.result.root_pane.pane_id` from a tab. The tab id is
     `.result.tab.tab_id`.
