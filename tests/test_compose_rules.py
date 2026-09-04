@@ -46,6 +46,25 @@ class ComposeTextTests(unittest.TestCase):
         out = compose_rules.compose("BASE\n", [("p", "## P\n")])
         self.assertLess(out.index("BASE"), out.index(compose_rules.SECTION_HEADING))
 
+    def test_workspace_alone_is_appended_after_base(self):
+        out = compose_rules.compose("BASE\n", [], "# Workspace Contract\nrules here\n")
+        self.assertTrue(out.startswith("BASE\n"))
+        self.assertIn(compose_rules.WORKSPACE_NOTICE, out)
+        self.assertIn("rules here", out)
+        self.assertNotIn(compose_rules.SECTION_HEADING, out, "no plugin section without fragments")
+        self.assertTrue(out.endswith("\n"))
+
+    def test_workspace_follows_plugin_section(self):
+        out = compose_rules.compose("BASE\n", [("p", "## P\n")], "# WS\n")
+        self.assertLess(out.index("BASE"), out.index(compose_rules.SECTION_HEADING))
+        self.assertLess(out.index("## P"), out.index(compose_rules.WORKSPACE_NOTICE))
+        self.assertLess(out.index(compose_rules.WORKSPACE_NOTICE), out.index("# WS"))
+
+    def test_absent_or_blank_workspace_keeps_base_byte_identical(self):
+        for ws in (None, "", "\n\n  \n"):
+            with self.subTest(ws=repr(ws)):
+                self.assertEqual(compose_rules.compose("a\nb\n", [], ws), "a\nb\n")
+
 
 class ReadEnabledTests(unittest.TestCase):
     def setUp(self):
@@ -175,9 +194,12 @@ class RunTests(unittest.TestCase):
         self.t2 = self.d / "home/.gemini/GEMINI.md"
 
     def _run(self, announce=False):
+        # workspace defaults to an absent path so the host's own /workspace
+        # contract never leaks into these fixtures.
         with redirect_stdout(io.StringIO()):
             return compose_rules.run(self.base, self.plugins, self.enabled,
-                                     [self.t1, self.t2], index=self.index, announce=announce)
+                                     [self.t1, self.t2], index=self.index, announce=announce,
+                                     workspace=self.d / "workspace-AGENTS.md")
 
     def test_no_plugins_targets_byte_identical_to_base(self):
         self.enabled.write_text("")
@@ -185,6 +207,48 @@ class RunTests(unittest.TestCase):
         base_bytes = self.base.read_bytes()
         self.assertEqual(self.t1.read_bytes(), base_bytes)
         self.assertEqual(self.t2.read_bytes(), base_bytes)
+
+    def test_workspace_contract_reaches_every_target(self):
+        (self.d / "workspace-AGENTS.md").write_text("# Workspace Contract\nworktrees only\n")
+        self.enabled.write_text("")
+        self.assertEqual(self._run(), 0)
+        for target in (self.t1, self.t2):
+            out = target.read_text()
+            self.assertIn("BASE RULES", out)
+            self.assertIn(compose_rules.WORKSPACE_NOTICE, out)
+            self.assertIn("worktrees only", out)
+        self.assertEqual(self.t1.read_bytes(), self.t2.read_bytes(), "same text for every harness")
+
+    def test_blank_workspace_is_not_announced_and_warns(self):
+        (self.d / "workspace-AGENTS.md").write_text("\n\n")
+        self.enabled.write_text("")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            compose_rules.run(self.base, self.plugins, self.enabled, [self.t1],
+                              index=self.index, announce=True,
+                              workspace=self.d / "workspace-AGENTS.md")
+        self.assertNotIn("workspace contract", out.getvalue())
+        self.assertIn("absent or empty", err.getvalue())
+        self.assertEqual(self.t1.read_bytes(), self.base.read_bytes())
+
+    def test_absent_workspace_warns_but_still_composes(self):
+        self.enabled.write_text("")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = compose_rules.run(self.base, self.plugins, self.enabled, [self.t1],
+                                   index=self.index, workspace=self.d / "missing")
+        self.assertEqual(rc, 0)
+        self.assertIn("workspace contract", err.getvalue())
+        self.assertEqual(self.t1.read_bytes(), self.base.read_bytes())
+
+    def test_workspace_contract_comes_after_plugin_fragments(self):
+        (self.plugins / "serena").mkdir()
+        (self.plugins / "serena" / "AGENTS.md").write_text("## Serena\n")
+        self.enabled.write_text("serena\n")
+        (self.d / "workspace-AGENTS.md").write_text("# WS\n")
+        self._run()
+        out = self.t1.read_text()
+        self.assertLess(out.index("## Serena"), out.index("# WS"))
 
     def test_import_line_preserved(self):
         self.enabled.write_text("")
@@ -265,7 +329,8 @@ class RunTests(unittest.TestCase):
         self.enabled.write_text("serena\n")
         buf = io.StringIO()
         with redirect_stdout(buf):
-            compose_rules.run(self.base, self.plugins, self.enabled, [self.t1], announce=True)
+            compose_rules.run(self.base, self.plugins, self.enabled, [self.t1], announce=True,
+                              workspace=self.d / "absent")
         self.assertIn("serena", buf.getvalue())
 
 

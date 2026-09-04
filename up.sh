@@ -4,7 +4,7 @@
 #
 # Kept:     the bottle (bottles/*.yml) and ~/djinn/secrets.env
 # Derived:  ~/djinn/keys/<name>/ (recomposed every run), the container,
-#           generated .mcp.json / dev.code-workspace / workspace CLAUDE.md
+#           generated .mcp.json / dev.code-workspace / workspace CONTRACT.md
 # Survives: workspace volume (code), ~/djinn/artifacts/<name>/
 #
 # Requires: docker, yq (brew install yq / static binary on Linux), python3
@@ -506,8 +506,14 @@ REPO_NAMES="$(printf '%s' "$REPOS" | cut -f1 | tr '\n' ' ')"
 docker exec -u coder -e REPO_NAMES="${REPO_NAMES:-scratch}" "$CNAME" \
     python3 /usr/local/lib/djinn/code_workspace.py /workspace/dev.code-workspace
 
-docker cp "$SCRIPT_DIR/docs/workspace.CLAUDE.md" "$CNAME:/workspace/CLAUDE.md"
-docker exec "$CNAME" chown coder:coder /workspace/CLAUDE.md
+# Workspace contract: a file no harness auto-loads (pi and codex walk ancestor
+# directories for AGENTS.md, so that name would load it twice). compose_rules
+# (below) appends it to the global rules file of every agent with a rules_file,
+# so those harnesses read it through the same channel as the base rules. The
+# old /workspace/CLAUDE.md copy is removed so Claude does not load the contract
+# twice (this script generated it).
+docker cp "$SCRIPT_DIR/docs/workspace.CONTRACT.md" "$CNAME:/workspace/CONTRACT.md"
+docker exec "$CNAME" sh -c 'chown coder:coder /workspace/CONTRACT.md && rm -f /workspace/CLAUDE.md'
 
 # ── Global rules fan-out (compose base rules + enabled-plugin fragments) ─────
 # Each tool's global file is GENERATED (was a symlink to the read-only

@@ -385,6 +385,11 @@ TPL_OUT=$(python3 rules/skills/djinn-bottle/check_manifest.py bottles/TEMPLATE.y
 fi  # command -v python3
 
 echo "── up.sh ↔ module contract pins"
+# The workspace contract is delivered through compose_rules, never as a Claude-only
+# /workspace/CLAUDE.md copy (that would load it twice for Claude, once for nobody else).
+! grep -qF -- ':/workspace/CLAUDE.md"' up.sh \
+    && pass "up.sh no longer copies the contract to /workspace/CLAUDE.md" \
+    || fail "up.sh still copies docs/workspace.* to /workspace/CLAUDE.md"
 # The modules are unit-tested; these greps only prove up.sh still CALLS them
 # (and converts YAML with yq) — the last mirror-drift risk left in bash.
 while IFS= read -r expr; do
@@ -396,6 +401,8 @@ done <<'DRIFT'
 yq -o=json -I=0 "$MANIFEST"
 src/manifest.py" --derive
 --build-payload
+docs/workspace.CONTRACT.md" "$CNAME:/workspace/CONTRACT.md"
+rm -f /workspace/CLAUDE.md
 "$PYTHON3" "$SCRIPT_DIR/src/wire_plugins.py"
 src/pull_manifests.py" "$BOTTLES_PATH"
 python3 /usr/local/lib/djinn/wire_plugins.py
