@@ -16,7 +16,7 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
   bottle's secret bindings.
 - `wire_plugins.py` writes generated MCP config for each enabled agent.
 - `compose_rules.py` composes global rules, enabled plugin rule fragments, and
-  the workspace contract (`/workspace/AGENTS.md`) into each agent's rules file.
+  the workspace contract (`/workspace/CONTRACT.md`) into each agent's rules file.
 - `code_workspace.py` keeps `dev.code-workspace` in sync with repos and visible
   worktrees.
 - `ensure_net.py` creates or verifies the shared Docker network.
