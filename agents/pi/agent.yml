@@ -12,6 +12,12 @@
 # image build decides the version; bump it here deliberately.
 # See ./README.md.
 
+# Global rules: pi loads AGENTS.md from its agent dir (~/.pi/agent) as the
+# global context file, then walks the cwd's ancestors for project files
+# (loadContextFileFromDir(agentDir) in the pi package). Declaring it here puts
+# pi on compose_rules' target list, so it receives the same composed rules as
+# claude and codex instead of receiving no global rules at all.
+rules_file: .pi/agent/AGENTS.md
 binary: pi
 
 install: |
