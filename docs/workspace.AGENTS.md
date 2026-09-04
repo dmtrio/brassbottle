@@ -1,8 +1,9 @@
 # Workspace Contract — Agent Dev Container
 
 This file governs every session in this container. `djinn up` installs it at
-`/workspace/AGENTS.md`, and `compose_rules.py` appends it to every agent's
-global rules file, so every harness reads the same contract.
+`/workspace/AGENTS.md`, and `compose_rules.py` appends it to the global rules
+file of every agent that declares one (`rules_file` in `agents/*/agent.yml`),
+so those harnesses read the same contract through the same channel.
 
 ## Layout (v2)
 
