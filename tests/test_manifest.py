@@ -767,6 +767,40 @@ class TestCredentialHosts(unittest.TestCase):
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
 
 
+class TestTokenRouting(unittest.TestCase):
+    """_check_token_routing: a canonical GH_TOKEN_<owner> var must map to
+    exactly one owner and one host, across repos: URLs and git.orgs keys."""
+
+    def test_two_host_guard_is_scheme_case_insensitive(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["HTTPS://github.com/acme/a.git",
+                              "https://git.example.test/acme/b.git"]})
+        self.assertIn("appears on more than one host", str(cm.exception))
+
+    def test_two_host_guard_ignores_explicit_443(self):
+        d = derive({"repos": ["https://github.com/acme/a.git",
+                              "https://github.com:443/acme/b.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+
+    def test_two_host_guard_ignores_http_repos(self):
+        d = derive({"repos": ["http://x.example.test/acme/a.git",
+                              "https://github.com/acme/b.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+
+    def test_orgs_owner_colliding_with_repo_owner_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://github.com/a_b/x.git"],
+                    "git": {"orgs": {"a.b": {"token": "GH_TOKEN_a_b"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
+        self.assertIn("'a.b', 'a_b' both map to GH_TOKEN_a_b", str(cm.exception))
+
+    def test_repo_owners_colliding_across_hosts_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://github.com/a_b/x.git",
+                              "https://git.example.test/a.b/y.git"]})
+        self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
+
+
 class TestGitIdentity(unittest.TestCase):
     # GH_TOKEN_VARS mirrors the set up.sh scans from secrets.env (names only).
     ENV = {"GH_TOKEN_VARS": "GH_TOKEN_hank GH_TOKEN_vendor GH_TOKEN_v2"}

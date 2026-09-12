@@ -177,9 +177,10 @@ touch "$(dirname "$0")/../gh-called"
 [ "$1" = auth ] && { echo "username=human"; echo "password=humantok"; exit 0; }
 exit 1
 MOCK
-out=$(printf 'protocol=https\nhost=git.example.test\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get); rc=$?
+out=$(printf 'protocol=https\nhost=git.example.test\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
 assert_rc "gitea, no per-org token: clean exit" 0 "$rc"
-assert_eq "gitea, no per-org token: NO credential (not GH_TOKEN, not gh)" "" "$out"
+assert_eq "gitea, no per-org token: tells git to quit" "quit=1" "$out"
+assert_contains "…names the missing var on stderr" "$(cat "$WORK/cred-err")" "no GH_TOKEN_nobody set for owner 'nobody' on git.example.test"
 [ -e "$WORK/gh-called" ] && fail "gh fallback invoked for a non-github host" || pass "gh fallback not invoked for a non-github host"
 # and the same request against github.com still takes the default → gh chain.
 out=$(printf 'protocol=https\nhost=github.com\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get)
@@ -282,9 +283,12 @@ grep -q 'GIT_CREDENTIAL_HOSTS=\${GIT_CREDENTIAL_HOSTS:-}' "$REPO/compose/docker-
 grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
     && pass "up.sh hands GIT_CREDENTIAL_HOSTS to compose" \
     || fail "up.sh no longer hands GIT_CREDENTIAL_HOSTS to compose"
-grep -q 'non-github private repo needs git.orgs' "$REPO/up.sh" \
+grep -q 'git.orgs.<owner>.token names a GH_TOKEN_<owner> var in secrets.env' "$REPO/up.sh" \
     && pass "up.sh warns with the non-github clone-failure message" \
     || fail "up.sh missing the non-github clone-failure warning text"
+grep -q 'https://\*@github.com:443/\*)' "$REPO/up.sh" \
+    && pass "up.sh clone warning matches userinfo/port github URLs" \
+    || fail "up.sh clone warning matches userinfo/port github URLs"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── common.sh ──"
