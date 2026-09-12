@@ -83,3 +83,11 @@ credential (the clone fails 401, loudly) rather than the github machine
 user's `GH_TOKEN` or the human `gh` login, neither of which belongs on a
 third-party server. And the token is sent as the HTTP password with a fixed
 username; gitea accepts any username alongside an access token.
+
+The router reads the owner as the first path segment, so a gitea served
+under a sub-path (`ROOT_URL https://host/git/`) derives owner `git` and
+finds no token; serve gitea at the host root or on its own hostname.
+
+Owner names are the token key and carry no host: `up` refuses a manifest
+where one owner name owns repos on two hosts (they would share
+`GH_TOKEN_<owner>`); use separate bottles.

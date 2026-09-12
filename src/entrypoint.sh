@@ -142,11 +142,13 @@ su -c "git config --global credential.useHttpPath true" coder
 # the router as the leading helper, per origin: idempotent across re-runs and
 # authoritative over the desktop bridge. Same idiom for every origin, so a
 # re-created bottle whose repos: changed converges too.
+set -f  # values are manifest-validated, but word-splitting below must not glob
 for origin in https://github.com $GIT_CREDENTIAL_HOSTS; do
     su -c "git config --global --unset-all credential.'$origin'.helper" coder 2>/dev/null || true
     su -c "git config --global --add credential.'$origin'.helper ''" coder
     su -c "git config --global --add credential.'$origin'.helper /usr/local/bin/git-credential-org" coder
 done
+set +f
 
 # ── SSH mode vs attach mode ───────────────────────────────────────────────────
 # remote_access.py owns the START_SSHD decision — two independent paths can

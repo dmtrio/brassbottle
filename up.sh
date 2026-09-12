@@ -461,7 +461,14 @@ EOF
         [ -n "$RNAME" ] || continue
         docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
             '[ -d "/workspace/repos/$REPO_NAME/.git" ] || git clone "$REPO_URL" "/workspace/repos/$REPO_NAME"' \
-            || echo "WARNING: clone of '$RNAME' failed — private repo needs either GH_TOKEN in secrets.env (machine user must have repo access) or a one-time 'gh auth login' in the container"
+            || { case "$RURL" in
+                    https://github.com/*)
+                        echo "WARNING: clone of '$RNAME' failed — private repo needs either GH_TOKEN in secrets.env (machine user must have repo access) or a one-time 'gh auth login' in the container"
+                        ;;
+                    *)
+                        echo "WARNING: clone of '$RNAME' failed — a non-github private repo needs git.orgs.<owner>.token naming a GH_TOKEN_<owner> var in secrets.env (github's GH_TOKEN and gh login are never sent to other hosts)"
+                        ;;
+                esac; }
         # Per-repo identity attribution: if this repo's OWNER has a git.orgs
         # override with a name/email, stamp it as the repo-local user.name/email
         # so commits to that owner's repos carry the right identity. Repos whose
