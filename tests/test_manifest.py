@@ -727,19 +727,44 @@ class TestCredentialHosts(unittest.TestCase):
             "https://Zeta.example.test/a/b.git",
             "https://alpha.example.test:3000/c/d.git",
             "https://alpha.example.test:3000/c/e.git",   # duplicate origin
-            "http://Alpha.example.test/f/g.git",          # http is its own origin
+            "http://Alpha.example.test/f/g.git",          # http: no credential over cleartext
             "git@gitea.example.test:h/i.git",             # scp-style: no HTTP helper
             "ssh://git@gitea.example.test/j/k.git",       # ssh: no HTTP helper
         ]})
         self.assertEqual(
             d["GIT_CREDENTIAL_HOSTS"],
-            "http://alpha.example.test\n"
             "https://alpha.example.test:3000\n"
             "https://zeta.example.test\n")
 
     def test_userinfo_in_url_is_not_part_of_origin(self):
         d = derive({"repos": ["https://bot@git.example.test/x/y.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+
+    def test_explicit_443_collapses_to_github(self):
+        d = derive({"repos": ["https://github.com:443/x/y.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+        d = derive({"repos": ["https://git.example.test:443/x/y.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+
+    def test_bad_host_is_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://h'$(x)'.test/o/r.git"]})
+        self.assertIn("unsupported host", str(cm.exception))
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://git.[a].test/o/r.git"]})
+        self.assertIn("unsupported host", str(cm.exception))
+
+    def test_owner_on_two_hosts_is_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://github.com/acme/a.git",
+                              "https://git.example.test/Acme/b.git"]})
+        self.assertIn(
+            "owner 'acme' appears on more than one host (git.example.test, github.com)",
+            str(cm.exception))
+        # Passing case: same owner twice on ONE host with different repo names.
+        d = derive({"repos": ["https://github.com/acme/a.git",
+                              "https://github.com/acme/b.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
 
 
 class TestGitIdentity(unittest.TestCase):
@@ -799,6 +824,18 @@ class TestGitIdentity(unittest.TestCase):
             str(cm.exception),
             "manifest git identity failed validation:\n"
             "  git.orgs: duplicate owner 'acme' (case-insensitive clash with 'Acme')")
+
+    def test_owner_canonical_collision_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"git": {"orgs": {"a.b": {"token": "GH_TOKEN_a_b"},
+                                     "a_b": {"token": "GH_TOKEN_a_b"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
+        self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
+
+    def test_gitea_owner_with_underscore_and_dot_accepted(self):
+        d = derive({"git": {"orgs": {"my_org.v2": {"token": "GH_TOKEN_a_b"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
+        self.assertIn("my_org.v2\tGH_TOKEN_my_org_v2\t", d["GIT_ORG_TOKENS"])
 
     def test_org_missing_token_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:

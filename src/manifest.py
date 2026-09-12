@@ -161,10 +161,12 @@ REPO_DIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
 # boring charset keeps it stable across the docker-exec/tmux/heredoc hops.
 SERVICE_NAME_RE = re.compile(r"^[a-z0-9-]+\Z")
 # Forge org/user name (git.orgs key). GitHub's own rule: alphanumerics and
-# single hyphens, no leading/trailing hyphen. Only '-' is non-alphanumeric, so
-# the GH_TOKEN_<owner> sanitization (below) is a bijection over valid owners —
-# two distinct owners can never collide on one token var.
-OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\Z")
+# single hyphens, no leading/trailing hyphen — widened for gitea, whose owners
+# may contain '_' and '.', so '-', '_' and '.' are all non-alphanumeric and the
+# GH_TOKEN_<owner> sanitization (below) is no longer a bijection: two distinct
+# owners CAN collide on one token var (e.g. 'a.b' and 'a_b') — _git_identity
+# checks for that collision explicitly (seen_canon).
+OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\Z")
 DOMAIN_RE = re.compile(
     r"^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"[A-Za-z][A-Za-z0-9-]{0,61}[A-Za-z0-9]\Z"
@@ -648,18 +650,28 @@ def _parse_secret(val, plugin, slot):
 
 
 def _credential_hosts(urls):
-    """The non-github HTTP(S) origins the entrypoint must install the credential
+    """The non-github HTTPS origins the entrypoint must install the credential
     router under, derived from the repos: URLs. github.com is always installed
     (entrypoint.sh) so it is excluded; scp-style and ssh:// URLs take no HTTP
-    credential helper at all. One origin per line — scheme://host[:port], the
-    exact form git matches credential.<url>.helper against — distinct, sorted,
-    lowercased (hostnames are case-insensitive)."""
+    credential helper at all. https only: no credential over cleartext, so
+    http:// URLs are silently ignored like scp/ssh ones. One origin per line —
+    scheme://host[:port], the exact form git matches credential.<url>.helper
+    against — distinct, sorted, lowercased (hostnames are case-insensitive).
+    The host is validated (it is interpolated into shell by entrypoint.sh) and
+    an explicit :443 default port is stripped before dedup/exclusion."""
     origins = set()
     for url in urls:
-        m = re.match(r"^(https?)://(?:[^@/]*@)?([^/]+)", url, re.IGNORECASE)
+        m = re.match(r"^(https)://(?:[^@/]*@)?([^/]+)", url, re.IGNORECASE)
         if not m:
             continue
-        origin = f"{m.group(1).lower()}://{m.group(2).lower()}"
+        host = m.group(2).lower()
+        if not re.match(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?\Z", host):
+            raise ManifestError(
+                f"repos entry: URL '{url}' has an unsupported host '{host}' "
+                "(letters, digits, . and -, optional :port)")
+        if host.endswith(":443"):
+            host = host[:-len(":443")]
+        origin = f"{m.group(1).lower()}://{host}"
         if origin == "https://github.com":
             continue
         origins.add(origin)
@@ -714,6 +726,7 @@ def _git_identity(git, env, secrets_file):
     orgs = git.get("orgs")
     records = []  # (owner_lc, canonical_var, source_var, name, email)
     seen_owners = {}  # lowercased owner → the manifest key that claimed it
+    seen_canon = {}  # canonical token var → the manifest key that claimed it
     if not _falsy(orgs):
         if not isinstance(orgs, dict):
             errors.append("  git.orgs: must be a map of <owner>: {token, name, email}")
@@ -733,6 +746,12 @@ def _git_identity(git, env, secrets_file):
                               f"(case-insensitive clash with '{seen_owners[owner_lc]}')")
                 continue
             seen_owners[owner_lc] = owner
+            canon = _canonical_token_var(owner)
+            if canon in seen_canon:
+                errors.append(f"  git.orgs: owners '{owner}' and '{seen_canon[canon]}' "
+                              f"both map to {canon} (non-alphanumerics become _)")
+                continue
+            seen_canon[canon] = owner
             if _falsy(spec):
                 spec = {}
             if not isinstance(spec, dict):
@@ -866,6 +885,25 @@ def derive(manifest, plugin_files, agent_files, env):
             "manifest repos failed validation:\n" + "\n".join(repo_errors))
     out["REPOS"] = "".join(f"{name}\t{url}\n" for name, url in parsed_repos)
     out["GIT_CREDENTIAL_HOSTS"] = _credential_hosts(url for _name, url in parsed_repos)
+    # Per-org tokens are keyed by owner name only, with no host (see
+    # _canonical_token_var) — the same owner name on two different hosts would
+    # receive the same GH_TOKEN_<owner> and misroute a credential to the wrong
+    # forge. Reject it up front, whether or not git.orgs currently mentions the
+    # owner (a future git.orgs entry would misroute silently otherwise).
+    owner_hosts = {}
+    for _name, url in parsed_repos:
+        m = re.match(r"^https?://(?:[^@/]*@)?([^/]+)/([^/]+)", url)
+        if not m:
+            continue
+        host = m.group(1).lower()
+        owner = m.group(2).lower()
+        owner_hosts.setdefault(owner, set()).add(host)
+    for owner, hosts in sorted(owner_hosts.items()):
+        if len(hosts) > 1:
+            raise ManifestError(
+                f"repos: owner '{owner}' appears on more than one host "
+                f"({', '.join(sorted(hosts))}); per-org tokens are keyed by owner only "
+                "— put those repos in separate bottles")
     forge = _scalar(manifest.get("forge"), "forge") or "github"
     if forge not in ("github", "gitea"):
         raise ManifestError("forge must be github or gitea")

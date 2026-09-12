@@ -185,6 +185,11 @@ assert_eq "gitea, no per-org token: NO credential (not GH_TOKEN, not gh)" "" "$o
 out=$(printf 'protocol=https\nhost=github.com\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get)
 assert_contains "github.com, no per-org token → default GH_TOKEN" "$out" "password=defval"
 
+# explicit default port: git passes host=github.com:443 for a URL written
+# https://github.com:443/... — the gate must still recognize it as github.
+out=$(printf 'protocol=https\nhost=github.com:443\npath=nobody/x.git\n' | env -i GH_TOKEN=defval bash "$HELPER" get)
+assert_contains "github.com:443 still takes the github default" "$out" "password=defval"
+
 # store/erase are no-ops (stateless helper) — no output, clean exit.
 out=$(printf 'protocol=https\nhost=github.com\npath=vendor/lib.git\n' | GH_TOKEN_vendor=vtok bash "$HELPER" store); rc=$?
 assert_rc "store is a no-op (rc 0)" 0 "$rc"
@@ -263,12 +268,23 @@ assert_contains "entrypoint adds an empty reset before the router" \
     "$EP" "--add credential.'\$origin'.helper ''"
 assert_contains "entrypoint adds the router via --add (not a plain set)" \
     "$EP" "--add credential.'\$origin'.helper /usr/local/bin/git-credential-org"
+# The loop expands unquoted with globbing on; values are manifest-validated,
+# but word-splitting must not glob. Check set -f sits directly before the for.
+if grep -B1 '^for origin in https://github.com \$GIT_CREDENTIAL_HOSTS; do' "$REPO/src/entrypoint.sh" \
+    | head -1 | grep -q '^set -f'; then
+  pass "entrypoint loop is glob-safe (set -f)"
+else
+  fail "entrypoint loop is glob-safe (set -f)"
+fi
 grep -q 'GIT_CREDENTIAL_HOSTS=\${GIT_CREDENTIAL_HOSTS:-}' "$REPO/compose/docker-compose.local.yml" \
     && pass "compose passes GIT_CREDENTIAL_HOSTS into the container" \
     || fail "compose no longer passes GIT_CREDENTIAL_HOSTS (entrypoint would install github.com only)"
 grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
     && pass "up.sh hands GIT_CREDENTIAL_HOSTS to compose" \
     || fail "up.sh no longer hands GIT_CREDENTIAL_HOSTS to compose"
+grep -q 'non-github private repo needs git.orgs' "$REPO/up.sh" \
+    && pass "up.sh warns with the non-github clone-failure message" \
+    || fail "up.sh missing the non-github clone-failure warning text"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── common.sh ──"
