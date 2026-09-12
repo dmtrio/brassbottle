@@ -41,7 +41,7 @@ class TinfoilPlugin(unittest.TestCase):
         self.assertEqual(derived["AGENT_SERVERS_JSON"], "{}")
         self.assertEqual(derived["PLUGIN_SERVICES"], "")
         self.assertEqual(derived["PLUGIN_SETUP"], "")
-        self.assertEqual(derived["EGRESS"], "tinfoil.sh")
+        self.assertIn("tinfoil.sh", derived["EGRESS"].split(","))
 
     def test_yaml_pins_package_and_has_no_runtime_wiring(self):
         self.assertIn("@tinfoilsh/pi-provider@0.1.2", PLUGIN_TEXT)
@@ -50,6 +50,9 @@ class TinfoilPlugin(unittest.TestCase):
             PLUGIN_TEXT,
         )
         self.assertIn("exit 1", PLUGIN_TEXT)
+        self.assertIn("--omit=peer", PLUGIN_TEXT)
+        self.assertIn("--save-exact tinfoil@1.2.1 zod@4.6.3", PLUGIN_TEXT)
+        self.assertNotIn("npm cache clean", PLUGIN_TEXT)
         self.assertRegex(PLUGIN_TEXT, r"(?m)^  TINFOIL_API_KEY: \{hint: ")
         for key in ("mcp:", "services:", "setup:"):
             self.assertNotRegex(PLUGIN_TEXT, rf"(?m)^{key}")
