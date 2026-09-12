@@ -461,8 +461,10 @@ EOF
         [ -n "$RNAME" ] || continue
         docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
             '[ -d "/workspace/repos/$REPO_NAME/.git" ] || git clone "$REPO_URL" "/workspace/repos/$REPO_NAME"' \
-            || { case "$RURL" in
-                    https://github.com/*|https://github.com:443/*|https://*@github.com/*|https://*@github.com:443/*)
+            || { # Match on the HOST, not the URL: a `*` in a case pattern crosses `/`,
+                 # so a URL pattern would let https://other/org/a@github.com/b.git read as github.
+                 _h="${RURL#*://}"; _h="${_h%%/*}"; _h="${_h##*@}"   # host[:port] — cut at first /, then drop userinfo
+                 case "$_h" in github.com|github.com:443)
                         echo "WARNING: clone of '$RNAME' failed — private repo needs either GH_TOKEN in secrets.env (machine user must have repo access) or a one-time 'gh auth login' in the container"
                         ;;
                     *)

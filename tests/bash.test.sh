@@ -286,9 +286,29 @@ grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
 grep -q 'git.orgs.<owner>.token names a GH_TOKEN_<owner> var in secrets.env' "$REPO/up.sh" \
     && pass "up.sh warns with the non-github clone-failure message" \
     || fail "up.sh missing the non-github clone-failure warning text"
-grep -q 'https://\*@github.com:443/\*)' "$REPO/up.sh" \
-    && pass "up.sh clone warning matches userinfo/port github URLs" \
-    || fail "up.sh clone warning matches userinfo/port github URLs"
+grep -qF '_h="${RURL#*://}"; _h="${_h%%/*}"; _h="${_h##*@}"' "$REPO/up.sh" \
+    && pass "up.sh derives the host before the clone-warning case" \
+    || fail "up.sh derives the host before the clone-warning case"
+grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
+    && pass "up.sh clone warning matches on host, not URL" \
+    || fail "up.sh clone warning matches on host, not URL"
+
+# Functional test of the case logic itself: the same host-extraction lines
+# and case, copied verbatim from up.sh, so a rewrite of the case arms is
+# caught by behavior, not just by the drift-pin greps above.
+warn_kind() {
+    _h="${1#*://}"; _h="${_h%%/*}"; _h="${_h##*@}"   # host[:port] — cut at first /, then drop userinfo
+    case "$_h" in
+        github.com|github.com:443) echo github;;
+        *) echo other;;
+    esac
+}
+assert_eq "warn_kind: plain github.com URL is github" "github" "$(warn_kind 'https://github.com/o/r.git')"
+assert_eq "warn_kind: userinfo@github.com:443 URL is github" "github" "$(warn_kind 'https://bot@github.com:443/o/r.git')"
+assert_eq "warn_kind: an '@' in the path before a real github.com userinfo is NOT github" \
+    "other" "$(warn_kind 'https://gitea.example.test/org/a@github.com/b.git')"
+assert_eq "warn_kind: github.com as a suffix of another host is NOT github" \
+    "other" "$(warn_kind 'https://github.com.evil.test/o/r.git')"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── common.sh ──"

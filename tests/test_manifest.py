@@ -727,7 +727,6 @@ class TestCredentialHosts(unittest.TestCase):
             "https://Zeta.example.test/a/b.git",
             "https://alpha.example.test:3000/c/d.git",
             "https://alpha.example.test:3000/c/e.git",   # duplicate origin
-            "http://Alpha.example.test/f/g.git",          # http: no credential over cleartext
             "git@gitea.example.test:h/i.git",             # scp-style: no HTTP helper
             "ssh://git@gitea.example.test/j/k.git",       # ssh: no HTTP helper
         ]})
@@ -754,10 +753,16 @@ class TestCredentialHosts(unittest.TestCase):
             derive({"repos": ["https://git.[a].test/o/r.git"]})
         self.assertIn("unsupported host", str(cm.exception))
 
+    def test_underscore_host_accepted(self):
+        d = derive({"repos": ["https://git_internal.lan/o/r.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git_internal.lan\n")
+
     def test_owner_on_two_hosts_is_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["https://github.com/acme/a.git",
-                              "https://git.example.test/Acme/b.git"]})
+                              "https://git.example.test/Acme/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
         self.assertIn(
             "owner 'acme' appears on more than one host (git.example.test, github.com)",
             str(cm.exception))
@@ -774,7 +779,9 @@ class TestTokenRouting(unittest.TestCase):
     def test_two_host_guard_is_scheme_case_insensitive(self):
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["HTTPS://github.com/acme/a.git",
-                              "https://git.example.test/acme/b.git"]})
+                              "https://git.example.test/acme/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
         self.assertIn("appears on more than one host", str(cm.exception))
 
     def test_two_host_guard_ignores_explicit_443(self):
@@ -782,10 +789,24 @@ class TestTokenRouting(unittest.TestCase):
                               "https://github.com:443/acme/b.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
 
-    def test_two_host_guard_ignores_http_repos(self):
-        d = derive({"repos": ["http://x.example.test/acme/a.git",
-                              "https://github.com/acme/b.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+    def test_http_repo_url_is_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["http://x.example.test/acme/a.git"]})
+        self.assertIn("uses http://", str(cm.exception))
+
+    def test_two_host_guard_only_fires_for_routed_owners(self):
+        # No git.orgs token routed for openssl: a public owner on two hosts
+        # (github.com + its own forge) must derive fine.
+        d = derive({"repos": ["https://github.com/openssl/openssl.git",
+                              "https://git.openssl.org/openssl/tools.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.openssl.org\n")
+        # Add a git.orgs token that actually routes for openssl: now it fires.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://github.com/openssl/openssl.git",
+                              "https://git.openssl.org/openssl/tools.git"],
+                    "git": {"orgs": {"openssl": {"token": "GH_TOKEN_openssl"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_openssl"})
+        self.assertIn("appears on more than one host", str(cm.exception))
 
     def test_orgs_owner_colliding_with_repo_owner_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -797,7 +818,9 @@ class TestTokenRouting(unittest.TestCase):
     def test_repo_owners_colliding_across_hosts_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["https://github.com/a_b/x.git",
-                              "https://git.example.test/a.b/y.git"]})
+                              "https://git.example.test/a.b/y.git"],
+                    "git": {"orgs": {"a_b": {"token": "GH_TOKEN_a_b"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
         self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
 
 

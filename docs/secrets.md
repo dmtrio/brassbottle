@@ -78,13 +78,16 @@ capabilities:
 ```
 
 Two things differ from github.com, both deliberate. The fall-backs are
-github-only: a non-github owner with no `GH_TOKEN_<owner>` gets **no**
-credential: the helper prints which `GH_TOKEN_<owner>` is missing and tells
-git to quit, so the clone fails immediately instead of prompting for a
-password rather than the github machine user's `GH_TOKEN` or the human `gh`
-login, neither of which belongs on a third-party server. And the token is
-sent as the HTTP password with a fixed username; gitea accepts any username
-alongside an access token.
+github-only. A non-github owner with no `GH_TOKEN_<owner>` gets **no**
+credential: the helper prints which var is missing and tells git to quit,
+so the clone fails immediately instead of prompting for a password, and
+neither the github machine user's `GH_TOKEN` nor the human `gh` login is
+ever offered to a third-party server. That also means a plain terminal or
+editor git client in the bottle has no credential for a non-github host:
+in a bottle, git to such a host authenticates only through `git.orgs`
+tokens, which reach the agent shims. The token is sent as the HTTP password
+with a fixed username; gitea accepts any username alongside an access
+token. `http://` repo URLs are rejected outright.
 
 The router reads the owner as the first path segment, so a gitea served
 under a sub-path (`ROOT_URL https://host/git/`) derives owner `git` and
