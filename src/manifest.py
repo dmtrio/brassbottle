@@ -689,6 +689,57 @@ def _canonical_token_var(owner):
     return "GH_TOKEN_" + re.sub(r"[^A-Za-z0-9]", "_", owner.lower())
 
 
+def _check_token_routing(parsed_repos, org_tokens):
+    """A canonical token var (_canonical_token_var) must map to exactly ONE
+    owner string and ONE host, across BOTH repos: URLs and git.orgs keys.
+
+    keyfiles.sh writes GH_TOKEN_<owner> and git-credential-org.sh reads it back
+    keyed by owner string alone — host plays no part in routing. So two owner
+    spellings that sanitize to the same var (e.g. 'a.b' and 'a_b') would have
+    one silently receive the other's token, and one owner string split across
+    two hosts would receive its one token on both — the wrong forge on
+    whichever host it wasn't issued for. Both are rejected up front, whether
+    or not git.orgs currently mentions the owner (a future git.orgs entry
+    would misroute silently otherwise).
+
+    org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
+    line) — git.orgs carries no host, so only its owner/canon pairing is
+    recorded.
+    """
+    canon_owners = {}
+    canon_hosts = {}
+    for _name, url in parsed_repos:
+        m = re.match(r"^https://(?:[^@/]*@)?([^/]+)/([^/]+)", url, re.IGNORECASE)
+        if not m:
+            continue
+        host = m.group(1).lower()
+        if host.endswith(":443"):
+            host = host[:-len(":443")]
+        owner = m.group(2).lower()
+        canon = _canonical_token_var(owner)
+        canon_owners.setdefault(canon, set()).add(owner)
+        canon_hosts.setdefault(canon, set()).add(host)
+    for line in org_tokens.splitlines():
+        if not line:
+            continue
+        owner, canon, _src = line.split("\t")
+        canon_owners.setdefault(canon, set()).add(owner)
+    for canon in sorted(canon_owners):
+        owners = canon_owners[canon]
+        if len(owners) > 1:
+            raise ManifestError(
+                f"git.orgs/repos: owners {', '.join(repr(o) for o in sorted(owners))} "
+                f"both map to {canon} (non-alphanumerics become _) — per-org tokens are "
+                "keyed by that var, so one of them would receive the other's token")
+        hosts = canon_hosts.get(canon, set())
+        if len(hosts) > 1:
+            owner = next(iter(owners))
+            raise ManifestError(
+                f"repos: owner '{owner}' appears on more than one host "
+                f"({', '.join(sorted(hosts))}); per-org tokens are keyed by owner only "
+                "— put those repos in separate bottles")
+
+
 def _git_identity(git, env, secrets_file):
     """Derive git credential routing from the git: section — NAMES only, per the
     module contract (up.sh resolves the secret VALUES). git.token names the
@@ -885,25 +936,6 @@ def derive(manifest, plugin_files, agent_files, env):
             "manifest repos failed validation:\n" + "\n".join(repo_errors))
     out["REPOS"] = "".join(f"{name}\t{url}\n" for name, url in parsed_repos)
     out["GIT_CREDENTIAL_HOSTS"] = _credential_hosts(url for _name, url in parsed_repos)
-    # Per-org tokens are keyed by owner name only, with no host (see
-    # _canonical_token_var) — the same owner name on two different hosts would
-    # receive the same GH_TOKEN_<owner> and misroute a credential to the wrong
-    # forge. Reject it up front, whether or not git.orgs currently mentions the
-    # owner (a future git.orgs entry would misroute silently otherwise).
-    owner_hosts = {}
-    for _name, url in parsed_repos:
-        m = re.match(r"^https?://(?:[^@/]*@)?([^/]+)/([^/]+)", url)
-        if not m:
-            continue
-        host = m.group(1).lower()
-        owner = m.group(2).lower()
-        owner_hosts.setdefault(owner, set()).add(host)
-    for owner, hosts in sorted(owner_hosts.items()):
-        if len(hosts) > 1:
-            raise ManifestError(
-                f"repos: owner '{owner}' appears on more than one host "
-                f"({', '.join(sorted(hosts))}); per-org tokens are keyed by owner only "
-                "— put those repos in separate bottles")
     forge = _scalar(manifest.get("forge"), "forge") or "github"
     if forge not in ("github", "gitea"):
         raise ManifestError("forge must be github or gitea")
@@ -912,6 +944,10 @@ def derive(manifest, plugin_files, agent_files, env):
     out["GIT_USER_NAME"] = _scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
     out["GIT_USER_EMAIL"] = _scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
     out.update(_git_identity(git, env, secrets_file))
+    # Per-org tokens are keyed by owner string alone, with no host (see
+    # _canonical_token_var) — checked here, after _git_identity, so it can see
+    # git.orgs (GIT_ORG_TOKENS) as well as the repos: URLs parsed above.
+    _check_token_routing(parsed_repos, out["GIT_ORG_TOKENS"])
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
     # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────

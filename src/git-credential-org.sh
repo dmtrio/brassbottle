@@ -20,8 +20,8 @@
 # in the manifest's repos: (gitea, self-hosted). Both fall-backs are gated on
 # host=github.com: GH_TOKEN is the github machine user's token and must never be
 # presented to a third-party server, and gh knows nothing about other hosts.
-# A non-github owner with no GH_TOKEN_<owner> set gets NO credential (git then
-# fails 401, loudly) rather than the wrong one.
+# A non-github owner with no GH_TOKEN_<owner> set answers quit=1 with a stderr
+# line naming the missing var, so git fails immediately instead of prompting.
 
 [ "$1" = get ] || exit 0                 # store/erase: no-op (stateless helper)
 
@@ -46,4 +46,11 @@ if [ -n "$tok" ]; then
     echo "password=$tok"
 elif [ "$host" = github.com ]; then
     printf '%s\n' "$req" | gh auth git-credential get   # human fallback
+else
+    # Non-github host, no GH_TOKEN_<owner>: say exactly what is missing and tell
+    # git to stop — no other helper, no terminal prompt (which would hang an
+    # agent's clone waiting for a username). git then fails with
+    # "credential helper … told us to quit" plus this line on stderr.
+    echo "git-credential-org: no $var set for owner '$owner' on $host — add git.orgs.<owner>.token: $var to the bottle and the token to secrets.env" >&2
+    echo "quit=1"
 fi
