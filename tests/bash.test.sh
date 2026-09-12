@@ -158,6 +158,33 @@ chmod +x "$WORK/ghbin/gh"
 out=$(printf 'protocol=https\nhost=github.com\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" bash "$HELPER" get)
 assert_contains "no token set → falls back to gh credential" "$out" "password=humantok"
 
+# Non-github origins (gitea, self-hosted — entrypoint installs the helper for
+# every GIT_CREDENTIAL_HOSTS origin): the owner lookup is host-agnostic, so a
+# gitea owner reads its own GH_TOKEN_<owner> exactly like a github one …
+gcred() { printf 'protocol=https\nhost=git.example.test\npath=%s\n' "$1" | env "${@:2}" bash "$HELPER" get; }
+out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok GH_TOKEN=defval)
+assert_contains "gitea owner → its per-org token" "$out" "password=etok"
+assert_absent "gitea owner does not get the github default" "$out" "password=defval"
+
+# … but BOTH fall-backs are github-only. GH_TOKEN is the github machine user's
+# token and must never be presented to a third-party server; gh knows nothing
+# about other hosts. No per-org token → no credential at all (git fails 401,
+# loudly) and gh is never invoked.
+rm -f "$WORK/gh-called"
+cat > "$WORK/ghbin/gh" <<'MOCK'
+#!/bin/bash
+touch "$(dirname "$0")/../gh-called"
+[ "$1" = auth ] && { echo "username=human"; echo "password=humantok"; exit 0; }
+exit 1
+MOCK
+out=$(printf 'protocol=https\nhost=git.example.test\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get); rc=$?
+assert_rc "gitea, no per-org token: clean exit" 0 "$rc"
+assert_eq "gitea, no per-org token: NO credential (not GH_TOKEN, not gh)" "" "$out"
+[ -e "$WORK/gh-called" ] && fail "gh fallback invoked for a non-github host" || pass "gh fallback not invoked for a non-github host"
+# and the same request against github.com still takes the default → gh chain.
+out=$(printf 'protocol=https\nhost=github.com\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get)
+assert_contains "github.com, no per-org token → default GH_TOKEN" "$out" "password=defval"
+
 # store/erase are no-ops (stateless helper) — no output, clean exit.
 out=$(printf 'protocol=https\nhost=github.com\npath=vendor/lib.git\n' | GH_TOKEN_vendor=vtok bash "$HELPER" store); rc=$?
 assert_rc "store is a no-op (rc 0)" 0 "$rc"
@@ -195,11 +222,16 @@ out=$(gc credential.'https://github.com'.helper /usr/local/bin/git-credential-or
 assert_rc "plain set aborts on VS Code's duplicated pre-seed (the reported bug)" 5 "$rc"
 assert_contains "…with the multiple-values error" "$out" "cannot overwrite multiple values"
 
-# The fix: reset(empty)+add, verbatim from entrypoint.sh (minus `su … coder`).
+# The fix: reset(empty)+add, verbatim from entrypoint.sh (minus `su … coder`),
+# looped over github.com plus the manifest's non-github origins
+# (GIT_CREDENTIAL_HOSTS, newline-separated — word-split on purpose).
+GIT_CREDENTIAL_HOSTS=$'https://git.example.test\n'
 install_helper() {
-  gc --unset-all credential.'https://github.com'.helper 2>/dev/null || true
-  gc --add credential.'https://github.com'.helper ''
-  gc --add credential.'https://github.com'.helper /usr/local/bin/git-credential-org
+  for origin in https://github.com $GIT_CREDENTIAL_HOSTS; do
+    gc --unset-all "credential.$origin.helper" 2>/dev/null || true
+    gc --add "credential.$origin.helper" ''
+    gc --add "credential.$origin.helper" /usr/local/bin/git-credential-org
+  done
 }
 seed_home; install_helper; rc=$?
 assert_rc "reset+add succeeds despite the duplicated pre-seed" 0 "$rc"
@@ -212,17 +244,31 @@ assert_rc "reset+add is idempotent on re-run" 0 "$rc"
 eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://github.com/dmtrio/x.git)
 assert_eq "router is the sole effective github.com helper (bridge cleared)" \
     "/usr/local/bin/git-credential-org" "$eff"
+eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://git.example.test/Emergence/filebrowser.git)
+assert_eq "router is the sole effective helper for a manifest gitea origin" \
+    "/usr/local/bin/git-credential-org" "$eff"
+eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://other.example.test/x/y.git)
+assert_eq "an origin NOT in the manifest keeps only the desktop bridge (router not installed)" \
+    "!desktop-bridge" "$eff"
 
 # Drift pin: entrypoint.sh must keep the idempotent idiom. If anyone reverts to a
 # plain `git config … helper <value>` set, these fail loudly (mirrors the
 # up.sh/plugins.test.sh drift pins).
 EP=$(cat "$REPO/src/entrypoint.sh")
+assert_contains "entrypoint loops github.com plus the manifest's non-github origins" \
+    "$EP" 'for origin in https://github.com $GIT_CREDENTIAL_HOSTS; do'
 assert_contains "entrypoint resets the helper list (--unset-all)" \
-    "$EP" "--unset-all credential.'https://github.com'.helper"
+    "$EP" "--unset-all credential.'\$origin'.helper"
 assert_contains "entrypoint adds an empty reset before the router" \
-    "$EP" "--add credential.'https://github.com'.helper ''"
+    "$EP" "--add credential.'\$origin'.helper ''"
 assert_contains "entrypoint adds the router via --add (not a plain set)" \
-    "$EP" "--add credential.'https://github.com'.helper /usr/local/bin/git-credential-org"
+    "$EP" "--add credential.'\$origin'.helper /usr/local/bin/git-credential-org"
+grep -q 'GIT_CREDENTIAL_HOSTS=\${GIT_CREDENTIAL_HOSTS:-}' "$REPO/compose/docker-compose.local.yml" \
+    && pass "compose passes GIT_CREDENTIAL_HOSTS into the container" \
+    || fail "compose no longer passes GIT_CREDENTIAL_HOSTS (entrypoint would install github.com only)"
+grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
+    && pass "up.sh hands GIT_CREDENTIAL_HOSTS to compose" \
+    || fail "up.sh no longer hands GIT_CREDENTIAL_HOSTS to compose"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── common.sh ──"

@@ -14,7 +14,9 @@ task: coding                       # label: coding | research | ... (information
 #                                  # git init at /workspace/repos/scratch
 #  - https://github.com/org/app.git                # name = URL basename
 #  - {name: lib, url: https://github.com/org/lib.git}
-forge: github                      # github | gitea
+forge: github                      # github | gitea (informational — the git
+                                   # credential router covers github.com plus
+                                   # every non-github https:// host in repos:)
 
 git:
   name: ""                         # blank = your host git config

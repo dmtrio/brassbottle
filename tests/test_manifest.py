@@ -703,6 +703,45 @@ class TestRepos(unittest.TestCase):
             "  repos entry: URL 'https://github.com/x/a pp.git' contains whitespace")
 
 
+class TestCredentialHosts(unittest.TestCase):
+    """GIT_CREDENTIAL_HOSTS: the non-github origins (scheme://host[:port], one
+    per line) entrypoint.sh installs git-credential-org under. github.com is
+    always installed, so it never appears here."""
+
+    def test_absent_repos_is_empty(self):
+        self.assertEqual(derive({})["GIT_CREDENTIAL_HOSTS"], "")
+
+    def test_github_only_manifest_is_empty(self):
+        d = derive({"repos": ["https://github.com/x/app.git",
+                              "https://GitHub.com/y/lib.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+
+    def test_gitea_repo_yields_its_origin(self):
+        d = derive({"forge": "gitea",
+                    "repos": ["https://git.example.test/Emergence/filebrowser.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+
+    def test_mixed_hosts_distinct_sorted_lowercased(self):
+        d = derive({"repos": [
+            "https://github.com/x/app.git",
+            "https://Zeta.example.test/a/b.git",
+            "https://alpha.example.test:3000/c/d.git",
+            "https://alpha.example.test:3000/c/e.git",   # duplicate origin
+            "http://Alpha.example.test/f/g.git",          # http is its own origin
+            "git@gitea.example.test:h/i.git",             # scp-style: no HTTP helper
+            "ssh://git@gitea.example.test/j/k.git",       # ssh: no HTTP helper
+        ]})
+        self.assertEqual(
+            d["GIT_CREDENTIAL_HOSTS"],
+            "http://alpha.example.test\n"
+            "https://alpha.example.test:3000\n"
+            "https://zeta.example.test\n")
+
+    def test_userinfo_in_url_is_not_part_of_origin(self):
+        d = derive({"repos": ["https://bot@git.example.test/x/y.git"]})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+
+
 class TestGitIdentity(unittest.TestCase):
     # GH_TOKEN_VARS mirrors the set up.sh scans from secrets.env (names only).
     ENV = {"GH_TOKEN_VARS": "GH_TOKEN_hank GH_TOKEN_vendor GH_TOKEN_v2"}
