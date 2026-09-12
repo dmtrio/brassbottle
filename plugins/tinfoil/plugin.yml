@@ -7,8 +7,9 @@
 # into pi offline at up. The plugin bake loop runs before the agents loop, so pi
 # is absent now; setup: must never download because the firewall is up at up.
 
-# Baked at build (full network). Pin the version and integrity together when
-# revising this package deliberately.
+# Baked at build (full network). Bump the package version, its integrity
+# string and the two dep pins together, deliberately. The bake loop cleans the
+# npm cache once after every plugin, so this block does not.
 install: |
   sudo mkdir -p /opt/plugins/tinfoil/pkg && sudo chown coder:coder /opt/plugins/tinfoil/pkg
   cd /opt/plugins/tinfoil/pkg
@@ -16,8 +17,19 @@ install: |
   python3 -c 'import json,sys; p=json.load(open("pack.json"))[0]; expected="sha512-qe6Z/Vy7Io4Jip2nhnaN87Fw+Czl2s+IeBbt/oM7ly1feCyql64wWludMv+pPtJFJ+vR1CUxcoZgviyowE8osg=="; filename="tinfoilsh-pi-provider-0.1.2.tgz"; ok=p.get("integrity") == expected and p.get("filename") == filename; print("Tinfoil package pin mismatch: integrity=%r filename=%r" % (p.get("integrity"), p.get("filename")), file=sys.stderr) if not ok else None; sys.exit(0 if ok else 1)' || { echo "Tinfoil package integrity or filename verification failed" >&2; exit 1; }
   tar xzf tinfoilsh-pi-provider-0.1.2.tgz
   rm tinfoilsh-pi-provider-0.1.2.tgz pack.json
-  (cd package && npm install --omit=dev --ignore-scripts --no-audit --no-fund)
-  npm cache clean --force
+  # --omit=peer: the package declares pi's own runtime (@earendil-works/*) as
+  # "*" peers; npm 7+ would install a second copy of pi (285 packages, ~586 MB)
+  # that the extension could resolve instead of the pi the agents loop
+  # installs. pi supplies those modules to extensions itself. Without peers:
+  # 17 packages, ~49 MB. The wrapper's deps are pinned exact here because
+  # they are the security-critical part (tinfoil = attestation, HPKE, the
+  # verifier); the tarball integrity above covers only the 552-line wrapper.
+  (cd package && npm install --omit=dev --omit=peer --ignore-scripts --no-audit --no-fund \
+     --save-exact tinfoil@1.2.1 zod@4.6.3)
+  for pin in tinfoil:1.2.1 zod:4.6.3; do
+    got="$(node -p "require('./package/node_modules/${pin%%:*}/package.json').version")"
+    [ "$got" = "${pin##*:}" ] || { echo "Tinfoil dep pin mismatch: ${pin%%:*} is $got, want ${pin##*:}" >&2; exit 1; }
+  done
 
 # The extension reads TINFOIL_API_KEY from the agent's process environment
 # (delivered by agent_secrets like OPENROUTER_API_KEY) and never writes it to
