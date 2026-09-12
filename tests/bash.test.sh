@@ -191,6 +191,10 @@ assert_contains "github.com, no per-org token → default GH_TOKEN" "$out" "pass
 out=$(printf 'protocol=https\nhost=github.com:443\npath=nobody/x.git\n' | env -i GH_TOKEN=defval bash "$HELPER" get)
 assert_contains "github.com:443 still takes the github default" "$out" "password=defval"
 
+# hostnames are case-insensitive; git passes the URL's own spelling verbatim.
+out=$(printf 'protocol=https\nhost=GitHub.com\npath=nobody/x.git\n' | env -i GH_TOKEN=defval bash "$HELPER" get)
+assert_contains "mixed-case github host still takes the github default" "$out" "password=defval"
+
 # store/erase are no-ops (stateless helper) — no output, clean exit.
 out=$(printf 'protocol=https\nhost=github.com\npath=vendor/lib.git\n' | GH_TOKEN_vendor=vtok bash "$HELPER" store); rc=$?
 assert_rc "store is a no-op (rc 0)" 0 "$rc"
@@ -286,18 +290,24 @@ grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
 grep -q 'git.orgs.<owner>.token names a GH_TOKEN_<owner> var in secrets.env' "$REPO/up.sh" \
     && pass "up.sh warns with the non-github clone-failure message" \
     || fail "up.sh missing the non-github clone-failure warning text"
-grep -qF '_h="${RURL#*://}"; _h="${_h%%/*}"; _h="${_h##*@}"' "$REPO/up.sh" \
-    && pass "up.sh derives the host before the clone-warning case" \
-    || fail "up.sh derives the host before the clone-warning case"
+grep -qF '*://*) _h="${RURL#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;' "$REPO/up.sh" \
+    && pass "up.sh derives the host/path before the clone-warning case" \
+    || fail "up.sh derives the host/path before the clone-warning case"
 grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
     && pass "up.sh clone warning matches on host, not URL" \
     || fail "up.sh clone warning matches on host, not URL"
+grep -qF 'REPO_OWNER="${_p%%/*}"' "$REPO/up.sh" \
+    && pass "up.sh derives REPO_OWNER from the shared host/path split" \
+    || fail "up.sh derives REPO_OWNER from the shared host/path split"
 
-# Functional test of the case logic itself: the same host-extraction lines
-# and case, copied verbatim from up.sh, so a rewrite of the case arms is
-# caught by behavior, not just by the drift-pin greps above.
+# Functional test of the case logic itself: the same host/path-extraction
+# lines and case, copied verbatim from up.sh, so a rewrite of the case arms
+# is caught by behavior, not just by the drift-pin greps above.
 warn_kind() {
-    _h="${1#*://}"; _h="${_h%%/*}"; _h="${_h##*@}"   # host[:port] — cut at first /, then drop userinfo
+    case "$1" in
+        *://*) _h="${1#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
+        *)     _h="${1%%:*}"; _p="${1#*:}"; _h="${_h##*@}" ;;
+    esac
     case "$_h" in
         github.com|github.com:443) echo github;;
         *) echo other;;
@@ -309,6 +319,24 @@ assert_eq "warn_kind: an '@' in the path before a real github.com userinfo is NO
     "other" "$(warn_kind 'https://gitea.example.test/org/a@github.com/b.git')"
 assert_eq "warn_kind: github.com as a suffix of another host is NOT github" \
     "other" "$(warn_kind 'https://github.com.evil.test/o/r.git')"
+assert_eq "warn_kind: scp-style github URL is github" "github" "$(warn_kind 'git@github.com:dmtrio/x.git')"
+assert_eq "warn_kind: scp-style non-github URL is other" "other" "$(warn_kind 'git@gitea.example.test:org/x.git')"
+
+# owner_of(): the same host/path split, but returning the derived owner
+# (first path segment) — the REPO_OWNER half of the shared derivation.
+owner_of() {
+    case "$1" in
+        *://*) _h="${1#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
+        *)     _h="${1%%:*}"; _p="${1#*:}"; _h="${_h##*@}" ;;
+    esac
+    echo "${_p%%/*}"
+}
+assert_eq "owner_of: '@' in the path before a real userinfo does not confuse owner" \
+    "org" "$(owner_of 'https://gitea.example.test/org/a@github.com/b.git')"
+assert_eq "owner_of: userinfo is dropped, owner is the first path segment" \
+    "Acme" "$(owner_of 'https://bot@github.com/Acme/x.git')"
+assert_eq "owner_of: scp-style URL" "dmtrio" "$(owner_of 'git@github.com:dmtrio/x.git')"
+assert_eq "owner_of: ssh:// URL" "o" "$(owner_of 'ssh://git@github.com/o/r.git')"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── common.sh ──"

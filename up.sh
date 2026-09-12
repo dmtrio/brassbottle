@@ -459,12 +459,18 @@ $GIT_ORG_TOKENS
 EOF
     while IFS=$'\t' read -r RNAME RURL; do
         [ -n "$RNAME" ] || continue
+        # Host and path from the URL, for the failure hint below and the owner
+        # attribution after it. https://[user@]host[:port]/owner/repo and
+        # scp-style [user@]host:owner/repo. Cut the path off FIRST, then drop
+        # userinfo — a `@` inside the path must not read as userinfo, and a
+        # `*` in a case pattern crosses `/`, so no URL globs.
+        case "$RURL" in
+            *://*) _h="${RURL#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
+            *)     _h="${RURL%%:*}"; _p="${RURL#*:}"; _h="${_h##*@}" ;;
+        esac
         docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
             '[ -d "/workspace/repos/$REPO_NAME/.git" ] || git clone "$REPO_URL" "/workspace/repos/$REPO_NAME"' \
-            || { # Match on the HOST, not the URL: a `*` in a case pattern crosses `/`,
-                 # so a URL pattern would let https://other/org/a@github.com/b.git read as github.
-                 _h="${RURL#*://}"; _h="${_h%%/*}"; _h="${_h##*@}"   # host[:port] — cut at first /, then drop userinfo
-                 case "$_h" in github.com|github.com:443)
+            || { case "$_h" in github.com|github.com:443)
                         echo "WARNING: clone of '$RNAME' failed — private repo needs either GH_TOKEN in secrets.env (machine user must have repo access) or a one-time 'gh auth login' in the container"
                         ;;
                     *)
@@ -475,10 +481,9 @@ EOF
         # override with a name/email, stamp it as the repo-local user.name/email
         # so commits to that owner's repos carry the right identity. Repos whose
         # owner has no override inherit the container-global identity from
-        # entrypoint.sh. Owner = first path segment of the URL, for both
-        # https://host/owner/repo and git@host:owner/repo (and creds@host) forms.
-        REPO_OWNER="${RURL#*://}"; REPO_OWNER="${REPO_OWNER#*@}"
-        REPO_OWNER="${REPO_OWNER#*[:/]}"; REPO_OWNER="${REPO_OWNER%%/*}"
+        # entrypoint.sh.
+        # Owner = first path segment (see the host/path derivation above).
+        REPO_OWNER="${_p%%/*}"
         # case-fold to match GIT_ORG_IDENTITIES (lowercased owners). tr, not
         # ${VAR,,}: up.sh runs on the host, and macOS ships bash 3.2 where that
         # expansion is a syntax error.

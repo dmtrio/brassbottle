@@ -27,6 +27,7 @@
 
 req=$(cat)                                # buffer the request so gh can replay it
 host=$(printf '%s\n' "$req" | sed -n 's/^host=//p')
+host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive; git passes the URL's spelling
 host=${host%:443}                        # explicit default port: git passes host=github.com:443 for https://github.com:443/…
 path=$(printf '%s\n' "$req" | sed -n 's/^path=//p')
 owner=${path%%/*}
