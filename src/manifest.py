@@ -647,6 +647,25 @@ def _parse_secret(val, plugin, slot):
     return hint
 
 
+def _credential_hosts(urls):
+    """The non-github HTTP(S) origins the entrypoint must install the credential
+    router under, derived from the repos: URLs. github.com is always installed
+    (entrypoint.sh) so it is excluded; scp-style and ssh:// URLs take no HTTP
+    credential helper at all. One origin per line — scheme://host[:port], the
+    exact form git matches credential.<url>.helper against — distinct, sorted,
+    lowercased (hostnames are case-insensitive)."""
+    origins = set()
+    for url in urls:
+        m = re.match(r"^(https?)://(?:[^@/]*@)?([^/]+)", url, re.IGNORECASE)
+        if not m:
+            continue
+        origin = f"{m.group(1).lower()}://{m.group(2).lower()}"
+        if origin == "https://github.com":
+            continue
+        origins.add(origin)
+    return "".join(f"{o}\n" for o in sorted(origins))
+
+
 def _canonical_token_var(owner):
     """The in-container env var a per-org token lands in — keyfiles.sh writes it,
     git-credential-org.sh reads it. This derivation MUST match the shell one in
@@ -846,6 +865,7 @@ def derive(manifest, plugin_files, agent_files, env):
         raise ManifestError(
             "manifest repos failed validation:\n" + "\n".join(repo_errors))
     out["REPOS"] = "".join(f"{name}\t{url}\n" for name, url in parsed_repos)
+    out["GIT_CREDENTIAL_HOSTS"] = _credential_hosts(url for _name, url in parsed_repos)
     forge = _scalar(manifest.get("forge"), "forge") or "github"
     if forge not in ("github", "gitea"):
         raise ManifestError("forge must be github or gitea")

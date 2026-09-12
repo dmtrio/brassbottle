@@ -127,19 +127,26 @@ su -c "git config --global safe.directory /workspace" coder
 # login — so agents present the right per-org token and humans still fall back
 # to the shared gh login. No SSH keys. useHttpPath=true feeds the repo path to
 # the router so it can read the owner (and makes credential caching per-path,
-# which is harmless here). Router is github-only for now; gitea is a follow-up.
+# which is harmless here). Installed for github.com and for every non-github
+# origin in the manifest's repos: (GIT_CREDENTIAL_HOSTS, from manifest.py) —
+# a gitea/self-hosted repo authenticates by owner the same way. The helper
+# itself gates its fall-backs by host, so a non-github origin only ever sees
+# its own GH_TOKEN_<owner>, never the github machine-user token or gh.
 su -c "git config --global credential.useHttpPath true" coder
 # VS Code's dev-container GitHub feature pre-seeds credential.'https://github.com'.helper
 # (= !gh auth git-credential) on every attach, and can duplicate it across windows/
 # re-attaches. A plain `git config` set then aborts with "cannot overwrite multiple
 # values", leaving the router UNinstalled — and the desktop credential bridge
 # (credential.helper in /etc/gitconfig) answers first, so git ops leak the human's
-# login instead of the per-org token. Reset the github.com helper list (empty value)
-# and add the router as the leading helper: idempotent across re-runs and
-# authoritative over the desktop bridge.
-su -c "git config --global --unset-all credential.'https://github.com'.helper" coder 2>/dev/null || true
-su -c "git config --global --add credential.'https://github.com'.helper ''" coder
-su -c "git config --global --add credential.'https://github.com'.helper /usr/local/bin/git-credential-org" coder
+# login instead of the per-org token. Reset the helper list (empty value) and add
+# the router as the leading helper, per origin: idempotent across re-runs and
+# authoritative over the desktop bridge. Same idiom for every origin, so a
+# re-created bottle whose repos: changed converges too.
+for origin in https://github.com $GIT_CREDENTIAL_HOSTS; do
+    su -c "git config --global --unset-all credential.'$origin'.helper" coder 2>/dev/null || true
+    su -c "git config --global --add credential.'$origin'.helper ''" coder
+    su -c "git config --global --add credential.'$origin'.helper /usr/local/bin/git-credential-org" coder
+done
 
 # ── SSH mode vs attach mode ───────────────────────────────────────────────────
 # remote_access.py owns the START_SSHD decision — two independent paths can

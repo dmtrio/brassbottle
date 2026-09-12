@@ -1,6 +1,7 @@
 REPOS='alpha	https://github.com/example/alpha.git
 beta	https://github.com/example/beta.git
 '
+GIT_CREDENTIAL_HOSTS=''
 FORGE=github
 GIT_USER_NAME='Golden Tester'
 GIT_USER_EMAIL=golden@example.com
@@ -11,6 +12,7 @@ MEM_LIMIT=4g
 AGENTS_ENABLED='aider claude codex cursor pi'
 SHIM_AGENTS='claude codex cursor-agent pi'
 AGENTS_MCP_JSON='[{"binary":"claude","config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove","settings":{}},{"binary":"codex","config_path":".codex/config.toml","format":"toml","dialect":"","env_refs":"bearer_token_env_var","strategy":"codex_managed_block","settings":{"sandbox_mode":"danger-full-access"}},{"binary":"cursor-agent","config_path":".cursor/mcp.json","format":"json","dialect":"url","env_refs":false,"strategy":"","settings":{}},{"binary":"pi","config_path":".pi/agent/mcp.json","format":"json","dialect":"type-http","env_refs":false,"strategy":"","settings":{}}]'
+ENABLE_EGRESS_BROKER=true
 PLUGINS='axiom obsidian-annotated codebase-memory'
 PLUGINS_ENABLED='axiom codebase-memory obsidian-annotated'
 SSH_PORT=''
@@ -52,8 +54,8 @@ volumes:
   cursor-auth:
   cursor-state:'
 PLUGIN_SERVICES=''
-HOST_MCP_PORTS='8816'
-ENABLE_EGRESS_BROKER=true
+PLUGIN_SETUP=''
+HOST_MCP_PORTS=8816
 AGENT_SERVERS_JSON='{"axiom":{"spec":{"url":"https://mcp.axiom.co/mcp","headers":{"Authorization":"Bearer ${AXIOM_TOKEN}"}},"requires":["AXIOM_TOKEN"]},"obsidian-annotated":{"spec":{"url":"https://mcp-obsidian.dmetr.io/mcp","headers":{"Authorization":"Bearer ${OBSIDIAN_ANNOTATED_KEY}"}},"requires":["OBSIDIAN_ANNOTATED_KEY"]}}'
 AGENT_SERVER_SLOTS='AXIOM_TOKEN OBSIDIAN_ANNOTATED_KEY'
 AGENT_SECRETS='cursor-agent	AXIOM_TOKEN	AXIOM_KEY_cursor

@@ -60,6 +60,10 @@ services:
       - CONTAINER_NAME=${CONTAINER_NAME}
       - GIT_USER_NAME=${GIT_USER_NAME:-}
       - GIT_USER_EMAIL=${GIT_USER_EMAIL:-}
+      # Non-github repo origins (one scheme://host per line, from repos:) the
+      # entrypoint installs git-credential-org under, so a gitea/self-hosted
+      # clone authenticates by owner exactly like github.com does.
+      - GIT_CREDENTIAL_HOSTS=${GIT_CREDENTIAL_HOSTS:-}
       - TZ=${TZ:-America/Chicago}
       # Host MCP opt-in: comma-separated TCP ports on host.docker.internal.
       # Empty = container cannot reach the host at all.

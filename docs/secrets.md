@@ -56,3 +56,30 @@ apply** — never a silent fall-back to the wrong identity. This is routing +
 attribution, not isolation: every org's token sits in each agent's
 `<agent>.env`, so a repo whose token must be unreachable by other work
 belongs in a separate container.
+
+### Gitea and other self-hosted forges
+
+The same routing serves a non-github repo. `up` derives every non-github
+`https://` origin from `repos:` and the entrypoint installs the helper for
+each, so a repo at `https://git.example.test/Emergence/filebrowser.git`
+authenticates with `GH_TOKEN_emergence` (the var name keeps the `GH_TOKEN_`
+prefix on every forge — one naming rule, one scan, one router):
+
+```yaml
+forge: gitea
+repos:
+  - https://git.example.test/Emergence/filebrowser.git
+git:
+  orgs:
+    Emergence:
+      token: GH_TOKEN_emergence      # a gitea access token, in secrets.env
+capabilities:
+  egress: [git.example.test]         # repo hosts are never auto-allowlisted
+```
+
+Two things differ from github.com, both deliberate. The fall-backs are
+github-only: a non-github owner with no `GH_TOKEN_<owner>` gets **no**
+credential (the clone fails 401, loudly) rather than the github machine
+user's `GH_TOKEN` or the human `gh` login, neither of which belongs on a
+third-party server. And the token is sent as the HTTP password with a fixed
+username; gitea accepts any username alongside an access token.
