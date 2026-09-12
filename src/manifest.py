@@ -653,8 +653,8 @@ def _credential_hosts(urls):
     """The non-github HTTPS origins the entrypoint must install the credential
     router under, derived from the repos: URLs. github.com is always installed
     (entrypoint.sh) so it is excluded; scp-style and ssh:// URLs take no HTTP
-    credential helper at all. https only: no credential over cleartext, so
-    http:// URLs are silently ignored like scp/ssh ones. One origin per line —
+    credential helper at all. http:// URLs are rejected upstream in derive()
+    (no credential over cleartext). One origin per line —
     scheme://host[:port], the exact form git matches credential.<url>.helper
     against — distinct, sorted, lowercased (hostnames are case-insensitive).
     The host is validated (it is interpolated into shell by entrypoint.sh) and
@@ -665,10 +665,10 @@ def _credential_hosts(urls):
         if not m:
             continue
         host = m.group(2).lower()
-        if not re.match(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?\Z", host):
+        if not re.match(r"^[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?(?::[0-9]{1,5})?\Z", host):
             raise ManifestError(
                 f"repos entry: URL '{url}' has an unsupported host '{host}' "
-                "(letters, digits, . and -, optional :port)")
+                "(letters, digits, _ . and -, optional :port)")
         if host.endswith(":443"):
             host = host[:-len(":443")]
         origin = f"{m.group(1).lower()}://{host}"
@@ -691,16 +691,19 @@ def _canonical_token_var(owner):
 
 def _check_token_routing(parsed_repos, org_tokens):
     """A canonical token var (_canonical_token_var) must map to exactly ONE
-    owner string and ONE host, across BOTH repos: URLs and git.orgs keys.
-
-    keyfiles.sh writes GH_TOKEN_<owner> and git-credential-org.sh reads it back
-    keyed by owner string alone — host plays no part in routing. So two owner
+    owner string and ONE host, across BOTH repos: URLs and git.orgs keys —
+    but only for owners git.orgs actually routes a token for. keyfiles.sh
+    writes GH_TOKEN_<owner> and git-credential-org.sh reads it back keyed by
+    owner string alone — host plays no part in routing. So two owner
     spellings that sanitize to the same var (e.g. 'a.b' and 'a_b') would have
     one silently receive the other's token, and one owner string split across
     two hosts would receive its one token on both — the wrong forge on
-    whichever host it wasn't issued for. Both are rejected up front, whether
-    or not git.orgs currently mentions the owner (a future git.orgs entry
-    would misroute silently otherwise).
+    whichever host it wasn't issued for. An owner with no git.orgs token is
+    harmless: nothing routes for it (github uses the default GH_TOKEN, a
+    non-github host gets the helper's quit-loudly path), so a public
+    two-host owner like openssl on github.com + git.openssl.org must derive
+    fine. The check fires only for owners git.orgs actually routes a token
+    for — a git.orgs entry added later re-runs derive at `up` and fires then.
 
     org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
     line) — git.orgs carries no host, so only its owner/canon pairing is
@@ -708,6 +711,7 @@ def _check_token_routing(parsed_repos, org_tokens):
     """
     canon_owners = {}
     canon_hosts = {}
+    org_canons = set()
     for _name, url in parsed_repos:
         m = re.match(r"^https://(?:[^@/]*@)?([^/]+)/([^/]+)", url, re.IGNORECASE)
         if not m:
@@ -724,7 +728,10 @@ def _check_token_routing(parsed_repos, org_tokens):
             continue
         owner, canon, _src = line.split("\t")
         canon_owners.setdefault(canon, set()).add(owner)
+        org_canons.add(canon)
     for canon in sorted(canon_owners):
+        if canon not in org_canons:
+            continue
         owners = canon_owners[canon]
         if len(owners) > 1:
             raise ManifestError(
@@ -904,6 +911,11 @@ def derive(manifest, plugin_files, agent_files, env):
             continue
         if any(c in url for c in (" ", "\t", "\n")):
             repo_errors.append(f"  repos entry: URL '{url}' contains whitespace")
+            continue
+        if re.match(r"^http://", url, re.IGNORECASE):
+            repo_errors.append(
+                f"  repos entry: URL '{url}' uses http:// — credentials over cleartext are "
+                "not supported (the desktop credential bridge would answer for it); use https://")
             continue
         if explicit_name is not None:
             if not isinstance(explicit_name, str):

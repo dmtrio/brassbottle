@@ -341,9 +341,10 @@ RUN chmod +x /usr/local/bin/egress_broker_firewall.sh
 COPY src/remote_access.py /usr/local/lib/djinn/remote_access.py
 RUN chmod 644 /usr/local/lib/djinn/remote_access.py
 
-# Per-org git credential router (entrypoint installs it as the github.com
-# credential helper). Routes by repo owner to GH_TOKEN_<owner>, falling back to
-# the container GH_TOKEN then gh's human login. See src/git-credential-org.sh.
+# Per-org git credential router (entrypoint installs it for github.com and
+# every non-github https origin in the manifest's repos:). Routes by repo
+# owner to GH_TOKEN_<owner>; on github.com only, falls back to the container
+# GH_TOKEN then gh's human login. See src/git-credential-org.sh.
 COPY src/git-credential-org.sh /usr/local/bin/git-credential-org
 RUN chmod +x /usr/local/bin/git-credential-org
 
