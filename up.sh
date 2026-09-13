@@ -150,26 +150,41 @@ fi
 # keyfiles.sh fans into every <agent>.env and the clone bootstrap hands to git.
 if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 
-# Up-time notice: a non-github host with no git.orgs token bound to it (see
-# manifest.py:_org_hosts) will fail every private clone from it — there is no
-# fall-back to human credentials (docs/secrets.md). Warn now, not at the first
-# failed clone. bash-3.2 compatible: while-read over heredocs, no process
-# substitution.
-while IFS= read -r _cred_origin; do
-    [ -n "$_cred_origin" ] || continue
-    _cred_host="${_cred_origin#*://}"
-    _cred_bound=""
-    while IFS=$'\t' read -r _org_owner _org_hostvar _org_host; do
+# Up-time notice: an owner routed via a non-github repos: URL, with no
+# git.orgs token for THAT OWNER, will fail every private clone of its repos —
+# there is no fall-back to human credentials (docs/secrets.md). Per owner, not
+# per host: a host can be perfectly reachable (github.com always is) while
+# still lacking this owner's token — the old per-host notice missed that.
+# Warn now, not at the first failed clone. bash-3.2 compatible: while-read
+# over heredocs, no process substitution.
+while IFS=$'\t' read -r _rname _rurl; do
+    [ -n "$_rname" ] || continue
+    case "$_rurl" in
+        *://*) ;;
+        *) continue ;;   # scp-style/ssh:// takes no HTTP credential at all
+    esac
+    # Host and owner, derived exactly like the clone block below: cut the
+    # path off first, then drop userinfo — a `@` inside the path must not
+    # read as userinfo.
+    _rhost="${_rurl#*://}"; _rpath="${_rhost#*/}"; _rhost="${_rhost%%/*}"; _rhost="${_rhost##*@}"
+    _rhost=$(printf '%s' "$_rhost" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive
+    _rhost="${_rhost%:443}"
+    [ "$_rhost" = github.com ] && continue   # github.com always has the default GH_TOKEN/gh fall-backs
+    _rowner="${_rpath%%/*}"
+    _rowner=$(printf '%s' "$_rowner" | tr '[:upper:]' '[:lower:]')   # case-fold to match GIT_ORG_TOKENS
+    _rcanon="GH_TOKEN_${_rowner//[!a-z0-9]/_}"                      # parity with _canonical_token_var
+    _org_has_token=""
+    while IFS=$'\t' read -r _org_owner _org_canon _org_src; do
         [ -n "$_org_owner" ] || continue
-        [ "$_org_host" = "$_cred_host" ] && _cred_bound=1
+        [ "$_org_canon" = "$_rcanon" ] && _org_has_token=1
     done <<EOF
-$GIT_ORG_HOSTS
+$GIT_ORG_TOKENS
 EOF
-    if [ -z "$_cred_bound" ]; then
-        echo "  note: $_cred_host: no git.orgs token is bound to this host — private clones from it will fail (no fall-back to human credentials; see docs/secrets.md)"
+    if [ -z "$_org_has_token" ]; then
+        echo "  note: $_rhost/$_rowner: no git.orgs token for this owner — private clones of its repos will fail (no fall-back to human credentials; see docs/secrets.md)"
     fi
 done <<EOF
-$GIT_CREDENTIAL_HOSTS
+$REPOS
 EOF
 
 COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
@@ -500,6 +515,7 @@ EOF
             *://*) _h="${RURL#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
             *)     _h="${RURL%%:*}"; _p="${RURL#*:}"; _h="${_h##*@}" ;;
         esac
+        _h=$(printf '%s' "$_h" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive (tr, not ${_h,,}: macOS bash 3.2)
         docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
             '[ -d "/workspace/repos/$REPO_NAME/.git" ] || git clone "$REPO_URL" "/workspace/repos/$REPO_NAME"' \
             || { case "$_h" in github.com|github.com:443)

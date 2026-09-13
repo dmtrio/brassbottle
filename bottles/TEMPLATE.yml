@@ -35,6 +35,7 @@ git:
   #       token: GH_TOKEN_planetexpress   # secrets.env var name (required per org)
   #       name:  "Leela Bot"              # optional — repo-local user.name for planetexpress/*
   #       email: "bot@planetexpress.example"  # optional — repo-local user.email
+  #       host:  git.planetexpress.example    # optional — only needed when this owner has no repos: URL to derive its host from
 
 memory: 10g
 

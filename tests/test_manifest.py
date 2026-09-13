@@ -840,10 +840,50 @@ class TestOrgHosts(unittest.TestCase):
             "acme\tGH_HOST_acme\tgithub.com\n"
             "emergence\tGH_HOST_emergence\tgit.example.test\n")
 
-    def test_org_hosts_default_github_when_owner_not_in_repos(self):
+    def test_org_hosts_default_github_only_in_github_only_bottle(self):
+        # No repos: at all → GIT_CREDENTIAL_HOSTS is empty → github.com is
+        # this bottle's only origin, so an unrouted owner is safely assumed
+        # to live there.
         d = derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
         self.assertEqual(d["GIT_ORG_HOSTS"], "vendor\tGH_HOST_vendor\tgithub.com\n")
+
+    def test_org_hosts_unlisted_owner_rejected_in_mixed_bottle(self):
+        # This bottle has a non-github host installed (git.example.test, via
+        # OrgA's repo), so OrgB — routed a token but never seen in repos: —
+        # can no longer be silently assumed to be a github owner.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://git.example.test/OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"},
+                                     "OrgB": {"token": "GH_TOKEN_orgb"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga GH_TOKEN_orgb"})
+        # owner routing folds to lowercase throughout GIT_ORG_TOKENS (see
+        # _canonical_token_var), so the owner naming this error is "orgb".
+        self.assertIn("git.orgs.orgb: owner appears in no https repos: URL", str(cm.exception))
+
+    def test_org_hosts_declared_host(self):
+        d = derive({"repos": ["https://git.example.test/OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"},
+                                     "OrgB": {"token": "GH_TOKEN_orgb",
+                                              "host": "Git.Other.Test:443"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga GH_TOKEN_orgb"})
+        self.assertIn("orgb\tGH_HOST_orgb\tgit.other.test\n", d["GIT_ORG_HOSTS"])
+        self.assertEqual(d["GIT_ORG_DECLARED_HOSTS"], "orgb\tgit.other.test\n")
+
+    def test_org_hosts_declared_host_disagrees_with_repos(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://git.example.test/OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga",
+                                               "host": "github.com"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
+        self.assertIn("disagrees with repos:", str(cm.exception))
+
+    def test_org_hosts_bad_declared_host(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor",
+                                                 "host": "h'$(x)'.test"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
+        self.assertIn("is not a valid host", str(cm.exception))
 
     def test_org_hosts_empty_without_orgs(self):
         self.assertEqual(derive({})["GIT_ORG_HOSTS"], "")
@@ -941,7 +981,7 @@ class TestGitIdentity(unittest.TestCase):
         self.assertEqual(
             str(cm.exception),
             "manifest git identity failed validation:\n"
-            "  git.orgs.vendor: unsupported field(s): tokne (only token, name, email)")
+            "  git.orgs.vendor: unsupported field(s): tokne (only token, name, email, host)")
 
     def test_illegal_owner_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:

@@ -26,7 +26,12 @@
 # Per-org tokens are host-bound via GH_HOST_<owner> (manifest.py:_org_hosts,
 # written beside the token by keyfiles.sh): a request from any other host never
 # sees them — an ad-hoc clone from a same-named owner on a different forge gets
-# no credential instead of the wrong one.
+# no credential instead of the wrong one. A token with NO binding at all (no
+# GH_HOST_<owner> set — up.sh always writes one for every git.orgs token, so
+# this means a hand-set token, e.g. via bin/update-agent-keys.sh, with no
+# matching GH_HOST_<owner>) is refused everywhere, github.com included: an
+# empty $bound never equals a real $host, so there is no host left for which
+# it would be presented.
 
 [ "$1" = get ] || exit 0                 # store/erase: no-op (stateless helper)
 
@@ -43,11 +48,13 @@ owner=$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')
 clean=${owner//[!a-z0-9]/_}              # parity with _canonical_token_var
 var="GH_TOKEN_${clean}"
 hostvar="GH_HOST_${clean}"                # parity with manifest.py:_org_hosts
-bound="${!hostvar:-github.com}"           # no binding recorded → github owner
+bound="${!hostvar:-}"                     # no binding recorded → refuse everywhere
 tok="${!var:-}"
 if [ -n "$tok" ] && [ "$bound" != "$host" ]; then
-    # The per-org token was issued for $bound. Never present it to another
-    # host — for github.com the default/gh fall-backs still apply below.
+    # The per-org token was issued for $bound (or, if $bound is empty, for no
+    # host at all — an empty $bound never equals a real $host, so an unbound
+    # token is refused everywhere, github.com included). Never present it to
+    # another host — for github.com the default/gh fall-backs still apply below.
     tok=""
 fi
 if [ -z "$tok" ] && [ "$host" = github.com ]; then
@@ -64,7 +71,9 @@ else
     # tell git to stop — no other helper, no terminal prompt (which would hang
     # an agent's clone waiting for a username). git then fails with
     # "credential helper … told us to quit" plus this line on stderr.
-    if [ -n "${!var:-}" ]; then
+    if [ -n "${!var:-}" ] && [ -z "$bound" ]; then
+        echo "git-credential-org: $var is set but has no GH_HOST_<owner> binding — refusing to present it (up writes the binding; a hand-set token via bin/update-agent-keys.sh needs GH_HOST_${clean}=$host too)" >&2
+    elif [ -n "${!var:-}" ]; then
         echo "git-credential-org: $var is bound to $bound, not $host — refusing to present it (add git.orgs.<owner>.token: $var for $host if this owner also lives there)" >&2
     else
         echo "git-credential-org: no $var set for owner '$owner' on $host — add git.orgs.<owner>.token: $var to the bottle and the token to secrets.env" >&2
