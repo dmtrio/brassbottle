@@ -30,7 +30,7 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
 - `tmux-*`, `tmux.conf`, and `herdr-config.toml` support remote agent
   sessions. `mosh-server-wrapper.sh` is built into the jump image only
   (`jump/Dockerfile`).
-- `git-credential-org.sh` routes GitHub credentials by repo owner.
+- `git-credential-org.sh` routes git credentials by repo owner, for github.com and every non-github `https://` origin in the manifest's `repos:` (fall-backs to `GH_TOKEN` and `gh` are github-only).
 
 ## Testing
 

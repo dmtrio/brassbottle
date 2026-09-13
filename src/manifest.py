@@ -689,6 +689,26 @@ def _canonical_token_var(owner):
     return "GH_TOKEN_" + re.sub(r"[^A-Za-z0-9]", "_", owner.lower())
 
 
+def _routed_repo_owners(parsed_repos):
+    """Yield (host, owner, canon) for every https:// repos: URL — the same
+    parse both _check_token_routing and _org_hosts need, kept in one place so
+    they can't drift apart. host and owner are lowercased and host has a
+    trailing :443 stripped, matching _credential_hosts' own parse; canon is
+    _canonical_token_var(owner). A URL that doesn't match https://host/owner/…
+    (already rejected upstream by derive()'s repos: validation for anything
+    that would reach here) is skipped rather than raising."""
+    for _name, url in parsed_repos:
+        m = re.match(r"^https://(?:[^@/]*@)?([^/]+)/([^/]+)", url, re.IGNORECASE)
+        if not m:
+            continue
+        host = m.group(1).lower()
+        if host.endswith(":443"):
+            host = host[:-len(":443")]
+        owner = m.group(2).lower()
+        canon = _canonical_token_var(owner)
+        yield host, owner, canon
+
+
 def _check_token_routing(parsed_repos, org_tokens):
     """A canonical token var (_canonical_token_var) must map to exactly ONE
     owner string and ONE host, across BOTH repos: URLs and git.orgs keys —
@@ -712,15 +732,7 @@ def _check_token_routing(parsed_repos, org_tokens):
     canon_owners = {}
     canon_hosts = {}
     org_canons = set()
-    for _name, url in parsed_repos:
-        m = re.match(r"^https://(?:[^@/]*@)?([^/]+)/([^/]+)", url, re.IGNORECASE)
-        if not m:
-            continue
-        host = m.group(1).lower()
-        if host.endswith(":443"):
-            host = host[:-len(":443")]
-        owner = m.group(2).lower()
-        canon = _canonical_token_var(owner)
+    for host, owner, canon in _routed_repo_owners(parsed_repos):
         canon_owners.setdefault(canon, set()).add(owner)
         canon_hosts.setdefault(canon, set()).add(host)
     for line in org_tokens.splitlines():
@@ -745,6 +757,41 @@ def _check_token_routing(parsed_repos, org_tokens):
                 f"repos: owner '{owner}' appears on more than one host "
                 f"({', '.join(sorted(hosts))}); per-org tokens are keyed by owner only "
                 "— put those repos in separate bottles")
+
+
+def _org_hosts(parsed_repos, org_tokens):
+    """Bind each routed per-org token to the one host its owner appears on in
+    repos: (github.com when the owner appears on none — an owner git.orgs
+    routes a token for but that never shows up in repos: is assumed to be a
+    github owner, the forge every bottle can reach). This is the fix for the
+    leak _check_token_routing doesn't cover: that function only rejects one
+    owner spread across two hosts, it doesn't stop an ad-hoc clone of a
+    same-named owner on a DIFFERENT host from being handed that owner's
+    token. keyfiles.sh writes GH_HOST_<owner>=<host> beside GH_TOKEN_<owner>,
+    and git-credential-org.sh refuses to present the token when the request's
+    host doesn't match.
+
+    hostvar is derived from the same sanitised owner _canonical_token_var
+    produces, so it stays in lockstep with the token var: "GH_HOST_" +
+    canon[len("GH_TOKEN_"):] (canon is always "GH_TOKEN_" + sanitised owner —
+    see _canonical_token_var). _check_token_routing has already guaranteed at
+    most one host per routed canon, so the first mapped host is authoritative.
+
+    org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
+    line). Returns owner<TAB>hostvar<TAB>host per line, in org_tokens order.
+    """
+    canon_hosts = {}
+    for host, _owner, canon in _routed_repo_owners(parsed_repos):
+        canon_hosts.setdefault(canon, host)
+    lines = []
+    for line in org_tokens.splitlines():
+        if not line:
+            continue
+        owner, canon, _src = line.split("\t")
+        host = canon_hosts.get(canon, "github.com")
+        hostvar = "GH_HOST_" + canon[len("GH_TOKEN_"):]
+        lines.append(f"{owner}\t{hostvar}\t{host}\n")
+    return "".join(lines)
 
 
 def _git_identity(git, env, secrets_file):
@@ -960,6 +1007,7 @@ def derive(manifest, plugin_files, agent_files, env):
     # _canonical_token_var) — checked here, after _git_identity, so it can see
     # git.orgs (GIT_ORG_TOKENS) as well as the repos: URLs parsed above.
     _check_token_routing(parsed_repos, out["GIT_ORG_TOKENS"])
+    out["GIT_ORG_HOSTS"] = _org_hosts(parsed_repos, out["GIT_ORG_TOKENS"])
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
     # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────

@@ -97,4 +97,8 @@ Owner names are the token key and carry no host: `up` refuses a manifest
 where one owner name owns repos on two hosts (they would share
 `GH_TOKEN_<owner>`); use separate bottles. The same rule applies across
 owner spellings: `a.b` and `a_b` both become `GH_TOKEN_a_b`, so `up` refuses
-a manifest where two such owners appear anywhere in `repos:` or `git.orgs`.
+a manifest where either of two such owners has a `git.orgs` token.
+
+Each `git.orgs` token is bound to the one host its owner appears on in
+`repos:` (github.com if none) and is never presented to another host, so an
+ad-hoc clone of a same-named owner elsewhere gets no credential.

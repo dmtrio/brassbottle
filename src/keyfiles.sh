@@ -15,16 +15,17 @@
 
 warn_missing() { echo "  ⚠ $1 not in secrets.env — $2 will not authenticate until set"; }
 
-# write_keyfiles <keys_dir> <shim_agents> <plugin_env_secrets> <agent_secrets> [<git_org_tokens>]
+# write_keyfiles <keys_dir> <shim_agents> <plugin_env_secrets> <agent_secrets> [<git_org_tokens>] [<git_org_hosts>]
 #   keys_dir            already exists, mode 700, wiped of *.env by the caller
 #   shim_agents         space-separated agent names (match the Dockerfile shims)
 #   plugin_env_secrets  legacy shared passthrough records (currently empty)
 #   agent_secrets       AGENT<TAB>SLOT<TAB>SOURCE resolved records (manifest.py)
 #   git_org_tokens      OWNER<TAB>CANONICAL<TAB>SOURCE per line (per-org, from manifest.py)
+#   git_org_hosts       OWNER<TAB>HOSTVAR<TAB>HOST per line (per-org, from manifest.py)
 # Reads GH_TOKEN and every SOURCE var from the environment (indirect expansion).
 write_keyfiles() {
-    local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" git_org_tokens="${5:-}"
-    local shared="" slot src hint agent a f owner canonical
+    local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" git_org_tokens="${5:-}" git_org_hosts="${6:-}"
+    local shared="" slot src hint agent a f owner canonical hostvar host
 
     # Shared block: legacy passthroughs + GH_TOKEN, built once. The
     # heredoc keeps the loop in this shell so the warns aren't lost to a pipe
@@ -50,6 +51,17 @@ EOF
         shared="${shared}${canonical}=${!src}"$'\n'
     done <<EOF
 $git_org_tokens
+EOF
+
+    # The host each per-org token is bound to, written beside it as
+    # GH_HOST_<owner>=<host> — so git-credential-org can refuse to present the
+    # token to any other host. A host is not a secret; it rides in the same
+    # keyfile as the token it's paired with for convenience, not confidentiality.
+    while IFS=$'\t' read -r owner hostvar host; do
+        [ -n "$owner" ] || continue
+        shared="${shared}${hostvar}=${host}"$'\n'
+    done <<EOF
+$git_org_hosts
 EOF
 
     # Fan the shared block out to every shim agent. chmod 600 as each file is

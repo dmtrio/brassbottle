@@ -824,6 +824,31 @@ class TestTokenRouting(unittest.TestCase):
         self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
 
 
+class TestOrgHosts(unittest.TestCase):
+    """_org_hosts: each routed per-org token is bound to the one host its
+    owner appears on in repos: (github.com if none) — end to end with the
+    token, so git-credential-org can refuse a host mismatch."""
+
+    def test_org_hosts_bind_to_repo_host(self):
+        d = derive({"repos": ["https://github.com/acme/a.git",
+                              "https://git.example.test/Emergence/f.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"},
+                                     "Emergence": {"token": "GH_TOKEN_emergence"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme GH_TOKEN_emergence"})
+        self.assertEqual(
+            d["GIT_ORG_HOSTS"],
+            "acme\tGH_HOST_acme\tgithub.com\n"
+            "emergence\tGH_HOST_emergence\tgit.example.test\n")
+
+    def test_org_hosts_default_github_when_owner_not_in_repos(self):
+        d = derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
+        self.assertEqual(d["GIT_ORG_HOSTS"], "vendor\tGH_HOST_vendor\tgithub.com\n")
+
+    def test_org_hosts_empty_without_orgs(self):
+        self.assertEqual(derive({})["GIT_ORG_HOSTS"], "")
+
+
 class TestGitIdentity(unittest.TestCase):
     # GH_TOKEN_VARS mirrors the set up.sh scans from secrets.env (names only).
     ENV = {"GH_TOKEN_VARS": "GH_TOKEN_hank GH_TOKEN_vendor GH_TOKEN_v2"}
