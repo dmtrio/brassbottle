@@ -59,7 +59,7 @@ echo "── src/keyfiles.sh ──"
 # pure function of one file's contents plus the VAR name.
 WUOT="$WORK/wuot.env"; : > "$WUOT"
 err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_acme 2>&1)
-assert_contains "warn_unbound_org_token: warns when GH_HOST_acme is missing" "$err" "set without GH_HOST_acme"
+assert_contains "warn_unbound_org_token: warns when GH_HOST_acme is missing" "$err" "GH_TOKEN_acme set without a matching GH_HOST_<owner>"
 printf 'GH_HOST_acme=git.example.test\n' >> "$WUOT"
 err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_acme 2>&1)
 assert_eq "warn_unbound_org_token: silent once GH_HOST_acme is set" "" "$err"
@@ -859,6 +859,18 @@ assert_rc "missing keys dir rc 1" 1 "$rc"
 out=$(uak mysite bogusagent VAR val 2>&1); rc=$?
 assert_rc "unknown agent rc 1" 1 "$rc"
 assert_contains "unknown agent message" "$out" "agent must be one of"
+
+# Regression: warn_unbound_org_token was called as `[ -n "$VALUE" ] &&
+# warn_unbound_org_token ...`, the LAST statement of set_var_in. On a removal
+# (VALUE empty) that `&&` itself returns 1 (its left side was false), and the
+# whole script runs under `set -e` — so a `common` removal aborted after the
+# first agent's file, leaving the var set in every file but the first.
+RKP="$DAH/keys/removal"; mkdir -p "$RKP"
+for a in one two three; do printf 'FOO=bar\n' > "$RKP/$a.env"; chmod 600 "$RKP/$a.env"; done
+out=$(printf '\n' | uak removal common FOO 2>&1); rc=$?
+assert_rc "common removal across every agent file exits 0" 0 "$rc"
+allclear=1; for a in one two three; do grep -q '^FOO=' "$RKP/$a.env" && allclear=0; done
+assert_eq "common removal clears the var from every agent file" "1" "$allclear"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── run-*.sh token generation ──"

@@ -98,7 +98,7 @@ set_var_in() {
     # src/keyfiles.sh:warn_unbound_org_token) — up.sh always writes both
     # together, but this script only knows the VAR it was given, never the
     # host, so it can't write the binding itself; it can only warn.
-    [ -n "$VALUE" ] && warn_unbound_org_token "$file" "$VAR"
+    if [ -n "$VALUE" ]; then warn_unbound_org_token "$file" "$VAR"; fi
 }
 
 # common.env is retired (Plugins v2 Phase 3): each agent has one complete env
