@@ -32,7 +32,8 @@
 # matching GH_HOST_<owner>) is refused everywhere, github.com included: an
 # empty $bound never equals a real $host, so there is no host left for which
 # it would be presented. A request with no host= line at all (git credential
-# fill invoked by hand) gets no credential either — there is nothing to route.
+# fill invoked by hand) has nothing to route either: answer quit=1 so git
+# stops there instead of falling through to another helper or a prompt.
 
 [ "$1" = get ] || exit 0                 # store/erase: no-op (stateless helper)
 
@@ -40,7 +41,7 @@ req=$(cat)                                # buffer the request so gh can replay 
 host=$(printf '%s\n' "$req" | sed -n 's/^host=//p')
 host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive; git passes the URL's spelling
 host=${host%:443}                        # explicit default port: git passes host=github.com:443 for https://github.com:443/…
-[ -n "$host" ] || exit 0                 # no host= line (git credential fill by hand): nothing to route, present nothing
+[ -n "$host" ] || { echo "quit=1"; exit 0; }   # no host= line: nothing to route; stop git rather than fall through to another helper or a prompt
 path=$(printf '%s\n' "$req" | sed -n 's/^path=//p')
 owner=${path%%/*}
 # case-fold (github owners are case-insensitive), then sanitize. tr, not

@@ -260,9 +260,10 @@ out=$(printf 'protocol=https\nhost=gitea.example.test\npath=acme/x.git\n' | env 
 assert_contains "hand-set binding spelled with case/port still matches" "$out" "password=atok"
 
 # Fix B: a request with no host= line at all (git credential fill invoked by
-# hand) has nothing to route — present no credential, clean exit, no gh call.
+# hand) has nothing to route — quit=1 so git stops instead of falling through
+# to another helper or a prompt.
 out=$(printf 'protocol=https\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_TOKEN=defval bash "$HELPER" get); rc=$?
-assert_eq "no host= → no credential (empty stdout)" "" "$out"
+assert_eq "no host= → quit=1" "quit=1" "$out"
 assert_rc "no host= → clean exit" 0 "$rc"
 
 # store/erase are no-ops (stateless helper) — no output, clean exit.
@@ -380,13 +381,73 @@ grep -qF 'no git.orgs token for this owner' "$REPO/up.sh" \
     || fail "up.sh missing the unbound-owner up-time notice"
 # Fix D: the up-time notice loop must dedupe per host/owner (several repos:
 # entries for the same owner must print the notice once, not once per repo).
-# A functional dedupe test is not required; this pin on the guard is enough.
 grep -qF '_seen="$_seen $_rkey"' "$REPO/up.sh" \
     && pass "up.sh dedupes the per-owner up-time notice" \
     || fail "up.sh no longer dedupes the per-owner up-time notice"
-grep -qF '_rkey="$_rhost/${_rowner//[!a-z0-9]/_}"' "$REPO/up.sh" \
-    && pass "up.sh sanitises the dedupe key so it cannot act as a glob" \
-    || fail "up.sh no longer sanitises the dedupe key"
+# Drift pin: _rkey must stay UNSANITISED. It is only ever compared inside a
+# double-quoted `case " $_seen " in *" $_rkey "*)` pattern, where the
+# expansion is matched LITERALLY, not as a glob — so sanitising it (as a
+# prior round briefly did) doesn't buy glob-safety, it just makes two
+# genuinely different owners (a.b and a_b) collide into the same key and
+# drop the second owner's notice.
+grep -qF '_rkey="$_rhost/$_rowner"' "$REPO/up.sh" \
+    && pass "up.sh dedupe key is the literal host/owner, never sanitised" \
+    || fail "up.sh dedupe key is sanitised again — this collides a.b with a_b"
+
+# Functional test of the notice loop's key derivation + dedupe itself, copied
+# verbatim from up.sh (from _rscheme= through the dedupe), so a regression is
+# caught by behavior, not just by the drift-pin grep above. GIT_ORG_TOKENS is
+# left empty (irrelevant here) and the token-check/echo is replaced with
+# printing the key, so the test observes exactly what dedupes.
+notice_keys() {
+    _seen=""
+    for _rurl in "$@"; do
+        _rscheme=$(printf '%s' "${_rurl%%://*}" | tr '[:upper:]' '[:lower:]')
+        [ "$_rscheme" = https ] || continue
+        _rhost="${_rurl#*://}"; _rpath="${_rhost#*/}"; _rhost="${_rhost%%/*}"; _rhost="${_rhost##*@}"
+        _rhost=$(printf '%s' "$_rhost" | tr '[:upper:]' '[:lower:]')
+        _rhost="${_rhost%:443}"
+        [ "$_rhost" = github.com ] && continue
+        _rowner="${_rpath%%/*}"
+        _rowner=$(printf '%s' "$_rowner" | tr '[:upper:]' '[:lower:]')
+        _rkey="$_rhost/$_rowner"
+        case " $_seen " in *" $_rkey "*) continue ;; esac
+        _seen="$_seen $_rkey"
+        echo "$_rhost/$_rowner"
+    done
+}
+out=$(notice_keys https://h.test/a.b/x.git https://h.test/a_b/y.git)
+assert_eq "notice_keys: a.b and a_b are different owners, both notice" \
+    "$(printf 'h.test/a.b\nh.test/a_b')" "$out"
+out=$(notice_keys https://h.test/acme/x.git https://h.test/acme/y.git https://h.test/'*'/z.git https://h.test/acme2/w.git)
+assert_eq "notice_keys: dedupes acme, a glob owner never swallows acme2" \
+    "$(printf 'h.test/acme\nh.test/*\nh.test/acme2')" "$out"
+
+# Fix E: a bound non-github host (repos: origin, or a git.orgs.<owner>.host:
+# with no repos: entry of its own) is never auto-allowlisted in the egress
+# firewall — up.sh must warn when GIT_CREDENTIAL_HOSTS names a host that
+# capabilities.egress (comma-separated zones; a zone covers its subdomains)
+# does not cover, walking up parent domains the same way the firewall does.
+# Functional test of the coverage check itself, copied verbatim from up.sh.
+egress_covers() {
+    EGRESS="$1"; _ehost="$2"
+    _ok=""
+    _d="$_ehost"
+    while [ -n "$_d" ]; do
+        case ",$EGRESS," in *",$_d,"*) _ok=1; break;; esac
+        case "$_d" in *.*) _d="${_d#*.}";; *) _d="";; esac
+    done
+    [ -n "$_ok" ] && echo yes || echo no
+}
+assert_eq "egress_covers: exact host match" "yes" "$(egress_covers git.example.test git.example.test)"
+assert_eq "egress_covers: parent domain covers a subdomain" "yes" "$(egress_covers example.test git.example.test)"
+assert_eq "egress_covers: an unrelated zone does not cover the host" "no" "$(egress_covers other.test git.example.test)"
+assert_eq "egress_covers: an empty EGRESS covers nothing" "no" "$(egress_covers "" git.example.test)"
+
+grep -qF 'git host is not in capabilities.egress' "$REPO/up.sh" \
+    && pass "up.sh warns when a bound git host is missing from capabilities.egress" \
+    || fail "up.sh missing the egress-coverage notice for a bound git host"
+
 grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
     && pass "up.sh lowercases the clone-hint host" \
     || fail "up.sh missing the clone-hint host lowercasing"
