@@ -840,13 +840,18 @@ class TestOrgHosts(unittest.TestCase):
             "acme\tGH_HOST_acme\tgithub.com\n"
             "emergence\tGH_HOST_emergence\tgit.example.test\n")
 
-    def test_org_hosts_default_github_only_in_github_only_bottle(self):
-        # No repos: at all → GIT_CREDENTIAL_HOSTS is empty → github.com is
-        # this bottle's only origin, so an unrouted owner is safely assumed
-        # to live there.
-        d = derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor"}}}},
+    def test_org_hosts_unlisted_owner_rejected_everywhere(self):
+        # No default host, ever: an owner git.orgs routes a token for that
+        # appears in no repos: URL and declares no host: is a hard error even
+        # in an otherwise github-only bottle — the binding decides which host
+        # receives the token, and a wrong guess presents a token to the wrong
+        # forge.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "vendor\tGH_HOST_vendor\tgithub.com\n")
+        self.assertIn(
+            "add its repo to repos: or set git.orgs.vendor.host:",
+            str(cm.exception))
 
     def test_org_hosts_unlisted_owner_rejected_in_mixed_bottle(self):
         # This bottle has a non-github host installed (git.example.test, via
@@ -888,6 +893,26 @@ class TestOrgHosts(unittest.TestCase):
     def test_org_hosts_empty_without_orgs(self):
         self.assertEqual(derive({})["GIT_ORG_HOSTS"], "")
 
+    def test_declared_host_installs_router(self):
+        # Fix B: a declared host: with no matching repos: URL never entered
+        # GIT_CREDENTIAL_HOSTS before — the entrypoint installed no helper for
+        # it and git fell through to the desktop bridge. The router must be
+        # installed for every host a token is bound to.
+        d = derive({"repos": ["https://github.com/x/y.git"],
+                    "git": {"orgs": {"OrgB": {"token": "GH_TOKEN_orgb",
+                                               "host": "gitea.example.test"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orgb"})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://gitea.example.test\n")
+
+    def test_declared_github_host_does_not_install_router(self):
+        # github.com already gets the router unconditionally (entrypoint.sh);
+        # a declared host: of github.com must not add a redundant entry.
+        d = derive({"repos": ["https://github.com/x/y.git"],
+                    "git": {"orgs": {"OrgB": {"token": "GH_TOKEN_orgb",
+                                               "host": "github.com"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orgb"})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+
 
 class TestGitIdentity(unittest.TestCase):
     # GH_TOKEN_VARS mirrors the set up.sh scans from secrets.env (names only).
@@ -916,7 +941,7 @@ class TestGitIdentity(unittest.TestCase):
 
     def test_per_org_token_routing_and_canonical_var(self):
         d = self._d({"token": "GH_TOKEN_hank",
-                     "orgs": {"vendor": {"token": "GH_TOKEN_vendor",
+                     "orgs": {"vendor": {"token": "GH_TOKEN_vendor", "host": "github.com",
                                          "name": "Vendor Bot", "email": "bot@vendor.io"}}})
         # owner<TAB>canonical_var<TAB>source_var — canonical is GH_TOKEN_<owner>.
         self.assertEqual(d["GIT_ORG_TOKENS"], "vendor\tGH_TOKEN_vendor\tGH_TOKEN_vendor\n")
@@ -924,7 +949,7 @@ class TestGitIdentity(unittest.TestCase):
 
     def test_hyphenated_owner_sanitizes_to_underscore(self):
         # canonical var replaces '-' with '_'; the source var name is unchanged.
-        d = self._d({"orgs": {"acme-corp": {"token": "GH_TOKEN_v2"}}})
+        d = self._d({"orgs": {"acme-corp": {"token": "GH_TOKEN_v2", "host": "github.com"}}})
         self.assertEqual(d["GIT_ORG_TOKENS"], "acme-corp\tGH_TOKEN_acme_corp\tGH_TOKEN_v2\n")
         self.assertEqual(d["GIT_ORG_IDENTITIES"], "acme-corp\t\t\n")
 
@@ -932,7 +957,7 @@ class TestGitIdentity(unittest.TestCase):
         # github owners are case-insensitive; the router derives the owner from
         # the clone URL, so the emitted owner + canonical var fold to lowercase
         # (a `PlanetExpress` manifest key must route a `planetexpress/*` clone).
-        d = self._d({"orgs": {"PlanetExpress": {"token": "GH_TOKEN_v2",
+        d = self._d({"orgs": {"PlanetExpress": {"token": "GH_TOKEN_v2", "host": "github.com",
                                                 "name": "Leela Bot"}}})
         self.assertEqual(d["GIT_ORG_TOKENS"],
                          "planetexpress\tGH_TOKEN_planetexpress\tGH_TOKEN_v2\n")
@@ -955,7 +980,8 @@ class TestGitIdentity(unittest.TestCase):
         self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
 
     def test_gitea_owner_with_underscore_and_dot_accepted(self):
-        d = derive({"git": {"orgs": {"my_org.v2": {"token": "GH_TOKEN_a_b"}}}},
+        d = derive({"git": {"orgs": {"my_org.v2": {"token": "GH_TOKEN_a_b",
+                                                    "host": "github.com"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
         self.assertIn("my_org.v2\tGH_TOKEN_my_org_v2\t", d["GIT_ORG_TOKENS"])
 

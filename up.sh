@@ -156,7 +156,10 @@ if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 # per host: a host can be perfectly reachable (github.com always is) while
 # still lacking this owner's token — the old per-host notice missed that.
 # Warn now, not at the first failed clone. bash-3.2 compatible: while-read
-# over heredocs, no process substitution.
+# over heredocs, no process substitution. _seen tracks host/owner pairs
+# already reported (bash 3.2 has no associative arrays) so a host/owner with
+# several repos: entries gets one notice, not one per repo.
+_seen=""
 while IFS=$'\t' read -r _rname _rurl; do
     [ -n "$_rname" ] || continue
     case "$_rurl" in
@@ -172,6 +175,8 @@ while IFS=$'\t' read -r _rname _rurl; do
     [ "$_rhost" = github.com ] && continue   # github.com always has the default GH_TOKEN/gh fall-backs
     _rowner="${_rpath%%/*}"
     _rowner=$(printf '%s' "$_rowner" | tr '[:upper:]' '[:lower:]')   # case-fold to match GIT_ORG_TOKENS
+    case " $_seen " in *" $_rhost/$_rowner "*) continue ;; esac
+    _seen="$_seen $_rhost/$_rowner"
     _rcanon="GH_TOKEN_${_rowner//[!a-z0-9]/_}"                      # parity with _canonical_token_var
     _org_has_token=""
     while IFS=$'\t' read -r _org_owner _org_canon _org_src; do

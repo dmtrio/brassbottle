@@ -764,21 +764,20 @@ def _check_token_routing(parsed_repos, org_tokens):
                 "— put those repos in separate bottles")
 
 
-def _org_hosts(parsed_repos, org_tokens, declared_hosts, credential_hosts):
+def _org_hosts(parsed_repos, org_tokens, declared_hosts):
     """Bind each routed per-org token to exactly one host, in priority order:
 
     1. repos-derived: the owner appears on some host in repos: (canon found
        in _routed_repo_owners' output) — that host wins, full stop.
     2. declared: no repos: URL routes this owner, but git.orgs.<owner>.host:
        named one explicitly — use it.
-    3. github.com, but ONLY when GIT_CREDENTIAL_HOSTS (credential_hosts) is
-       empty: that means github.com is this bottle's only origin (no other
-       host has the credential router installed at all), so assuming an
-       unrouted owner lives there is safe — there is nowhere else it could be.
-    4. otherwise: a hard error. The bottle has a non-github host installed AND
-       this owner isn't pinned to any host — silently defaulting to
-       github.com here is exactly the leak this fix closes (a same-named
-       owner on the OTHER host would then receive this owner's token).
+    3. otherwise: a hard error. There is no default host. The binding decides
+       which host receives the token, and a wrong guess presents a token to
+       the wrong forge — an owner routed by git.orgs that appears in no
+       repos: URL and declares no host: must never silently resolve to
+       github.com just because this particular bottle happens to have no
+       other hosts installed; a later repos: or git.orgs edit elsewhere in
+       the same bottle would then flip that guess out from under it.
 
     When both a repos-derived host and a declared host: exist for the same
     owner and disagree, that is a manifest error too (the declaration is
@@ -792,8 +791,8 @@ def _org_hosts(parsed_repos, org_tokens, declared_hosts, credential_hosts):
 
     org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
     line); declared_hosts is GIT_ORG_DECLARED_HOSTS (owner<TAB>host per line,
-    from _git_identity); credential_hosts is GIT_CREDENTIAL_HOSTS. Returns
-    owner<TAB>hostvar<TAB>host per line, in org_tokens order.
+    from _git_identity). Returns owner<TAB>hostvar<TAB>host per line, in
+    org_tokens order.
     """
     canon_hosts = {}
     for host, _owner, canon in _routed_repo_owners(parsed_repos):
@@ -818,13 +817,10 @@ def _org_hosts(parsed_repos, org_tokens, declared_hosts, credential_hosts):
             host = derived
         elif decl is not None:
             host = decl
-        elif not credential_hosts:
-            host = "github.com"
         else:
             raise ManifestError(
-                f"git.orgs.{owner}: owner appears in no https repos: URL and this bottle "
-                "has non-github hosts — add its repo to repos: or set "
-                f"git.orgs.{owner}.host:")
+                f"git.orgs.{owner}: owner appears in no https repos: URL — add its repo to "
+                f"repos: or set git.orgs.{owner}.host: (github.com for a github org)")
         hostvar = "GH_HOST_" + canon[len("GH_TOKEN_"):]
         lines.append(f"{owner}\t{hostvar}\t{host}\n")
     return "".join(lines)
@@ -848,9 +844,9 @@ def _git_identity(git, env, secrets_file):
                              git.orgs entry set an explicit host: (lowercased,
                              a trailing :443 stripped). _org_hosts consumes
                              this alongside repos:-derived hosts; an owner
-                             with no host: here and no repos: routing either
-                             falls back to github.com (github-only bottle) or
-                             is a hard error (mixed bottle) — see _org_hosts.
+                             with no host: here and no repos: routing is a
+                             hard error — there is no default host, see
+                             _org_hosts.
     """
     token_vars = set((env.get("GH_TOKEN_VARS") or "").split())
     errors = []
@@ -1067,8 +1063,23 @@ def derive(manifest, plugin_files, agent_files, env):
     # git.orgs (GIT_ORG_TOKENS) as well as the repos: URLs parsed above.
     _check_token_routing(parsed_repos, out["GIT_ORG_TOKENS"])
     out["GIT_ORG_HOSTS"] = _org_hosts(parsed_repos, out["GIT_ORG_TOKENS"],
-                                       out["GIT_ORG_DECLARED_HOSTS"],
-                                       out["GIT_CREDENTIAL_HOSTS"])
+                                       out["GIT_ORG_DECLARED_HOSTS"])
+    # Fix B: a declared host: that appears in no repos: URL never entered
+    # GIT_CREDENTIAL_HOSTS above (that set is repos:-derived only), so the
+    # entrypoint installed no credential-router helper for it and git fell
+    # through to the desktop bridge for that host. The router must be
+    # installed for every host a token is bound to, or the binding is never
+    # consulted — so extend GIT_CREDENTIAL_HOSTS with every GIT_ORG_HOSTS host
+    # that isn't github.com and isn't already present, keeping the result
+    # distinct and sorted, one per line.
+    cred_hosts = {line for line in out["GIT_CREDENTIAL_HOSTS"].splitlines() if line}
+    for line in out["GIT_ORG_HOSTS"].splitlines():
+        if not line:
+            continue
+        _owner, _hostvar, host = line.split("\t")
+        if host != "github.com":
+            cred_hosts.add(f"https://{host}")
+    out["GIT_CREDENTIAL_HOSTS"] = "".join(f"{o}\n" for o in sorted(cred_hosts))
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
     # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────

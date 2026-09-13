@@ -211,6 +211,19 @@ out=$(cred emergence/x.git GH_TOKEN_emergence=etok GH_HOST_emergence=git.example
 assert_contains "gitea-bound token is never presented on github.com either" "$out" "password=defval"
 assert_absent "…not the gitea-bound token itself" "$out" "password=etok"
 
+# Fix C: the wrong-host and unbound refusal on github.com fell through to the
+# container default with NO diagnostic — add one before the fall-through.
+out=$(cred acme/x.git GH_TOKEN_acme=atok GH_HOST_acme=gitea.example.test GH_TOKEN=defval 2>"$WORK/cred-fallback-bound-err")
+assert_contains "wrong-host refusal on github.com still falls back to the default token" "$out" "password=defval"
+assert_absent "…not the gitea-bound token itself" "$out" "password=atok"
+assert_contains "…stderr says which host it's bound to and that it fell back" \
+    "$(cat "$WORK/cred-fallback-bound-err")" "bound to gitea.example.test, not github.com — not presenting it"
+
+out=$(cred acme/x.git GH_TOKEN_acme=atok GH_TOKEN=defval 2>"$WORK/cred-fallback-unbound-err")
+assert_contains "unbound-on-github.com refusal still falls back to the default token" "$out" "password=defval"
+assert_contains "…stderr says it has no binding" \
+    "$(cat "$WORK/cred-fallback-unbound-err")" "has no GH_HOST_<owner> binding — not presenting it"
+
 # … but BOTH fall-backs are github-only. GH_TOKEN is the github machine user's
 # token and must never be presented to a third-party server; gh knows nothing
 # about other hosts. No per-org token → no credential at all (git fails 401,
@@ -353,6 +366,12 @@ grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGE
 grep -qF 'no git.orgs token for this owner' "$REPO/up.sh" \
     && pass "up.sh warns about an unbound credential owner" \
     || fail "up.sh missing the unbound-owner up-time notice"
+# Fix D: the up-time notice loop must dedupe per host/owner (several repos:
+# entries for the same owner must print the notice once, not once per repo).
+# A functional dedupe test is not required; this pin on the guard is enough.
+grep -qF '_seen="$_seen $_rhost/$_rowner"' "$REPO/up.sh" \
+    && pass "up.sh dedupes the per-owner up-time notice" \
+    || fail "up.sh no longer dedupes the per-owner up-time notice"
 grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
     && pass "up.sh lowercases the clone-hint host" \
     || fail "up.sh missing the clone-hint host lowercasing"
