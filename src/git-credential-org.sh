@@ -31,7 +31,8 @@
 # this means a hand-set token, e.g. via bin/update-agent-keys.sh, with no
 # matching GH_HOST_<owner>) is refused everywhere, github.com included: an
 # empty $bound never equals a real $host, so there is no host left for which
-# it would be presented.
+# it would be presented. A request with no host= line at all (git credential
+# fill invoked by hand) gets no credential either — there is nothing to route.
 
 [ "$1" = get ] || exit 0                 # store/erase: no-op (stateless helper)
 
@@ -39,6 +40,7 @@ req=$(cat)                                # buffer the request so gh can replay 
 host=$(printf '%s\n' "$req" | sed -n 's/^host=//p')
 host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive; git passes the URL's spelling
 host=${host%:443}                        # explicit default port: git passes host=github.com:443 for https://github.com:443/…
+[ -n "$host" ] || exit 0                 # no host= line (git credential fill by hand): nothing to route, present nothing
 path=$(printf '%s\n' "$req" | sed -n 's/^path=//p')
 owner=${path%%/*}
 # case-fold (github owners are case-insensitive), then sanitize. tr, not
@@ -49,6 +51,7 @@ clean=${owner//[!a-z0-9]/_}              # parity with _canonical_token_var
 var="GH_TOKEN_${clean}"
 hostvar="GH_HOST_${clean}"                # parity with manifest.py:_org_hosts
 bound="${!hostvar:-}"                     # no binding recorded → refuse everywhere
+bound=$(printf '%s' "$bound" | tr '[:upper:]' '[:lower:]'); bound="${bound%:443}"   # same normalisation as $host — a hand-set GH_HOST_<owner> may be spelled either way
 tok="${!var:-}"
 if [ -n "$tok" ] && [ "$bound" != "$host" ]; then
     # The per-org token was issued for $bound (or, if $bound is empty, for no

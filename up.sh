@@ -162,10 +162,8 @@ if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 _seen=""
 while IFS=$'\t' read -r _rname _rurl; do
     [ -n "$_rname" ] || continue
-    case "$_rurl" in
-        *://*) ;;
-        *) continue ;;   # scp-style/ssh:// takes no HTTP credential at all
-    esac
+    _rscheme=$(printf '%s' "${_rurl%%://*}" | tr '[:upper:]' '[:lower:]')
+    [ "$_rscheme" = https ] || continue   # only https:// repos get the router; scp-style and ssh:// never need a token here
     # Host and owner, derived exactly like the clone block below: cut the
     # path off first, then drop userinfo — a `@` inside the path must not
     # read as userinfo.

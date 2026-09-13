@@ -846,7 +846,10 @@ def _git_identity(git, env, secrets_file):
                              this alongside repos:-derived hosts; an owner
                              with no host: here and no repos: routing is a
                              hard error — there is no default host, see
-                             _org_hosts.
+                             _org_hosts. Consumed entirely inside derive()
+                             (by _org_hosts) and never emitted — up.sh has no
+                             use for it once GIT_ORG_HOSTS carries the
+                             resolved binding.
     """
     token_vars = set((env.get("GH_TOKEN_VARS") or "").split())
     errors = []
@@ -874,7 +877,7 @@ def _git_identity(git, env, secrets_file):
     seen_canon = {}  # canonical token var → the manifest key that claimed it
     if not _falsy(orgs):
         if not isinstance(orgs, dict):
-            errors.append("  git.orgs: must be a map of <owner>: {token, name, email}")
+            errors.append("  git.orgs: must be a map of <owner>: {token, name, email, host}")
             orgs = {}
         for owner, spec in orgs.items():
             field = f"git.orgs.{owner}"
@@ -1064,6 +1067,10 @@ def derive(manifest, plugin_files, agent_files, env):
     _check_token_routing(parsed_repos, out["GIT_ORG_TOKENS"])
     out["GIT_ORG_HOSTS"] = _org_hosts(parsed_repos, out["GIT_ORG_TOKENS"],
                                        out["GIT_ORG_DECLARED_HOSTS"])
+    # GIT_ORG_DECLARED_HOSTS is internal to derive() — up.sh never consumes it
+    # (GIT_ORG_HOSTS already carries the resolved binding for every routed
+    # owner). Drop it now that _org_hosts has used it, so it isn't emitted.
+    del out["GIT_ORG_DECLARED_HOSTS"]
     # Fix B: a declared host: that appears in no repos: URL never entered
     # GIT_CREDENTIAL_HOSTS above (that set is repos:-derived only), so the
     # entrypoint installed no credential-router helper for it and git fell

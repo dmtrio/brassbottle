@@ -873,7 +873,14 @@ class TestOrgHosts(unittest.TestCase):
                                               "host": "Git.Other.Test:443"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga GH_TOKEN_orgb"})
         self.assertIn("orgb\tGH_HOST_orgb\tgit.other.test\n", d["GIT_ORG_HOSTS"])
-        self.assertEqual(d["GIT_ORG_DECLARED_HOSTS"], "orgb\tgit.other.test\n")
+
+    def test_declared_hosts_not_emitted(self):
+        # GIT_ORG_DECLARED_HOSTS is internal to derive() — up.sh never
+        # consumes it (GIT_ORG_HOSTS already carries the resolved binding).
+        d = derive({"git": {"orgs": {"OrgB": {"token": "GH_TOKEN_orgb",
+                                               "host": "git.other.test"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orgb"})
+        self.assertNotIn("GIT_ORG_DECLARED_HOSTS", d)
 
     def test_org_hosts_declared_host_disagrees_with_repos(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -1023,7 +1030,7 @@ class TestGitIdentity(unittest.TestCase):
         self.assertEqual(
             str(cm.exception),
             "manifest git identity failed validation:\n"
-            "  git.orgs: must be a map of <owner>: {token, name, email}")
+            "  git.orgs: must be a map of <owner>: {token, name, email, host}")
 
     def test_errors_aggregate(self):
         # Both a bad default and a bad org surface together (aggregated list).

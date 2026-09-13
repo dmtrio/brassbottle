@@ -253,6 +253,18 @@ assert_contains "github.com:443 still takes the github default" "$out" "password
 out=$(printf 'protocol=https\nhost=GitHub.com\npath=nobody/x.git\n' | env -i GH_TOKEN=defval bash "$HELPER" get)
 assert_contains "mixed-case github host still takes the github default" "$out" "password=defval"
 
+# Fix B: a hand-set GH_HOST_<owner> (e.g. via bin/update-agent-keys.sh) may be
+# spelled with different case/port than the request's normalized host —
+# normalise $bound the same way as $host before comparing.
+out=$(printf 'protocol=https\nhost=gitea.example.test\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_HOST_acme=Gitea.Example.Test:443 bash "$HELPER" get)
+assert_contains "hand-set binding spelled with case/port still matches" "$out" "password=atok"
+
+# Fix B: a request with no host= line at all (git credential fill invoked by
+# hand) has nothing to route — present no credential, clean exit, no gh call.
+out=$(printf 'protocol=https\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_TOKEN=defval bash "$HELPER" get); rc=$?
+assert_eq "no host= → no credential (empty stdout)" "" "$out"
+assert_rc "no host= → clean exit" 0 "$rc"
+
 # store/erase are no-ops (stateless helper) — no output, clean exit.
 out=$(printf 'protocol=https\nhost=github.com\npath=vendor/lib.git\n' | GH_TOKEN_vendor=vtok bash "$HELPER" store); rc=$?
 assert_rc "store is a no-op (rc 0)" 0 "$rc"
@@ -375,6 +387,14 @@ grep -qF '_seen="$_seen $_rhost/$_rowner"' "$REPO/up.sh" \
 grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
     && pass "up.sh lowercases the clone-hint host" \
     || fail "up.sh missing the clone-hint host lowercasing"
+# Fix A: the up-time notice loop's scheme guard must be case-insensitive and
+# admit only https:// (scp-style/ssh:// take no HTTP credential at all).
+grep -qF '[ "$_rscheme" = https ] || continue' "$REPO/up.sh" \
+    && pass "up.sh notice loop's scheme guard is the case-insensitive https check" \
+    || fail "up.sh notice loop's scheme guard is the case-insensitive https check"
+! grep -qF '*://*) ;;' "$REPO/up.sh" \
+    && pass "up.sh notice loop's old *://*) guard is gone" \
+    || fail "up.sh notice loop's old *://*) guard is still present"
 
 # Functional test of the case logic itself: the same host/path-extraction
 # lines and case, copied verbatim from up.sh, so a rewrite of the case arms
