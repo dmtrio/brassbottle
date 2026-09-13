@@ -30,7 +30,7 @@ warn_unbound_org_token() {
         GH_TOKEN_*)
             hostvar="GH_HOST_${var#GH_TOKEN_}"
             grep -q "^$hostvar=" "$file" \
-                || echo "  ⚠ $var set without $hostvar — git-credential-org will not present it until you also set $hostvar=<host> (github.com for a github org) the same way" >&2
+                || echo "  ⚠ $var set without a matching GH_HOST_<owner> — git-credential-org reads GH_HOST_<owner> beside the canonical GH_TOKEN_<owner> (owner lowercased, non-alphanumerics as _); set it the same way (github.com for a github org)" >&2
             ;;
     esac
 }
