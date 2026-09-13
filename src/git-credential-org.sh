@@ -22,6 +22,11 @@
 # presented to a third-party server, and gh knows nothing about other hosts.
 # A non-github owner with no GH_TOKEN_<owner> set answers quit=1 with a stderr
 # line naming the missing var, so git fails immediately instead of prompting.
+#
+# Per-org tokens are host-bound via GH_HOST_<owner> (manifest.py:_org_hosts,
+# written beside the token by keyfiles.sh): a request from any other host never
+# sees them — an ad-hoc clone from a same-named owner on a different forge gets
+# no credential instead of the wrong one.
 
 [ "$1" = get ] || exit 0                 # store/erase: no-op (stateless helper)
 
@@ -37,7 +42,14 @@ owner=${path%%/*}
 owner=$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')
 clean=${owner//[!a-z0-9]/_}              # parity with _canonical_token_var
 var="GH_TOKEN_${clean}"
+hostvar="GH_HOST_${clean}"                # parity with manifest.py:_org_hosts
+bound="${!hostvar:-github.com}"           # no binding recorded → github owner
 tok="${!var:-}"
+if [ -n "$tok" ] && [ "$bound" != "$host" ]; then
+    # The per-org token was issued for $bound. Never present it to another
+    # host — for github.com the default/gh fall-backs still apply below.
+    tok=""
+fi
 if [ -z "$tok" ] && [ "$host" = github.com ]; then
     tok="${GH_TOKEN:-}"                   # container default: github only
 fi
@@ -48,10 +60,14 @@ if [ -n "$tok" ]; then
 elif [ "$host" = github.com ]; then
     printf '%s\n' "$req" | gh auth git-credential get   # human fallback
 else
-    # Non-github host, no GH_TOKEN_<owner>: say exactly what is missing and tell
-    # git to stop — no other helper, no terminal prompt (which would hang an
-    # agent's clone waiting for a username). git then fails with
+    # Non-github host, no usable GH_TOKEN_<owner>: say exactly what is wrong and
+    # tell git to stop — no other helper, no terminal prompt (which would hang
+    # an agent's clone waiting for a username). git then fails with
     # "credential helper … told us to quit" plus this line on stderr.
-    echo "git-credential-org: no $var set for owner '$owner' on $host — add git.orgs.<owner>.token: $var to the bottle and the token to secrets.env" >&2
+    if [ -n "${!var:-}" ]; then
+        echo "git-credential-org: $var is bound to $bound, not $host — refusing to present it (add git.orgs.<owner>.token: $var for $host if this owner also lives there)" >&2
+    else
+        echo "git-credential-org: no $var set for owner '$owner' on $host — add git.orgs.<owner>.token: $var to the bottle and the token to secrets.env" >&2
+    fi
     echo "quit=1"
 fi

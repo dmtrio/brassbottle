@@ -150,6 +150,28 @@ fi
 # keyfiles.sh fans into every <agent>.env and the clone bootstrap hands to git.
 if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 
+# Up-time notice: a non-github host with no git.orgs token bound to it (see
+# manifest.py:_org_hosts) will fail every private clone from it — there is no
+# fall-back to human credentials (docs/secrets.md). Warn now, not at the first
+# failed clone. bash-3.2 compatible: while-read over heredocs, no process
+# substitution.
+while IFS= read -r _cred_origin; do
+    [ -n "$_cred_origin" ] || continue
+    _cred_host="${_cred_origin#*://}"
+    _cred_bound=""
+    while IFS=$'\t' read -r _org_owner _org_hostvar _org_host; do
+        [ -n "$_org_owner" ] || continue
+        [ "$_org_host" = "$_cred_host" ] && _cred_bound=1
+    done <<EOF
+$GIT_ORG_HOSTS
+EOF
+    if [ -z "$_cred_bound" ]; then
+        echo "  note: $_cred_host: no git.orgs token is bound to this host — private clones from it will fail (no fall-back to human credentials; see docs/secrets.md)"
+    fi
+done <<EOF
+$GIT_CREDENTIAL_HOSTS
+EOF
+
 COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
 [ -n "$SSH_PORT" ] && COMPOSE_FILES="$COMPOSE_FILES -f $SCRIPT_DIR/compose/docker-compose.ssh.yml"
 
@@ -194,7 +216,7 @@ rm -f "$KEYS_PATH"/*.env
 # mirrored; up.sh only routes the derived vars (NAMES) into it — the ${!source}
 # value lookups happen against the secrets.env this shell already sourced.
 . "$SCRIPT_DIR/src/keyfiles.sh"
-write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS"
+write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS" "$GIT_ORG_HOSTS"
 
 # ── Host paths + platform ─────────────────────────────────────────────────────
 ARTIFACTS_PATH="$BASE_PATH/artifacts/$NAME"
@@ -456,6 +478,16 @@ if [ -n "$REPOS" ]; then
         CLONE_ENV="$CLONE_ENV -e $_canon=${!_src}"
     done <<EOF
 $GIT_ORG_TOKENS
+EOF
+    # And each per-org token's host binding, so the bootstrap exec's
+    # git-credential-org sees the same GH_HOST_<owner> it would inside the
+    # running container — hosts carry no whitespace (manifest.py validated the
+    # charset), so this unquoted -e assembly is safe too.
+    while IFS=$'\t' read -r _owner _hostvar _host; do
+        [ -n "$_owner" ] || continue
+        CLONE_ENV="$CLONE_ENV -e $_hostvar=$_host"
+    done <<EOF
+$GIT_ORG_HOSTS
 EOF
     while IFS=$'\t' read -r RNAME RURL; do
         [ -n "$RNAME" ] || continue

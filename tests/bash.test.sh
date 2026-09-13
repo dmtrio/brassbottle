@@ -109,6 +109,23 @@ assert_eq "per-org fan-out reaches every shim agent" \
     $'GH_TOKEN=defval\nGH_TOKEN_vendor=vtok\nGH_TOKEN_acme_corp=atok' "$(cat "$d/cursor-agent.env")"
 unset GH_TOKEN SRC_VENDOR SRC_ACME
 
+# git_org_hosts (6th arg): the host each per-org token is bound to rides beside
+# it as GH_HOST_<owner> — a host is not a secret, so it needs no SRC_* lookup.
+d="$WORK/ck4h"; mkdir -p "$d"; chmod 700 "$d"
+GH_TOKEN=defval SRC_VENDOR=vtok SRC_ACME=atok
+GOH=$(printf 'vendor\tGH_HOST_vendor\tgithub.com\nacme-corp\tGH_HOST_acme_corp\tgit.example.test\n')
+write_keyfiles "$d" "$SHIM" "" "" "$GOT" "$GOH" >/dev/null
+assert_contains "GH_HOST_vendor rides beside its token" "$(cat "$d/codex.env")" "GH_HOST_vendor=github.com"
+assert_contains "GH_HOST_acme_corp rides beside its token" "$(cat "$d/codex.env")" "GH_HOST_acme_corp=git.example.test"
+unset GH_TOKEN SRC_VENDOR SRC_ACME
+
+# 6th arg omitted entirely still works (no GH_HOST lines, no regression).
+d="$WORK/ck4o"; mkdir -p "$d"; chmod 700 "$d"
+GH_TOKEN=defval SRC_VENDOR=vtok SRC_ACME=atok
+write_keyfiles "$d" "$SHIM" "" "" "$GOT" >/dev/null
+assert_absent "6th arg omitted: no GH_HOST lines" "$(cat "$d/codex.env")" "GH_HOST_"
+unset GH_TOKEN SRC_VENDOR SRC_ACME
+
 # no orgs (empty / omitted git_org_tokens) → only GH_TOKEN, no regression
 d="$WORK/ck5"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval
@@ -162,9 +179,28 @@ assert_contains "no token set → falls back to gh credential" "$out" "password=
 # every GIT_CREDENTIAL_HOSTS origin): the owner lookup is host-agnostic, so a
 # gitea owner reads its own GH_TOKEN_<owner> exactly like a github one …
 gcred() { printf 'protocol=https\nhost=git.example.test\npath=%s\n' "$1" | env "${@:2}" bash "$HELPER" get; }
-out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok GH_TOKEN=defval)
+out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok GH_HOST_emergence=git.example.test GH_TOKEN=defval)
 assert_contains "gitea owner → its per-org token" "$out" "password=etok"
 assert_absent "gitea owner does not get the github default" "$out" "password=defval"
+
+# Host binding (GH_HOST_<owner>, written by keyfiles.sh from
+# manifest.py:_org_hosts): a per-org token is only ever presented to the host
+# it was issued for — an ad-hoc clone of a same-named owner on ANY other host
+# gets no credential, not the wrong forge's token.
+out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_HOST_vendor=github.com GH_TOKEN=defval)
+assert_contains "binding matches the requested host → per-org token used" "$out" "password=vtok"
+
+out=$(gcred dmtrio/c.git GH_TOKEN_dmtrio=ghtok GH_HOST_dmtrio=github.com GH_TOKEN=defval 2>"$WORK/cred-bind-err")
+assert_eq "token bound to a different host: quit=1 exactly" "quit=1" "$out"
+assert_contains "…stderr names the bound host, not the requested one" \
+    "$(cat "$WORK/cred-bind-err")" "GH_TOKEN_dmtrio is bound to github.com, not git.example.test"
+
+out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok)
+assert_eq "no GH_HOST recorded → treated as a github token, refused on gitea" "quit=1" "$out"
+
+out=$(cred emergence/x.git GH_TOKEN_emergence=etok GH_HOST_emergence=git.example.test GH_TOKEN=defval)
+assert_contains "gitea-bound token is never presented on github.com either" "$out" "password=defval"
+assert_absent "…not the gitea-bound token itself" "$out" "password=etok"
 
 # … but BOTH fall-backs are github-only. GH_TOKEN is the github machine user's
 # token and must never be presented to a third-party server; gh knows nothing
@@ -284,6 +320,9 @@ fi
 grep -q 'GIT_CREDENTIAL_HOSTS=\${GIT_CREDENTIAL_HOSTS:-}' "$REPO/compose/docker-compose.local.yml" \
     && pass "compose passes GIT_CREDENTIAL_HOSTS into the container" \
     || fail "compose no longer passes GIT_CREDENTIAL_HOSTS (entrypoint would install github.com only)"
+grep -qF 'every non-github `https://` origin' "$REPO/src/README.md" \
+    && pass "src/README.md describes the router as multi-origin" \
+    || fail "src/README.md still describes git-credential-org as github-only"
 grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
     && pass "up.sh hands GIT_CREDENTIAL_HOSTS to compose" \
     || fail "up.sh no longer hands GIT_CREDENTIAL_HOSTS to compose"
@@ -299,6 +338,12 @@ grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
 grep -qF 'REPO_OWNER="${_p%%/*}"' "$REPO/up.sh" \
     && pass "up.sh derives REPO_OWNER from the shared host/path split" \
     || fail "up.sh derives REPO_OWNER from the shared host/path split"
+grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS" "$GIT_ORG_HOSTS"' "$REPO/up.sh" \
+    && pass "up.sh passes GIT_ORG_HOSTS to write_keyfiles" \
+    || fail "up.sh no longer passes GIT_ORG_HOSTS to write_keyfiles"
+grep -qF 'no git.orgs token is bound to this host' "$REPO/up.sh" \
+    && pass "up.sh warns about an unbound credential host" \
+    || fail "up.sh missing the unbound-host up-time notice"
 
 # Functional test of the case logic itself: the same host/path-extraction
 # lines and case, copied verbatim from up.sh, so a rewrite of the case arms
