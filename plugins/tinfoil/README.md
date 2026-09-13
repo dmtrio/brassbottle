@@ -22,7 +22,10 @@ PR 2 adds the `setup:` line that runs
 The provider verifies the hardware-attested enclave, encrypts requests to its
 attested key, and fails closed. `/tinfoil` re-verifies the enclave. A bare
 OpenAI-compatible base URL to `inference.tinfoil.sh` would not be verified and
-is deliberately not offered.
+is deliberately not offered. Note the firewall does not enforce that: the
+`tinfoil.sh` egress zone lets any process in the bottle reach the enclave
+over plain HTTPS, so the guarantee comes from the extension's fail-closed
+path, not from the allowlist.
 
 See the [Tinfoil documentation](https://docs.tinfoil.sh) and the
 [pi provider](https://github.com/tinfoilsh/pi-provider).
