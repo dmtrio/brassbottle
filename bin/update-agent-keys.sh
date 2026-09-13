@@ -30,7 +30,9 @@
 
 set -e
 
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../src/common.sh"   # sets BASE_PATH
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../src"
+. "$SRC_DIR/common.sh"     # sets BASE_PATH
+. "$SRC_DIR/keyfiles.sh"   # defines warn_unbound_org_token
 CONTAINER="$1"
 AGENT="$2"
 VAR="$3"
@@ -92,6 +94,11 @@ set_var_in() {
     grep -v "^$VAR=" "$file" > "$tmp" || true
     [ -n "$VALUE" ] && echo "$VAR=$VALUE" >> "$tmp"
     mv "$tmp" "$file"; chmod 600 "$file"
+    # A hand-set per-org token needs its host binding in the same file (see
+    # src/keyfiles.sh:warn_unbound_org_token) — up.sh always writes both
+    # together, but this script only knows the VAR it was given, never the
+    # host, so it can't write the binding itself; it can only warn.
+    [ -n "$VALUE" ] && warn_unbound_org_token "$file" "$VAR"
 }
 
 # common.env is retired (Plugins v2 Phase 3): each agent has one complete env

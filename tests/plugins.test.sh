@@ -408,6 +408,7 @@ src/pull_manifests.py" "$BOTTLES_PATH"
 python3 /usr/local/lib/djinn/wire_plugins.py
 "$PYTHON3" "$SCRIPT_DIR/src/plugin_setup.py"
 PRESENT_SECRET_VARS
+. "$SCRIPT_DIR/src/git_notices.sh"
 DRIFT
 # The identity-key prefixes and hostname rule each live in two places by
 # design (bash glue ↔ module, manifest.py ↔ allow-egress.sh) — cross-pin
@@ -528,6 +529,14 @@ grep -qF -- '. "$SCRIPT_DIR/src/keyfiles.sh"' up.sh \
     && grep -qF -- 'write_keyfiles "$KEYS_PATH"' up.sh \
     && pass "up.sh sources + calls src/keyfiles.sh" \
     || fail "up.sh no longer wires to src/keyfiles.sh (update this suite!)"
+# Same shape as the keyfiles.sh pin above: up.sh sources the extracted
+# up-time-notice helper and calls both its functions (the logic is
+# unit-tested by tests/bash.test.sh; this pin proves up.sh still wires to it).
+grep -qF -- '. "$SCRIPT_DIR/src/git_notices.sh"' up.sh \
+    && grep -qF -- 'git_owner_notices "$REPOS" "$GIT_ORG_TOKENS"' up.sh \
+    && grep -qF -- 'git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' up.sh \
+    && pass "up.sh sources + calls src/git_notices.sh" \
+    || fail "up.sh no longer wires to src/git_notices.sh (update this suite!)"
 
 echo "── host-side bash unit tests (tests/bash.test.sh) ──"
 BASH_OUT=$(bash "$SCRIPT_DIR/tests/bash.test.sh" 2>&1) \

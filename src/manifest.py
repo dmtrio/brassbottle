@@ -819,9 +819,9 @@ def _org_hosts(parsed_repos, org_tokens, declared_hosts):
             host = decl
         else:
             raise ManifestError(
-                f"git.orgs.{owner}: owner has no https:// repo in repos: (scp-style and "
-                f"ssh:// URLs never use this token) — add an https:// repo for it or set "
-                f"git.orgs.{owner}.host: (github.com for a github org)")
+                f"git.orgs owner '{owner}': no https:// repo in repos: (scp-style and "
+                f"ssh:// URLs never use this token) — add an https:// repo for it, or set "
+                f"host: on its git.orgs entry (github.com for a github org)")
         hostvar = "GH_HOST_" + canon[len("GH_TOKEN_"):]
         lines.append(f"{owner}\t{hostvar}\t{host}\n")
     return "".join(lines)

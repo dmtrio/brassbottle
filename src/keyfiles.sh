@@ -15,6 +15,26 @@
 
 warn_missing() { echo "  ⚠ $1 not in secrets.env — $2 will not authenticate until set"; }
 
+# warn_unbound_org_token <file> <VAR> — used by bin/update-agent-keys.sh right
+# after it hand-sets a per-org token (GH_TOKEN_<owner>) in one agent's env
+# file. A per-org token needs its host binding (GH_HOST_<owner>=<host>) in the
+# SAME file, or git-credential-org.sh refuses to present it (see
+# src/git-credential-org.sh) — up.sh always writes both together from the
+# manifest, but a hand-set override via update-agent-keys.sh only knows the
+# VAR it was given, never the host, so it can't write the binding itself.
+# No-op for any VAR that isn't a GH_TOKEN_* (every other kind of key has no
+# such binding to check). bash-3.2 compatible.
+warn_unbound_org_token() {
+    local file="$1" var="$2" hostvar
+    case "$var" in
+        GH_TOKEN_*)
+            hostvar="GH_HOST_${var#GH_TOKEN_}"
+            grep -q "^$hostvar=" "$file" \
+                || echo "  ⚠ $var set without $hostvar — git-credential-org will not present it until you also set $hostvar=<host> (github.com for a github org) the same way" >&2
+            ;;
+    esac
+}
+
 # write_keyfiles <keys_dir> <shim_agents> <plugin_env_secrets> <agent_secrets> [<git_org_tokens>] [<git_org_hosts>]
 #   keys_dir            already exists, mode 700, wiped of *.env by the caller
 #   shim_agents         space-separated agent names (match the Dockerfile shims)

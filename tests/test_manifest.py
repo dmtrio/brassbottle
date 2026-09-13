@@ -864,9 +864,9 @@ class TestOrgHosts(unittest.TestCase):
             derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
         self.assertIn(
-            "git.orgs.vendor: owner has no https:// repo in repos: "
+            "git.orgs owner 'vendor': no https:// repo in repos: "
             "(scp-style and ssh:// URLs never use this token) — add an "
-            "https:// repo for it or set git.orgs.vendor.host:",
+            "https:// repo for it, or set host: on its git.orgs entry",
             str(cm.exception))
 
     def test_org_hosts_unlisted_owner_rejected_in_mixed_bottle(self):
@@ -879,11 +879,15 @@ class TestOrgHosts(unittest.TestCase):
                                      "OrgB": {"token": "GH_TOKEN_orgb"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga GH_TOKEN_orgb"})
         # owner routing folds to lowercase throughout GIT_ORG_TOKENS (see
-        # _canonical_token_var), so the owner naming this error is "orgb".
+        # _canonical_token_var), so _org_hosts only ever sees "orgb" — the
+        # message must name the owner without pretending "orgb" is the
+        # literal manifest key (it's "OrgB"), so it never spells a dotted
+        # git.orgs.<owner>... path a user could paste back in the wrong case.
         self.assertIn(
-            "git.orgs.orgb: owner has no https:// repo in repos: "
+            "git.orgs owner 'orgb': no https:// repo in repos: "
             "(scp-style and ssh:// URLs never use this token)",
             str(cm.exception))
+        self.assertNotIn("git.orgs.orgb", str(cm.exception))
 
     def test_org_hosts_scp_only_owner_gets_accurate_error(self):
         # OrgA's only repos: entry is scp-style (git@host:owner/x.git), which
@@ -895,7 +899,7 @@ class TestOrgHosts(unittest.TestCase):
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
         self.assertIn(
-            "has no https:// repo in repos: (scp-style and ssh:// URLs never use this token)",
+            "no https:// repo in repos: (scp-style and ssh:// URLs never use this token)",
             str(cm.exception))
 
     def test_org_hosts_declared_host(self):

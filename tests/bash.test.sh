@@ -3,6 +3,7 @@
 # Hand-rolled execute-and-assert (same style as plugins.test.sh; no bats
 # dependency). Covers:
 #   - src/keyfiles.sh   key-file composition (sourced by up.sh)
+#   - src/git_notices.sh    up-time git.orgs/egress notices (sourced by up.sh)
 #   - common.sh             BASE_PATH resolution (default / env / ./.env / broken)
 #   - allow-egress.sh       arg parsing + strict domain validation
 #   - update-agent-keys.sh  per-agent key edits (set / remove / common / list)
@@ -37,7 +38,7 @@ WORK=$(cd "$(mktemp -d)" && pwd -P); trap 'rm -rf "$WORK"' EXIT
 # documented `DJINN_HOME=...` in ./.env would ignore our sandbox and write
 # to the user's REAL keys/secrets. Running them from here can't.
 SBOX="$WORK/repo"; mkdir -p "$SBOX/bin" "$SBOX/src" "$SBOX/plugins/gateway"
-cp "$REPO"/bin/*.sh "$SBOX/bin/"; cp "$REPO"/src/common.sh "$SBOX/src/"
+cp "$REPO"/bin/*.sh "$SBOX/bin/"; cp "$REPO"/src/common.sh "$REPO/src/keyfiles.sh" "$SBOX/src/"
 # The launcher test drives gateway THROUGH service.sh (the only supported entry
 # point): service.sh sources src/common.sh, resolves BASE_PATH, and hands it to
 # plugins/<name>/run.sh in the env. Mirror that layout — service.sh at the root,
@@ -49,7 +50,21 @@ cp "$REPO"/plugins/gateway/run.sh "$SBOX/plugins/gateway/"
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/keyfiles.sh ──"
 # shellcheck disable=SC1091
-. "$REPO/src/keyfiles.sh"   # defines warn_missing + write_keyfiles, no side effects
+. "$REPO/src/keyfiles.sh"   # defines warn_missing + write_keyfiles + warn_unbound_org_token, no side effects
+
+# warn_unbound_org_token <file> <VAR>: a hand-set GH_TOKEN_<owner> in an agent
+# env file needs its GH_HOST_<owner> binding in the SAME file, or
+# git-credential-org.sh refuses to present it. Tested directly (not by
+# driving update-agent-keys.sh end to end, which would need docker) — it's a
+# pure function of one file's contents plus the VAR name.
+WUOT="$WORK/wuot.env"; : > "$WUOT"
+err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_acme 2>&1)
+assert_contains "warn_unbound_org_token: warns when GH_HOST_acme is missing" "$err" "set without GH_HOST_acme"
+printf 'GH_HOST_acme=git.example.test\n' >> "$WUOT"
+err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_acme 2>&1)
+assert_eq "warn_unbound_org_token: silent once GH_HOST_acme is set" "" "$err"
+err=$(warn_unbound_org_token "$WUOT" OBSIDIAN_ANNOTATED_KEY 2>&1)
+assert_eq "warn_unbound_org_token: no-op for a non-GH_TOKEN_ var" "" "$err"
 # The shim-agent list derives from the descriptors — binaries of mcp-capable
 # agents — exactly what manifest.py emits as SHIM_AGENTS with every agent
 # enabled (update-agent-keys.sh itself derives per-container from the keys
@@ -376,89 +391,74 @@ grep -qF 'REPO_OWNER="${_p%%/*}"' "$REPO/up.sh" \
 grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS" "$GIT_ORG_HOSTS"' "$REPO/up.sh" \
     && pass "up.sh passes GIT_ORG_HOSTS to write_keyfiles" \
     || fail "up.sh no longer passes GIT_ORG_HOSTS to write_keyfiles"
-grep -qF 'no git.orgs token for this owner' "$REPO/up.sh" \
-    && pass "up.sh warns about an unbound credential owner" \
-    || fail "up.sh missing the unbound-owner up-time notice"
-# Fix D: the up-time notice loop must dedupe per host/owner (several repos:
-# entries for the same owner must print the notice once, not once per repo).
-grep -qF '_seen="$_seen $_rkey"' "$REPO/up.sh" \
-    && pass "up.sh dedupes the per-owner up-time notice" \
-    || fail "up.sh no longer dedupes the per-owner up-time notice"
-# Drift pin: _rkey must stay UNSANITISED. It is only ever compared inside a
-# double-quoted `case " $_seen " in *" $_rkey "*)` pattern, where the
-# expansion is matched LITERALLY, not as a glob — so sanitising it (as a
-# prior round briefly did) doesn't buy glob-safety, it just makes two
-# genuinely different owners (a.b and a_b) collide into the same key and
-# drop the second owner's notice.
-grep -qF '_rkey="$_rhost/$_rowner"' "$REPO/up.sh" \
-    && pass "up.sh dedupe key is the literal host/owner, never sanitised" \
-    || fail "up.sh dedupe key is sanitised again — this collides a.b with a_b"
+grep -qF 'no git.orgs token for this owner' "$REPO/src/git_notices.sh" \
+    && pass "git_notices.sh warns about an unbound credential owner" \
+    || fail "git_notices.sh missing the unbound-owner up-time notice"
+grep -qF 'git host is not in capabilities.egress' "$REPO/src/git_notices.sh" \
+    && pass "git_notices.sh warns when a bound git host is missing from capabilities.egress" \
+    || fail "git_notices.sh missing the egress-coverage notice for a bound git host"
 
-# Functional test of the notice loop's key derivation + dedupe itself, copied
-# verbatim from up.sh (from _rscheme= through the dedupe), so a regression is
-# caught by behavior, not just by the drift-pin grep above. GIT_ORG_TOKENS is
-# left empty (irrelevant here) and the token-check/echo is replaced with
-# printing the key, so the test observes exactly what dedupes.
-notice_keys() {
-    _seen=""
-    for _rurl in "$@"; do
-        _rscheme=$(printf '%s' "${_rurl%%://*}" | tr '[:upper:]' '[:lower:]')
-        [ "$_rscheme" = https ] || continue
-        _rhost="${_rurl#*://}"; _rpath="${_rhost#*/}"; _rhost="${_rhost%%/*}"; _rhost="${_rhost##*@}"
-        _rhost=$(printf '%s' "$_rhost" | tr '[:upper:]' '[:lower:]')
-        _rhost="${_rhost%:443}"
-        [ "$_rhost" = github.com ] && continue
-        _rowner="${_rpath%%/*}"
-        _rowner=$(printf '%s' "$_rowner" | tr '[:upper:]' '[:lower:]')
-        _rkey="$_rhost/$_rowner"
-        case " $_seen " in *" $_rkey "*) continue ;; esac
-        _seen="$_seen $_rkey"
-        echo "$_rhost/$_rowner"
-    done
-}
-out=$(notice_keys https://h.test/a.b/x.git https://h.test/a_b/y.git)
-assert_eq "notice_keys: a.b and a_b are different owners, both notice" \
-    "$(printf 'h.test/a.b\nh.test/a_b')" "$out"
-out=$(notice_keys https://h.test/acme/x.git https://h.test/acme/y.git https://h.test/'*'/z.git https://h.test/acme2/w.git)
-assert_eq "notice_keys: dedupes acme, a glob owner never swallows acme2" \
-    "$(printf 'h.test/acme\nh.test/*\nh.test/acme2')" "$out"
+# ────────────────────────────────────────────────────────────────────────────
+echo "── src/git_notices.sh ──"
+# shellcheck disable=SC1091
+. "$REPO/src/git_notices.sh"   # defines git_owner_notices + git_egress_notices, no side effects
 
-# Fix E: a bound non-github host (repos: origin, or a git.orgs.<owner>.host:
-# with no repos: entry of its own) is never auto-allowlisted in the egress
-# firewall — up.sh must warn when GIT_CREDENTIAL_HOSTS names a host that
-# capabilities.egress (comma-separated zones; a zone covers its subdomains)
-# does not cover, walking up parent domains the same way the firewall does.
-# Functional test of the coverage check itself, copied verbatim from up.sh.
-egress_covers() {
-    EGRESS="$1"; _ehost="$2"
-    _ok=""
-    _d="$_ehost"
-    while [ -n "$_d" ]; do
-        case ",$EGRESS," in *",$_d,"*) _ok=1; break;; esac
-        case "$_d" in *.*) _d="${_d#*.}";; *) _d="";; esac
-    done
-    [ -n "$_ok" ] && echo yes || echo no
-}
-assert_eq "egress_covers: exact host match" "yes" "$(egress_covers git.example.test git.example.test)"
-assert_eq "egress_covers: parent domain covers a subdomain" "yes" "$(egress_covers example.test git.example.test)"
-assert_eq "egress_covers: an unrelated zone does not cover the host" "no" "$(egress_covers other.test git.example.test)"
-assert_eq "egress_covers: an empty EGRESS covers nothing" "no" "$(egress_covers "" git.example.test)"
+out=$(git_owner_notices $'a\thttps://h.test/a.b/x.git\nb\thttps://h.test/a_b/y.git\n' '')
+assert_eq "git_owner_notices: a.b and a_b are different owners, two notice lines" \
+    "2" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+assert_contains "git_owner_notices: notes h.test/a.b" "$out" "h.test/a.b"
+assert_contains "git_owner_notices: notes h.test/a_b" "$out" "h.test/a_b"
 
-grep -qF 'git host is not in capabilities.egress' "$REPO/up.sh" \
-    && pass "up.sh warns when a bound git host is missing from capabilities.egress" \
-    || fail "up.sh missing the egress-coverage notice for a bound git host"
+out=$(git_owner_notices $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/acme/y.git\nc\thttps://h.test/*/z.git\nd\thttps://h.test/acme2/w.git\n' '')
+assert_eq "git_owner_notices: dedupes acme, a glob owner never swallows acme2 — exactly 3 notes" \
+    "3" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+assert_contains "git_owner_notices: notes acme once" "$out" "h.test/acme:"
+assert_contains "git_owner_notices: notes the glob owner" "$out" 'h.test/*:'
+assert_contains "git_owner_notices: notes acme2" "$out" "h.test/acme2:"
+
+out=$(git_owner_notices $'a\thttps://h.test/acme/x.git\n' $'acme\tGH_TOKEN_acme\tSRC\n')
+assert_eq "git_owner_notices: an owner with a git.orgs token gets no notice" "" "$out"
+out=$(git_owner_notices $'a\thttps://github.com/acme/x.git\n' '')
+assert_eq "git_owner_notices: github.com never gets a notice" "" "$out"
+out=$(git_owner_notices $'a\tssh://git@h.test/acme/x.git\n' '')
+assert_eq "git_owner_notices: an ssh:// repo never gets a notice" "" "$out"
+
+out=$(git_egress_notices $'https://git.example.test\n' "git.example.test" '')
+assert_eq "git_egress_notices: exact host match in EGRESS, no notice" "" "$out"
+out=$(git_egress_notices $'https://git.example.test\n' "example.test" '')
+assert_eq "git_egress_notices: a parent domain covers the host, no notice" "" "$out"
+out=$(git_egress_notices $'https://git.example.test\n' "other.test" '')
+assert_contains "git_egress_notices: an unrelated zone still notices" "$out" "git.example.test"
+out=$(git_egress_notices $'https://git.example.test\n' "" '')
+assert_contains "git_egress_notices: an empty EGRESS still notices" "$out" "git.example.test"
+out=$(git_egress_notices $'https://192.168.1.10\n' '' '192.168.1.0/24')
+assert_eq "git_egress_notices: an IP-literal host covered by a CIDR grant, no notice" "" "$out"
+out=$(git_egress_notices $'https://192.168.1.10\n' '' '')
+assert_contains "git_egress_notices: an IP-literal host with no CIDR grant still notices" "$out" "192.168.1.10"
+
+grep -qF '. "$SCRIPT_DIR/src/git_notices.sh"' "$REPO/up.sh" \
+    && pass "up.sh sources src/git_notices.sh" \
+    || fail "up.sh no longer sources src/git_notices.sh"
+grep -qF 'git_owner_notices "$REPOS" "$GIT_ORG_TOKENS"' "$REPO/up.sh" \
+    && pass "up.sh calls git_owner_notices" \
+    || fail "up.sh no longer calls git_owner_notices"
+grep -qF 'git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' "$REPO/up.sh" \
+    && pass "up.sh calls git_egress_notices" \
+    || fail "up.sh no longer calls git_egress_notices"
 
 grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
     && pass "up.sh lowercases the clone-hint host" \
     || fail "up.sh missing the clone-hint host lowercasing"
 # Fix A: the up-time notice loop's scheme guard must be case-insensitive and
-# admit only https:// (scp-style/ssh:// take no HTTP credential at all).
-grep -qF '[ "$_rscheme" = https ] || continue' "$REPO/up.sh" \
-    && pass "up.sh notice loop's scheme guard is the case-insensitive https check" \
-    || fail "up.sh notice loop's scheme guard is the case-insensitive https check"
-! grep -qF '*://*) ;;' "$REPO/up.sh" \
-    && pass "up.sh notice loop's old *://*) guard is gone" \
-    || fail "up.sh notice loop's old *://*) guard is still present"
+# admit only https:// (scp-style/ssh:// take no HTTP credential at all). The
+# loop itself now lives in src/git_notices.sh, not up.sh (see the
+# "── src/git_notices.sh ──" section below).
+grep -qF '[ "$_rscheme" = https ] || continue' "$REPO/src/git_notices.sh" \
+    && pass "git_notices.sh notice loop's scheme guard is the case-insensitive https check" \
+    || fail "git_notices.sh notice loop's scheme guard is the case-insensitive https check"
+! grep -qF '*://*) ;;' "$REPO/src/git_notices.sh" \
+    && pass "git_notices.sh notice loop's old *://*) guard is gone" \
+    || fail "git_notices.sh notice loop's old *://*) guard is still present"
 
 # Functional test of the case logic itself: the same host/path-extraction
 # lines and case, copied verbatim from up.sh, so a rewrite of the case arms
