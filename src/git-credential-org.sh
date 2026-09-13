@@ -64,9 +64,9 @@ if [ -n "$tok" ] && [ "$bound" != "$host" ]; then
     # clone.
     if [ "$host" = github.com ]; then
         if [ -z "$bound" ]; then
-            echo "git-credential-org: $var is set but has no GH_HOST_<owner> binding — not presenting it; falling back to the container default for $host" >&2
+            echo "git-credential-org: $var is set but has no GH_HOST_<owner> binding — not presenting it; falling back to the container default or the gh login for $host" >&2
         else
-            echo "git-credential-org: $var is bound to $bound, not $host — not presenting it; falling back to the container default for $host" >&2
+            echo "git-credential-org: $var is bound to $bound, not $host — not presenting it; falling back to the container default or the gh login for $host" >&2
         fi
     fi
     tok=""

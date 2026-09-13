@@ -153,8 +153,10 @@ if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 # Up-time notice: an owner routed via a non-github repos: URL, with no
 # git.orgs token for THAT OWNER, will fail every private clone of its repos —
 # there is no fall-back to human credentials (docs/secrets.md). Per owner, not
-# per host: a host can be perfectly reachable (github.com always is) while
-# still lacking this owner's token — the old per-host notice missed that.
+# per host: a host with one bound owner would otherwise hide a sibling owner
+# on that same host with no token — the old per-host notice missed that.
+# github.com is skipped (below) because its GH_TOKEN/gh fall-backs mean a
+# clone there never fails for lack of a per-org token, so it needs no notice.
 # Warn now, not at the first failed clone. bash-3.2 compatible: while-read
 # over heredocs, no process substitution. _seen tracks host/owner pairs
 # already reported (bash 3.2 has no associative arrays) so a host/owner with
