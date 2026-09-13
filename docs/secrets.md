@@ -43,13 +43,17 @@ git:
       token: GH_TOKEN_planetexpress   # secrets.env var NAME
       name:  "Leela Bot"              # optional — repo-local identity for planetexpress/* repos
       email: "bot@planetexpress.example"
+      host:  github.com               # required when planetexpress has no repo in repos:
 ```
 
 `token`/`orgs.*.token` name vars in `secrets.env` (values never enter the
 manifest). At `up`, a repo owned by `<owner>` authenticates with
 `GH_TOKEN_<owner>` if set, else the container's `git.token`, else the global
 `GH_TOKEN` — resolved by the `git-credential-org` helper on every
-`github.com` fetch/push. A `git.orgs` owner with a `name`/`email` also gets
+`github.com` fetch/push. A per-org token is presented only to its bound host
+(`repos:`-derived, or the declared `host:`) — never to another host — and
+only `github.com` has the `git.token`/global-`GH_TOKEN`/`gh` fall-backs; every
+other host gets the per-org token or nothing. A `git.orgs` owner with a `name`/`email` also gets
 that identity stamped repo-locally, so its commits carry the right author.
 A `token:` naming a var that isn't in `secrets.env` **hard-fails the
 apply** — never a silent fall-back to the wrong identity. This is routing +

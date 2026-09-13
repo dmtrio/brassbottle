@@ -794,6 +794,19 @@ class TestTokenRouting(unittest.TestCase):
             derive({"repos": ["http://x.example.test/acme/a.git"]})
         self.assertIn("uses http://", str(cm.exception))
 
+    def test_https_repo_url_needs_owner_and_repo(self):
+        # The router treats the first path segment as owner (_routed_repo_owners)
+        # and the up-time notice does the same; a bare host or owner-only URL
+        # would silently break both, so require a full owner/repo path.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://git.example.test"]})
+        self.assertIn("has no owner/repo path", str(cm.exception))
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://git.example.test/onlyowner"]})
+        self.assertIn("has no owner/repo path", str(cm.exception))
+        d = derive({"repos": ["https://git.example.test/o/r"]})
+        self.assertEqual(d["REPOS"], "r\thttps://git.example.test/o/r\n")
+
     def test_two_host_guard_only_fires_for_routed_owners(self):
         # No git.orgs token routed for openssl: a public owner on two hosts
         # (github.com + its own forge) must derive fine.
@@ -850,7 +863,9 @@ class TestOrgHosts(unittest.TestCase):
             derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
         self.assertIn(
-            "add its repo to repos: or set git.orgs.vendor.host:",
+            "git.orgs.vendor: owner has no https:// repo in repos: "
+            "(scp-style and ssh:// URLs never use this token) — add an "
+            "https:// repo for it or set git.orgs.vendor.host:",
             str(cm.exception))
 
     def test_org_hosts_unlisted_owner_rejected_in_mixed_bottle(self):
@@ -864,7 +879,23 @@ class TestOrgHosts(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga GH_TOKEN_orgb"})
         # owner routing folds to lowercase throughout GIT_ORG_TOKENS (see
         # _canonical_token_var), so the owner naming this error is "orgb".
-        self.assertIn("git.orgs.orgb: owner appears in no https repos: URL", str(cm.exception))
+        self.assertIn(
+            "git.orgs.orgb: owner has no https:// repo in repos: "
+            "(scp-style and ssh:// URLs never use this token)",
+            str(cm.exception))
+
+    def test_org_hosts_scp_only_owner_gets_accurate_error(self):
+        # OrgA's only repos: entry is scp-style (git@host:owner/x.git), which
+        # never routes an https owner — the old "appears in no https repos:
+        # URL" message read as though OrgA simply had no repo at all, when in
+        # fact it has one that just can't bind a token.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["git@git.example.test:OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
+        self.assertIn(
+            "has no https:// repo in repos: (scp-style and ssh:// URLs never use this token)",
+            str(cm.exception))
 
     def test_org_hosts_declared_host(self):
         d = derive({"repos": ["https://git.example.test/OrgA/x.git"],
@@ -896,6 +927,22 @@ class TestOrgHosts(unittest.TestCase):
                                                  "host": "h'$(x)'.test"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
         self.assertIn("is not a valid host", str(cm.exception))
+
+    def test_org_empty_host_rejected(self):
+        # A present-but-empty host: (or an explicit null) used to be silently
+        # ignored (falsy → skipped entirely), leaving the owner to fall
+        # through to "owner appears in no https repos:" with no hint that
+        # host: was the field actually at fault.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor",
+                                                 "host": ""}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
+        self.assertIn("host: must be a non-empty host", str(cm.exception))
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor",
+                                                 "host": None}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
+        self.assertIn("host: must be a non-empty host", str(cm.exception))
 
     def test_org_hosts_empty_without_orgs(self):
         self.assertEqual(derive({})["GIT_ORG_HOSTS"], "")

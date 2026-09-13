@@ -819,8 +819,9 @@ def _org_hosts(parsed_repos, org_tokens, declared_hosts):
             host = decl
         else:
             raise ManifestError(
-                f"git.orgs.{owner}: owner appears in no https repos: URL — add its repo to "
-                f"repos: or set git.orgs.{owner}.host: (github.com for a github org)")
+                f"git.orgs.{owner}: owner has no https:// repo in repos: (scp-style and "
+                f"ssh:// URLs never use this token) — add an https:// repo for it or set "
+                f"git.orgs.{owner}.host: (github.com for a github org)")
         hostvar = "GH_HOST_" + canon[len("GH_TOKEN_"):]
         lines.append(f"{owner}\t{hostvar}\t{host}\n")
     return "".join(lines)
@@ -910,7 +911,11 @@ def _git_identity(git, env, secrets_file):
                 errors.append(f"  {field}: unsupported field(s): {extra} (only token, name, email, host)")
                 continue
             raw_host = spec.get("host")
-            if not _falsy(raw_host):
+            if "host" in spec and (_falsy(raw_host) or raw_host == ""):
+                errors.append(
+                    f"  {field}.host: must be a non-empty host "
+                    "(letters, digits, _ . and -, optional :port)")
+            elif not _falsy(raw_host):
                 if not isinstance(raw_host, str):
                     errors.append(f"  {field}.host: must be a string")
                 else:
@@ -1021,6 +1026,12 @@ def derive(manifest, plugin_files, agent_files, env):
             repo_errors.append(
                 f"  repos entry: URL '{url}' uses http:// — credentials over cleartext are "
                 "not supported (the desktop credential bridge would answer for it); use https://")
+            continue
+        if re.match(r"^https://", url, re.IGNORECASE) and not re.match(
+                r"^https://(?:[^@/]*@)?[^/]+/[^/]+/[^/]+", url, re.IGNORECASE):
+            repo_errors.append(
+                f"  repos entry: URL '{url}' has no owner/repo path "
+                "(expected https://host/owner/repo)")
             continue
         if explicit_name is not None:
             if not isinstance(explicit_name, str):
