@@ -94,13 +94,14 @@ under a sub-path (`ROOT_URL https://host/git/`) derives owner `git` and
 finds no token; serve gitea at the host root or on its own hostname.
 
 Owner names are the token key and carry no host: `up` refuses a manifest
-where one owner name owns repos on two hosts (they would share
-`GH_TOKEN_<owner>`); use separate bottles. The same rule applies across
-owner spellings: `a.b` and `a_b` both become `GH_TOKEN_a_b`, so `up` refuses
-a manifest where either of two such owners has a `git.orgs` token.
+where an owner `git.orgs` routes a token for owns repos on two hosts (they
+would share `GH_TOKEN_<owner>`); use separate bottles. The same rule applies
+across owner spellings: `a.b` and `a_b` both become `GH_TOKEN_a_b`, so `up`
+refuses a manifest where either of two such owners has a `git.orgs` token.
 
 Each `git.orgs` token is bound to one host: the host its owner appears on in
-`repos:`, else an explicit `git.orgs.<owner>.host:`, else github.com only in
-a bottle with no other git host. The token is never presented to another
-host, and a token with no binding (for example one hand-set with
-`bin/update-agent-keys.sh` without `GH_HOST_<owner>`) is presented nowhere.
+`repos:`, else an explicit `git.orgs.<owner>.host:` — required if the owner
+has no repo listed (write `github.com` for a github org). The token is never
+presented to another host, and a token with no binding (for example one
+hand-set with `bin/update-agent-keys.sh` without `GH_HOST_<owner>`) is
+presented nowhere.

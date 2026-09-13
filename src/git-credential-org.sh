@@ -55,6 +55,17 @@ if [ -n "$tok" ] && [ "$bound" != "$host" ]; then
     # host at all — an empty $bound never equals a real $host, so an unbound
     # token is refused everywhere, github.com included). Never present it to
     # another host — for github.com the default/gh fall-backs still apply below.
+    # On github.com that fall-through would otherwise be silent (the quit
+    # branch below never runs there) — say so on stderr before falling back,
+    # or a wrong-host refusal looks exactly like an ordinary default-token
+    # clone.
+    if [ "$host" = github.com ]; then
+        if [ -z "$bound" ]; then
+            echo "git-credential-org: $var is set but has no GH_HOST_<owner> binding — not presenting it; falling back to the container default for $host" >&2
+        else
+            echo "git-credential-org: $var is bound to $bound, not $host — not presenting it; falling back to the container default for $host" >&2
+        fi
+    fi
     tok=""
 fi
 if [ -z "$tok" ] && [ "$host" = github.com ]; then
