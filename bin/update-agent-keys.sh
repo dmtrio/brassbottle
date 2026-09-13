@@ -22,6 +22,11 @@
 # driven, so it needs no update when agents/ gains a new agent), or 'common'
 # to set the var in EVERY agent's file at once — common.env was retired in
 # Phase 3, so each agent now carries one complete env file.
+#
+# A per-org git token (GH_TOKEN_<owner>) set this way also needs its host
+# binding GH_HOST_<owner>=<host> set the same way, or git-credential-org.sh
+# refuses to present it (an unbound token is refused everywhere, github.com
+# included — see src/git-credential-org.sh).
 
 set -e
 

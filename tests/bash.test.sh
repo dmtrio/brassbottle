@@ -143,7 +143,7 @@ echo "── src/git-credential-org.sh ──"
 HELPER="$REPO/src/git-credential-org.sh"
 cred() { printf 'protocol=https\nhost=github.com\npath=%s\n' "$1" | env "${@:2}" bash "$HELPER" get; }
 
-out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_TOKEN=defval)
+out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_HOST_vendor=github.com GH_TOKEN=defval)
 assert_contains "known owner → its per-org token" "$out" "password=vtok"
 assert_contains "per-org token uses x-access-token username" "$out" "username=x-access-token"
 assert_absent "per-org token is not the default" "$out" "password=defval"
@@ -153,14 +153,21 @@ assert_contains "unknown owner → default GH_TOKEN" "$out" "password=defval"
 
 # owner sanitization parity with manifest.py:_canonical_token_var (- → _):
 # acme-corp reads GH_TOKEN_acme_corp, not GH_TOKEN_acme-corp.
-out=$(cred acme-corp/thing.git GH_TOKEN_acme_corp=atok GH_TOKEN=defval)
+out=$(cred acme-corp/thing.git GH_TOKEN_acme_corp=atok GH_HOST_acme_corp=github.com GH_TOKEN=defval)
 assert_contains "hyphenated owner sanitized to GH_TOKEN_acme_corp" "$out" "password=atok"
 
 # case-folding parity: a mixed-case URL owner (github is case-insensitive; the
 # manifest lowercases) must read the lowercased GH_TOKEN_<owner>, not fall back.
-out=$(cred PlanetExpress/ship.git GH_TOKEN_planetexpress=ptok GH_TOKEN=defval)
+out=$(cred PlanetExpress/ship.git GH_TOKEN_planetexpress=ptok GH_HOST_planetexpress=github.com GH_TOKEN=defval)
 assert_contains "mixed-case owner folds to GH_TOKEN_planetexpress" "$out" "password=ptok"
 assert_absent "mixed-case owner does not fall back to default" "$out" "password=defval"
+
+# Fix B: no GH_HOST_<owner> binding at all → the per-org token is refused
+# EVERYWHERE, github.com included (an empty $bound never equals a real
+# $host) — the container default GH_TOKEN still answers for github.com.
+out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_TOKEN=defval)
+assert_contains "unbound per-org token is presented nowhere: falls back to default" "$out" "password=defval"
+assert_absent "unbound per-org token is presented nowhere: not the org token" "$out" "password=vtok"
 
 # neither the per-org nor the default token set → defer to gh (human login).
 # Mock gh so the fallback is deterministic and offline.
@@ -195,8 +202,10 @@ assert_eq "token bound to a different host: quit=1 exactly" "quit=1" "$out"
 assert_contains "…stderr names the bound host, not the requested one" \
     "$(cat "$WORK/cred-bind-err")" "GH_TOKEN_dmtrio is bound to github.com, not git.example.test"
 
-out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok)
-assert_eq "no GH_HOST recorded → treated as a github token, refused on gitea" "quit=1" "$out"
+out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok 2>"$WORK/cred-unbound-err")
+assert_eq "no GH_HOST recorded → unbound, refused on gitea too" "quit=1" "$out"
+assert_contains "…stderr says it has no binding, not that it's bound elsewhere" \
+    "$(cat "$WORK/cred-unbound-err")" "has no GH_HOST_<owner> binding"
 
 out=$(cred emergence/x.git GH_TOKEN_emergence=etok GH_HOST_emergence=git.example.test GH_TOKEN=defval)
 assert_contains "gitea-bound token is never presented on github.com either" "$out" "password=defval"
@@ -341,9 +350,12 @@ grep -qF 'REPO_OWNER="${_p%%/*}"' "$REPO/up.sh" \
 grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS" "$GIT_ORG_HOSTS"' "$REPO/up.sh" \
     && pass "up.sh passes GIT_ORG_HOSTS to write_keyfiles" \
     || fail "up.sh no longer passes GIT_ORG_HOSTS to write_keyfiles"
-grep -qF 'no git.orgs token is bound to this host' "$REPO/up.sh" \
-    && pass "up.sh warns about an unbound credential host" \
-    || fail "up.sh missing the unbound-host up-time notice"
+grep -qF 'no git.orgs token for this owner' "$REPO/up.sh" \
+    && pass "up.sh warns about an unbound credential owner" \
+    || fail "up.sh missing the unbound-owner up-time notice"
+grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
+    && pass "up.sh lowercases the clone-hint host" \
+    || fail "up.sh missing the clone-hint host lowercasing"
 
 # Functional test of the case logic itself: the same host/path-extraction
 # lines and case, copied verbatim from up.sh, so a rewrite of the case arms
