@@ -175,8 +175,10 @@ while IFS=$'\t' read -r _rname _rurl; do
     [ "$_rhost" = github.com ] && continue   # github.com always has the default GH_TOKEN/gh fall-backs
     _rowner="${_rpath%%/*}"
     _rowner=$(printf '%s' "$_rowner" | tr '[:upper:]' '[:lower:]')   # case-fold to match GIT_ORG_TOKENS
-    case " $_seen " in *" $_rhost/$_rowner "*) continue ;; esac
-    _seen="$_seen $_rhost/$_rowner"
+    # _rkey is sanitised (owner is already lowercased above) so it cannot act as a glob in the case pattern below
+    _rkey="$_rhost/${_rowner//[!a-z0-9]/_}"
+    case " $_seen " in *" $_rkey "*) continue ;; esac
+    _seen="$_seen $_rkey"
     _rcanon="GH_TOKEN_${_rowner//[!a-z0-9]/_}"                      # parity with _canonical_token_var
     _org_has_token=""
     while IFS=$'\t' read -r _org_owner _org_canon _org_src; do

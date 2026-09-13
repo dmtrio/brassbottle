@@ -381,9 +381,12 @@ grep -qF 'no git.orgs token for this owner' "$REPO/up.sh" \
 # Fix D: the up-time notice loop must dedupe per host/owner (several repos:
 # entries for the same owner must print the notice once, not once per repo).
 # A functional dedupe test is not required; this pin on the guard is enough.
-grep -qF '_seen="$_seen $_rhost/$_rowner"' "$REPO/up.sh" \
+grep -qF '_seen="$_seen $_rkey"' "$REPO/up.sh" \
     && pass "up.sh dedupes the per-owner up-time notice" \
     || fail "up.sh no longer dedupes the per-owner up-time notice"
+grep -qF '_rkey="$_rhost/${_rowner//[!a-z0-9]/_}"' "$REPO/up.sh" \
+    && pass "up.sh sanitises the dedupe key so it cannot act as a glob" \
+    || fail "up.sh no longer sanitises the dedupe key"
 grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
     && pass "up.sh lowercases the clone-hint host" \
     || fail "up.sh missing the clone-hint host lowercasing"

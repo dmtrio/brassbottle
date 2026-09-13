@@ -839,8 +839,9 @@ class TestTokenRouting(unittest.TestCase):
 
 class TestOrgHosts(unittest.TestCase):
     """_org_hosts: each routed per-org token is bound to the one host its
-    owner appears on in repos: (github.com if none) — end to end with the
-    token, so git-credential-org can refuse a host mismatch."""
+    owner appears on in repos:, else the host declared in git.orgs.<owner>.host:,
+    else a hard error — no default — end to end with the token, so
+    git-credential-org can refuse a host mismatch."""
 
     def test_org_hosts_bind_to_repo_host(self):
         d = derive({"repos": ["https://github.com/acme/a.git",
