@@ -3,9 +3,9 @@
 # Tinfoil.sh runs open-weight models in hardware-attested enclaves. Its official
 # pi extension (@tinfoilsh/pi-provider) verifies the enclave at startup,
 # encrypts request bodies (HPKE/EHBP) to the attested key, and fails closed.
-# This plugin bakes that package at image build so setup: (PR 2) can register it
-# into pi offline at up. The plugin bake loop runs before the agents loop, so pi
-# is absent now; setup: must never download because the firewall is up at up.
+# This plugin bakes that package at image build so setup: can register it into
+# pi offline at up. The plugin bake loop runs before the agents loop, so pi is
+# absent now; setup: must never download because the firewall is up at up.
 
 # Baked at build (full network). Bump the package version, its integrity
 # string, the dep pins and package-lock.json together, deliberately. The bake
@@ -54,3 +54,13 @@ secrets:
 # wildcards: tinfoil.sh covers atc, inference, router.inf6, and future routers.
 # registry.npmjs.org is BUILD-time only (pre-firewall), so it is not listed.
 egress: [tinfoil.sh]
+
+# One-shot at the end of every `./djinn up`, after the firewall is up:
+# setup.sh (beside this file, baked at /opt/plugins/tinfoil/) registers the
+# package baked by `install:` into pi's `~/.pi/agent/settings.json`
+# `packages[]` (pi stores the path relative to settings.json, resolved at
+# load). The hook is a non-interactive `docker exec -u coder bash`; the
+# image's final ENV PATH puts ~/.agent-shims and the fnm default-alias bin
+# first, so `pi` resolves there. Without the pi agent the script exits 0
+# with one line. Idempotent and offline. Runs as coder.
+setup: "bash /opt/plugins/tinfoil/setup.sh"

@@ -14,8 +14,21 @@ agent_secrets:
 Set `TINFOIL_KEY_pi` in the bottle's local `secrets.env`. The plugin needs an
 image rebuild because its `install:` block runs at image build time.
 
-PR 2 adds the `setup:` line that runs
-`pi install /opt/plugins/tinfoil/pkg/package` at `up`, offline.
+`setup:` runs `setup.sh` at every `./djinn up`, which registers the baked
+package into pi, offline. Without the pi agent it logs one line and exits 0. The
+plugin's [AGENTS.md](AGENTS.md) gives pi agents the provider's usage and
+failure guidance.
+
+## Verify inside the container
+
+```bash
+pi --list-models tinfoil                 # live catalogue when verified, bundled fallback otherwise
+grep -n tinfoil ~/.pi/agent/settings.json
+cat /tmp/djinn-setup/tinfoil.log         # last setup run
+```
+
+Interactive check: start pi, use `/model` to pick a tinfoil model, and confirm
+the footer says `Tinfoil verified`; `/tinfoil` prints the verification document.
 
 ## Security posture
 
