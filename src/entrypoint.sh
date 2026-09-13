@@ -128,7 +128,8 @@ su -c "git config --global safe.directory /workspace" coder
 # to the shared gh login. No SSH keys. useHttpPath=true feeds the repo path to
 # the router so it can read the owner (and makes credential caching per-path,
 # which is harmless here). Installed for github.com and for every non-github
-# origin in the manifest's repos: (GIT_CREDENTIAL_HOSTS, from manifest.py) —
+# origin in the manifest's repos: and every host a git.orgs token is bound to
+# (GIT_CREDENTIAL_HOSTS, from manifest.py) —
 # a gitea/self-hosted repo authenticates by owner the same way. The helper
 # itself gates its fall-backs by host, so a non-github origin only ever sees
 # its own GH_TOKEN_<owner>, never the github machine-user token or gh.
