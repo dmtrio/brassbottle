@@ -99,6 +99,8 @@ where one owner name owns repos on two hosts (they would share
 owner spellings: `a.b` and `a_b` both become `GH_TOKEN_a_b`, so `up` refuses
 a manifest where either of two such owners has a `git.orgs` token.
 
-Each `git.orgs` token is bound to the one host its owner appears on in
-`repos:` (github.com if none) and is never presented to another host, so an
-ad-hoc clone of a same-named owner elsewhere gets no credential.
+Each `git.orgs` token is bound to one host: the host its owner appears on in
+`repos:`, else an explicit `git.orgs.<owner>.host:`, else github.com only in
+a bottle with no other git host. The token is never presented to another
+host, and a token with no binding (for example one hand-set with
+`bin/update-agent-keys.sh` without `GH_HOST_<owner>`) is presented nowhere.
