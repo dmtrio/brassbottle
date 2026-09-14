@@ -836,17 +836,19 @@ class TestTokenRouting(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
         self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
 
-    def test_scp_owner_colliding_with_orgs_owner_rejected(self):
-        # scp/ssh/git:// owners never bind to the host they're spelled on
-        # (_org_hosts requires an explicit host: for those), but their owner
-        # still counts for the canon-collision check in _check_token_routing
-        # — otherwise a git.orgs token whose canon collides with a scp-only
-        # owner would derive silently.
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"repos": ["git@h.test:a.b/x.git"],
-                    "git": {"orgs": {"a_b": {"token": "GH_TOKEN_a_b"}}}},
+    def test_scp_owner_spelling_collision_is_allowed_when_bound(self):
+        # scp/ssh/git:// owners are OUT OF SCOPE for _check_token_routing's
+        # spelling-collision check entirely (see its docstring): an scp
+        # clone never presents an https credential, so 'a-b' (scp-only) and
+        # 'a_b' (git.orgs, host: explicit) sanitising to the same canon
+        # cannot misroute anything — a_b's token is bound to github.com,
+        # where the helper refuses any other host regardless of what 'a-b'
+        # is spelled. Must derive clean, not raise.
+        d = derive({"repos": ["git@h.test:a-b/x.git"],
+                    "git": {"orgs": {"a_b": {"token": "GH_TOKEN_a_b",
+                                             "host": "github.com"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
-        self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
+        self.assertEqual(d["GIT_ORG_HOSTS"], "a_b\tGH_HOST_a_b\tgithub.com\n")
 
     def test_owner_on_scp_github_and_https_gitea_binds_to_https_host(self):
         # The same owner spelled via scp-style (which never binds — see
