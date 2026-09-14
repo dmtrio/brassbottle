@@ -99,8 +99,11 @@ git_egress_notices() {
             if [ -z "$_is_ip" ] && [ -n "$egress_cidrs" ]; then
                 # A DNS-named LAN host may be covered by a CIDR grant that this
                 # zone walk cannot see — soften the wording rather than the
-                # false-positive "will be refused" of the plain note.
-                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall unless one of egress_cidrs ($egress_cidrs) already covers it"
+                # false-positive "will be refused" of the plain note. Named by
+                # the address it resolves to, not the CIDR "covering" the
+                # name itself — a private CIDR grant can never cover a public
+                # DNS name as such, only the address that name resolves to.
+                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall unless egress_cidrs ($egress_cidrs) covers the address it resolves to"
             else
                 echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall until it is added"
             fi

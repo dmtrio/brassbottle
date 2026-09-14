@@ -836,6 +836,24 @@ class TestTokenRouting(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
         self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
 
+    def test_scp_owner_colliding_with_orgs_owner_rejected(self):
+        # scp/ssh/git:// owners route no host here (_org_hosts never binds a
+        # token to them), but their owner still counts for the
+        # canon-collision check — otherwise a git.orgs token whose canon
+        # collides with a scp-only owner would derive silently.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["git@h.test:a.b/x.git"],
+                    "git": {"orgs": {"a_b": {"token": "GH_TOKEN_a_b"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
+        self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
+
+    def test_scp_owner_with_no_orgs_token_derives(self):
+        # Same repos:, but no git.orgs token routes for that canon — the
+        # collision check never fires (it only fires for owners git.orgs
+        # actually routes a token for), so this must derive fine.
+        d = derive({"repos": ["git@h.test:a.b/x.git"]})
+        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+
 
 class TestOrgHosts(unittest.TestCase):
     """_org_hosts: each routed per-org token is bound to the one host its
@@ -904,6 +922,25 @@ class TestOrgHosts(unittest.TestCase):
         # Same as above but for the ssh:// form (ssh://host/owner/repo.git)
         # rather than scp-style (host:owner/repo.git).
         d = derive({"repos": ["ssh://git.example.test/OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
+        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertIn("orga", d["GIT_ORG_TOKENS"])
+
+    def test_org_hosts_scp_userless_owner_gets_no_binding(self):
+        # git's scp-like syntax makes the userinfo optional
+        # (host:owner/repo.git, no user@) — must still be recognised as
+        # scp-style, not misread as an unlisted owner.
+        d = derive({"repos": ["git.example.test:OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
+        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertIn("orga", d["GIT_ORG_TOKENS"])
+
+    def test_org_hosts_git_scheme_only_owner_gets_no_binding(self):
+        # git:// is treated the same as ssh:// — neither ever routes an
+        # https per-org token, but the repo is real.
+        d = derive({"repos": ["git://git.example.test/OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
         self.assertEqual(d["GIT_ORG_HOSTS"], "")

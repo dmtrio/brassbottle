@@ -106,7 +106,7 @@ refuses a manifest where either of two such owners has a `git.orgs` token.
 Each `git.orgs` token is bound to one host: the host its owner appears on in
 `repos:`, else an explicit `git.orgs.<owner>.host:` — required if the owner
 has no repo listed (write `github.com` for a github org). An owner whose only
-listed repos are scp-style or `ssh://` gets no binding: the token is never
+listed repos are scp-style, `ssh://` or `git://` gets no binding: the token is never
 presented anywhere and the entry serves only its `name`/`email`. The token is
 never presented to another host, and a token with no binding (for example one
 hand-set with `bin/update-agent-keys.sh` without `GH_HOST_<owner>`) is
