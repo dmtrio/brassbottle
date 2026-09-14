@@ -36,7 +36,7 @@ warn_unbound_org_token() {
             case "${var#GH_TOKEN_}" in *[!a-z0-9_]*) return 0 ;; esac
             hostvar="GH_HOST_${var#GH_TOKEN_}"
             grep -q "^$hostvar=" "$file" \
-                || echo "  ⚠ $var set without a matching GH_HOST_<owner> — git-credential-org reads GH_HOST_<owner> beside the canonical GH_TOKEN_<owner> (owner lowercased, non-alphanumerics as _); set it the same way (github.com for a github org)" >&2
+                || echo "  ⚠ $var set without a matching GH_HOST_<owner> in $(basename "$file") — git-credential-org reads GH_HOST_<owner> beside the canonical GH_TOKEN_<owner> (owner lowercased, non-alphanumerics as _); set it the same way (github.com for a github org)" >&2
             ;;
     esac
 }

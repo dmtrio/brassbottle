@@ -897,6 +897,22 @@ assert_eq "common removal clears GH_TOKEN_acme from both agent files" "1" "$tokg
 assert_eq "common removal notes the orphaned binding once per file (two notes)" \
     "2" "$(grep -c 'still set in' "$WORK/orphan-err")"
 
+# The unbound-binding warning is per FILE, not per run: in `common` mode one
+# agent's env already carrying GH_HOST_acme must never hide a sibling env
+# that still lacks it. Two agent files, only one already bound — setting
+# GH_TOKEN_acme via `common` must warn exactly once, naming the file that
+# still lacks the binding, and must still set the token in both files.
+UKP="$DAH/keys/unbound"; mkdir -p "$UKP"
+printf 'GH_HOST_acme=git.example.test\n' > "$UKP/one.env"; chmod 600 "$UKP/one.env"
+: > "$UKP/two.env"; chmod 600 "$UKP/two.env"
+out=$(uak unbound common GH_TOKEN_acme tok 2>"$WORK/unbound-err")
+assert_eq "common set with a mixed binding: exactly one warning line" \
+    "1" "$(grep -c 'set without a matching GH_HOST_<owner>' "$WORK/unbound-err")"
+assert_contains "common set with a mixed binding: warning names the unbound file" \
+    "$(cat "$WORK/unbound-err")" "in two.env"
+bothhave=1; for a in one two; do grep -q '^GH_TOKEN_acme=tok$' "$UKP/$a.env" || bothhave=0; done
+assert_eq "common set with a mixed binding: both files still get the token" "1" "$bothhave"
+
 # ────────────────────────────────────────────────────────────────────────────
 echo "── run-*.sh token generation ──"
 mkdir -p "$WORK/rbin"

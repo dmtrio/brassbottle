@@ -768,15 +768,19 @@ def _check_token_routing(parsed_repos, org_tokens):
     line) — git.orgs carries no host, so only its owner/canon pairing is
     recorded.
 
-    scp-style, ssh:// and git:// repos: URLs have no https per-org token of
-    their own to protect from a host mismatch, and (per _ssh_repo_owners)
-    their host is unvalidated and never binds anything — so _ssh_repo_owners'
-    (host, owner, canon) feeds canon_owners ONLY, not canon_hosts: a routed
-    owner spelled via scp/ssh/git is still caught by the spelling-collision
-    check ("both map to") against a git.orgs token or an https owner that
-    sanitises to the same canon, but the two-host guard never fires from an
-    scp/ssh/git host — an owner routed on github over scp and on a gitea host
-    over https is fine, because the scp clone never presents the token.
+    scp-style, ssh:// and git:// repos: URLs are OUT OF SCOPE for this check
+    entirely — not merely exempt from the host half of it. They route no
+    https per-org token in the first place (see _routed_repo_owners vs
+    _ssh_repo_owners: an scp/ssh/git clone never presents an https
+    credential), and every routed git.orgs token is host-bound by
+    _org_hosts — derived from an https repos: URL or declared via host: —
+    so the helper only ever presents that token for the ONE host it was
+    bound to. An owner spelled only over scp/ssh/git://, however it's
+    spelled, therefore can never cause a misroute: there is no token
+    reachable through that URL to protect, and the token that IS bound to
+    the same canon under a different, correct spelling stays bound to its
+    own host regardless. _ssh_repo_owners still feeds _org_hosts' own
+    "listed only over scp" error text; it plays no part here.
     """
     canon_owners = {}
     canon_hosts = {}
@@ -784,8 +788,6 @@ def _check_token_routing(parsed_repos, org_tokens):
     for host, owner, canon in _routed_repo_owners(parsed_repos):
         canon_owners.setdefault(canon, set()).add(owner)
         canon_hosts.setdefault(canon, set()).add(host)
-    for _host, owner, canon in _ssh_repo_owners(parsed_repos):
-        canon_owners.setdefault(canon, set()).add(owner)
     for line in org_tokens.splitlines():
         if not line:
             continue

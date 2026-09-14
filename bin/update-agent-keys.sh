@@ -88,11 +88,6 @@ fi
 
 # Set VAR=VALUE (or remove VAR when VALUE is empty) in one agent's env file,
 # idempotently (drop any existing line first, mode 600 throughout).
-# _warned_unbound tracks whether the unbound-binding warning already fired
-# this run: `common` mode calls set_var_in once per agent file, but the
-# warning is about VAR having no host binding, not about any one file, so it
-# fires at most once rather than once per agent.
-_warned_unbound=""
 set_var_in() {
     local file="$1" tmp="$1.tmp.$$"
     touch "$file"; chmod 600 "$file"
@@ -104,11 +99,12 @@ set_var_in() {
         # (see src/keyfiles.sh:warn_unbound_org_token) — up.sh always writes
         # both together, but this script only knows the VAR it was given,
         # never the host, so it can't write the binding itself; it can only
-        # warn, and only once (see _warned_unbound above).
-        if [ -z "$_warned_unbound" ]; then
-            warn_unbound_org_token "$file" "$VAR"
-            _warned_unbound=1
-        fi
+        # warn. One check per agent file, not once per run: in `common` mode
+        # each file's binding is independent (one agent's env may already
+        # carry GH_HOST_<owner> while a sibling doesn't), so a per-file
+        # warning is the only way not to hide that gap — the message names
+        # the file so several warnings in one run are still legible.
+        warn_unbound_org_token "$file" "$VAR"
     else
         # Removing a per-org token can leave its host binding orphaned in
         # this same file (see src/keyfiles.sh:note_orphan_org_binding) — one
