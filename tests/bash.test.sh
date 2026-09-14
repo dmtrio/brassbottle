@@ -444,6 +444,15 @@ assert_eq "git_owner_notices: github.com never gets a notice" "" "$out"
 out=$(git_owner_notices $'a\tssh://git@h.test/acme/x.git\n' '')
 assert_eq "git_owner_notices: an ssh:// repo never gets a notice" "" "$out"
 
+# git_owner_notices now derives host/path via git_url_split (up.sh's own
+# split), not an inline copy — mixed-case host and an explicit :443 default
+# port must still normalize exactly as the clone loop's own derivation does.
+out=$(git_owner_notices $'a\thttps://Git.Example.Test:443/OrgA/x.git\n' '')
+assert_eq "git_owner_notices: via git_url_split, exactly one note" \
+    "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+assert_contains "git_owner_notices: via git_url_split, host lowercased and :443 stripped, owner lowercased" \
+    "$out" "git.example.test/orga"
+
 out=$(git_egress_notices $'https://git.example.test\n' "git.example.test" '')
 assert_eq "git_egress_notices: exact host match in EGRESS, no notice" "" "$out"
 out=$(git_egress_notices $'https://git.example.test\n' "example.test" '')
@@ -453,7 +462,10 @@ assert_contains "git_egress_notices: an unrelated zone still notices" "$out" "gi
 out=$(git_egress_notices $'https://git.example.test\n' "" '')
 assert_contains "git_egress_notices: an empty EGRESS still notices" "$out" "git.example.test"
 out=$(git_egress_notices $'https://192.168.1.10\n' '' '192.168.1.0/24')
-assert_eq "git_egress_notices: an IP-literal host covered by a CIDR grant, no notice" "" "$out"
+assert_eq "git_egress_notices: an IP-literal host with egress_cidrs set, exactly one note" \
+    "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+assert_contains "git_egress_notices: IP-literal host note mentions egress_cidrs and covers it" \
+    "$out" "unless egress_cidrs (192.168.1.0/24) covers it"
 out=$(git_egress_notices $'https://192.168.1.10\n' '' '')
 assert_contains "git_egress_notices: an IP-literal host with no CIDR grant still notices" "$out" "192.168.1.10"
 out=$(git_egress_notices $'https://git.example.test\n' "Example.Test" '')

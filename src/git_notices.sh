@@ -48,12 +48,10 @@ git_owner_notices() {
         [ -n "$_rname" ] || continue
         _rscheme=$(printf '%s' "${_rurl%%://*}" | tr '[:upper:]' '[:lower:]')
         [ "$_rscheme" = https ] || continue   # only https:// repos get the router; scp-style and ssh:// never need a token here
-        # Host and owner, derived exactly like the clone block below: cut the
-        # path off first, then drop userinfo — a `@` inside the path must not
-        # read as userinfo.
-        _rhost="${_rurl#*://}"; _rpath="${_rhost#*/}"; _rhost="${_rhost%%/*}"; _rhost="${_rhost##*@}"
-        _rhost=$(printf '%s' "$_rhost" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive
-        _rhost="${_rhost%:443}"
+        # Host and owner, derived via git_url_split, the same split the clone
+        # loop uses (up.sh) — it already lowercases the host and drops
+        # userinfo, so only the :443 default port is stripped here.
+        git_url_split "$_rurl"; _rhost="${_h%:443}"; _rpath="$_p"
         [ "$_rhost" = github.com ] && continue   # github.com always has the default GH_TOKEN/gh fall-backs
         _rowner="${_rpath%%/*}"
         _rowner=$(printf '%s' "$_rowner" | tr '[:upper:]' '[:lower:]')   # case-fold to match GIT_ORG_TOKENS
@@ -98,13 +96,19 @@ git_egress_notices() {
         _ehost=$(printf '%s' "$_ehost" | tr '[:upper:]' '[:lower:]')
         # An IP-literal host has no DNS name, so no zone in
         # capabilities.egress could ever cover it — that's what
-        # capabilities.egress_cidrs (EGRESS_CIDRS) is for. A non-empty
-        # EGRESS_CIDRS means a CIDR grant may already reach this host in a way
-        # the domain zone list can never express, so skip the notice rather
-        # than warning on every IP-literal git host that's actually fine.
+        # capabilities.egress_cidrs (EGRESS_CIDRS) is for, and it is never in
+        # a DNS zone list either way, so skip the zone walk below for it. A
+        # non-empty EGRESS_CIDRS means a CIDR grant MAY already reach this
+        # host in a way the domain zone list can never express — "may", not
+        # "does": nothing here parses the CIDRs to check containment, so
+        # soften the wording the same way the DNS-named branch below does,
+        # rather than staying silent on an IP-literal host no grant actually
+        # covers. Empty EGRESS_CIDRS keeps the plain wording (no grant of any
+        # kind could apply), by falling through to the zone walk unchanged.
         _is_ip=""
         [[ "$_ehost" =~ $_ip_re ]] && _is_ip=1
         if [ -n "$_is_ip" ] && [ -n "$egress_cidrs" ]; then
+            echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall unless egress_cidrs ($egress_cidrs) covers it"
             continue
         fi
         _ok=""
