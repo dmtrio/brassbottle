@@ -444,7 +444,7 @@ assert_eq "git_egress_notices: zone match is case-insensitive" "" "$out"
 out=$(git_egress_notices $'https://git.example.test\n' '' '10.0.0.0/8')
 assert_eq "git_egress_notices: a DNS-named host with a CIDR grant, exactly one note" \
     "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
-assert_contains "git_egress_notices: DNS-named host note mentions egress_cidrs" "$out" "unless one of egress_cidrs (10.0.0.0/8)"
+assert_contains "git_egress_notices: DNS-named host note mentions egress_cidrs" "$out" "unless egress_cidrs (10.0.0.0/8) covers the address it resolves to"
 
 grep -qF '. "$SCRIPT_DIR/src/git_notices.sh"' "$REPO/up.sh" \
     && pass "up.sh sources src/git_notices.sh" \

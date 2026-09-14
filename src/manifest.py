@@ -715,15 +715,21 @@ def _routed_repo_owners(parsed_repos):
 
 
 def _ssh_repo_owners(parsed_repos):
-    """Yield the lowercased owner for every scp-style or ssh:// repos: URL —
-    neither ever routes an https per-org token (see _routed_repo_owners), but
-    an owner that appears ONLY this way still has a real repos: entry, so
-    _org_hosts must not treat it as unlisted. Matched separately from
-    _routed_repo_owners' https:// parse: scp-style is
-    user@host:owner/... (no scheme) and ssh:// is ssh://[user@]host/owner/...
-    (scheme, case-insensitive)."""
-    scp_re = re.compile(r"^[^/@:]+@[^/:]+:([^/]+)/")
-    ssh_re = re.compile(r"^ssh://(?:[^@/]*@)?[^/]+/([^/]+)/", re.IGNORECASE)
+    """Yield the lowercased owner for every scp-style, ssh:// or git:// repos:
+    URL — none of these ever route an https per-org token (see
+    _routed_repo_owners), but an owner that appears ONLY this way still has a
+    real repos: entry, so _org_hosts must not treat it as unlisted. Matched
+    separately from _routed_repo_owners' https:// parse: scp-style is
+    [user@]host:owner/... (no scheme — git's own syntax makes the userinfo
+    optional, e.g. plain git.example.test:OrgA/x.git with the server-side
+    user implied); ssh:// and git:// are scheme://[user@]host/owner/...
+    (case-insensitive scheme). scp_re's host segment ([^/:]+ before the
+    literal :) can never contain a '/', so it can't match a scheme's '://' —
+    https://host/... and ssh://host/... both fail scp_re (the ':' immediately
+    followed by '/' has no [^/:]+ to its left), leaving ssh_re to handle
+    ssh://and git://."""
+    scp_re = re.compile(r"^(?:[^/@:]+@)?[^/:]+:([^/]+)/")
+    ssh_re = re.compile(r"^(?:ssh|git)://(?:[^@/]*@)?[^/]+/([^/]+)/", re.IGNORECASE)
     for _name, url in parsed_repos:
         m = scp_re.match(url) or ssh_re.match(url)
         if not m:
@@ -750,6 +756,13 @@ def _check_token_routing(parsed_repos, org_tokens):
     org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
     line) — git.orgs carries no host, so only its owner/canon pairing is
     recorded.
+
+    scp-style, ssh:// and git:// repos: URLs never route a host here (they
+    have no https per-org token to protect from a host mismatch — see
+    _org_hosts), but their owners still count for the canon-collision check:
+    an owner spelled only that way (_ssh_repo_owners) is added to
+    canon_owners with no host entry, so a git.orgs token that sanitises to
+    the same canon still raises "both map to" instead of silently deriving.
     """
     canon_owners = {}
     canon_hosts = {}
@@ -757,6 +770,8 @@ def _check_token_routing(parsed_repos, org_tokens):
     for host, owner, canon in _routed_repo_owners(parsed_repos):
         canon_owners.setdefault(canon, set()).add(owner)
         canon_hosts.setdefault(canon, set()).add(host)
+    for owner in _ssh_repo_owners(parsed_repos):
+        canon_owners.setdefault(_canonical_token_var(owner), set()).add(owner)
     for line in org_tokens.splitlines():
         if not line:
             continue
