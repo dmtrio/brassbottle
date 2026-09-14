@@ -481,11 +481,7 @@ EOF
         # scp-style [user@]host:owner/repo. Cut the path off FIRST, then drop
         # userinfo — a `@` inside the path must not read as userinfo, and a
         # `*` in a case pattern crosses `/`, so no URL globs.
-        case "$RURL" in
-            *://*) _h="${RURL#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
-            *)     _h="${RURL%%:*}"; _p="${RURL#*:}"; _h="${_h##*@}" ;;
-        esac
-        _h=$(printf '%s' "$_h" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive (tr, not ${_h,,}: macOS bash 3.2)
+        git_url_split "$RURL"
         docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
             '[ -d "/workspace/repos/$REPO_NAME/.git" ] || git clone "$REPO_URL" "/workspace/repos/$REPO_NAME"' \
             || { case "$_h" in github.com|github.com:443)

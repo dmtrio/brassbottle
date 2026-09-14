@@ -41,7 +41,7 @@ req=$(cat)                                # buffer the request so gh can replay 
 host=$(printf '%s\n' "$req" | sed -n 's/^host=//p')
 host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive; git passes the URL's spelling
 host=${host%:443}                        # explicit default port: git passes host=github.com:443 for https://github.com:443/…
-[ -n "$host" ] || { echo "quit=1"; exit 0; }   # no host= line: nothing to route; stop git rather than fall through to another helper or a prompt
+[ -n "$host" ] || { echo "git-credential-org: request carries no host= line — nothing to route" >&2; echo "quit=1"; exit 0; }   # no host= line: nothing to route; stop git rather than fall through to another helper or a prompt
 path=$(printf '%s\n' "$req" | sed -n 's/^path=//p')
 owner=${path%%/*}
 # case-fold (github owners are case-insensitive), then sanitize. tr, not

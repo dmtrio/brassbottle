@@ -37,6 +37,7 @@ converter up.sh uses) rather than PyYAML, which is not guaranteed present.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -303,6 +304,52 @@ def secret_refs(manifest):
     return names
 
 
+def _repo_owners(manifest):
+    """Lowercased owner segments of every https:// repos: URL, tolerant of
+    both the bare-string and {name, url} entry forms. Deliberately looser
+    than src/manifest.py's own parse (no HOST_RE, no scp/ssh handling): this
+    only needs to know WHICH owners are https-routed, for the standalone
+    host: pre-flight below — it never has to reproduce manifest.py's own
+    error text."""
+    owners = set()
+    for entry in _get(manifest, "repos", default=[]) or []:
+        url = entry if isinstance(entry, str) else \
+            (entry.get("url") if isinstance(entry, dict) else None)
+        if not isinstance(url, str):
+            continue
+        m = re.match(r"^https://(?:[^@/]*@)?[^/]+/([^/]+)/", url, re.IGNORECASE)
+        if m:
+            owners.add(m.group(1).lower())
+    return owners
+
+
+def check_org_host_binding(manifest):
+    """Standalone pre-flight for the git.orgs.<owner>.host: requirement —
+    used ONLY on the no-brassbottle path (see check(), below). When a
+    brassbottle checkout IS reachable, run_real_validator already feeds the
+    draft to src/manifest.py's own derive() (_org_hosts), which enforces the
+    real rule (and its full three-case error text); this is a plainer
+    stand-in for the path where that call never runs at all, so a manifest
+    with an obviously-missing host: doesn't ship un-checked just because no
+    checkout was reachable."""
+    errors = []
+    orgs = _get(manifest, "git", "orgs", default={})
+    if not isinstance(orgs, dict):
+        return errors
+    https_owners = _repo_owners(manifest)
+    for owner, spec in orgs.items():
+        if not isinstance(owner, str):
+            continue
+        host = _get(spec, "host") if isinstance(spec, dict) else None
+        if host:
+            continue
+        if owner.lower() in https_owners:
+            continue
+        errors.append(
+            "git.orgs.%s: owner has no https:// repo in repos: — set host:" % owner)
+    return errors
+
+
 def _split_validator_output(stderr):
     """manifest.py writes '⚠' advisories and 'Error:' failures to one stream."""
     errors, warnings = [], []
@@ -402,6 +449,10 @@ def check(draft_path, manifests_dir=None, brassbottle=None):
             "implicit plugin-port defaults, so a collision on an unstated "
             "port (browser 8814, gateway 8811, …) would go unseen. Point "
             "--brassbottle at a brassbottle checkout to close that gap.")
+        # The real validator (src/manifest.py's derive()) would have caught a
+        # missing git.orgs.<owner>.host: itself — it never ran, so pre-flight
+        # that one rule standalone rather than shipping it un-checked.
+        errors.extend(check_org_host_binding(draft))
 
     sibling_dir = manifests_dir or os.path.dirname(draft_path)
     if not os.path.isdir(sibling_dir):
