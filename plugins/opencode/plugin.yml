@@ -1,0 +1,12 @@
+# opencode — env-only plugin. Delivers an OpenCode Zen / OpenCode Go API key to
+# the selected agent harnesses; Pi uses it through its native `opencode` (Zen,
+# pay per request) and `opencode-go` ($10/month open-model subscription)
+# providers. One key serves both: pi reads OPENCODE_API_KEY for either provider.
+#
+# Egress: pi dials only opencode.ai (Zen at /zen/v1, Go at /zen/go/v1). The
+# zone covers its subdomains, so a single entry is enough.
+
+secrets:
+  OPENCODE_API_KEY: {hint: "OpenCode Zen/Go API key (opencode.ai/auth → API Keys)"}
+
+egress: [opencode.ai]
