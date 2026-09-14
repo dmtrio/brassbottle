@@ -104,10 +104,11 @@ across owner spellings: `a.b` and `a_b` both become `GH_TOKEN_a_b`, so `up`
 refuses a manifest where either of two such owners has a `git.orgs` token.
 
 Each `git.orgs` token is bound to one host: the host its owner appears on in
-`repos:`, else an explicit `git.orgs.<owner>.host:` — required if the owner
-has no repo listed (write `github.com` for a github org). An owner whose
-listed repos are scp-style, `ssh://` or `git://` is bound to that host, so a
-later https clone of the same owner there routes its token; those clones
-themselves never use it. The token is never presented to another host, and a
-token with no binding (for example one hand-set with
-`bin/update-agent-keys.sh` without `GH_HOST_<owner>`) is presented nowhere.
+`repos:` (an `https://` URL), else an explicit `git.orgs.<owner>.host:` —
+required if the owner has no repo listed (write `github.com` for a github
+org). An owner whose listed repos are all scp-style, `ssh://` or `git://`
+must declare `host:` — those clones never use the token, and the host in
+such a URL is not validated, so it is never used for routing. The token is
+never presented to another host, and a token with no binding (for example
+one hand-set with `bin/update-agent-keys.sh` without `GH_HOST_<owner>`) is
+presented nowhere.
