@@ -23,11 +23,17 @@ warn_missing() { echo "  ⚠ $1 not in secrets.env — $2 will not authenticate 
 # manifest, but a hand-set override via update-agent-keys.sh only knows the
 # VAR it was given, never the host, so it can't write the binding itself.
 # No-op for any VAR that isn't a GH_TOKEN_* (every other kind of key has no
-# such binding to check). bash-3.2 compatible.
+# such binding to check), and for any GH_TOKEN_* whose suffix isn't a
+# canonical per-org owner (all-lowercase alphanumerics/underscores, matching
+# _canonical_token_var's output) — that excludes GH_TOKEN_VARS (the scan list
+# itself, not a token) and any GH_TOKEN_<Name>-shaped source var a plugin
+# might define with its own casing, neither of which has a GH_HOST_ binding
+# to check. bash-3.2 compatible.
 warn_unbound_org_token() {
     local file="$1" var="$2" hostvar
     case "$var" in
         GH_TOKEN_*)
+            case "${var#GH_TOKEN_}" in *[!a-z0-9_]*) return 0 ;; esac
             hostvar="GH_HOST_${var#GH_TOKEN_}"
             grep -q "^$hostvar=" "$file" \
                 || echo "  ⚠ $var set without a matching GH_HOST_<owner> — git-credential-org reads GH_HOST_<owner> beside the canonical GH_TOKEN_<owner> (owner lowercased, non-alphanumerics as _); set it the same way (github.com for a github org)" >&2

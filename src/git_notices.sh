@@ -73,6 +73,7 @@ EOF
 git_egress_notices() {
     local git_credential_hosts="$1" egress="$2" egress_cidrs="$3"
     local _ehost _ok _d _is_ip _ip_re='^[0-9]+(\.[0-9]+){3}$'
+    egress=$(printf '%s' "$egress" | tr '[:upper:]' '[:lower:]')   # zone list is matched case-insensitively
     while IFS= read -r _ehost; do
         [ -n "$_ehost" ] || continue
         _ehost="${_ehost#*://}"; _ehost="${_ehost%%/*}"; _ehost="${_ehost%:*}"
@@ -95,7 +96,14 @@ git_egress_notices() {
             case "$_d" in *.*) _d="${_d#*.}";; *) _d="";; esac
         done
         if [ -z "$_ok" ]; then
-            echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall until it is added"
+            if [ -z "$_is_ip" ] && [ -n "$egress_cidrs" ]; then
+                # A DNS-named LAN host may be covered by a CIDR grant that this
+                # zone walk cannot see — soften the wording rather than the
+                # false-positive "will be refused" of the plain note.
+                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall unless one of egress_cidrs ($egress_cidrs) already covers it"
+            else
+                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall until it is added"
+            fi
         fi
     done <<EOF
 $git_credential_hosts
