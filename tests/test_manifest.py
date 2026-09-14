@@ -864,9 +864,8 @@ class TestOrgHosts(unittest.TestCase):
             derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
         self.assertIn(
-            "git.orgs owner 'vendor': no https:// repo in repos: "
-            "(scp-style and ssh:// URLs never use this token) — add an "
-            "https:// repo for it, or set host: on its git.orgs entry",
+            "git.orgs owner 'vendor': not in repos: — add its repo "
+            "(https:// to route this token) or set host: on its git.orgs entry",
             str(cm.exception))
 
     def test_org_hosts_unlisted_owner_rejected_in_mixed_bottle(self):
@@ -884,23 +883,31 @@ class TestOrgHosts(unittest.TestCase):
         # literal manifest key (it's "OrgB"), so it never spells a dotted
         # git.orgs.<owner>... path a user could paste back in the wrong case.
         self.assertIn(
-            "git.orgs owner 'orgb': no https:// repo in repos: "
-            "(scp-style and ssh:// URLs never use this token)",
+            "git.orgs owner 'orgb': not in repos: — add its repo "
+            "(https:// to route this token) or set host: on its git.orgs entry",
             str(cm.exception))
         self.assertNotIn("git.orgs.orgb", str(cm.exception))
 
-    def test_org_hosts_scp_only_owner_gets_accurate_error(self):
+    def test_org_hosts_scp_only_owner_gets_no_binding(self):
         # OrgA's only repos: entry is scp-style (git@host:owner/x.git), which
-        # never routes an https owner — the old "appears in no https repos:
-        # URL" message read as though OrgA simply had no repo at all, when in
-        # fact it has one that just can't bind a token.
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"repos": ["git@git.example.test:OrgA/x.git"],
+        # never routes an https owner — but it IS a real repo, so this must
+        # not raise. The token is still derived (GIT_ORG_TOKENS carries it,
+        # serving name/email attribution) but GIT_ORG_HOSTS gets no line for
+        # it: unbound, it is presented nowhere, so leaving it out is harmless.
+        d = derive({"repos": ["git@git.example.test:OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
-        self.assertIn(
-            "no https:// repo in repos: (scp-style and ssh:// URLs never use this token)",
-            str(cm.exception))
+        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertIn("orga", d["GIT_ORG_TOKENS"])
+
+    def test_org_hosts_ssh_scheme_only_owner_gets_no_binding(self):
+        # Same as above but for the ssh:// form (ssh://host/owner/repo.git)
+        # rather than scp-style (host:owner/repo.git).
+        d = derive({"repos": ["ssh://git.example.test/OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
+        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertIn("orga", d["GIT_ORG_TOKENS"])
 
     def test_org_hosts_declared_host(self):
         d = derive({"repos": ["https://git.example.test/OrgA/x.git"],
@@ -919,12 +926,18 @@ class TestOrgHosts(unittest.TestCase):
         self.assertNotIn("GIT_ORG_DECLARED_HOSTS", d)
 
     def test_org_hosts_declared_host_disagrees_with_repos(self):
+        # The message must read "git.orgs owner 'orga'", not the case-folded
+        # "git.orgs.orga" — the latter looks like a literal manifest key even
+        # though 'orga' is owner_lc, not what the user typed (OrgA).
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["https://git.example.test/OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga",
                                                "host": "github.com"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
-        self.assertIn("disagrees with repos:", str(cm.exception))
+        self.assertIn(
+            "git.orgs owner 'orga': host: github.com disagrees with repos: "
+            "(git.example.test) — remove host: or fix the repos: URL",
+            str(cm.exception))
 
     def test_org_hosts_bad_declared_host(self):
         with self.assertRaises(m.ManifestError) as cm:

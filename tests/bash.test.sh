@@ -65,6 +65,10 @@ err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_acme 2>&1)
 assert_eq "warn_unbound_org_token: silent once GH_HOST_acme is set" "" "$err"
 err=$(warn_unbound_org_token "$WUOT" OBSIDIAN_ANNOTATED_KEY 2>&1)
 assert_eq "warn_unbound_org_token: no-op for a non-GH_TOKEN_ var" "" "$err"
+err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_VARS 2>&1)
+assert_eq "warn_unbound_org_token: no-op for GH_TOKEN_VARS (the scan list, not a token)" "" "$err"
+err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_Hank 2>&1)
+assert_eq "warn_unbound_org_token: no-op for a non-canonical (mixed-case) suffix" "" "$err"
 # The shim-agent list derives from the descriptors — binaries of mcp-capable
 # agents — exactly what manifest.py emits as SHIM_AGENTS with every agent
 # enabled (update-agent-keys.sh itself derives per-container from the keys
@@ -435,6 +439,12 @@ out=$(git_egress_notices $'https://192.168.1.10\n' '' '192.168.1.0/24')
 assert_eq "git_egress_notices: an IP-literal host covered by a CIDR grant, no notice" "" "$out"
 out=$(git_egress_notices $'https://192.168.1.10\n' '' '')
 assert_contains "git_egress_notices: an IP-literal host with no CIDR grant still notices" "$out" "192.168.1.10"
+out=$(git_egress_notices $'https://git.example.test\n' "Example.Test" '')
+assert_eq "git_egress_notices: zone match is case-insensitive" "" "$out"
+out=$(git_egress_notices $'https://git.example.test\n' '' '10.0.0.0/8')
+assert_eq "git_egress_notices: a DNS-named host with a CIDR grant, exactly one note" \
+    "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+assert_contains "git_egress_notices: DNS-named host note mentions egress_cidrs" "$out" "unless one of egress_cidrs (10.0.0.0/8)"
 
 grep -qF '. "$SCRIPT_DIR/src/git_notices.sh"' "$REPO/up.sh" \
     && pass "up.sh sources src/git_notices.sh" \

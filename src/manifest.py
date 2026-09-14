@@ -714,6 +714,23 @@ def _routed_repo_owners(parsed_repos):
         yield host, owner, canon
 
 
+def _ssh_repo_owners(parsed_repos):
+    """Yield the lowercased owner for every scp-style or ssh:// repos: URL —
+    neither ever routes an https per-org token (see _routed_repo_owners), but
+    an owner that appears ONLY this way still has a real repos: entry, so
+    _org_hosts must not treat it as unlisted. Matched separately from
+    _routed_repo_owners' https:// parse: scp-style is
+    user@host:owner/... (no scheme) and ssh:// is ssh://[user@]host/owner/...
+    (scheme, case-insensitive)."""
+    scp_re = re.compile(r"^[^/@:]+@[^/:]+:([^/]+)/")
+    ssh_re = re.compile(r"^ssh://(?:[^@/]*@)?[^/]+/([^/]+)/", re.IGNORECASE)
+    for _name, url in parsed_repos:
+        m = scp_re.match(url) or ssh_re.match(url)
+        if not m:
+            continue
+        yield m.group(1).lower()
+
+
 def _check_token_routing(parsed_repos, org_tokens):
     """A canonical token var (_canonical_token_var) must map to exactly ONE
     owner string and ONE host, across BOTH repos: URLs and git.orgs keys —
@@ -771,13 +788,23 @@ def _org_hosts(parsed_repos, org_tokens, declared_hosts):
        in _routed_repo_owners' output) — that host wins, full stop.
     2. declared: no repos: URL routes this owner, but git.orgs.<owner>.host:
        named one explicitly — use it.
-    3. otherwise: a hard error. There is no default host. The binding decides
-       which host receives the token, and a wrong guess presents a token to
-       the wrong forge — an owner routed by git.orgs that appears in no
-       repos: URL and declares no host: must never silently resolve to
-       github.com just because this particular bottle happens to have no
-       other hosts installed; a later repos: or git.orgs edit elsewhere in
-       the same bottle would then flip that guess out from under it.
+    3. otherwise: either no binding, or a hard error, depending on WHY the
+       owner has no https-derived host and no declared host::
+       - its only repos: entries are scp-style or ssh:// (canon found in
+         _ssh_repo_owners' output): it has a real repo, that repo just never
+         routes an https token, so silently emit NO GIT_ORG_HOSTS line — the
+         token is written to GIT_ORG_TOKENS but, unbound, is presented
+         nowhere (harmless: nothing reads a per-org token without a host to
+         pair it with); the git.orgs entry still serves its name/email
+         attribution.
+       - otherwise: the owner appears in no repos: URL of any kind — a hard
+         error. There is no default host. The binding decides which host
+         receives the token, and a wrong guess presents a token to the wrong
+         forge — an owner routed by git.orgs that appears in no repos: URL
+         and declares no host: must never silently resolve to github.com
+         just because this particular bottle happens to have no other hosts
+         installed; a later repos: or git.orgs edit elsewhere in the same
+         bottle would then flip that guess out from under it.
 
     When both a repos-derived host and a declared host: exist for the same
     owner and disagree, that is a manifest error too (the declaration is
@@ -787,16 +814,19 @@ def _org_hosts(parsed_repos, org_tokens, declared_hosts):
     produces, so it stays in lockstep with the token var: "GH_HOST_" +
     canon[len("GH_TOKEN_"):] (canon is always "GH_TOKEN_" + sanitised owner —
     see _canonical_token_var). _check_token_routing has already guaranteed at
-    most one repos-derived host per routed canon.
+    most one repos-derived host per routed canon. The scp/ssh check compares
+    canon, not the raw owner string, for the same reason: two owner spellings
+    that sanitise to the same canon must be treated as the same owner here.
 
     org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
     line); declared_hosts is GIT_ORG_DECLARED_HOSTS (owner<TAB>host per line,
     from _git_identity). Returns owner<TAB>hostvar<TAB>host per line, in
-    org_tokens order.
+    org_tokens order (an unbound scp/ssh-only owner contributes no line).
     """
     canon_hosts = {}
     for host, _owner, canon in _routed_repo_owners(parsed_repos):
         canon_hosts.setdefault(canon, host)
+    ssh_canons = {_canonical_token_var(o) for o in _ssh_repo_owners(parsed_repos)}
     declared = {}
     for line in declared_hosts.splitlines():
         if not line:
@@ -812,16 +842,19 @@ def _org_hosts(parsed_repos, org_tokens, declared_hosts):
         decl = declared.get(owner)
         if derived is not None and decl is not None and derived != decl:
             raise ManifestError(
-                f"git.orgs.{owner}: host: {decl} disagrees with repos: ({derived})")
+                f"git.orgs owner '{owner}': host: {decl} disagrees with repos: ({derived}) "
+                "— remove host: or fix the repos: URL")
         if derived is not None:
             host = derived
         elif decl is not None:
             host = decl
+        elif canon in ssh_canons:
+            continue   # scp/ssh-only owner: real repo, just never routes an https token — no binding, no error
         else:
             raise ManifestError(
-                f"git.orgs owner '{owner}': no https:// repo in repos: (scp-style and "
-                f"ssh:// URLs never use this token) — add an https:// repo for it, or set "
-                f"host: on its git.orgs entry (github.com for a github org)")
+                f"git.orgs owner '{owner}': not in repos: — add its repo "
+                f"(https:// to route this token) or set host: on its git.orgs "
+                f"entry (github.com for a github org)")
         hostvar = "GH_HOST_" + canon[len("GH_TOKEN_"):]
         lines.append(f"{owner}\t{hostvar}\t{host}\n")
     return "".join(lines)
