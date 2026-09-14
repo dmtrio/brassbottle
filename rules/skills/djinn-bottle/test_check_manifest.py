@@ -196,6 +196,52 @@ class SecretRefs(unittest.TestCase):
         self.assertEqual(cm.secret_refs({}), set())
 
 
+class OrgHostBinding(unittest.TestCase):
+    """check_org_host_binding — the standalone git.orgs.<owner>.host: rule
+    check() runs only on the no-brassbottle path (see EndToEnd below for
+    that wiring); src/manifest.py's own derive() already enforces the real
+    rule whenever a checkout IS reachable."""
+
+    def test_missing_host_and_no_https_repo_is_an_error(self):
+        errors = cm.check_org_host_binding({
+            "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}},
+        })
+        self.assertEqual(
+            errors,
+            ["git.orgs.acme: owner has no https:// repo in repos: — set host:"])
+
+    def test_declared_host_passes(self):
+        errors = cm.check_org_host_binding({
+            "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme",
+                                      "host": "git.example.test"}}},
+        })
+        self.assertEqual(errors, [])
+
+    def test_https_repo_for_the_owner_passes(self):
+        errors = cm.check_org_host_binding({
+            "repos": ["https://github.com/acme/x.git"],
+            "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}},
+        })
+        self.assertEqual(errors, [])
+
+    def test_owner_matching_is_case_insensitive(self):
+        errors = cm.check_org_host_binding({
+            "repos": ["https://github.com/Acme/x.git"],
+            "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}},
+        })
+        self.assertEqual(errors, [])
+
+    def test_repos_name_url_map_form_counts_too(self):
+        errors = cm.check_org_host_binding({
+            "repos": [{"name": "x", "url": "https://github.com/acme/x.git"}],
+            "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}},
+        })
+        self.assertEqual(errors, [])
+
+    def test_no_orgs_is_clean(self):
+        self.assertEqual(cm.check_org_host_binding({}), [])
+
+
 class ValidatorOutput(unittest.TestCase):
     def test_advisories_and_errors_are_separated(self):
         errors, warnings = cm._split_validator_output(
@@ -219,6 +265,26 @@ class EndToEnd(unittest.TestCase):
         real = cm.BRASSBOTTLE_CANDIDATES
         cm.BRASSBOTTLE_CANDIDATES = ()
         self.addCleanup(setattr, cm, "BRASSBOTTLE_CANDIDATES", real)
+
+    def test_missing_org_host_binding_is_an_error_without_brassbottle(self):
+        # No brassbottle checkout → run_real_validator never runs, so this is
+        # the standalone check_org_host_binding rule's only chance to catch
+        # a missing host: before the manifest ships.
+        draft = write(self.dir, "newbox.yml",
+                      "task: newbox\n"
+                      "git: {orgs: {acme: {token: GH_TOKEN_acme}}}\n")
+        errors, _, _ = cm.check(draft)
+        self.assertTrue(any(
+            e == "git.orgs.acme: owner has no https:// repo in repos: — set host:"
+            for e in errors))
+
+    def test_declared_org_host_binding_passes_without_brassbottle(self):
+        draft = write(self.dir, "newbox.yml",
+                      "task: newbox\n"
+                      "git: {orgs: {acme: {token: GH_TOKEN_acme, "
+                      "host: git.example.test}}}\n")
+        errors, _, _ = cm.check(draft)
+        self.assertEqual(errors, [])
 
     def test_clean_draft_passes_without_a_brassbottle_checkout(self):
         write(self.dir, "existing.yml", """

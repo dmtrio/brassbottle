@@ -69,6 +69,22 @@ err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_VARS 2>&1)
 assert_eq "warn_unbound_org_token: no-op for GH_TOKEN_VARS (the scan list, not a token)" "" "$err"
 err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_Hank 2>&1)
 assert_eq "warn_unbound_org_token: no-op for a non-canonical (mixed-case) suffix" "" "$err"
+
+# note_orphan_org_binding <file> <VAR>: the removal-side sibling — used after
+# a GH_TOKEN_<owner> is removed from an agent env file, to flag a
+# GH_HOST_<owner> binding left behind with no token to gate. Same
+# canonical-suffix filter as warn_unbound_org_token, tested directly for the
+# same reason.
+NOOB="$WORK/noob.env"; printf 'GH_HOST_acme=git.example.test\n' > "$NOOB"
+err=$(note_orphan_org_binding "$NOOB" GH_TOKEN_acme 2>&1)
+assert_contains "note_orphan_org_binding: notes when GH_HOST_acme is still present" "$err" "GH_HOST_acme still set in $NOOB"
+: > "$NOOB"
+err=$(note_orphan_org_binding "$NOOB" GH_TOKEN_acme 2>&1)
+assert_eq "note_orphan_org_binding: silent when no GH_HOST_acme is present" "" "$err"
+printf 'GH_HOST_acme=git.example.test\n' > "$NOOB"
+err=$(note_orphan_org_binding "$NOOB" GH_TOKEN_VARS 2>&1)
+assert_eq "note_orphan_org_binding: no-op for GH_TOKEN_VARS (the scan list, not a token)" "" "$err"
+
 # The shim-agent list derives from the descriptors — binaries of mcp-capable
 # agents — exactly what manifest.py emits as SHIM_AGENTS with every agent
 # enabled (update-agent-keys.sh itself derives per-container from the keys
@@ -281,9 +297,10 @@ assert_contains "hand-set binding spelled with case/port still matches" "$out" "
 # A request with no host= line at all (git credential fill invoked by
 # hand) has nothing to route — quit=1 so git stops instead of falling through
 # to another helper or a prompt.
-out=$(printf 'protocol=https\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_TOKEN=defval bash "$HELPER" get); rc=$?
+out=$(printf 'protocol=https\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_TOKEN=defval bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
 assert_eq "no host= → quit=1" "quit=1" "$out"
 assert_rc "no host= → clean exit" 0 "$rc"
+assert_contains "no host= → stderr says why" "$(cat "$WORK/cred-err")" "git-credential-org: request carries no host= line — nothing to route"
 
 # store/erase are no-ops (stateless helper) — no output, clean exit.
 out=$(printf 'protocol=https\nhost=github.com\npath=vendor/lib.git\n' | GH_TOKEN_vendor=vtok bash "$HELPER" store); rc=$?
@@ -383,9 +400,9 @@ grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
 grep -q 'git.orgs.<owner>.token names a GH_TOKEN_<owner> var in secrets.env' "$REPO/up.sh" \
     && pass "up.sh warns with the non-github clone-failure message" \
     || fail "up.sh missing the non-github clone-failure warning text"
-grep -qF '*://*) _h="${RURL#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;' "$REPO/up.sh" \
-    && pass "up.sh derives the host/path before the clone-warning case" \
-    || fail "up.sh derives the host/path before the clone-warning case"
+grep -qF 'git_url_split "$RURL"' "$REPO/up.sh" \
+    && pass "up.sh derives the host/path via git_url_split" \
+    || fail "up.sh derives the host/path via git_url_split"
 grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
     && pass "up.sh clone warning matches on host, not URL" \
     || fail "up.sh clone warning matches on host, not URL"
@@ -456,9 +473,6 @@ grep -qF 'git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' 
     && pass "up.sh calls git_egress_notices" \
     || fail "up.sh no longer calls git_egress_notices"
 
-grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
-    && pass "up.sh lowercases the clone-hint host" \
-    || fail "up.sh missing the clone-hint host lowercasing"
 # The up-time notice loop's scheme guard must be case-insensitive and
 # admit only https:// (scp-style/ssh:// take no HTTP credential at all). The
 # loop itself now lives in src/git_notices.sh, not up.sh (see the
@@ -470,43 +484,32 @@ grep -qF '[ "$_rscheme" = https ] || continue' "$REPO/src/git_notices.sh" \
     && pass "git_notices.sh notice loop's old *://*) guard is gone" \
     || fail "git_notices.sh notice loop's old *://*) guard is still present"
 
-# Functional test of the case logic itself: the same host/path-extraction
-# lines and case, copied verbatim from up.sh, so a rewrite of the case arms
-# is caught by behavior, not just by the drift-pin greps above.
-warn_kind() {
-    case "$1" in
-        *://*) _h="${1#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
-        *)     _h="${1%%:*}"; _p="${1#*:}"; _h="${_h##*@}" ;;
-    esac
-    case "$_h" in
-        github.com|github.com:443) echo github;;
-        *) echo other;;
-    esac
-}
-assert_eq "warn_kind: plain github.com URL is github" "github" "$(warn_kind 'https://github.com/o/r.git')"
-assert_eq "warn_kind: userinfo@github.com:443 URL is github" "github" "$(warn_kind 'https://bot@github.com:443/o/r.git')"
-assert_eq "warn_kind: an '@' in the path before a real github.com userinfo is NOT github" \
-    "other" "$(warn_kind 'https://gitea.example.test/org/a@github.com/b.git')"
-assert_eq "warn_kind: github.com as a suffix of another host is NOT github" \
-    "other" "$(warn_kind 'https://github.com.evil.test/o/r.git')"
-assert_eq "warn_kind: scp-style github URL is github" "github" "$(warn_kind 'git@github.com:dmtrio/x.git')"
-assert_eq "warn_kind: scp-style non-github URL is other" "other" "$(warn_kind 'git@gitea.example.test:org/x.git')"
-
-# owner_of(): the same host/path split, but returning the derived owner
-# (first path segment) — the REPO_OWNER half of the shared derivation.
-owner_of() {
-    case "$1" in
-        *://*) _h="${1#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
-        *)     _h="${1%%:*}"; _p="${1#*:}"; _h="${_h##*@}" ;;
-    esac
-    echo "${_p%%/*}"
-}
-assert_eq "owner_of: '@' in the path before a real userinfo does not confuse owner" \
-    "org" "$(owner_of 'https://gitea.example.test/org/a@github.com/b.git')"
-assert_eq "owner_of: userinfo is dropped, owner is the first path segment" \
-    "Acme" "$(owner_of 'https://bot@github.com/Acme/x.git')"
-assert_eq "owner_of: scp-style URL" "dmtrio" "$(owner_of 'git@github.com:dmtrio/x.git')"
-assert_eq "owner_of: ssh:// URL" "o" "$(owner_of 'ssh://git@github.com/o/r.git')"
+# Functional test of git_url_split itself (defined in src/git_notices.sh,
+# sourced above) — the same host/path derivation up.sh's clone loop now
+# calls, so a rewrite of the case arms is caught by behavior, not just by
+# the drift-pin greps above.
+git_url_split 'https://github.com/o/r.git'
+assert_eq "git_url_split: plain github.com URL host" "github.com" "$_h"
+git_url_split 'https://bot@github.com:443/o/r.git'
+assert_eq "git_url_split: userinfo@github.com:443 URL host" "github.com:443" "$_h"
+assert_eq "git_url_split: userinfo@github.com:443 URL owner" "o" "${_p%%/*}"
+git_url_split 'https://gitea.example.test/org/a@github.com/b.git'
+assert_eq "git_url_split: an '@' in the path before a real userinfo does not confuse host" \
+    "gitea.example.test" "$_h"
+assert_eq "git_url_split: an '@' in the path before a real userinfo does not confuse owner" \
+    "org" "${_p%%/*}"
+git_url_split 'https://github.com.evil.test/o/r.git'
+assert_eq "git_url_split: github.com as a suffix of another host is NOT github.com" \
+    "github.com.evil.test" "$_h"
+git_url_split 'git@github.com:dmtrio/x.git'
+assert_eq "git_url_split: scp-style github host" "github.com" "$_h"
+assert_eq "git_url_split: scp-style github owner" "dmtrio" "${_p%%/*}"
+git_url_split 'git@gitea.example.test:org/x.git'
+assert_eq "git_url_split: scp-style non-github host" "gitea.example.test" "$_h"
+git_url_split 'ssh://git@github.com/o/r.git'
+assert_eq "git_url_split: ssh:// URL owner" "o" "${_p%%/*}"
+git_url_split 'https://GitHub.com/o/r.git'
+assert_eq "git_url_split: host is lowercased (the case the mirror missed)" "github.com" "$_h"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── common.sh ──"
@@ -881,6 +884,18 @@ out=$(printf '\n' | uak removal common FOO 2>&1); rc=$?
 assert_rc "common removal across every agent file exits 0" 0 "$rc"
 allclear=1; for a in one two three; do grep -q '^FOO=' "$RKP/$a.env" && allclear=0; done
 assert_eq "common removal clears the var from every agent file" "1" "$allclear"
+
+# Fix C: removing GH_TOKEN_acme via `common` from agent files that still
+# carry GH_HOST_acme leaves an orphaned binding behind — note it once per
+# file (note_orphan_org_binding), not once per run.
+OKP="$DAH/keys/orphan"; mkdir -p "$OKP"
+for a in one two; do printf 'GH_TOKEN_acme=tok\nGH_HOST_acme=git.example.test\n' > "$OKP/$a.env"; chmod 600 "$OKP/$a.env"; done
+out=$(printf '\n' | uak orphan common GH_TOKEN_acme 2>"$WORK/orphan-err"); rc=$?
+assert_rc "common removal with an orphaned host binding exits 0" 0 "$rc"
+tokgone=1; for a in one two; do grep -q '^GH_TOKEN_acme=' "$OKP/$a.env" && tokgone=0; done
+assert_eq "common removal clears GH_TOKEN_acme from both agent files" "1" "$tokgone"
+assert_eq "common removal notes the orphaned binding once per file (two notes)" \
+    "2" "$(grep -c 'still set in' "$WORK/orphan-err")"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── run-*.sh token generation ──"

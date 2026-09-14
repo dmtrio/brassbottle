@@ -9,6 +9,24 @@
 # return 0 — neither is ever fatal; a missing token or a missing egress zone
 # fails at the FIRST clone, not at bring-up. These just warn early.
 
+# git_url_split <url>
+# Host and path from a repo URL, exactly as up.sh's clone loop derived them
+# before this was extracted: https://[user@]host[:port]/owner/repo and
+# scp-style [user@]host:owner/repo. Cut the path off FIRST, then drop
+# userinfo — a `@` inside the path must not read as userinfo, and a `*` in a
+# case pattern crosses `/`, so no URL globs. Sets the caller-visible _h (host,
+# lowercased — tr, not ${_h,,}: macOS bash 3.2) and _p (path after the host);
+# ${_p%%/*} is the owner. bash 3.2 has no local-with-nameref, so these are
+# plain globals like the rest of this file's caller-visible outputs.
+git_url_split() {
+    local url="$1"
+    case "$url" in
+        *://*) _h="${url#*://}"; _p="${_h#*/}"; _h="${_h%%/*}"; _h="${_h##*@}" ;;
+        *)     _h="${url%%:*}"; _p="${url#*:}"; _h="${_h##*@}" ;;
+    esac
+    _h=$(printf '%s' "$_h" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive (tr, not ${_h,,}: macOS bash 3.2)
+}
+
 # git_owner_notices <REPOS> <GIT_ORG_TOKENS>
 # Up-time notice: an owner routed via a non-github repos: URL, with no
 # git.orgs token for THAT OWNER, will fail every private clone of its repos —
