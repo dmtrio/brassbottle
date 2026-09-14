@@ -181,7 +181,7 @@ out=$(cred PlanetExpress/ship.git GH_TOKEN_planetexpress=ptok GH_HOST_planetexpr
 assert_contains "mixed-case owner folds to GH_TOKEN_planetexpress" "$out" "password=ptok"
 assert_absent "mixed-case owner does not fall back to default" "$out" "password=defval"
 
-# Fix B: no GH_HOST_<owner> binding at all → the per-org token is refused
+# No GH_HOST_<owner> binding at all → the per-org token is refused
 # EVERYWHERE, github.com included (an empty $bound never equals a real
 # $host) — the container default GH_TOKEN still answers for github.com.
 out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_TOKEN=defval)
@@ -230,7 +230,7 @@ out=$(cred emergence/x.git GH_TOKEN_emergence=etok GH_HOST_emergence=git.example
 assert_contains "gitea-bound token is never presented on github.com either" "$out" "password=defval"
 assert_absent "…not the gitea-bound token itself" "$out" "password=etok"
 
-# Fix C: the wrong-host and unbound refusal on github.com fell through to the
+# The wrong-host and unbound refusal on github.com fell through to the
 # container default with NO diagnostic — add one before the fall-through.
 out=$(cred acme/x.git GH_TOKEN_acme=atok GH_HOST_acme=gitea.example.test GH_TOKEN=defval 2>"$WORK/cred-fallback-bound-err")
 assert_contains "wrong-host refusal on github.com still falls back to the default token" "$out" "password=defval"
@@ -272,13 +272,13 @@ assert_contains "github.com:443 still takes the github default" "$out" "password
 out=$(printf 'protocol=https\nhost=GitHub.com\npath=nobody/x.git\n' | env -i GH_TOKEN=defval bash "$HELPER" get)
 assert_contains "mixed-case github host still takes the github default" "$out" "password=defval"
 
-# Fix B: a hand-set GH_HOST_<owner> (e.g. via bin/update-agent-keys.sh) may be
+# A hand-set GH_HOST_<owner> (e.g. via bin/update-agent-keys.sh) may be
 # spelled with different case/port than the request's normalized host —
 # normalise $bound the same way as $host before comparing.
 out=$(printf 'protocol=https\nhost=gitea.example.test\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_HOST_acme=Gitea.Example.Test:443 bash "$HELPER" get)
 assert_contains "hand-set binding spelled with case/port still matches" "$out" "password=atok"
 
-# Fix B: a request with no host= line at all (git credential fill invoked by
+# A request with no host= line at all (git credential fill invoked by
 # hand) has nothing to route — quit=1 so git stops instead of falling through
 # to another helper or a prompt.
 out=$(printf 'protocol=https\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_TOKEN=defval bash "$HELPER" get); rc=$?
@@ -444,7 +444,7 @@ assert_eq "git_egress_notices: zone match is case-insensitive" "" "$out"
 out=$(git_egress_notices $'https://git.example.test\n' '' '10.0.0.0/8')
 assert_eq "git_egress_notices: a DNS-named host with a CIDR grant, exactly one note" \
     "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
-assert_contains "git_egress_notices: DNS-named host note mentions egress_cidrs" "$out" "unless egress_cidrs (10.0.0.0/8) covers the address it resolves to"
+assert_contains "git_egress_notices: DNS-named host note mentions egress_cidrs" "$out" "egress_cidrs (10.0.0.0/8)"
 
 grep -qF '. "$SCRIPT_DIR/src/git_notices.sh"' "$REPO/up.sh" \
     && pass "up.sh sources src/git_notices.sh" \
@@ -459,7 +459,7 @@ grep -qF 'git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' 
 grep -qF '_h=$(printf '"'"'%s'"'"' "$_h" | tr' "$REPO/up.sh" \
     && pass "up.sh lowercases the clone-hint host" \
     || fail "up.sh missing the clone-hint host lowercasing"
-# Fix A: the up-time notice loop's scheme guard must be case-insensitive and
+# The up-time notice loop's scheme guard must be case-insensitive and
 # admit only https:// (scp-style/ssh:// take no HTTP credential at all). The
 # loop itself now lives in src/git_notices.sh, not up.sh (see the
 # "── src/git_notices.sh ──" section below).

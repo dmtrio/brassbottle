@@ -78,7 +78,7 @@ git_egress_notices() {
         [ -n "$_ehost" ] || continue
         _ehost="${_ehost#*://}"; _ehost="${_ehost%%/*}"; _ehost="${_ehost%:*}"
         _ehost=$(printf '%s' "$_ehost" | tr '[:upper:]' '[:lower:]')
-        # Review finding 1: an IP-literal host has no DNS name, so no zone in
+        # An IP-literal host has no DNS name, so no zone in
         # capabilities.egress could ever cover it — that's what
         # capabilities.egress_cidrs (EGRESS_CIDRS) is for. A non-empty
         # EGRESS_CIDRS means a CIDR grant may already reach this host in a way
@@ -103,9 +103,9 @@ git_egress_notices() {
                 # the address it resolves to, not the CIDR "covering" the
                 # name itself — a private CIDR grant can never cover a public
                 # DNS name as such, only the address that name resolves to.
-                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall unless egress_cidrs ($egress_cidrs) covers the address it resolves to"
+                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall unless it was allowed another way (a saved allow-egress domain, or egress_cidrs ($egress_cidrs) covering the address it resolves to)"
             else
-                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall until it is added"
+                echo "  note: $_ehost: git host is not in capabilities.egress — clones will be refused by the firewall unless it was allowed another way (a saved allow-egress domain)"
             fi
         fi
     done <<EOF

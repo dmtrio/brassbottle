@@ -837,15 +837,29 @@ class TestTokenRouting(unittest.TestCase):
         self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
 
     def test_scp_owner_colliding_with_orgs_owner_rejected(self):
-        # scp/ssh/git:// owners route no host here (_org_hosts never binds a
-        # token to them), but their owner still counts for the
-        # canon-collision check — otherwise a git.orgs token whose canon
-        # collides with a scp-only owner would derive silently.
+        # scp/ssh/git:// owners are bound to the host they're spelled on
+        # (_org_hosts), but their owner still counts for the canon-collision
+        # check too — otherwise a git.orgs token whose canon collides with a
+        # scp-only owner would derive silently.
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["git@h.test:a.b/x.git"],
                     "git": {"orgs": {"a_b": {"token": "GH_TOKEN_a_b"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
         self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
+
+    def test_owner_on_scp_github_and_https_gitea_rejected(self):
+        # The same owner spelled via scp-style (bound to github.com) and via
+        # https on a different host — _ssh_repo_owners now feeds canon_hosts
+        # too, so this collides exactly like two https: URLs on different
+        # hosts would.
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["git@github.com:acme/a.git",
+                              "https://git.example.test/acme/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
+        self.assertIn(
+            "appears on more than one host (git.example.test, github.com)",
+            str(cm.exception))
 
     def test_scp_owner_with_no_orgs_token_derives(self):
         # Same repos:, but no git.orgs token routes for that canon — the
@@ -906,45 +920,66 @@ class TestOrgHosts(unittest.TestCase):
             str(cm.exception))
         self.assertNotIn("git.orgs.orgb", str(cm.exception))
 
-    def test_org_hosts_scp_only_owner_gets_no_binding(self):
-        # OrgA's only repos: entry is scp-style (git@host:owner/x.git), which
-        # never routes an https owner — but it IS a real repo, so this must
-        # not raise. The token is still derived (GIT_ORG_TOKENS carries it,
-        # serving name/email attribution) but GIT_ORG_HOSTS gets no line for
-        # it: unbound, it is presented nowhere, so leaving it out is harmless.
+    def test_org_hosts_scp_only_owner_binds_to_that_host(self):
+        # OrgA's only repos: entry is scp-style (git@host:owner/x.git),
+        # which never routes an https owner directly — but the owner
+        # demonstrably lives on that host, so it's bound there: a later
+        # https clone of the same owner on the same host would route this
+        # token instead of falling back to the container default silently.
         d = derive({"repos": ["git@git.example.test:OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertEqual(d["GIT_ORG_HOSTS"], "orga\tGH_HOST_orga\tgit.example.test\n")
         self.assertIn("orga", d["GIT_ORG_TOKENS"])
 
-    def test_org_hosts_ssh_scheme_only_owner_gets_no_binding(self):
+    def test_org_hosts_scp_github_owner_binds_without_router_entry(self):
+        # A github scp repo binds its owner to github.com, but
+        # GIT_CREDENTIAL_HOSTS stays empty — github.com already gets the
+        # router unconditionally (entrypoint.sh), so it's excluded there
+        # the same as an https:// github repo would be.
+        d = derive({"repos": ["git@github.com:acme/x.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
+        self.assertEqual(d["GIT_ORG_HOSTS"], "acme\tGH_HOST_acme\tgithub.com\n")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+
+    def test_org_hosts_ssh_scheme_only_owner_binds_to_that_host(self):
         # Same as above but for the ssh:// form (ssh://host/owner/repo.git)
         # rather than scp-style (host:owner/repo.git).
         d = derive({"repos": ["ssh://git.example.test/OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertEqual(d["GIT_ORG_HOSTS"], "orga\tGH_HOST_orga\tgit.example.test\n")
         self.assertIn("orga", d["GIT_ORG_TOKENS"])
 
-    def test_org_hosts_scp_userless_owner_gets_no_binding(self):
+    def test_org_hosts_scp_userless_owner_binds_to_that_host(self):
         # git's scp-like syntax makes the userinfo optional
         # (host:owner/repo.git, no user@) — must still be recognised as
         # scp-style, not misread as an unlisted owner.
         d = derive({"repos": ["git.example.test:OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertEqual(d["GIT_ORG_HOSTS"], "orga\tGH_HOST_orga\tgit.example.test\n")
         self.assertIn("orga", d["GIT_ORG_TOKENS"])
 
-    def test_org_hosts_git_scheme_only_owner_gets_no_binding(self):
+    def test_org_hosts_git_scheme_only_owner_binds_to_that_host(self):
         # git:// is treated the same as ssh:// — neither ever routes an
-        # https per-org token, but the repo is real.
+        # https per-org token directly, but the owner still binds to the
+        # host it's spelled on.
         d = derive({"repos": ["git://git.example.test/OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertEqual(d["GIT_ORG_HOSTS"], "orga\tGH_HOST_orga\tgit.example.test\n")
         self.assertIn("orga", d["GIT_ORG_TOKENS"])
+
+    def test_ssh_port_dropped_from_binding(self):
+        # The binding is matched against https requests, which carry no ssh
+        # port, so a port in the ssh:// URL must not leak into the bound
+        # host.
+        d = derive({"repos": ["ssh://git@git.example.test:2222/OrgA/x.git"],
+                    "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
+        self.assertEqual(d["GIT_ORG_HOSTS"], "orga\tGH_HOST_orga\tgit.example.test\n")
 
     def test_org_hosts_declared_host(self):
         d = derive({"repos": ["https://git.example.test/OrgA/x.git"],
@@ -1003,7 +1038,7 @@ class TestOrgHosts(unittest.TestCase):
         self.assertEqual(derive({})["GIT_ORG_HOSTS"], "")
 
     def test_declared_host_installs_router(self):
-        # Fix B: a declared host: with no matching repos: URL never entered
+        # A declared host: with no matching repos: URL never entered
         # GIT_CREDENTIAL_HOSTS before — the entrypoint installed no helper for
         # it and git fell through to the desktop bridge. The router must be
         # installed for every host a token is bound to.
