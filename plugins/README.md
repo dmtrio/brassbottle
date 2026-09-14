@@ -48,6 +48,7 @@ opinion.
 | [`axiom`](axiom/) | remote HTTP (real host) | — | [README](axiom/README.md) |
 | [`annotated-watch`](annotated-watch/) | env-only (no server) | — | [README](annotated-watch/README.md) |
 | [`openrouter`](openrouter/) | env-only (no server) | — | [README](openrouter/README.md) |
+| [`opencode`](opencode/) | env-only (no server) | — | [README](opencode/README.md) |
 | [`tinfoil`](tinfoil/) | env-only + baked pi package (no server) | — | [README](tinfoil/README.md) |
 | [`ngrok`](ngrok/) | CLI binary + secret (no server) | — | [README](ngrok/README.md) |
 | [`rhinomcp-official`](rhinomcp-official/) | remote HTTP (in-Rhino server, official) | Rhino: `MCPStart` | [README](rhinomcp-official/README.md) |
