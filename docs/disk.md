@@ -2,7 +2,7 @@
 
 Docker keeps images, container writable layers, volumes, and build cache in one
 virtual disk. When it fills, pulls and builds fail with `no space left on
-device`. For djinn, the space is almost always in volumes, not images.
+device`. For djinn, the space is in volumes and in the per-bottle image layers.
 
 ## Read the numbers first
 
@@ -23,17 +23,23 @@ limit.
 tag and the tag count tracks the bottle count. Tags are free; layers cost disk,
 and layers are shared.
 
-`AGENTS_ENABLED` and `PLUGINS_ENABLED` are declared near the top of the
-`Dockerfile` but not *referenced* until the plugin install step. Cache diverges
-only from the first reference onward, so base, apt, and common tooling layers
-are stored once for all bottles.
+Every `RUN` below an `ARG` receives it as environment, so the ARG's value is
+part of that `RUN`'s cache key whether or not the command references it.
+`AGENTS_ENABLED` and `PLUGINS_ENABLED` differ per bottle, so the `Dockerfile`
+declares each one directly above the loop that reads it. Base, apt, and common
+tooling layers above that point are stored once for all bottles built from the
+same build cache; the plugin and agent layers below it are stored once per
+distinct tool combination.
 
-**Keep it that way.** Referencing either ARG earlier forks every base layer per
-bottle and multiplies image disk by the number of distinct tool combinations.
+**Keep it that way.** Declaring either ARG earlier forks every layer below the
+declaration per bottle and multiplies image disk by the number of distinct tool
+combinations. `tests/test_dockerfile_layer_order.py` pins the positions.
 
-The upshot: `Images` normally reports `0B` reclaimable, because unused tags
-share all their layers with running bottles. Image pruning is not where space
-comes from.
+Sharing depends on the build cache: a bottle rebuilt after
+`docker builder prune -a` gets fresh copies of the base layers, and older
+images keep theirs until they are rebuilt too. In `docker system df -v`,
+`SHARED SIZE` near the base image's size on a `djinn:<bottle>` row means that
+image shares nothing with the rest.
 
 ## Volumes: where space accumulates
 
@@ -128,8 +134,10 @@ stopped bottles you still want.
 
 ## Reclaiming the rest
 
-- Build cache: `docker builder prune -a` — safe, costs a slower next build.
-- Unused images: `docker image prune -a` — usually frees nothing, per above.
+- Build cache: `docker builder prune -a` — safe, costs a slower next build,
+  and bottles rebuilt afterwards stop sharing base layers with older images.
+- Unused images: `docker image prune -a` — frees the plugin and agent layers of
+  bottles with no container, and any dangling image a rebuild left behind.
 - Container writable layers grow with use and are not prunable; a `./djinn up`
   recreate resets them.
 
