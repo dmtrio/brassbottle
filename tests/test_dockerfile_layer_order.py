@@ -41,6 +41,8 @@ HERDR_URL = "https://github.com/herdrdev/herdr/releases/download"
 HERDR_CONFIG_COPY = "COPY --chown=$USERNAME:$USERNAME src/herdr-config.toml"
 PLUGIN_BAKE_COPY = "COPY --chown=$USERNAME:$USERNAME plugins /opt/plugins"
 PLUGIN_BAKE_LOOP = "for f in /opt/plugins/*/plugin.yml"
+# Three RUNs loop over agent.yml; only the install loop runs the install: block.
+AGENT_INSTALL_LOOP_BODY = "/tmp/agent-install.sh"
 
 
 def _positions(*markers):
@@ -95,6 +97,42 @@ class DockerfileLayerOrderTests(unittest.TestCase):
         block = "\n".join(block)
         self.assertIn("sudo curl", block)
         self.assertIn("sudo chmod 755 /usr/local/bin/herdr", block)
+
+
+class EnabledSetArgScopeTests(unittest.TestCase):
+    """Every RUN below an ARG sees it as env, so its value keys that RUN's
+    cache. AGENTS_ENABLED / PLUGINS_ENABLED differ per bottle: declared at the
+    top they gave each distinct set a private copy of the whole toolchain
+    (apt, node, uv — GBs), sharing only the FROM layer. Each must sit directly
+    above the loop that reads it."""
+
+    def _arg_index(self, arg_line):
+        ins = _instructions()
+        hits = [i for i, x in enumerate(ins) if x == arg_line]
+        self.assertEqual(len(hits), 1, f"expected exactly one {arg_line!r}")
+        return ins, hits[0]
+
+    def _next_run(self, ins, idx):
+        return next(x for x in ins[idx + 1:] if x.startswith("RUN"))
+
+    def test_plugins_enabled_arg_sits_below_the_toolchain(self):
+        ins, arg = self._arg_index('ARG PLUGINS_ENABLED=""')
+        herdr = next(i for i, x in enumerate(ins) if HERDR_CONFIG_COPY in x)
+        self.assertGreater(arg, herdr)
+
+    def test_first_run_below_plugins_enabled_arg_is_the_plugin_loop(self):
+        ins, arg = self._arg_index('ARG PLUGINS_ENABLED=""')
+        self.assertIn(PLUGIN_BAKE_LOOP, self._next_run(ins, arg))
+
+    def test_first_run_below_agents_enabled_arg_is_the_agent_loop(self):
+        ins, arg = self._arg_index('ARG AGENTS_ENABLED=""')
+        self.assertIn(AGENT_INSTALL_LOOP_BODY, self._next_run(ins, arg))
+
+    def test_agents_enabled_arg_sits_below_the_plugin_loop(self):
+        """So a different agent set leaves the plugin layer cached."""
+        ins, arg = self._arg_index('ARG AGENTS_ENABLED=""')
+        loop = next(i for i, x in enumerate(ins) if PLUGIN_BAKE_LOOP in x)
+        self.assertGreater(arg, loop)
 
 
 if __name__ == "__main__":
