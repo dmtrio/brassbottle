@@ -7,10 +7,10 @@ ENV TZ=America/Chicago
 ARG USERNAME=coder
 ARG USER_UID=1000
 ARG USER_GID=1000
-# Fail-closed default for direct `docker build .`; up.sh always passes the
-# manifest-derived set explicitly.
-ARG AGENTS_ENABLED=""
-ARG PLUGINS_ENABLED=""
+# AGENTS_ENABLED / PLUGINS_ENABLED are declared further down, each directly
+# above the loop that reads it: every RUN after an ARG sees it as env, so a
+# declaration up here keys the whole toolchain's cache on the bottle's set and
+# no two bottles with different sets share a single layer.
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
@@ -180,6 +180,9 @@ RUN set -eu; arch="$(dpkg --print-architecture)"; \
 # allowlisted; a check that can never succeed is noise in the log.
 COPY --chown=$USERNAME:$USERNAME src/herdr-config.toml /home/$USERNAME/.config/herdr/config.toml
 
+# Fail-closed default for direct `docker build .`; up.sh always passes the
+# manifest-derived set explicitly. Declared here, not at the top: see Build args.
+ARG PLUGINS_ENABLED=""
 COPY --chown=$USERNAME:$USERNAME plugins /opt/plugins
 RUN set -e; \
     eval "$(fnm env)"; \
@@ -214,6 +217,9 @@ RUN set -e; \
 # cost proves annoying. (The npm/pip purges at the end of this RUN address a
 # different problem — image SIZE, not rebuild speed. Neither makes the other
 # unnecessary.)
+# Fail-closed default, as for PLUGINS_ENABLED above. Declared after the plugin
+# loop so a different agent set leaves the plugin layer cached.
+ARG AGENTS_ENABLED=""
 COPY --chown=$USERNAME:$USERNAME agents /opt/agents
 RUN set -e; \
     eval "$(fnm env)"; \
