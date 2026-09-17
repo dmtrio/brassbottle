@@ -108,8 +108,13 @@ class EnabledSetArgScopeTests(unittest.TestCase):
 
     def _arg_index(self, arg_line):
         ins = _instructions()
-        hits = [i for i, x in enumerate(ins) if x == arg_line]
-        self.assertEqual(len(hits), 1, f"expected exactly one {arg_line!r}")
+        # Any declaration counts, not just this spelling: a bare
+        # `ARG PLUGINS_ENABLED` re-added at the top would fork the cache too.
+        name = arg_line.split("=")[0]
+        hits = [i for i, x in enumerate(ins)
+                if x == name or x.startswith((name + "=", name + " "))]
+        self.assertEqual(len(hits), 1, f"expected exactly one {name!r}")
+        self.assertEqual(ins[hits[0]], arg_line)
         return ins, hits[0]
 
     def _next_run(self, ins, idx):
