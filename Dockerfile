@@ -10,7 +10,9 @@ ARG USER_GID=1000
 # AGENTS_ENABLED / PLUGINS_ENABLED are declared further down, each directly
 # above the COPY + loop that reads it: every RUN after an ARG sees it as env,
 # so a declaration up here keys the whole toolchain's cache on the bottle's
-# set and two bottles with different sets share nothing beyond the FROM layers.
+# set and two bottles with different sets rebuild everything below it apart,
+# sharing only the FROM layers and whatever rebuilt byte-identical (nothing
+# in practice: apt and downloads never do).
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
@@ -213,11 +215,10 @@ RUN set -e; \
 # included) invalidates the COPY below, and a changed AGENTS_ENABLED the RUN;
 # either re-runs every enabled agent's install (~minutes, network-bound).
 # Accepted per the PLN — the loop sits late so the expensive toolchain layers
-# above stay cached; a
-# BuildKit npm cache mount is still the documented mitigation if the rebuild
-# cost proves annoying. (The npm/pip purges at the end of this RUN address a
-# different problem — image SIZE, not rebuild speed. Neither makes the other
-# unnecessary.)
+# above stay cached; a BuildKit npm cache mount is still the documented
+# mitigation if the rebuild cost proves annoying. (The npm/pip purges at the
+# end of this RUN address a different problem — image SIZE, not rebuild speed.
+# Neither makes the other unnecessary.)
 # Fail-closed default, as for PLUGINS_ENABLED above. Declared after the plugin
 # loop so a different agent set leaves the plugin layer cached.
 ARG AGENTS_ENABLED=""

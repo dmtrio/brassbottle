@@ -137,8 +137,9 @@ stopped bottles you still want.
 ## Reclaiming the rest
 
 - Build cache: `docker builder prune -a` — loses no data; the next build of
-  each bottle re-executes every `RUN`, and bottles rebuilt afterwards share no
-  layers with images built before, per above.
+  each bottle re-executes every `RUN`, and bottles rebuilt afterwards share
+  only the base and any byte-identical layer with images built before, per
+  above.
 - Unused images: `docker image prune -a` — frees the plugin and agent layers of
   bottles with no container, and any dangling image a rebuild left behind. It
   removes those bottles' whole `djinn:<bottle>` image, so their next
