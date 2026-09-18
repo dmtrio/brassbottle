@@ -45,6 +45,15 @@ PLUGIN_BAKE_LOOP = "for f in /opt/plugins/*/plugin.yml"
 AGENT_INSTALL_LOOP_BODY = "/tmp/agent-install.sh"
 
 
+def _arg_names(instruction):
+    """Names an ARG instruction declares: `ARG A=1 B \\\n C=2` declares A, B, C.
+    Anything else declares none."""
+    tokens = instruction.replace("\\\n", " ").split()
+    if not tokens or tokens[0] != "ARG":
+        return []
+    return [t.split("=", 1)[0] for t in tokens[1:]]
+
+
 def _positions(*markers):
     """Line index of each marker, failing loudly if any is missing."""
     return [_index(m) for m in markers]
@@ -109,11 +118,11 @@ class EnabledSetArgScopeTests(unittest.TestCase):
     def _arg_index(self, arg_line):
         ins = _instructions()
         # Any declaration counts, not just this spelling: a bare
-        # `ARG PLUGINS_ENABLED` re-added at the top would fork the cache too.
-        name = arg_line.split("=")[0]
-        hits = [i for i, x in enumerate(ins)
-                if x == name or x.startswith((name + "=", name + " "))]
-        self.assertEqual(len(hits), 1, f"expected exactly one {name!r}")
+        # `ARG PLUGINS_ENABLED`, or `ARG OTHER=1 PLUGINS_ENABLED`, re-added at
+        # the top would fork the cache too.
+        name = arg_line.split("=")[0].split()[1]
+        hits = [i for i, x in enumerate(ins) if name in _arg_names(x)]
+        self.assertEqual(len(hits), 1, f"expected exactly one ARG {name}")
         self.assertEqual(ins[hits[0]], arg_line)
         return ins, hits[0]
 
