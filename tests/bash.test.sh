@@ -506,6 +506,24 @@ assert_eq "git_host_notices: an ssh:// repo never gets a notice" "" "$out"
 out=$(git_host_notices $'a\thttps://github.com/acme/x.git\n' 'github.com=GH_TOKEN')
 assert_eq "git_host_notices: the CLI host with its row gets no notice" "" "$out"
 
+# End to end through the real derive: the notice list drops the
+# base-allowlisted CLI host, so the up-time egress notice is silent for it
+# even with empty capabilities.egress (it would have fired on every bottle).
+eval "$(printf '{"repos":["https://github.com/x/y.git","https://git.example.test/o/r.git"]}\n---agents---\na\t{"binary":"a","install":"x"}\n' \
+    | PRESENT_SECRET_VARS="GH_TOKEN" SECRETS_FILE=/sec/secrets.env \
+      GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
+      python3 "$REPO/src/manifest.py" --derive)"
+assert_eq "derive drops the base-allowlisted CLI host from the notice list" \
+    $'https://git.example.test\n' "$GIT_EGRESS_NOTICE_HOSTS"
+# A github-only bottle: the derived list is empty, so the notice is silent —
+# it used to fire a false note on every such bottle.
+eval "$(printf '{"repos":["https://github.com/x/y.git"]}\n---agents---\na\t{"binary":"a","install":"x"}\n' \
+    | PRESENT_SECRET_VARS="GH_TOKEN" SECRETS_FILE=/sec/secrets.env \
+      GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
+      python3 "$REPO/src/manifest.py" --derive)"
+assert_eq "a github-only bottle derives an empty notice list" "" "$GIT_EGRESS_NOTICE_HOSTS"
+out=$(git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" '' '')
+assert_eq "git_egress_notices: the base-allowlisted CLI host is silent with empty egress" "" "$out"
 out=$(git_egress_notices $'https://git.example.test\n' "git.example.test" '')
 assert_eq "git_egress_notices: exact host match in EGRESS, no notice" "" "$out"
 out=$(git_egress_notices $'https://git.example.test\n' "example.test" '')
@@ -534,8 +552,8 @@ grep -qF '. "$SCRIPT_DIR/src/git_notices.sh"' "$REPO/up.sh" \
 grep -qF 'git_host_notices "$REPOS" "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
     && pass "up.sh calls git_host_notices" \
     || fail "up.sh no longer calls git_host_notices"
-grep -qF 'git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' "$REPO/up.sh" \
-    && pass "up.sh calls git_egress_notices" \
+grep -qF 'git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' "$REPO/up.sh" \
+    && pass "up.sh calls git_egress_notices with the notice-host list" \
     || fail "up.sh no longer calls git_egress_notices"
 
 # The up-time notice loop's scheme guard must be case-insensitive and
