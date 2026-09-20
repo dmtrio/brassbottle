@@ -212,7 +212,15 @@ echo "── src/git-credential-org.sh ──"
 # unlisted host → defer to gh when gh holds a login for it, else quit=1 with
 # a stderr line naming git.hosts.<host>.token. Run the real script.
 HELPER="$REPO/src/git-credential-org.sh"
-gcred() { printf 'protocol=https\nhost=%s\npath=%s\n' "$1" "$2" | env "${@:3}" bash "$HELPER" get; }
+# gh is never invoked unless the request reaches the fallback; whenever it
+# CAN (a listed host with an empty row variable), it must never see the
+# ambient home — real gh writes state (device ids, tokens) into it. Every
+# helper call therefore runs with HOME and GH_CONFIG_DIR pointed at this
+# suite's temp dirs; a caller's own env args (GH_CONFIG_DIR fixtures)
+# come after and win.
+ISO_CONF="$WORK/ghconf-iso"; mkdir -p "$ISO_CONF" "$WORK/gh-home"
+gcred() { printf 'protocol=https\nhost=%s\npath=%s\n' "$1" "$2" \
+    | env HOME="$WORK/gh-home" GH_CONFIG_DIR="$ISO_CONF" XDG_STATE_HOME="$WORK/gh-home/.local/state" "${@:3}" bash "$HELPER" get; }
 
 # A listed host returns ITS OWN token, under its own variable name — no owner
 # lookup, no sanitisation: the secrets.env variable exactly as written.
@@ -358,13 +366,13 @@ assert_contains "host:443 takes the bare-host row" "$out" "password=ghval"
 # A request with no host= line at all (git credential fill invoked by
 # hand) has nothing to route — quit=1 so git stops instead of falling through
 # to another helper or a prompt.
-out=$(printf 'protocol=https\npath=acme/x.git\n' | env GIT_HOST_TOKENS='a.test=SRC_A' SRC_A=atok bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+out=$(printf 'protocol=https\npath=acme/x.git\n' | env HOME="$WORK/gh-home" GH_CONFIG_DIR="$ISO_CONF" GIT_HOST_TOKENS='a.test=SRC_A' SRC_A=atok bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
 assert_eq "no host= → quit=1" "quit=1" "$out"
 assert_rc "no host= → clean exit" 0 "$rc"
 assert_contains "no host= → stderr says why" "$(cat "$WORK/cred-err")" "git-credential-org: request carries no host= line — nothing to route"
 
 # store/erase are no-ops (stateless helper) — no output, clean exit.
-out=$(printf 'protocol=https\nhost=git.example.test\npath=o/r.git\n' | GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" store); rc=$?
+out=$(printf 'protocol=https\nhost=git.example.test\npath=o/r.git\n' | env HOME="$WORK/gh-home" GH_CONFIG_DIR="$ISO_CONF" GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" store); rc=$?
 assert_rc "store is a no-op (rc 0)" 0 "$rc"
 assert_eq "store produces no output" "" "$out"
 
