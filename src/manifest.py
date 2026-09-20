@@ -77,6 +77,10 @@ import sys
 # trailing newlines — word splitting ate them).
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 REF_RE = re.compile(r"^[A-Za-z0-9_]+\Z")
+# A token/secret variable name must be a valid shell identifier — leading
+# digits (e.g. 1TOKEN) are legal in the ref charset above but can never name
+# an env var, so the git token sources are validated against this instead.
+TOKEN_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 # Placeholder a plugin uses for its own host port — in a remote url, or in a
 # local bridge's command/args when the bridge dials the host (rhinomcp) — so
 # the port lives once in plugin.yml (host_port:) and a manifest plugin_ports:
@@ -162,11 +166,24 @@ REPO_DIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
 SERVICE_NAME_RE = re.compile(r"^[a-z0-9-]+\Z")
 # Forge org/user name (git.orgs key). GitHub's own rule: alphanumerics and
 # single hyphens, no leading/trailing hyphen — widened for gitea, whose owners
-# may contain '_' and '.', so '-', '_' and '.' are all non-alphanumeric and the
-# GH_TOKEN_<owner> sanitization (below) is no longer a bijection: two distinct
-# owners CAN collide on one token var (e.g. 'a.b' and 'a_b') — _git_identity
-# checks for that collision explicitly (seen_canon).
+# may contain '_' and '.'. The owner no longer keys a token var (tokens are
+# routed by host), so the charset only has to stay a sane forge name.
 OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\Z")
+# A git.hosts key: a bare hostname (optionally :port), lowercased before
+# matching. Stricter than HOST_RE (no underscore): the normalized host becomes
+# a credential-routing key that entrypoint.sh word-splits and git-credential-org
+# compares against git's request, so anything beyond letters, digits, . - and
+# an optional :port is refused rather than silently unmatched.
+GIT_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?\Z")
+
+# The one-row CLI token table: the host whose table token is ALSO exported as
+# a plain CLI env var for tools that expect it (gh, non-shim git clients).
+# This is the ONLY place github.com is named for routing — the implicit
+# default row, GIT_TOKEN_SOURCE, and the entrypoint's helper install all
+# derive from this table; the helper, entrypoint and keyfiles route purely by
+# host and never name a forge.
+CLI_TOKEN_VARS = {"github.com": "GH_TOKEN"}
+CLI_HOST = next(iter(CLI_TOKEN_VARS))
 # A bare hostname (optionally :port), lowercased before matching — shared by
 # _credential_hosts (repos: URLs, interpolated into shell by entrypoint.sh)
 # and _git_identity's git.orgs.<owner>.host: (interpolated into shell by
@@ -655,15 +672,16 @@ def _parse_secret(val, plugin, slot):
 
 
 def _credential_hosts(urls):
-    """The non-github HTTPS origins the entrypoint must install the credential
-    router under, derived from the repos: URLs. github.com is always installed
-    (entrypoint.sh) so it is excluded; scp-style and ssh:// URLs take no HTTP
-    credential helper at all. http:// URLs are rejected upstream in derive()
-    (no credential over cleartext). One origin per line —
+    """The HTTPS origins the entrypoint must install the credential router
+    under, derived from the repos: URLs — every https:// origin, no exclusions
+    (the router is installed for exactly GIT_CREDENTIAL_HOSTS, which derives
+    the table's hosts plus everything here). scp-style and ssh:// URLs take
+    no HTTP credential helper at all. http:// URLs are rejected upstream in
+    derive() (no credential over cleartext). One origin per line —
     scheme://host[:port], the exact form git matches credential.<url>.helper
     against — distinct, sorted, lowercased (hostnames are case-insensitive).
     The host is validated (it is interpolated into shell by entrypoint.sh) and
-    an explicit :443 default port is stripped before dedup/exclusion."""
+    an explicit :443 default port is stripped before dedup."""
     origins = set()
     for url in urls:
         m = re.match(r"^(https)://(?:[^@/]*@)?([^/]+)", url, re.IGNORECASE)
@@ -677,31 +695,17 @@ def _credential_hosts(urls):
         if host.endswith(":443"):
             host = host[:-len(":443")]
         origin = f"{m.group(1).lower()}://{host}"
-        if origin == "https://github.com":
-            continue
         origins.add(origin)
     return "".join(f"{o}\n" for o in sorted(origins))
 
 
-def _canonical_token_var(owner):
-    """The in-container env var a per-org token lands in — keyfiles.sh writes it,
-    git-credential-org.sh reads it. This derivation MUST match the shell one in
-    that helper byte-for-byte: lowercase the owner (github owners are
-    case-insensitive, and the router derives the owner from the clone URL, whose
-    case we don't control), then GH_TOKEN_ + every non-alphanumeric replaced by
-    _. Case-folding means two owners differing only in case would collide on one
-    var, so _git_identity rejects case-insensitive duplicate owners upstream."""
-    return "GH_TOKEN_" + re.sub(r"[^A-Za-z0-9]", "_", owner.lower())
-
-
 def _routed_repo_owners(parsed_repos):
-    """Yield (host, owner, canon) for every https:// repos: URL — the same
-    parse both _check_token_routing and _org_hosts need, kept in one place so
-    they can't drift apart. host and owner are lowercased and host has a
-    trailing :443 stripped, matching _credential_hosts' own parse; canon is
-    _canonical_token_var(owner). A URL that doesn't match https://host/owner/…
-    (already rejected upstream by derive()'s repos: validation for anything
-    that would reach here) is skipped rather than raising."""
+    """Yield (host, owner) for every https:// repos: URL — the parse the
+    git.orgs host resolution needs, kept in one place so it can't drift from
+    _credential_hosts' own. host and owner are lowercased and host has a
+    trailing :443 stripped, matching _credential_hosts' parse. A URL that
+    doesn't match https://host/owner/… (already rejected upstream by
+    derive()'s repos: validation) is skipped rather than raising."""
     for _name, url in parsed_repos:
         m = re.match(r"^https://(?:[^@/]*@)?([^/]+)/([^/]+)", url, re.IGNORECASE)
         if not m:
@@ -709,33 +713,28 @@ def _routed_repo_owners(parsed_repos):
         host = m.group(1).lower()
         if host.endswith(":443"):
             host = host[:-len(":443")]
-        owner = m.group(2).lower()
-        canon = _canonical_token_var(owner)
-        yield host, owner, canon
+        yield host, m.group(2).lower()
 
 
 def _ssh_repo_owners(parsed_repos):
-    """Yield (host, owner, canon) for every scp-style, ssh:// or git://
-    repos: URL — none of these ever route an https per-org token (see
-    _routed_repo_owners), and unlike an https-derived owner, the owner here
-    does NOT bind to that host: the host is unvalidated (never checked
-    against HOST_RE, unlike _credential_hosts' and _routed_repo_owners'
-    hosts) and MUST NOT reach any shell-interpolated output — not
-    GIT_CREDENTIAL_HOSTS, not the two-host guard in _check_token_routing,
-    and not a binding in _org_hosts. It is informational only (useful in
-    error messages); an owner listed only via scp/ssh/git:// must declare
-    host: explicitly to route its token (see _org_hosts). Matched separately
-    from _routed_repo_owners' https:// parse: scp-style is
-    [user@]host:owner/... (no scheme — git's own syntax makes the userinfo
-    optional, e.g. plain git.example.test:OrgA/x.git with the server-side
-    user implied); ssh:// and git:// are
+    """Yield the lowercased owner of every scp-style, ssh:// or git://
+    repos: URL — none of these ever route an https token (see
+    _routed_repo_owners). The owner here does NOT bind to any host: the host
+    is unvalidated (never checked against HOST_RE, unlike _credential_hosts'
+    and _routed_repo_owners' hosts) and MUST NOT reach any shell-interpolated
+    output — not GIT_CREDENTIAL_HOSTS, not GIT_HOST_TOKENS. It is
+    informational only (drives one error message): an owner listed only via
+    scp/ssh/git:// must declare host: explicitly for its git.orgs token to
+    get a row. Matched separately from _routed_repo_owners' https:// parse:
+    scp-style is [user@]host:owner/... (no scheme — git's own syntax makes
+    the userinfo optional, e.g. plain git.example.test:OrgA/x.git with the
+    server-side user implied); ssh:// and git:// are
     scheme://[user@]host[:port]/owner/... (case-insensitive scheme).
     scp_re's host segment ([^/:]+ before the literal :) can never contain a
     '/', so it can't match a scheme's '://' — https://host/... and
     ssh://host/... both fail scp_re (the ':' immediately followed by '/' has
-    no [^/:]+ to its left), leaving ssh_re to handle ssh:// and git://. host
-    and owner are lowercased; canon is _canonical_token_var(owner), matching
-    _routed_repo_owners."""
+    no [^/:]+ to its left), leaving ssh_re to handle ssh:// and git://. Owner
+    is lowercased."""
     scp_re = re.compile(r"^(?:[^/@:]+@)?([^/:]+):([^/]+)/")
     ssh_re = re.compile(r"^(?:ssh|git)://(?:[^@/]*@)?([^/:]+)(?::[0-9]+)?/([^/]+)/",
                          re.IGNORECASE)
@@ -743,183 +742,63 @@ def _ssh_repo_owners(parsed_repos):
         m = scp_re.match(url) or ssh_re.match(url)
         if not m:
             continue
-        host = m.group(1).lower()
-        owner = m.group(2).lower()
-        yield host, owner, _canonical_token_var(owner)
+        yield m.group(2).lower()
 
 
-def _check_token_routing(parsed_repos, org_tokens):
-    """A canonical token var (_canonical_token_var) must map to exactly ONE
-    owner string and ONE host, across BOTH repos: URLs and git.orgs keys —
-    but only for owners git.orgs actually routes a token for. keyfiles.sh
-    writes GH_TOKEN_<owner> and git-credential-org.sh reads it back keyed by
-    owner string alone — host plays no part in routing. So two owner
-    spellings that sanitize to the same var (e.g. 'a.b' and 'a_b') would have
-    one silently receive the other's token, and one owner string split across
-    two hosts would receive its one token on both — the wrong forge on
-    whichever host it wasn't issued for. An owner with no git.orgs token is
-    harmless: nothing routes for it (github uses the default GH_TOKEN, a
-    non-github host gets the helper's quit-loudly path), so a public
-    two-host owner like openssl on github.com + git.openssl.org must derive
-    fine. The check fires only for owners git.orgs actually routes a token
-    for — a git.orgs entry added later re-runs derive at `up` and fires then.
-
-    org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
-    line) — git.orgs carries no host, so only its owner/canon pairing is
-    recorded.
-
-    scp-style, ssh:// and git:// repos: URLs are OUT OF SCOPE for this check
-    entirely — not merely exempt from the host half of it. They route no
-    https per-org token in the first place (see _routed_repo_owners vs
-    _ssh_repo_owners: an scp/ssh/git clone never presents an https
-    credential), and every routed git.orgs token is host-bound by
-    _org_hosts — derived from an https repos: URL or declared via host: —
-    so the helper only ever presents that token for the ONE host it was
-    bound to. An owner spelled only over scp/ssh/git://, however it's
-    spelled, therefore can never cause a misroute: there is no token
-    reachable through that URL to protect, and the token that IS bound to
-    the same canon under a different, correct spelling stays bound to its
-    own host regardless. _ssh_repo_owners still feeds _org_hosts' own
-    "listed only over scp" error text; it plays no part here.
-    """
-    canon_owners = {}
-    canon_hosts = {}
-    org_canons = set()
-    for host, owner, canon in _routed_repo_owners(parsed_repos):
-        canon_owners.setdefault(canon, set()).add(owner)
-        canon_hosts.setdefault(canon, set()).add(host)
-    for line in org_tokens.splitlines():
-        if not line:
-            continue
-        owner, canon, _src = line.split("\t")
-        canon_owners.setdefault(canon, set()).add(owner)
-        org_canons.add(canon)
-    for canon in sorted(canon_owners):
-        if canon not in org_canons:
-            continue
-        owners = canon_owners[canon]
-        if len(owners) > 1:
-            raise ManifestError(
-                f"git.orgs/repos: owners {', '.join(repr(o) for o in sorted(owners))} "
-                f"both map to {canon} (non-alphanumerics become _) — per-org tokens are "
-                "keyed by that var, so one of them would receive the other's token")
-        hosts = canon_hosts.get(canon, set())
-        if len(hosts) > 1:
-            owner = next(iter(owners))
-            raise ManifestError(
-                f"repos: owner '{owner}' appears on more than one host "
-                f"({', '.join(sorted(hosts))}); per-org tokens are keyed by owner only "
-                "— put those repos in separate bottles")
+def _normalize_git_host(raw, field, errors):
+    """One git.hosts key, normalised the way the helper normalises git's own
+    request: lowercased, a trailing :443 (the explicit default port git passes
+    for an https URL spelled with it) stripped, then validated against
+    GIT_HOST_RE — letters, digits, . and -, optional :port. Returns the
+    normalised host, or None with the error appended."""
+    if not isinstance(raw, str):
+        errors.append(f"  {field}: must be a string (got a {_yaml_type(raw)})")
+        return None
+    host = raw.lower()
+    if host.endswith(":443"):
+        host = host[:-len(":443")]
+    if not GIT_HOST_RE.match(host):
+        errors.append(
+            f"  {field}: {raw!r} is not a valid host "
+            "(lowercase letters, digits, . and -, optional :port)")
+        return None
+    return host
 
 
-def _org_hosts(parsed_repos, org_tokens, declared_hosts):
-    """Bind each routed per-org token to exactly one host. Three rules, in
-    priority order:
-
-    1. https-derived: the owner appears on some host via an https:// repos:
-       URL (canon found in _routed_repo_owners' output) — that host wins,
-       full stop.
-    2. declared: no https:// repos: URL routes this owner, but
-       git.orgs.<owner>.host: named one explicitly — use it.
-    3. otherwise: a hard error. If the owner is listed only via scp-style,
-       ssh:// or git:// repos: URLs, say so by name: those clones never use
-       the token (see _routed_repo_owners vs _ssh_repo_owners), and the host
-       in such a URL is never validated (it isn't checked against HOST_RE,
-       and ssh.github.com is not github.com, nor does an ssh port say
-       anything about the https port) — so it is never used for routing,
-       even though the owner "demonstrably lives" there. host: must be set
-       explicitly. If the owner appears in no repos: URL of any kind and
-       declares no host: either, there is no default host at all. Either way
-       the binding decides which host receives the token, and a wrong guess
-       presents a token to the wrong forge — an owner routed by git.orgs
-       must never silently resolve to github.com just because this
-       particular bottle happens to have no other hosts installed; a later
-       repos: or git.orgs edit elsewhere in the same bottle would then flip
-       that guess out from under it.
-
-    When both an https-derived host and a declared host: exist for the same
-    owner and disagree, that is a manifest error too (the declaration is
-    contradicted by fact, and one of the two is wrong). A declared host: is
-    never compared against an scp/ssh/git://-derived host — only against the
-    https-derived one, since the scp/ssh/git host is unvalidated and never
-    binds.
-
-    hostvar is derived from the same sanitised owner _canonical_token_var
-    produces, so it stays in lockstep with the token var: "GH_HOST_" +
-    canon[len("GH_TOKEN_"):] (canon is always "GH_TOKEN_" + sanitised owner —
-    see _canonical_token_var). _check_token_routing has already guaranteed at
-    most one https-derived host per routed canon.
-
-    org_tokens is GIT_ORG_TOKENS (owner<TAB>canonical_var<TAB>source_var per
-    line); declared_hosts is GIT_ORG_DECLARED_HOSTS (owner<TAB>host per line,
-    from _git_identity). Returns owner<TAB>hostvar<TAB>host per line, in
-    org_tokens order.
-    """
-    canon_hosts = {}
-    for host, _owner, canon in _routed_repo_owners(parsed_repos):
-        canon_hosts.setdefault(canon, host)
-    ssh_owners = {canon for _host, _owner, canon in _ssh_repo_owners(parsed_repos)}
-    declared = {}
-    for line in declared_hosts.splitlines():
-        if not line:
-            continue
-        owner_lc, host = line.split("\t")
-        declared[owner_lc] = host
-    lines = []
-    for line in org_tokens.splitlines():
-        if not line:
-            continue
-        owner, canon, _src = line.split("\t")
-        derived = canon_hosts.get(canon)
-        decl = declared.get(owner)
-        if derived is not None and decl is not None and derived != decl:
-            raise ManifestError(
-                f"git.orgs owner '{owner}': host: {decl} disagrees with repos: ({derived}) "
-                "— remove host: or fix the repos: URL")
-        if derived is not None:
-            host = derived
-        elif decl is not None:
-            host = decl
-        elif canon in ssh_owners:
-            raise ManifestError(
-                f"git.orgs owner '{owner}': listed only over scp-style/ssh:///git:// "
-                "URLs, which never use this token — set host: on its git.orgs entry to "
-                "route https clones (github.com for a github org; host:port if the forge "
-                "serves https on a non-443 port)")
-        else:
-            raise ManifestError(
-                f"git.orgs owner '{owner}': not in repos: — add its repo "
-                f"(https:// to route this token) or set host: on its git.orgs "
-                f"entry (github.com for a github org)")
-        hostvar = "GH_HOST_" + canon[len("GH_TOKEN_"):]
-        lines.append(f"{owner}\t{hostvar}\t{host}\n")
-    return "".join(lines)
-
-
-def _git_identity(git, env, secrets_file):
+def _git_identity(parsed_repos, git, env, secrets_file):
     """Derive git credential routing from the git: section — NAMES only, per the
-    module contract (up.sh resolves the secret VALUES). git.token names the
-    default credential's secrets.env var; git.orgs.<owner>.{token,name,email}
-    override per forge owner. A token: that isn't a currently-set secrets.env var
-    (GH_TOKEN_VARS lists the ones up.sh scanned) is a hard error — never a silent
-    fall-back to the wrong identity, which is the whole reason this exists.
+    module contract (up.sh resolves the secret VALUES).
 
-    Emits (owner is lowercased — github owners are case-insensitive and the
-    router/attribution match against the clone URL's owner, whose case we don't
-    control, so both sides fold to lowercase):
-      GIT_TOKEN_SOURCE       default token's source var name ("" = keep global GH_TOKEN)
-      GIT_ORG_TOKENS         owner<TAB>canonical_var<TAB>source_var per line
-      GIT_ORG_IDENTITIES     owner<TAB>name<TAB>email per line
-      GIT_ORG_DECLARED_HOSTS owner<TAB>host per line — only owners whose
-                             git.orgs entry set an explicit host: (lowercased,
-                             a trailing :443 stripped). _org_hosts consumes
-                             this alongside repos:-derived hosts; an owner
-                             with no host: here and no repos: routing is a
-                             hard error — there is no default host, see
-                             _org_hosts. Consumed entirely inside derive()
-                             (by _org_hosts) and never emitted — up.sh has no
-                             use for it once GIT_ORG_HOSTS carries the
-                             resolved binding.
+    Routing is by HOST, in one table: git.hosts maps each host to the
+    secrets.env variable holding that host's token, exactly as written — no
+    owner sanitisation, no name mangling. The old spellings feed the same
+    table: git.token: X is the github.com row; each git.orgs entry is a row
+    for the host it resolves to (its declared host:, else the one https://
+    host its owner's repos: URLs name — never a guessed default). A
+    token: that isn't a currently-set secrets.env var (GH_TOKEN_VARS lists
+    the ones up.sh scanned) is a hard error — never a silent fall-back to
+    the wrong identity, which is the whole reason this exists.
+
+    git.hosts and the old spellings (git.token / git.orgs) are two spellings
+    of ONE table and never combine: declaring both is a hard error.
+
+    Emits:
+      GIT_HOST_TOKENS     space-separated host=VARNAME pairs, sorted by host
+                          (the table; every row var is written beside it by
+                          keyfiles.sh and forwarded to the bootstrap clone)
+      GIT_TOKEN_SOURCE    the github.com row's variable when the row was
+                          declared via git.token or
+                          git.hosts.github.com.token (up.sh exports it as the
+                          plain GH_TOKEN via CLI_TOKEN_VARS); "" = the row is
+                          the implicit default (github.com=GH_TOKEN)
+      GIT_ORG_IDENTITIES  owner<TAB>name<TAB>email per line — per-owner
+                          author attribution for the bootstrap clone; never
+                          routing (owner is lowercased: attribution matches
+                          against the clone URL's owner, whose case we don't
+                          control, so both sides fold to lowercase)
+
+    Each git.orgs owner is case-insensitive (attribution folds to lowercase),
+    so two keys differing only in case are an ambiguity and are rejected.
     """
     token_vars = set((env.get("GH_TOKEN_VARS") or "").split())
     errors = []
@@ -930,7 +809,7 @@ def _git_identity(git, env, secrets_file):
             if required:
                 errors.append(f"  {field}: needs token: (a secrets.env var name)")
             return ""
-        if not REF_RE.match(src):
+        if not TOKEN_VAR_RE.match(src):
             errors.append(f"  {field}: '{src}' is not a valid env var name")
             return ""
         if src not in token_vars:
@@ -938,38 +817,103 @@ def _git_identity(git, env, secrets_file):
             return ""
         return src
 
-    default_source = source(git.get("token"), "git.token", required=False)
+    hosts_val = git.get("hosts")
+    token_val = git.get("token")
+    orgs_val = git.get("orgs")
+    # An EMPTY git.hosts map adds no rows and is not a declaration, so it
+    # neither conflicts with the old spellings nor suppresses the implicit
+    # default row.
+    if isinstance(hosts_val, dict):
+        has_hosts = bool(hosts_val)
+    else:
+        has_hosts = not _falsy(hosts_val)
+    if has_hosts and (not _falsy(token_val) or not _falsy(orgs_val)):
+        raise ManifestError(
+            "manifest git identity failed validation:\n"
+            "  git.hosts and git.token/git.orgs are both set — they are two "
+            "spellings of one routing table; declare git.hosts only")
 
-    orgs = git.get("orgs")
-    records = []  # (owner_lc, canonical_var, source_var, name, email)
-    declared_hosts = []  # (owner_lc, host), only owners whose entry set host:
-    seen_owners = {}  # lowercased owner → the manifest key that claimed it
-    seen_canon = {}  # canonical token var → the manifest key that claimed it
-    if not _falsy(orgs):
-        if not isinstance(orgs, dict):
+    rows = {}    # normalised host -> source var
+    origin = {}  # normalised host -> the manifest spelling that claimed it
+    cli_claimed = False   # the CLI_HOST row was set explicitly (not implicit)
+
+    def add_row(host, src, claimed_by):
+        """One row per host: a second claim for the same host with the same
+        variable collapses into it; with a different variable it is an error —
+        one host carries exactly one token, so two spellings naming different
+        tokens for one host would silently race."""
+        if host in rows:
+            if rows[host] != src:
+                errors.append(
+                    f"  {origin[host]} and {claimed_by} both set a token for "
+                    f"{host} with different variables ({rows[host]}, {src}) — "
+                    "a host carries exactly one token")
+            return
+        rows[host] = src
+        origin[host] = claimed_by
+
+    # ── git.hosts (the current spelling) ─────────────────────────────────
+    if not _falsy(hosts_val):
+        if not isinstance(hosts_val, dict):
+            errors.append(
+                f"  git.hosts: must be a map of <host>: {{token}} (got a "
+                f"{_yaml_type(hosts_val)})")
+            hosts_val = {}
+        for host_key, spec in hosts_val.items():
+            field_host = _normalize_git_host(host_key, "git.hosts", errors)
+            if field_host is None:
+                continue
+            if field_host in rows:
+                errors.append(
+                    f"  git.hosts: '{host_key}' normalises to the same host as "
+                    f"'{origin[field_host]}' — drop one of the two entries")
+                continue
+            if _falsy(spec):
+                spec = {}
+            if not isinstance(spec, dict):
+                errors.append(
+                    f"  git.hosts.{field_host}: must be a map with token: "
+                    f"(got a {_yaml_type(spec)})")
+                continue
+            extra = ",".join(k for k in spec if k != "token")
+            if extra:
+                errors.append(
+                    f"  git.hosts.{field_host}: unsupported field(s): {extra} (only token)")
+                continue
+            src = source(spec.get("token"),
+                         f"git.hosts.{field_host}.token", required=True)
+            if not src:
+                continue
+            rows[field_host] = src
+            origin[field_host] = f"git.hosts.{host_key}"
+            if field_host == CLI_HOST:
+                cli_claimed = True
+
+    # ── git.token (old spelling: the CLI host's row) ─────────────────────
+    if not _falsy(token_val):
+        default_src = source(token_val, "git.token", required=False)
+        if default_src:
+            add_row(CLI_HOST, default_src, "git.token")
+            cli_claimed = True
+
+    # ── git.orgs (old spelling: per-owner tokens, resolved to hosts) ──────
+    records = []          # (owner_lc, source_var, name, email, declared_host|None)
+    seen_owners = {}      # lowercased owner → the manifest key that claimed it
+    if not _falsy(orgs_val):
+        if not isinstance(orgs_val, dict):
             errors.append("  git.orgs: must be a map of <owner>: {token, name, email, host}")
-            orgs = {}
-        for owner, spec in orgs.items():
+            orgs_val = {}
+        for owner, spec in orgs_val.items():
             field = f"git.orgs.{owner}"
             if not isinstance(owner, str) or not OWNER_RE.match(owner):
                 errors.append(f"  git.orgs: illegal owner '{owner}' (a forge org/user name)")
                 continue
-            # Owners are case-insensitive (routing folds to lowercase), so two
-            # keys differing only in case would map to one token var — an
-            # ambiguity, not a valid config. Reject it instead of silently
-            # letting the last one win.
             owner_lc = owner.lower()
             if owner_lc in seen_owners:
                 errors.append(f"  git.orgs: duplicate owner '{owner}' "
                               f"(case-insensitive clash with '{seen_owners[owner_lc]}')")
                 continue
             seen_owners[owner_lc] = owner
-            canon = _canonical_token_var(owner)
-            if canon in seen_canon:
-                errors.append(f"  git.orgs: owners '{owner}' and '{seen_canon[canon]}' "
-                              f"both map to {canon} (non-alphanumerics become _)")
-                continue
-            seen_canon[canon] = owner
             if _falsy(spec):
                 spec = {}
             if not isinstance(spec, dict):
@@ -980,6 +924,7 @@ def _git_identity(git, env, secrets_file):
                 errors.append(f"  {field}: unsupported field(s): {extra} (only token, name, email, host)")
                 continue
             raw_host = spec.get("host")
+            declared_host = None
             if "host" in spec and (_falsy(raw_host) or raw_host == ""):
                 errors.append(
                     f"  {field}.host: must be a non-empty host "
@@ -996,22 +941,71 @@ def _git_identity(git, env, secrets_file):
                             f"  git.orgs.{owner}: host '{host}' is not a valid host "
                             "(letters, digits, _ . and -, optional :port)")
                     else:
-                        declared_hosts.append((owner_lc, host))
+                        declared_host = host
             src = source(spec.get("token"), f"{field}.token", required=True)
             if not src:
                 continue
-            records.append((owner_lc, _canonical_token_var(owner), src,
+            records.append((owner_lc, src,
                             _scalar(spec.get("name"), f"{field}.name"),
-                            _scalar(spec.get("email"), f"{field}.email")))
+                            _scalar(spec.get("email"), f"{field}.email"),
+                            declared_host))
+
+    # Resolve each git.orgs token to exactly one host — where the token row
+    # lands. An https-derived host wins over a declared one only by agreeing
+    # with it; a disagreement, an owner spread over several https hosts, an
+    # owner listed only over scp/ssh/git:// (whose spelling host is never
+    # validated and never binds), and an owner in no repos: URL at all are
+    # all hard errors: a wrong guess presents the token to the wrong forge.
+    if records:
+        https_owner_hosts = {}
+        for host, owner in _routed_repo_owners(parsed_repos):
+            https_owner_hosts.setdefault(owner, set()).add(host)
+        ssh_owners = set(_ssh_repo_owners(parsed_repos))
+        for owner_lc, src, _name, _email, declared_host in records:
+            field = f"git.orgs owner '{owner_lc}'"
+            derived = https_owner_hosts.get(owner_lc, set())
+            if derived and declared_host is not None:
+                if declared_host not in derived:
+                    errors.append(
+                        f"  {field}: host: {declared_host} disagrees with repos: "
+                        f"({min(derived)}) — remove host: or fix the repos: URL")
+                    continue
+                add_row(declared_host, src, field)
+            elif len(derived) > 1:
+                errors.append(
+                    f"  {field}: its repos: URLs name more than one host "
+                    f"({', '.join(sorted(derived))}) — set host: on its git.orgs "
+                    "entry to say which one carries its token")
+            elif derived:
+                add_row(next(iter(derived)), src, field)
+            elif declared_host is not None:
+                add_row(declared_host, src, field)
+            elif owner_lc in ssh_owners:
+                errors.append(
+                    f"  {field}: listed only over scp-style/ssh:///git:// URLs, "
+                    "which never use this token — set host: on its git.orgs entry "
+                    "to route https clones (github.com for a github org; "
+                    "host:port if the forge serves https on a non-443 port)")
+            else:
+                errors.append(
+                    f"  {field}: not in repos: — add its repo "
+                    "(https:// to route this token) or set host: on its git.orgs "
+                    "entry (github.com for a github org)")
 
     if errors:
         raise ManifestError("manifest git identity failed validation:\n" + "\n".join(errors))
 
+    # The implicit default row: a manifest that declares no token anywhere
+    # (no git.hosts, no git.token, no git.orgs) keeps today's behaviour — the
+    # CLI host's token is the plain GH_TOKEN from secrets.env.
+    if CLI_HOST not in rows:
+        rows[CLI_HOST] = CLI_TOKEN_VARS[CLI_HOST]
+
     return {
-        "GIT_TOKEN_SOURCE": default_source,
-        "GIT_ORG_TOKENS": "".join(f"{o}\t{c}\t{s}\n" for o, c, s, _, _ in records),
-        "GIT_ORG_IDENTITIES": "".join(f"{o}\t{n}\t{e}\n" for o, _, _, n, e in records),
-        "GIT_ORG_DECLARED_HOSTS": "".join(f"{o}\t{h}\n" for o, h in declared_hosts),
+        "GIT_TOKEN_SOURCE": rows[CLI_HOST] if cli_claimed else "",
+        "GIT_ORG_IDENTITIES": "".join(
+            f"{o}\t{n}\t{e}\n" for o, _s, n, e, _h in records),
+        "GIT_HOST_TOKENS": " ".join(f"{h}={rows[h]}" for h in sorted(rows)),
     }
 
 
@@ -1132,7 +1126,11 @@ def derive(manifest, plugin_files, agent_files, env):
         raise ManifestError(
             "manifest repos failed validation:\n" + "\n".join(repo_errors))
     out["REPOS"] = "".join(f"{name}\t{url}\n" for name, url in parsed_repos)
-    out["GIT_CREDENTIAL_HOSTS"] = _credential_hosts(url for _name, url in parsed_repos)
+    # Validated here (the unsupported-host error must fire in repos order, before
+    # the git: section's own errors); the set feeds GIT_CREDENTIAL_HOSTS below.
+    repo_origins = {line for line in
+                    _credential_hosts(url for _name, url in parsed_repos).splitlines()
+                    if line}
     forge = _scalar(manifest.get("forge"), "forge") or "github"
     if forge not in ("github", "gitea"):
         raise ManifestError("forge must be github or gitea")
@@ -1140,38 +1138,19 @@ def derive(manifest, plugin_files, agent_files, env):
     git = _section(manifest, "git")
     out["GIT_USER_NAME"] = _scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
     out["GIT_USER_EMAIL"] = _scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
-    out.update(_git_identity(git, env, secrets_file))
-    # Per-org tokens are keyed by owner string alone, with no host (see
-    # _canonical_token_var) — checked here, after _git_identity, so it can see
-    # git.orgs (GIT_ORG_TOKENS) as well as the repos: URLs parsed above.
-    _check_token_routing(parsed_repos, out["GIT_ORG_TOKENS"])
-    out["GIT_ORG_HOSTS"] = _org_hosts(parsed_repos, out["GIT_ORG_TOKENS"],
-                                       out["GIT_ORG_DECLARED_HOSTS"])
-    # GIT_ORG_DECLARED_HOSTS is internal to derive() — up.sh never consumes it
-    # (GIT_ORG_HOSTS already carries the resolved binding for every routed
-    # owner). Drop it now that _org_hosts has used it, so it isn't emitted.
-    del out["GIT_ORG_DECLARED_HOSTS"]
-    # A declared host: that appears in no repos: URL never entered
-    # GIT_CREDENTIAL_HOSTS above (that set is repos:-derived only), so the
-    # entrypoint installed no credential-router helper for it and git fell
-    # through to the desktop bridge for that host. The router must be
-    # installed for every host a token is bound to, or the binding is never
-    # consulted — so extend GIT_CREDENTIAL_HOSTS with every GIT_ORG_HOSTS host
-    # that isn't github.com and isn't already present, keeping the result
-    # distinct and sorted, one per line. Every GIT_ORG_HOSTS host here is
-    # either https-derived (already HOST_RE-validated by _credential_hosts
-    # above, for that same repos: URL) or a declared host: (HOST_RE-validated
-    # in _git_identity) — _org_hosts never binds an owner to an unvalidated
-    # scp/ssh/git://-derived host (see _ssh_repo_owners), so nothing
-    # unvalidated reaches this f-string.
-    cred_hosts = {line for line in out["GIT_CREDENTIAL_HOSTS"].splitlines() if line}
-    for line in out["GIT_ORG_HOSTS"].splitlines():
-        if not line:
-            continue
-        _owner, _hostvar, host = line.split("\t")
-        if host != "github.com":
-            cred_hosts.add(f"https://{host}")
+    out.update(_git_identity(parsed_repos, git, env, secrets_file))
+    # GIT_CREDENTIAL_HOSTS: every host a credential may be needed for — the
+    # git.hosts table's hosts plus every https:// origin in repos: — one
+    # scheme://host[:port] per line, distinct and sorted. entrypoint.sh
+    # installs the router for each, and git-credential-org resolves every
+    # request's host through GIT_HOST_TOKENS. Every host here is validated
+    # (HOST_RE for a repos: URL, GIT_HOST_RE/HOST_RE for a table row), so
+    # nothing unvalidated reaches the entrypoint's shell interpolation.
+    cred_hosts = set(repo_origins)
+    for pair in out["GIT_HOST_TOKENS"].split():
+        cred_hosts.add(f"https://{pair.split('=', 1)[0]}")
     out["GIT_CREDENTIAL_HOSTS"] = "".join(f"{o}\n" for o in sorted(cred_hosts))
+    out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
     # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────
