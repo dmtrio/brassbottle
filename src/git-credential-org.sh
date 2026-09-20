@@ -26,9 +26,10 @@
 #     gh's own normalisation never widens it;
 #   • when deferring, the four token variables are stripped from gh's
 #     environment, so only the stored login can answer.
-# No stored login for this host → quit=1 with a stderr line naming
-# git.hosts.<host>.token, so git fails immediately instead of prompting. A
-# listed host whose variable is unset (or empty) takes the same path.
+# No stored login for this host (or a deferral that fails or returns no
+# password) → quit=1 with a stderr line naming git.hosts.<host>.token, so
+# git fails immediately instead of prompting. A listed host whose variable
+# is unset (or empty) takes the same path.
 #
 # No host is special-cased here: every host resolves through the one
 # GIT_HOST_TOKENS walk below.

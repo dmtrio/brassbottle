@@ -1178,6 +1178,7 @@ def derive(manifest, plugin_files, agent_files, env):
     # scheme://host[:port] per line, distinct and sorted. entrypoint.sh
     # installs the router for each, and git-credential-org resolves every
     # request's host through GIT_HOST_TOKENS. Every host here is validated
+    # (HOST_RE for a repos: URL, GIT_HOST_RE/HOST_RE for a table row), so
     # nothing unvalidated reaches the entrypoint's shell interpolation.
     cred_hosts = set(repo_origins)
     for pair in out["GIT_HOST_TOKENS"].split():

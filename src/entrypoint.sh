@@ -125,7 +125,8 @@ su -c "git config --global safe.directory /workspace" coder
 # git-credential-org resolves each request's host through GIT_HOST_TOKENS (the
 # manifest's git.hosts table, written into each agent env file beside the
 # token variables it names) and returns that host's token; an unlisted host
-# defers to `gh auth git-credential` when gh holds a login for it, else
+# defers to `gh auth git-credential` only for a stored gh login for exactly
+# that host, else
 # answers quit=1 — so agents present the right per-host token and humans still
 # fall back to the shared gh login. No SSH keys. useHttpPath=true feeds the
 # repo path to the helper request (and makes credential caching per-path,

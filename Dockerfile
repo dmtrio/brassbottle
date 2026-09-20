@@ -352,7 +352,7 @@ RUN chmod 644 /usr/local/lib/djinn/remote_access.py
 # Per-host git credential router (entrypoint installs it for every host in
 # GIT_CREDENTIAL_HOSTS — the manifest's git.hosts table plus every https://
 # origin in repos:). Routes by request host through GIT_HOST_TOKENS; an
-# unlisted host defers to gh's human login when gh holds one for it. See
+# unlisted host defers only to a stored gh login for exactly that host. See
 # src/git-credential-org.sh.
 COPY src/git-credential-org.sh /usr/local/bin/git-credential-org
 RUN chmod +x /usr/local/bin/git-credential-org
