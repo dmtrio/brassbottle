@@ -1150,13 +1150,11 @@ def derive(manifest, plugin_files, agent_files, env):
     # scheme://host[:port] per line, distinct and sorted. entrypoint.sh
     # installs the router for each, and git-credential-org resolves every
     # request's host through GIT_HOST_TOKENS. Every host here is validated
-    # (HOST_RE for a repos: URL, GIT_HOST_RE/HOST_RE for a table row), so
     # nothing unvalidated reaches the entrypoint's shell interpolation.
     cred_hosts = set(repo_origins)
     for pair in out["GIT_HOST_TOKENS"].split():
         cred_hosts.add(f"https://{pair.split('=', 1)[0]}")
     out["GIT_CREDENTIAL_HOSTS"] = "".join(f"{o}\n" for o in sorted(cred_hosts))
-    out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
     # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────

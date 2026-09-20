@@ -50,9 +50,9 @@ cp "$REPO"/plugins/gateway/run.sh "$SBOX/plugins/gateway/"
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/keyfiles.sh ──"
 # shellcheck disable=SC1091
-. "$REPO/src/keyfiles.sh"   # defines warn_missing + write_keyfiles + git_clone_env_pairs, no side effects
+. "$REPO/src/keyfiles.sh"   # defines warn_missing + write_keyfiles + git_host_token_pairs, no side effects
 
-# git_clone_env_pairs <git_host_tokens>: one VAR=VALUE line per credential the
+# git_host_token_pairs <git_host_tokens>: one VAR=VALUE line per credential the
 # bootstrap clone exec needs — GIT_HOST_TOKENS itself plus every variable it
 # names, read from the environment by indirect expansion. This is the exact
 # mechanism up.sh hands the clone's `docker exec` its env, so the in-container
@@ -61,11 +61,11 @@ echo "── src/keyfiles.sh ──"
 # what the clone exec's env is built from — see the up.sh drift pins below.)
 CLONE_DIR="$WORK/clone"; mkdir -p "$CLONE_DIR"
 GH_TOKEN=cli_tok SRC_FRY=frytok SRC_X=xtok
-out=$(git_clone_env_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_X")
+out=$(git_host_token_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_X")
 assert_eq "clone env carries GIT_HOST_TOKENS and each named variable" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_X\nGH_TOKEN=cli_tok\nSRC_FRY=frytok\nSRC_X=xtok' \
     "$out"
-out=$(git_clone_env_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_FRY")
+out=$(git_host_token_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_FRY")
 assert_eq "clone env dedupes one variable serving two hosts" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_FRY\nGH_TOKEN=cli_tok\nSRC_FRY=frytok' \
     "$out"
@@ -74,7 +74,7 @@ assert_eq "clone env dedupes one variable serving two hosts" \
 # (up.sh then exports GH_TOKEN from it) and the clone env carries the table
 # row variable with that secret's VALUE — no bare GH_TOKEN forward needed.
 GH_TOKEN_x=new-token-value
-out=$(git_clone_env_pairs "github.com=GH_TOKEN_x")
+out=$(git_host_token_pairs "github.com=GH_TOKEN_x")
 assert_eq "clone env carries the git.hosts.github.com token variable" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=new-token-value' \
     "$out"
@@ -147,20 +147,33 @@ GH_TOKEN=defval GH_TOKEN_fry=frytok GIT_HOST_TOKENS_FRYVAR=gamut
 TABLE="github.com=GH_TOKEN git.example.test=GH_TOKEN_fry"
 write_keyfiles "$d" "$SHIM" "" "" "$TABLE" >/dev/null
 assert_eq "table + named variables land next to GH_TOKEN on each agent" \
-    $'GH_TOKEN=defval\nGIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/codex.env")"
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/codex.env")"
 assert_eq "table fan-out reaches every shim agent" \
-    $'GH_TOKEN=defval\nGIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/cursor-agent.env")"
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/cursor-agent.env")"
 unset GH_TOKEN GH_TOKEN_fry
 
-# one variable serving several hosts collapses to one line (git_clone_env_pairs
+# one variable serving several hosts collapses to one line (git_host_token_pairs
 # and the keyfile writer dedupe by variable, so no duplicate rows appear).
 d="$WORK/ck4d"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval SRC_SHARED=stok
 TABLE="github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED"
 write_keyfiles "$d" "codex" "" "" "$TABLE" >/dev/null
 assert_eq "one shared variable written once, not per host" \
-    $'GH_TOKEN=defval\nGIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED\nGH_TOKEN=defval\nSRC_SHARED=stok' "$(cat "$d/codex.env")"
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED\nGH_TOKEN=defval\nSRC_SHARED=stok' "$(cat "$d/codex.env")"
 unset GH_TOKEN SRC_SHARED
+
+# OLD SPELLING, end to end at the key-file level: the git.token spelling is
+# the CLI host's row github.com=GH_TOKEN_x, so GH_TOKEN equal to that
+# secret's VALUE lands in every agent's key file — written once, not twice.
+d="$WORK/ck7"; mkdir -p "$d"; chmod 700 "$d"
+GH_TOKEN_x=old-form-value
+GH_TOKEN="${GH_TOKEN_x}"   # what up.sh does with GIT_TOKEN_SOURCE=GH_TOKEN_x
+write_keyfiles "$d" "$SHIM" "" "" "github.com=GH_TOKEN_x" >/dev/null
+allhave=1; for a in $SHIM; do
+    [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=old-form-value\nGH_TOKEN=old-form-value' ] || allhave=0
+done
+assert_eq "git.token: X lands GH_TOKEN=<X's value> in every agent key file" "1" "$allhave"
+unset GH_TOKEN GH_TOKEN_x
 
 # 5th arg omitted entirely still works (no table, no regression).
 d="$WORK/ck4o"; mkdir -p "$d"; chmod 700 "$d"
@@ -179,7 +192,7 @@ GH_TOKEN="${GH_TOKEN_x}"   # what up.sh does with GIT_TOKEN_SOURCE=GH_TOKEN_x
 TABLE="github.com=GH_TOKEN_x"
 write_keyfiles "$d" "$SHIM" "" "" "$TABLE" >/dev/null
 allhave=1; for a in $SHIM; do
-    [ "$(cat "$d/$a.env")" = $'GH_TOKEN=new-token-value\nGIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=new-token-value' ] || allhave=0
+    [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=new-token-value\nGH_TOKEN=new-token-value' ] || allhave=0
 done
 assert_eq "git.hosts.github.com.token: GH_TOKEN becomes GH_TOKEN (table value) in every agent env file" "1" "$allhave"
 unset GH_TOKEN GH_TOKEN_x
@@ -422,8 +435,8 @@ grep -qF 'REPO_OWNER="${_p%%/*}"' "$REPO/up.sh" \
 grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
     && pass "up.sh passes GIT_HOST_TOKENS to write_keyfiles" \
     || fail "up.sh no longer passes GIT_HOST_TOKENS to write_keyfiles"
-grep -qF 'git_clone_env_pairs "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
-    && pass "up.sh builds the bootstrap clone env via git_clone_env_pairs" \
+grep -qF 'git_host_token_pairs "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
+    && pass "up.sh builds the bootstrap clone env via git_host_token_pairs" \
     || fail "up.sh no longer forwards GIT_HOST_TOKENS + row variables to the bootstrap clone"
 grep -qF '"${CLONE_ENV[@]}"' "$REPO/up.sh" \
     && pass "up.sh passes the clone env as an array (pairs stay single argv words)" \
