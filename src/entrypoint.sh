@@ -120,31 +120,32 @@ su coder -c 'mkdir -p /workspace/repos /workspace/worktrees'
 # ── Git safe directory ────────────────────────────────────────────────────────
 su -c "git config --global safe.directory /workspace" coder
 
-# ── Git over HTTPS via the per-org credential router ─────────────────────────
-# One credential lane for both API and git transport, routed by repo OWNER:
-# git-credential-org returns GH_TOKEN_<owner> if set (per-org identity), else
-# the container GH_TOKEN, else defers to `gh auth git-credential` for the human
-# login — so agents present the right per-org token and humans still fall back
-# to the shared gh login. No SSH keys. useHttpPath=true feeds the repo path to
-# the router so it can read the owner (and makes credential caching per-path,
-# which is harmless here). Installed for github.com and for every non-github
-# origin in the manifest's repos: and every host a git.orgs token is bound to
-# (GIT_CREDENTIAL_HOSTS, from manifest.py) —
-# a gitea/self-hosted repo authenticates by owner the same way. The helper
-# itself gates its fall-backs by host, so a non-github origin only ever sees
-# its own GH_TOKEN_<owner>, never the github machine-user token or gh.
+# ── Git over HTTPS via the per-host credential router ─────────────────────
+# One credential lane for both API and git transport, routed by HOST:
+# git-credential-org resolves each request's host through GIT_HOST_TOKENS (the
+# manifest's git.hosts table, written into each agent env file beside the
+# token variables it names) and returns that host's token; an unlisted host
+# defers to `gh auth git-credential` when gh holds a login for it, else
+# answers quit=1 — so agents present the right per-host token and humans still
+# fall back to the shared gh login. No SSH keys. useHttpPath=true feeds the
+# repo path to the helper request (and makes credential caching per-path,
+# which is harmless here). Installed for every host in GIT_CREDENTIAL_HOSTS
+# (manifest.py: every host the git.hosts table names plus every https://
+# origin in repos:) — a gitea/self-hosted repo authenticates by host the same
+# way. The helper carries no special case: every host resolves through the
+# one table, so a token is presented to its own host only.
 su -c "git config --global credential.useHttpPath true" coder
 # VS Code's dev-container GitHub feature pre-seeds credential.'https://github.com'.helper
 # (= !gh auth git-credential) on every attach, and can duplicate it across windows/
 # re-attaches. A plain `git config` set then aborts with "cannot overwrite multiple
 # values", leaving the router UNinstalled — and the desktop credential bridge
 # (credential.helper in /etc/gitconfig) answers first, so git ops leak the human's
-# login instead of the per-org token. Reset the helper list (empty value) and add
+# login instead of the per-host token. Reset the helper list (empty value) and add
 # the router as the leading helper, per origin: idempotent across re-runs and
 # authoritative over the desktop bridge. Same idiom for every origin, so a
 # re-created bottle whose repos: changed converges too.
 set -f  # values are manifest-validated, but word-splitting below must not glob
-for origin in https://github.com $GIT_CREDENTIAL_HOSTS; do
+for origin in $GIT_CREDENTIAL_HOSTS; do
     su -c "git config --global --unset-all credential.'$origin'.helper" coder 2>/dev/null || true
     su -c "git config --global --add credential.'$origin'.helper ''" coder
     su -c "git config --global --add credential.'$origin'.helper /usr/local/bin/git-credential-org" coder

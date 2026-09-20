@@ -27,47 +27,42 @@ git_url_split() {
     _h=$(printf '%s' "$_h" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive (tr, not ${_h,,}: macOS bash 3.2)
 }
 
-# git_owner_notices <REPOS> <GIT_ORG_TOKENS>
-# Up-time notice: an owner routed via a non-github repos: URL, with no
-# git.orgs token for THAT OWNER, will fail every private clone of its repos —
-# there is no fall-back to human credentials (docs/secrets.md). Per owner, not
-# per host: a host with one bound owner would otherwise hide a sibling owner
-# on that same host with no token — the old per-host notice missed that.
-# github.com is skipped (below) because its GH_TOKEN/gh fall-backs mean a
-# clone there never fails for lack of a per-org token, so it needs no notice.
-# Warn now, not at the first failed clone. bash-3.2 compatible: while-read
-# over heredocs, no process substitution. _seen tracks host/owner pairs
-# already reported (bash 3.2 has no associative arrays) so a host/owner with
-# several repos: entries gets one notice, not one per repo.
-git_owner_notices() {
-    local repos="$1" git_org_tokens="$2"
-    local _seen="" _rname _rurl _rscheme _rhost _rpath _rowner _rkey _rcanon \
-        _org_has_token _org_owner _org_canon _org_src
+# git_host_notices <REPOS> <GIT_HOST_TOKENS>
+# Up-time notice: an https:// repos: host with NO row in the git.hosts table
+# has no credential at all — private clones of its repos will fail, with no
+# fall-back to human credentials (docs/secrets.md). Every host the table names
+# carries a token, and the CLI host always carries a row (manifest.py adds the
+# implicit default when the manifest declares none), so the notice only ever
+# fires for a repo host the manifest never declared a token for. Warn now, not
+# at the first failed clone. bash-3.2 compatible: while-read over heredocs, no
+# process substitution, no associative arrays. _seen tracks hosts already
+# reported, so a host with several repos: entries gets one notice, not one per
+# repo.
+git_host_notices() {
+    local repos="$1" git_host_tokens="$2"
+    local _seen="" _rname _rurl _rscheme _rhost _pair _rowhost _has
     _seen=""
     while IFS=$'\t' read -r _rname _rurl; do
         [ -n "$_rname" ] || continue
         _rscheme=$(printf '%s' "${_rurl%%://*}" | tr '[:upper:]' '[:lower:]')
         [ "$_rscheme" = https ] || continue   # only https:// repos get the router; scp-style and ssh:// never need a token here
-        # Host and owner, derived via git_url_split, the same split the clone
-        # loop uses (up.sh) — it already lowercases the host and drops
-        # userinfo, so only the :443 default port is stripped here.
-        git_url_split "$_rurl"; _rhost="${_h%:443}"; _rpath="$_p"
-        [ "$_rhost" = github.com ] && continue   # github.com always has the default GH_TOKEN/gh fall-backs
-        _rowner="${_rpath%%/*}"
-        _rowner=$(printf '%s' "$_rowner" | tr '[:upper:]' '[:lower:]')   # case-fold to match GIT_ORG_TOKENS
-        _rkey="$_rhost/$_rowner"   # quoted in the case pattern below, so it is matched literally — never sanitise it: a.b and a_b are different owners
-        case " $_seen " in *" $_rkey "*) continue ;; esac
-        _seen="$_seen $_rkey"
-        _rcanon="GH_TOKEN_${_rowner//[!a-z0-9]/_}"                      # parity with _canonical_token_var
-        _org_has_token=""
-        while IFS=$'\t' read -r _org_owner _org_canon _org_src; do
-            [ -n "$_org_owner" ] || continue
-            [ "$_org_canon" = "$_rcanon" ] && _org_has_token=1
-        done <<EOF
-$git_org_tokens
-EOF
-        if [ -z "$_org_has_token" ]; then
-            echo "  note: $_rhost/$_rowner: no git.orgs token for this owner — private clones of its repos will fail (no fall-back to human credentials; see docs/secrets.md)"
+        # Host, derived via git_url_split, the same split the clone loop uses
+        # (up.sh) — it already lowercases the host and drops userinfo, so only
+        # the :443 default port is stripped here (the same normalisation as
+        # the table rows below).
+        git_url_split "$_rurl"; _rhost="${_h%:443}"
+        case " $_seen " in *" $_rhost "*) continue ;; esac
+        _seen="$_seen $_rhost"
+        _has=""
+        for _pair in $git_host_tokens; do
+            case "$_pair" in *=*) ;; *) continue ;; esac
+            _rowhost=${_pair%%=*}
+            _rowhost=$(printf '%s' "$_rowhost" | tr '[:upper:]' '[:lower:]')
+            _rowhost=${_rowhost%:443}
+            [ "$_rowhost" = "$_rhost" ] && { _has=1; break; }
+        done
+        if [ -z "$_has" ]; then
+            echo "  note: $_rhost: no git.hosts.$_rhost.token — private clones of its repos will fail (no fall-back to human credentials; see docs/secrets.md)"
         fi
     done <<EOF
 $repos
@@ -76,14 +71,14 @@ EOF
 }
 
 # git_egress_notices <GIT_CREDENTIAL_HOSTS> <EGRESS> <EGRESS_CIDRS>
-# Egress notice: a bound non-github host — a repos: origin, or a host bound
-# only via git.orgs.<owner>.host: with no repos: entry of its own (which the
-# per-owner loop above never even sees) — is never auto-allowlisted in the
-# container's firewall. capabilities.egress must name it, or a parent domain
-# of it (a zone covers its subdomains), or the router's own clones are
+# Egress notice: a host in GIT_CREDENTIAL_HOSTS — a repos: origin, or a host
+# the git.hosts table named with no repos: entry of its own (which the per-host
+# loop above never even sees) — is never auto-allowlisted in the container's
+# firewall. capabilities.egress must name it, or a parent domain of it (a zone
+# covers its subdomains), or the router's own clones are
 # refused at the firewall before git ever gets a chance to answer with a
 # credential. GIT_CREDENTIAL_HOSTS (manifest.py) is the union of both: every
-# repos:-derived non-github host plus every git.orgs-bound host, one
+# repos:-derived https:// host plus every git.hosts table host, one
 # https://host[:port] per line. Warn now, not at the first refused clone.
 # bash-3.2 compatible: while-read over a heredoc, no process substitution.
 git_egress_notices() {
