@@ -1180,7 +1180,12 @@ def derive(manifest, plugin_files, agent_files, env):
     # base-allowlisted name resolves into the same DNS zone).
     notice_hosts = []
     for line in sorted(cred_hosts):
-        if line.split("://", 1)[-1].split(":", 1)[0] in BASE_ALLOWLISTED_GIT_HOSTS:
+        bare = line.split("://", 1)[-1].split(":", 1)[0]
+        # A base-allowlisted name is a DNS ZONE: the firewall covers the host
+        # and every subdomain of it, so gist.github.com is as base-allowed
+        # as github.com itself.
+        if any(bare == z or bare.endswith("." + z)
+               for z in BASE_ALLOWLISTED_GIT_HOSTS):
             continue
         notice_hosts.append(line)
     out["GIT_EGRESS_NOTICE_HOSTS"] = "".join(f"{o}\n" for o in notice_hosts)

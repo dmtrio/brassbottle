@@ -780,6 +780,23 @@ class TestCredentialHosts(unittest.TestCase):
         d = derive({"repos": ["https://github.com:443/x/y.git"]})
         self.assertEqual(d["GIT_EGRESS_NOTICE_HOSTS"], "")
 
+    def test_base_allowlist_zone_covers_subdomains(self):
+        # BASE_ALLOWLISTED_GIT_HOSTS names ZONES: the base allowlist covers a
+        # host and every subdomain of it (the firewall's dnsmasq zones), so
+        # gist.github.com is as base-allowed as github.com itself and the
+        # egress notice stays silent for it.
+        d = derive({"repos": ["https://gist.github.com/me/x.git"]})
+        self.assertEqual(d["GIT_EGRESS_NOTICE_HOSTS"], "")
+
+    def test_base_allowlisted_hosts_are_pinned_against_init_firewall(self):
+        # Drift pin: every base-allowlisted git host must appear in
+        # src/init-firewall.sh's ALLOWED_ZONES block — the constant mirrors
+        # that list, so the two cannot drift apart silently.
+        text = (REPO / "src" / "init-firewall.sh").read_text()
+        zones = text.split('ALLOWED_ZONES="')[1].split('"')[0].split()
+        for host in m.BASE_ALLOWLISTED_GIT_HOSTS:
+            self.assertIn(host, zones)
+
     def test_repos_hosts_and_table_hosts_merge_deduped(self):
         d = derive({"repos": ["https://git.example.test/E/x.git"],
                     "git": {"hosts": {"git.example.test": {"token": "GH_TOKEN_x"},
