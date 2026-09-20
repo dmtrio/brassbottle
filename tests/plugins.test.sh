@@ -534,7 +534,8 @@ grep -qF -- '. "$SCRIPT_DIR/src/keyfiles.sh"' up.sh \
 # unit-tested by tests/bash.test.sh; this pin proves up.sh still wires to it).
 grep -qF -- '. "$SCRIPT_DIR/src/git_notices.sh"' up.sh \
     && grep -qF -- 'git_host_notices "$REPOS" "$GIT_HOST_TOKENS"' up.sh \
-    && grep -qF -- 'git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' up.sh \
+    && grep -qF -- 'git_orgs_host_notice "$REPOS" "$GIT_HOST_TOKENS" "$GIT_ORG_IDENTITIES"' up.sh \
+    && grep -qF -- 'git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' up.sh \
     && pass "up.sh sources + calls src/git_notices.sh" \
     || fail "up.sh no longer wires to src/git_notices.sh (update this suite!)"
 
