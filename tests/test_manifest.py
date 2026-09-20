@@ -1139,11 +1139,25 @@ class TestGitIdentity(unittest.TestCase):
     def test_orgs_row_lands_on_declared_host(self):
         d = self._d({"orgs": {"vendor": {"token": "GH_TOKEN_vendor", "host": "github.com",
                                          "name": "Vendor Bot", "email": "bot@vendor.io"}}})
-        # The org's token becomes the github.com row; the plain GH_TOKEN
-        # export is untouched (GIT_TOKEN_SOURCE stays "" — no explicit claim).
-        self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
+        # The org's token becomes the github.com row — and whatever row the
+        # CLI host ends up with is what GH_TOKEN exports from, git.orgs-
+        # claimed included, so git and gh never act as two identities on the
+        # same host.
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_vendor")
         self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_vendor")
         self.assertEqual(d["GIT_ORG_IDENTITIES"], "vendor\tVendor Bot\tbot@vendor.io\n")
+
+    def test_orgs_cli_host_row_serves_two_owners(self):
+        # Exactly the two-owner shape: acme's git.orgs token claims the CLI
+        # host row; every owner on that host (acme AND other) now
+        # authenticates with it, and GH_TOKEN exports from the same variable
+        # — one identity for git and gh alike.
+        d = derive({"repos": ["https://github.com/acme/a.git",
+                              "https://github.com/other/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env=dict(self.ENV, GH_TOKEN_VARS="GH_TOKEN_acme GH_TOKEN"))
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_acme")
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_acme")
 
     def test_orgs_hyphenated_owner_is_a_plain_row_now(self):
         # Routing is host-keyed and the secrets.env variable name is used

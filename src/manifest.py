@@ -838,7 +838,6 @@ def _git_identity(parsed_repos, git, env, secrets_file):
 
     rows = {}    # normalised host -> source var
     origin = {}  # normalised host -> the manifest spelling that claimed it
-    cli_claimed = False   # the CLI_HOST row was set explicitly (not implicit)
 
     def add_row(host, src, claimed_by):
         """One row per host: a second claim for the same host with the same
@@ -889,15 +888,12 @@ def _git_identity(parsed_repos, git, env, secrets_file):
                 continue
             rows[field_host] = src
             origin[field_host] = f"git.hosts.{host_key}"
-            if field_host == CLI_HOST:
-                cli_claimed = True
 
     # ── git.token (old spelling: the CLI host's row) ─────────────────────
     if not _falsy(token_val):
         default_src = source(token_val, "git.token", required=False)
         if default_src:
             add_row(CLI_HOST, default_src, "git.token")
-            cli_claimed = True
 
     # ── git.orgs (old spelling: per-owner tokens, resolved to hosts) ──────
     records = []          # (owner_lc, source_var, name, email, declared_host|None)
@@ -1004,8 +1000,15 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     if CLI_HOST not in rows:
         rows[CLI_HOST] = CLI_TOKEN_VARS[CLI_HOST]
 
+    # GIT_TOKEN_SOURCE: whatever row the CLI host ends up with is what the
+    # plain GH_TOKEN exports from — an explicitly declared row (git.hosts,
+    # git.token) AND a git.orgs-claimed row alike, so git and gh never act as
+    # two identities on the same host. Empty = the row IS the implicit
+    # GH_TOKEN one: keep GH_TOKEN as sourced from secrets.env.
+    cli_var = rows.get(CLI_HOST)
     return {
-        "GIT_TOKEN_SOURCE": rows[CLI_HOST] if cli_claimed else "",
+        "GIT_TOKEN_SOURCE":
+            cli_var if cli_var not in (None, CLI_TOKEN_VARS[CLI_HOST]) else "",
         "GIT_ORG_IDENTITIES": "".join(
             f"{o}\t{n}\t{e}\n" for o, _s, n, e, _h in records),
         "GIT_HOST_TOKENS": " ".join(f"{h}={rows[h]}" for h in sorted(rows)),
