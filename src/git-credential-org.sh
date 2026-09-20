@@ -36,7 +36,7 @@
 [ "$1" = get ] || exit 0                 # store/erase: no-op (stateless helper)
 
 req=$(cat)                                # buffer the request so gh can replay it
-host=$(printf '%s\n' "$req" | sed -n 's/^host=//p')
+host=$(printf '%s\n' "$req" | sed -n 's/^host=//p' | head -n 1)   # the FIRST host= line only — a second one must not widen the lookup
 host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive; git passes the URL's spelling
 host=${host%:443}                        # explicit default port: git passes host=host.example:443 for https://host.example:443/…
 [ -n "$host" ] || { echo "git-credential-org: request carries no host= line — nothing to route" >&2; echo "quit=1"; exit 0; }   # no host= line: nothing to route; stop git rather than fall through to another helper or a prompt
@@ -64,23 +64,33 @@ if [ -n "$tok" ]; then
     echo "password=$tok"
 else
     gh_hosts="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
+    gh_out=""
+    gh_rc=1
     if [ -f "$gh_hosts" ] && grep -Fxq "$host:" "$gh_hosts"; then
         # Stored gh login for exactly this host: defer, with every token
-        # variable stripped so only that login can answer.
-        printf '%s\n' "$req" | env -u GH_TOKEN -u GITHUB_TOKEN \
+        # variable stripped so only that login can answer. A deferral that
+        # fails (gh exits non-zero) or succeeds WITHOUT a password= line
+        # (no usable token stored, e.g. a hosts.yml entry that only names a
+        # protocol) must NOT fall through to a prompt — git gets the same
+        # stderr line + quit=1 as an unlisted host.
+        gh_out=$(printf '%s\n' "$req" | env -u GH_TOKEN -u GITHUB_TOKEN \
             -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
-            gh auth git-credential get   # human fallback
-    else
-        # No token for this host, and gh holds no login for it either: say
-        # exactly what is wrong and tell git to stop — no other helper, no
-        # terminal prompt (which would hang an agent's clone waiting for a
-        # username). git then fails with "credential helper … told us to
-        # quit" plus this line on stderr.
-        if [ -n "$table_var" ]; then
-            echo "git-credential-org: git.hosts.$host.token: '$table_var' is not set in secrets.env — put the token there (git.hosts.$host.token names the variable)" >&2
-        else
-            echo "git-credential-org: no git.hosts.$host.token — add git.hosts.$host.token: <secrets.env var name> to the bottle and the token to secrets.env" >&2
+            gh auth git-credential get)   # human fallback
+        gh_rc=$?
+        if [ "$gh_rc" -eq 0 ] && printf '%s\n' "$gh_out" | grep -q '^password='; then
+            printf '%s\n' "$gh_out"
+            exit 0
         fi
-        echo "quit=1"
     fi
+    # No token for this host, and gh holds no usable login for it: say
+    # exactly what is wrong and tell git to stop — no other helper, no
+    # terminal prompt (which would hang an agent's clone waiting for a
+    # username). git then fails with "credential helper … told us to
+    # quit" plus this line on stderr.
+    if [ -n "$table_var" ]; then
+        echo "git-credential-org: git.hosts.$host.token: '$table_var' is not set in secrets.env — put the token there (git.hosts.$host.token names the variable)" >&2
+    else
+        echo "git-credential-org: no git.hosts.$host.token — add git.hosts.$host.token: <secrets.env var name> to the bottle and the token to secrets.env" >&2
+    fi
+    echo "quit=1"
 fi
