@@ -451,10 +451,10 @@ if [ -n "$REPOS" ]; then
     # are manifest-validated (env-var names, boring host charset); the VALUES
     # are secrets and can be anything, so nothing is claimed about them —
     # git_host_token_pairs (src/keyfiles.sh, unit-tested) emits one VAR=VALUE
-    # per line and the array keeps each pair a single docker-exec argv word
-    # regardless of what its value contains (a plain string would word-split
-    # the space-separated pairs into separate -e arguments and mangle the
-    # table).
+    # per line (a value must not contain a newline, or the line pairing
+    # breaks) and the array keeps each pair a single docker-exec argv word (a
+    # plain string would word-split the space-separated pairs into separate -e
+    # arguments and mangle the table).
     CLONE_ENV=()
     while IFS= read -r _pair; do
         [ -n "$_pair" ] || continue

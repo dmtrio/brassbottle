@@ -25,7 +25,9 @@ warn_missing() { echo "  ⚠ $1 not in secrets.env — $2 will not authenticate 
 #   (the clone exec isn't shim-launched, so without it the in-container
 #   git-credential-org would find no table and no token and a private clone
 #   would fail). Names are manifest-validated; values are secrets and can be
-#   anything — each line rides as ONE argv word regardless. A variable whose
+#   anything — but the pairing is line-delimited, so a value must not contain
+#   a newline, or the VAR=VALUE pairs it splits into would be mangled. Each
+#   line rides as ONE argv word. A variable whose
 #   value is empty (the token was never set) is skipped: the helper then
 #   takes its gh/quit path for that host, exactly as it would for an unset
 #   variable. Deduped: one row var may serve several hosts.
@@ -74,7 +76,7 @@ write_keyfiles() {
 $plugin_env_secrets
 EOF
 
-    # The git.hosts routing table rides in the shared block beside the token in the shared block beside the token
+    # The git.hosts routing table rides in the shared block beside the token
     # variables it names (a host is not a secret; it is here for convenience,
     # not confidentiality) — git-credential-org resolves each request's host
     # through it and reads the row variable by indirect expansion. Same walk
@@ -97,7 +99,7 @@ EOF
         shared="${shared}GH_TOKEN=$GH_TOKEN"$'\n'
     fi
 
-    # Fan the shared block out to every shim agent. chmod 600 as each file is to every shim agent. chmod 600 as each file is
+    # Fan the shared block out to every shim agent. chmod 600 as each file is
     # created — it already holds secret values, so don't leave it at the umask
     # default even for the window until the trailing chmod.
     for a in $shim_agents; do

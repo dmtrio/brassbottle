@@ -36,7 +36,7 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
   (`jump/Dockerfile`).
 - `git-credential-org.sh` routes git credentials by request host through the
   manifest's git.hosts table (`GIT_HOST_TOKENS`, derived by manifest.py); an
-  unlisted host defers to `gh` when gh holds a login for it, else answers
+  unlisted host defers only to a stored gh login for exactly that host, else answers
   `quit=1` naming the missing `git.hosts.<host>.token`.
 
 ## Testing
