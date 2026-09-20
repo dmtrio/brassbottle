@@ -788,8 +788,7 @@ class TestCredentialHosts(unittest.TestCase):
         self.assertEqual(
             d["GIT_CREDENTIAL_HOSTS"],
             "https://git.example.test\n"
-            "https://git.other.test\n"
-            "https://github.com\n")
+            "https://git.other.test\n")
 
 
 class TestTokenRouting(unittest.TestCase):
@@ -1276,20 +1275,16 @@ class TestGitHosts(unittest.TestCase):
                                "a.example.test": {"token": "GH_TOKEN_fry"}}})
         self.assertEqual(
             d["GIT_HOST_TOKENS"],
-            "a.example.test=GH_TOKEN_fry github.com=GH_TOKEN z.example.test=GH_TOKEN_x")
+            "a.example.test=GH_TOKEN_fry z.example.test=GH_TOKEN_x")
 
     def test_host_keys_normalise_case_and_443(self):
         d = self._d({"hosts": {"Git.Example.Test:443": {"token": "GH_TOKEN_x"}}})
-        self.assertEqual(
-            d["GIT_HOST_TOKENS"],
-            "git.example.test=GH_TOKEN_x github.com=GH_TOKEN")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.test=GH_TOKEN_x")
         self.assertIn("https://git.example.test", d["GIT_CREDENTIAL_HOSTS"])
 
     def test_port_survives_normalisation(self):
         d = self._d({"hosts": {"git.example.test:3000": {"token": "GH_TOKEN_x"}}})
-        self.assertEqual(
-            d["GIT_HOST_TOKENS"],
-            "git.example.test:3000=GH_TOKEN_x github.com=GH_TOKEN")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.test:3000=GH_TOKEN_x")
         self.assertIn("https://git.example.test:3000", d["GIT_CREDENTIAL_HOSTS"])
 
     def test_any_secrets_env_variable_name_works(self):
@@ -1299,9 +1294,7 @@ class TestGitHosts(unittest.TestCase):
         # never reach manifest.py.
         env = {"PRESENT_SECRET_VARS": "GH_TOKEN GITEA_TOKEN"}
         d = self._d({"hosts": {"git.example.org": {"token": "GITEA_TOKEN"}}}, env=env)
-        self.assertEqual(
-            d["GIT_HOST_TOKENS"],
-            "git.example.org=GITEA_TOKEN github.com=GH_TOKEN")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.org=GITEA_TOKEN")
         d = self._d({"orgs": {"emergence": {"token": "GITEA_TOKEN",
                                              "host": "git.example.org"}}}, env=env)
         self.assertIn("git.example.org=GITEA_TOKEN", d["GIT_HOST_TOKENS"])
@@ -1407,16 +1400,31 @@ class TestGitHosts(unittest.TestCase):
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_x")
         self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_x")
 
-    def test_host_not_named_keeps_the_implicit_default(self):
-        # A git.hosts table that names only other hosts leaves the CLI host
-        # on its implicit default row — the container keeps presenting
-        # GH_TOKEN to github.com (today's behaviour) and the named token to
-        # its own host only.
+    def test_hosts_manifest_gets_exactly_its_rows(self):
+        # The implicit default row belongs to manifests WITHOUT git.hosts: a
+        # manifest that declares git.hosts gets exactly the rows it declares
+        # — no CLI-host row, no https:// credential host for it (unless
+        # repos: names it). GH_TOKEN still flows to key files via
+        # GIT_TOKEN_SOURCE="" (a later change decides that).
         d = self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x"}}})
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.test=GH_TOKEN_x")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+
+    def test_implicit_row_only_without_git_hosts(self):
+        # A manifest WITHOUT git.hosts keeps today's behaviour: the CLI host
+        # gets the implicit GH_TOKEN row unless an old spelling already gave
+        # it one.
+        self.assertEqual(self._d({})["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
+        d = self._d({"token": "GH_TOKEN_fry"})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_fry")
+        d = self._d({"orgs": {"emergence": {"token": "GH_TOKEN_x",
+                                             "host": "git.example.test"}}})
         self.assertEqual(
             d["GIT_HOST_TOKENS"],
             "git.example.test=GH_TOKEN_x github.com=GH_TOKEN")
+        # git.hosts: {} adds no rows and is not a declaration of hosts.
+        self.assertEqual(self._d({"hosts": {}})["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
 
     def test_token_and_hosts_spellings_derive_identically(self):
         # Guard: git.token: X and git.hosts.github.com.token: X are the same

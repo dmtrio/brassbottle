@@ -779,10 +779,14 @@ def _git_identity(parsed_repos, git, env, secrets_file):
 
     Routing is by HOST, in one table: git.hosts maps each host to the
     secrets.env variable holding that host's token, exactly as written — no
-    owner sanitisation, no name mangling. The old spellings feed the same
-    table: git.token: X is the github.com row; each git.orgs entry is a row
-    for the host it resolves to (its declared host:, else the one https://
-    host its owner's repos: URLs name — never a guessed default). A
+    owner sanitisation, no name mangling. A manifest that DECLARES git.hosts
+    gets exactly the rows it declares, nothing implicit. The old spellings
+    feed the same table: git.token: X is the github.com row; each git.orgs
+    entry is a row for the host it resolves to (its declared host:, else the
+    one https:// host its owner's repos: URLs name — never a guessed
+    default). A manifest WITHOUT git.hosts keeps the implicit default row
+    for the CLI host (github.com=GH_TOKEN) unless an old spelling already
+    gave that host a row.
     token: that isn't a currently-set secrets.env var (PRESENT_SECRET_VARS
     lists the ones up.sh scanned — every non-empty variable secrets.env
     defines, so any variable name works as a token source, not just
@@ -796,11 +800,13 @@ def _git_identity(parsed_repos, git, env, secrets_file):
       GIT_HOST_TOKENS     space-separated host=VARNAME pairs, sorted by host
                           (the table; every row var is written beside it by
                           keyfiles.sh and forwarded to the bootstrap clone)
-      GIT_TOKEN_SOURCE    the github.com row's variable when the row was
-                          declared via git.token or
-                          git.hosts.github.com.token (up.sh exports it as the
-                          plain GH_TOKEN via CLI_TOKEN_VARS); "" = the row is
-                          the implicit default (github.com=GH_TOKEN)
+      GIT_TOKEN_SOURCE    the CLI host's row variable whenever that row is
+                          not the implicit GH_TOKEN one (declared via
+                          git.token, git.hosts.github.com.token, or a
+                          git.orgs claim — up.sh exports it as the plain
+                          GH_TOKEN via CLI_TOKEN_VARS); "" = the row is the
+                          implicit default: keep GH_TOKEN as sourced from
+                          secrets.env
       GIT_ORG_IDENTITIES  owner<TAB>name<TAB>email per line — per-owner
                           author attribution for the bootstrap clone; never
                           routing (owner is lowercased: attribution matches
@@ -831,14 +837,14 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     hosts_val = git.get("hosts")
     token_val = git.get("token")
     orgs_val = git.get("orgs")
-    # An EMPTY git.hosts map adds no rows and is not a declaration, so it
-    # neither conflicts with the old spellings nor suppresses the implicit
-    # default row.
+    # "git.hosts is declared" — an EMPTY git.hosts map adds no rows and is
+    # not a declaration, so it neither conflicts with the old spellings nor
+    # suppresses the implicit default row.
     if isinstance(hosts_val, dict):
-        has_hosts = bool(hosts_val)
+        hosts_declared = bool(hosts_val)
     else:
-        has_hosts = not _falsy(hosts_val)
-    if has_hosts and (not _falsy(token_val) or not _falsy(orgs_val)):
+        hosts_declared = not _falsy(hosts_val)
+    if hosts_declared and (not _falsy(token_val) or not _falsy(orgs_val)):
         raise ManifestError(
             "manifest git identity failed validation:\n"
             "  git.hosts and git.token/git.orgs are both set — they are two "
@@ -1002,10 +1008,14 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     if errors:
         raise ManifestError("manifest git identity failed validation:\n" + "\n".join(errors))
 
-    # The implicit default row: a manifest that declares no token anywhere
-    # (no git.hosts, no git.token, no git.orgs) keeps today's behaviour — the
-    # CLI host's token is the plain GH_TOKEN from secrets.env.
-    if CLI_HOST not in rows:
+    # The implicit default row belongs to manifests WITHOUT git.hosts. A
+    # manifest that declares git.hosts gets exactly the rows it declares —
+    # nothing implicit, no CLI-host row, no credential host for it (unless
+    # repos: names it). A manifest without git.hosts (nothing declared, or
+    # git.token / git.orgs only) keeps today's behaviour: the CLI host's
+    # token is the plain GH_TOKEN from secrets.env unless an old spelling
+    # already gave the CLI host a row.
+    if not hosts_declared and CLI_HOST not in rows:
         rows[CLI_HOST] = CLI_TOKEN_VARS[CLI_HOST]
 
     # GIT_TOKEN_SOURCE: whatever row the CLI host ends up with is what the

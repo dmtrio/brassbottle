@@ -51,8 +51,10 @@ are rejected, and so is a host key with anything beyond letters, digits,
 `.`, `-` and an optional `:port` — the table is the credential router's
 only source. A `token:` naming a variable that isn't set in `secrets.env`
 **hard-fails the apply** — never a silent fall-back to the wrong identity.
-A manifest with none of `git.hosts`, `git.token`, `git.orgs` keeps one
-implicit row, `github.com` → the global `GH_TOKEN`.
+A manifest that declares `git.hosts` gets exactly the rows it declares —
+no implicit row. Without `git.hosts`, `github.com` keeps one implicit row,
+the global `GH_TOKEN` (the old `git.token`/`git.orgs` spellings may claim
+it instead).
 
 At `up`, a repo on host `<host>` authenticates with the token variable its
 table row names — resolved by the `git-credential-org` helper on every
