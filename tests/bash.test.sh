@@ -545,7 +545,6 @@ out=$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\nb\thttps://h.test/other/y
     'h.test=SRC_ACME' 'h.test')
 assert_contains "git_orgs_host_notice: an scp-only owner still leaves one https owner… silent" "" \
     "$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\n' 'h.test=SRC_ACME' 'h.test')"
-    "$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\n' 'h.test=SRC_ACME' $'acme\t\t\n')"
 
 out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h2.test/b/y.git\n' 'h.test=SRC_A')
 assert_eq "git_host_notices: a host WITH a table row gets no notice" \
