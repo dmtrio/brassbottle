@@ -69,6 +69,16 @@ out=$(git_clone_env_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=
 assert_eq "clone env dedupes one variable serving two hosts" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_FRY\nGH_TOKEN=cli_tok\nSRC_FRY=frytok' \
     "$out"
+# NEW FORM at the clone boundary: a manifest declaring
+# git.hosts.github.com.token: GH_TOKEN_x resolves GIT_TOKEN_SOURCE=GH_TOKEN_x
+# (up.sh then exports GH_TOKEN from it) and the clone env carries the table
+# row variable with that secret's VALUE — no bare GH_TOKEN forward needed.
+GH_TOKEN_x=new-token-value
+out=$(git_clone_env_pairs "github.com=GH_TOKEN_x")
+assert_eq "clone env carries the git.hosts.github.com token variable" \
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=new-token-value' \
+    "$out"
+unset GH_TOKEN_x
 unset GH_TOKEN SRC_FRY SRC_X
 
 # warn_unbound_org_token and note_orphan_org_binding are gone with per-owner
