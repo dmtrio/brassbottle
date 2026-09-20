@@ -293,6 +293,51 @@ assert_contains "…stderr names the unset variable" \
     "$(cat "$WORK/cred-err")" "git.hosts.git.example.test.token: 'SRC_FRY' is not set"
 assert_eq "…gh is never invoked for it" "$calls_before" "$(grep -c 'invoked' "$GH_CALLS")"
 
+# A deferral that FAILS (gh exits non-zero, or succeeds with no password=
+# in its output) must not leave git to a prompt: quit=1 with the same
+# stderr line naming git.hosts.<host>.token.
+GH_FAIL="$WORK/ghconf-fail"; mkdir -p "$GH_FAIL"
+printf 'github.com:\n    git_protocol: https\n' > "$GH_FAIL/hosts.yml"
+cat > "$WORK/ghbin/gh" <<'MOCK'
+#!/bin/bash
+exit 1
+MOCK
+chmod +x "$WORK/ghbin/gh"
+out=$(printf 'protocol=https\nhost=github.com\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_FAIL" GIT_HOST_TOKENS='github.com=GH_TOKEN' bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "failing deferral: clean exit" 0 "$rc"
+assert_eq "failing deferral: quit=1" "quit=1" "$out"
+assert_contains "…stderr names the missing token" "$(cat "$WORK/cred-err")" "git.hosts.github.com.token"
+
+cat > "$WORK/ghbin/gh" <<'MOCK'
+#!/bin/bash
+exit 0
+MOCK
+chmod +x "$WORK/ghbin/gh"
+out=$(printf 'protocol=https\nhost=github.com\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_FAIL" GIT_HOST_TOKENS='github.com=GH_TOKEN' bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "empty gh output: clean exit" 0 "$rc"
+assert_eq "empty gh output: quit=1" "quit=1" "$out"
+assert_contains "…stderr names the missing token" "$(cat "$WORK/cred-err")" "git.hosts.github.com.token"
+
+# Restore the recording stub for the gh-invocation accounting below.
+: > "$GH_CALLS"
+cat > "$WORK/ghbin/gh" <<MOCK
+#!/bin/bash
+echo "invoked \$*" >> "$GH_CALLS"
+env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)=' >> "$GH_CALLS"
+[ "\$1" = auth ] && { echo "username=human"; echo "password=humantok"; exit 0; }
+exit 1
+MOCK
+chmod +x "$WORK/ghbin/gh"
+
+# Only the FIRST host= line routes: a request carrying a second host= line
+# for a host with a stored gh login must be routed as the first host alone
+# (a multi-line host must never reach the hosts.yml lookup as alternatives).
+calls_before=$(grep -c 'invoked' "$GH_CALLS")
+out=$(printf 'protocol=https\nhost=evil.example.test\nhost=github.com\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_CONF" GIT_HOST_TOKENS='github.com=GH_TOKEN' GH_TOKEN=tableval bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "two host= lines: clean exit" 0 "$rc"
+assert_eq "…routed as the first host only: quit=1" "quit=1" "$out"
+assert_eq "…gh is never invoked" "$calls_before" "$(grep -c 'invoked' "$GH_CALLS")"
+
 # A listed host whose variable is unset but which HAS a stored gh login
 # defers instead of quitting.
 out=$(printf 'protocol=https\nhost=gh.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_CONF" GIT_HOST_TOKENS='gh.example.test=SRC_MISSING' bash "$HELPER" get)
