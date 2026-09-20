@@ -1240,8 +1240,9 @@ class TestGitHosts(unittest.TestCase):
 
     ENV = {"GH_TOKEN_VARS": "GH_TOKEN_fry GH_TOKEN_x"}
 
-    def _d(self, git, repos=()):
-        return derive({"repos": list(repos), "git": git}, env=dict(self.ENV))
+    def _d(self, git, repos=(), env=None):
+        return derive({"repos": list(repos), "git": git},
+                      env=dict(env if env is not None else self.ENV))
 
     def test_derivation_sorted_space_separated_pairs(self):
         d = self._d({"hosts": {"z.example.test": {"token": "GH_TOKEN_x"},
@@ -1263,6 +1264,29 @@ class TestGitHosts(unittest.TestCase):
             d["GIT_HOST_TOKENS"],
             "git.example.test:3000=GH_TOKEN_x github.com=GH_TOKEN")
         self.assertIn("https://git.example.test:3000", d["GIT_CREDENTIAL_HOSTS"])
+
+    def test_any_secrets_env_variable_name_works(self):
+        # token: names a secrets.env variable — ANY non-empty variable
+        # secrets.env defines, not just the GH_TOKEN* scan (gitea tokens are
+        # commonly named GITEA_*). Names only cross the boundary; values
+        # never reach manifest.py.
+        env = {"PRESENT_SECRET_VARS": "GH_TOKEN GITEA_TOKEN"}
+        d = self._d({"hosts": {"git.example.org": {"token": "GITEA_TOKEN"}}}, env=env)
+        self.assertEqual(
+            d["GIT_HOST_TOKENS"],
+            "git.example.org=GITEA_TOKEN github.com=GH_TOKEN")
+        d = self._d({"orgs": {"emergence": {"token": "GITEA_TOKEN",
+                                             "host": "git.example.org"}}}, env=env)
+        self.assertIn("git.example.org=GITEA_TOKEN", d["GIT_HOST_TOKENS"])
+
+    def test_absent_secrets_env_var_still_hard_fails(self):
+        env = {"PRESENT_SECRET_VARS": "GH_TOKEN"}
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.org": {"token": "GITEA_TOKEN"}}}, env=env)
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.git.example.org.token: GITEA_TOKEN not found in secrets.env")
 
     def test_unset_secret_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:

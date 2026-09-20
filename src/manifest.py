@@ -775,8 +775,10 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     table: git.token: X is the github.com row; each git.orgs entry is a row
     for the host it resolves to (its declared host:, else the one https://
     host its owner's repos: URLs name — never a guessed default). A
-    token: that isn't a currently-set secrets.env var (GH_TOKEN_VARS lists
-    the ones up.sh scanned) is a hard error — never a silent fall-back to
+    token: that isn't a currently-set secrets.env var (PRESENT_SECRET_VARS
+    lists the ones up.sh scanned — every non-empty variable secrets.env
+    defines, so any variable name works as a token source, not just
+    GH_TOKEN*-prefixed ones) is a hard error — never a silent fall-back to
     the wrong identity, which is the whole reason this exists.
 
     git.hosts and the old spellings (git.token / git.orgs) are two spellings
@@ -800,7 +802,8 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     Each git.orgs owner is case-insensitive (attribution folds to lowercase),
     so two keys differing only in case are an ambiguity and are rejected.
     """
-    token_vars = set((env.get("GH_TOKEN_VARS") or "").split())
+    token_vars = set((env.get("PRESENT_SECRET_VARS") or env.get("GH_TOKEN_VARS")
+                      or "").split())
     errors = []
 
     def source(val, field, required):
