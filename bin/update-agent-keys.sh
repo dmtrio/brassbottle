@@ -23,16 +23,15 @@
 # to set the var in EVERY agent's file at once — common.env was retired in
 # Phase 3, so each agent now carries one complete env file.
 #
-# A per-org git token (GH_TOKEN_<owner>) set this way also needs its host
-# binding GH_HOST_<owner>=<host> set the same way, or git-credential-org.sh
-# refuses to present it (an unbound token is refused everywhere, github.com
-# included — see src/git-credential-org.sh).
+# A token variable used by a host must be named by that host's row in the
+# manifest's git.hosts table (up.sh writes GIT_HOST_TOKENS and each named
+# variable into every agent env file). Add hosts there, in the manifest —
+# this script only edits the values, never the routing table.
 
 set -e
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../src"
 . "$SRC_DIR/common.sh"     # sets BASE_PATH
-. "$SRC_DIR/keyfiles.sh"   # defines warn_unbound_org_token
 CONTAINER="$1"
 AGENT="$2"
 VAR="$3"
@@ -94,23 +93,6 @@ set_var_in() {
     grep -v "^$VAR=" "$file" > "$tmp" || true
     [ -n "$VALUE" ] && echo "$VAR=$VALUE" >> "$tmp"
     mv "$tmp" "$file"; chmod 600 "$file"
-    if [ -n "$VALUE" ]; then
-        # A hand-set per-org token needs its host binding in the same file
-        # (see src/keyfiles.sh:warn_unbound_org_token) — up.sh always writes
-        # both together, but this script only knows the VAR it was given,
-        # never the host, so it can't write the binding itself; it can only
-        # warn. One check per agent file, not once per run: in `common` mode
-        # each file's binding is independent (one agent's env may already
-        # carry GH_HOST_<owner> while a sibling doesn't), so a per-file
-        # warning is the only way not to hide that gap — the message names
-        # the file so several warnings in one run are still legible.
-        warn_unbound_org_token "$file" "$VAR"
-    else
-        # Removing a per-org token can leave its host binding orphaned in
-        # this same file (see src/keyfiles.sh:note_orphan_org_binding) — one
-        # note per file, since each file's binding is independent.
-        note_orphan_org_binding "$file" "$VAR"
-    fi
 }
 
 # common.env is retired (Plugins v2 Phase 3): each agent has one complete env

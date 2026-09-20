@@ -143,18 +143,20 @@ if [ "$ENABLE_EGRESS_BROKER" = "true" ]; then
         --base-path "$BASE_PATH" --ensure-bottle-token "$NAME")"
 fi
 
-# Resolve the container's default git token from the manifest's git.token (a
-# secrets.env var NAME; manifest.py already checked it is set). Absent → keep
-# GH_TOKEN as sourced from secrets.env, so manifests with no git.token keep the
-# global machine-user token (backward compatible). This GH_TOKEN is what
-# keyfiles.sh fans into every <agent>.env and the clone bootstrap hands to git.
+# Export the CLI host's table token as the plain GH_TOKEN (CLI_TOKEN_VARS, in
+# manifest.py — the one place that names the CLI host for routing). The table
+# row was declared via git.hosts.github.com.token or the old git.token
+# spelling; when GIT_TOKEN_SOURCE is empty the row is the implicit default and
+# GH_TOKEN stays as sourced from secrets.env (backward compatible). This
+# GH_TOKEN is what keyfiles.sh fans into every <agent>.env, and the clone
+# bootstrap hands the whole table (plus each row variable) to git.
 if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 
-# Up-time notices (an unbound git.orgs owner; a bound git host missing from
-# capabilities.egress) — the real logic lives in src/git_notices.sh (sourced
+# Up-time notices (a repo host with no git.hosts row; a bound git host missing
+# from capabilities.egress) — the real logic lives in src/git_notices.sh (sourced
 # here, unit-tested by tests/bash.test.sh), the same precedent as keyfiles.sh.
 . "$SCRIPT_DIR/src/git_notices.sh"
-git_owner_notices "$REPOS" "$GIT_ORG_TOKENS"
+git_host_notices "$REPOS" "$GIT_HOST_TOKENS"
 git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"
 
 COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
@@ -201,7 +203,7 @@ rm -f "$KEYS_PATH"/*.env
 # mirrored; up.sh only routes the derived vars (NAMES) into it — the ${!source}
 # value lookups happen against the secrets.env this shell already sourced.
 . "$SCRIPT_DIR/src/keyfiles.sh"
-write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS" "$GIT_ORG_HOSTS"
+write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS"
 
 # ── Host paths + platform ─────────────────────────────────────────────────────
 ARTIFACTS_PATH="$BASE_PATH/artifacts/$NAME"
@@ -448,31 +450,22 @@ if docker exec -u coder "$CNAME" bash -c '[ -e /workspace/main ]'; then
 fi
 
 if [ -n "$REPOS" ]; then
-    # The bootstrap exec isn't shim-launched, so hand it the git tokens
-    # explicitly for private-repo clones over HTTPS. git-credential-org (the
-    # in-container helper) routes by owner, so it needs BOTH the default
-    # GH_TOKEN and every per-org GH_TOKEN_<owner> in scope — otherwise a repo
-    # owned by an org the default token can't reach would clone with the wrong
-    # token and 404 (the exact failure this feature fixes). Tokens carry no
-    # whitespace, so the unquoted -e assembly is safe. Name and URL ride as env
-    # vars too — never spliced into the bash -c string.
-    CLONE_ENV=""
-    [ -n "${GH_TOKEN:-}" ] && CLONE_ENV="-e GH_TOKEN=$GH_TOKEN"
-    while IFS=$'\t' read -r _owner _canon _src; do
-        [ -n "$_owner" ] || continue
-        CLONE_ENV="$CLONE_ENV -e $_canon=${!_src}"
+    # The bootstrap exec isn't shim-launched, so hand it the git credentials
+    # explicitly for private-repo clones over HTTPS: GIT_HOST_TOKENS (the
+    # manifest's host→variable routing table, derived by manifest.py) plus
+    # every variable it names — git-credential-org resolves the clone's host
+    # through the table and reads each value by indirect expansion. Values are
+    # manifest-validated (env-var names, boring host charset), so no line
+    # carries whitespace; git_clone_env_pairs (src/keyfiles.sh, unit-tested)
+    # emits one VAR=VALUE per line and the array keeps each a single docker-exec
+    # argv word (a plain string would word-split the space-separated pairs into
+    # separate -e arguments and mangle the table).
+    CLONE_ENV=()
+    while IFS= read -r _pair; do
+        [ -n "$_pair" ] || continue
+        CLONE_ENV+=("-e" "$_pair")
     done <<EOF
-$GIT_ORG_TOKENS
-EOF
-    # And each per-org token's host binding, so the bootstrap exec's
-    # git-credential-org sees the same GH_HOST_<owner> it would inside the
-    # running container — hosts carry no whitespace (manifest.py validated the
-    # charset), so this unquoted -e assembly is safe too.
-    while IFS=$'\t' read -r _owner _hostvar _host; do
-        [ -n "$_owner" ] || continue
-        CLONE_ENV="$CLONE_ENV -e $_hostvar=$_host"
-    done <<EOF
-$GIT_ORG_HOSTS
+$(git_clone_env_pairs "$GIT_HOST_TOKENS")
 EOF
     while IFS=$'\t' read -r RNAME RURL; do
         [ -n "$RNAME" ] || continue
@@ -482,13 +475,13 @@ EOF
         # userinfo — a `@` inside the path must not read as userinfo, and a
         # `*` in a case pattern crosses `/`, so no URL globs.
         git_url_split "$RURL"
-        docker exec $CLONE_ENV -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
+        docker exec "${CLONE_ENV[@]}" -e "REPO_NAME=$RNAME" -e "REPO_URL=$RURL" -u coder "$CNAME" bash -c \
             '[ -d "/workspace/repos/$REPO_NAME/.git" ] || git clone "$REPO_URL" "/workspace/repos/$REPO_NAME"' \
             || { case "$_h" in github.com|github.com:443)
                         echo "WARNING: clone of '$RNAME' failed — private repo needs either GH_TOKEN in secrets.env (machine user must have repo access) or a one-time 'gh auth login' in the container"
                         ;;
                     *)
-                        echo "WARNING: clone of '$RNAME' failed — for a non-github host check capabilities.egress includes it (repo hosts are never auto-allowlisted), then that git.orgs.<owner>.token names a GH_TOKEN_<owner> var in secrets.env (github's GH_TOKEN and gh login are never sent to other hosts)"
+                        echo "WARNING: clone of '$RNAME' failed — for a non-github host check capabilities.egress includes it (repo hosts are never auto-allowlisted), then that git.hosts.$_h.token names a variable set in secrets.env (the github GH_TOKEN and gh login are never sent to other hosts)"
                         ;;
                 esac; }
         # Per-repo identity attribution: if this repo's OWNER has a git.orgs
