@@ -8,6 +8,7 @@ GIT_ORG_IDENTITIES=''
 GIT_HOST_TOKENS=github.com=GH_TOKEN
 GIT_CREDENTIAL_HOSTS='https://github.com
 '
+GIT_EGRESS_NOTICE_HOSTS=''
 MEM_LIMIT=2g
 AGENTS_ENABLED='aider claude codex cursor pi'
 SHIM_AGENTS='claude codex cursor-agent pi'
