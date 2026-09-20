@@ -78,7 +78,7 @@ else
             -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
             gh auth git-credential get)   # human fallback
         gh_rc=$?
-        if [ "$gh_rc" -eq 0 ] && printf '%s\n' "$gh_out" | grep -q '^password='; then
+        if [ "$gh_rc" -eq 0 ] && printf '%s\n' "$gh_out" | grep -q '^password=.'; then
             printf '%s\n' "$gh_out"
             exit 0
         fi
