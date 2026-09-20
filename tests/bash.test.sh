@@ -50,40 +50,37 @@ cp "$REPO"/plugins/gateway/run.sh "$SBOX/plugins/gateway/"
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/keyfiles.sh ──"
 # shellcheck disable=SC1091
-. "$REPO/src/keyfiles.sh"   # defines warn_missing + write_keyfiles + warn_unbound_org_token, no side effects
+. "$REPO/src/keyfiles.sh"   # defines warn_missing + write_keyfiles + git_clone_env_pairs, no side effects
 
-# warn_unbound_org_token <file> <VAR>: a hand-set GH_TOKEN_<owner> in an agent
-# env file needs its GH_HOST_<owner> binding in the SAME file, or
-# git-credential-org.sh refuses to present it. Tested directly (not by
-# driving update-agent-keys.sh end to end, which would need docker) — it's a
-# pure function of one file's contents plus the VAR name.
-WUOT="$WORK/wuot.env"; : > "$WUOT"
-err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_acme 2>&1)
-assert_contains "warn_unbound_org_token: warns when GH_HOST_acme is missing" "$err" "GH_TOKEN_acme set without a matching GH_HOST_<owner>"
-printf 'GH_HOST_acme=git.example.test\n' >> "$WUOT"
-err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_acme 2>&1)
-assert_eq "warn_unbound_org_token: silent once GH_HOST_acme is set" "" "$err"
-err=$(warn_unbound_org_token "$WUOT" OBSIDIAN_ANNOTATED_KEY 2>&1)
-assert_eq "warn_unbound_org_token: no-op for a non-GH_TOKEN_ var" "" "$err"
-err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_VARS 2>&1)
-assert_eq "warn_unbound_org_token: no-op for GH_TOKEN_VARS (the scan list, not a token)" "" "$err"
-err=$(warn_unbound_org_token "$WUOT" GH_TOKEN_Hank 2>&1)
-assert_eq "warn_unbound_org_token: no-op for a non-canonical (mixed-case) suffix" "" "$err"
+# git_clone_env_pairs <git_host_tokens>: one VAR=VALUE line per credential the
+# bootstrap clone exec needs — GIT_HOST_TOKENS itself plus every variable it
+# names, read from the environment by indirect expansion. This is the exact
+# mechanism up.sh hands the clone's `docker exec` its env, so the in-container
+# git-credential-org sees the same table and token values it would see inside
+# the running container. (Bootstrap-clone environment test: this function is
+# what the clone exec's env is built from — see the up.sh drift pins below.)
+CLONE_DIR="$WORK/clone"; mkdir -p "$CLONE_DIR"
+GH_TOKEN=cli_tok SRC_FRY=frytok SRC_X=xtok
+out=$(git_clone_env_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_X")
+assert_eq "clone env carries GIT_HOST_TOKENS and each named variable" \
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_X\nGH_TOKEN=cli_tok\nSRC_FRY=frytok\nSRC_X=xtok' \
+    "$out"
+out=$(git_clone_env_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_FRY")
+assert_eq "clone env dedupes one variable serving two hosts" \
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_FRY\nGH_TOKEN=cli_tok\nSRC_FRY=frytok' \
+    "$out"
+unset GH_TOKEN SRC_FRY SRC_X
 
-# note_orphan_org_binding <file> <VAR>: the removal-side sibling — used after
-# a GH_TOKEN_<owner> is removed from an agent env file, to flag a
-# GH_HOST_<owner> binding left behind with no token to gate. Same
-# canonical-suffix filter as warn_unbound_org_token, tested directly for the
-# same reason.
-NOOB="$WORK/noob.env"; printf 'GH_HOST_acme=git.example.test\n' > "$NOOB"
-err=$(note_orphan_org_binding "$NOOB" GH_TOKEN_acme 2>&1)
-assert_contains "note_orphan_org_binding: notes when GH_HOST_acme is still present" "$err" "GH_HOST_acme still set in $NOOB"
-: > "$NOOB"
-err=$(note_orphan_org_binding "$NOOB" GH_TOKEN_acme 2>&1)
-assert_eq "note_orphan_org_binding: silent when no GH_HOST_acme is present" "" "$err"
-printf 'GH_HOST_acme=git.example.test\n' > "$NOOB"
-err=$(note_orphan_org_binding "$NOOB" GH_TOKEN_VARS 2>&1)
-assert_eq "note_orphan_org_binding: no-op for GH_TOKEN_VARS (the scan list, not a token)" "" "$err"
+# warn_unbound_org_token and note_orphan_org_binding are gone with per-owner
+# routing (GH_HOST_<owner> bindings no longer exist): a host token is routed
+# by the GIT_HOST_TOKENS row up.sh writes from the manifest, so update-agent-
+# keys.sh has nothing to warn about — it edits values, never the table.
+if grep -q 'warn_unbound_org_token\|note_orphan_org_binding' "$REPO/src/keyfiles.sh" \
+    "$REPO/bin/update-agent-keys.sh"; then
+    fail "per-org binding warn/note helpers are gone from keyfiles + update-agent-keys"
+else
+    pass "per-org binding warn/note helpers are gone from keyfiles + update-agent-keys"
+fi
 
 # The shim-agent list derives from the descriptors — binaries of mcp-capable
 # agents — exactly what manifest.py emits as SHIM_AGENTS with every agent
@@ -131,185 +128,174 @@ sourced=$(env -i bash -c 'set -a; . "$1"; set +a; echo "$FOO"' _ "$d/claude.env"
 assert_eq "agent-scoped overrides shared on source (last wins)" "agentval" "$sourced"
 unset FOO BAR
 
-# per-org tokens (GIT_ORG_TOKENS) fan into the shared block as GH_TOKEN_<owner>,
-# alongside the default GH_TOKEN, on every shim agent — this is what
-# git-credential-org reads to route by owner.
+# The git.hosts table (5th arg) lands in the shared block beside every
+# variable it names — this is what git-credential-org resolves request hosts
+# through, so the table itself AND each named variable (under its own name,
+# exactly as written — no owner sanitisation) reach every shim agent.
 d="$WORK/ck4"; mkdir -p "$d"; chmod 700 "$d"
-GH_TOKEN=defval SRC_VENDOR=vtok SRC_ACME=atok
-GOT=$(printf 'vendor\tGH_TOKEN_vendor\tSRC_VENDOR\nacme-corp\tGH_TOKEN_acme_corp\tSRC_ACME\n')
-write_keyfiles "$d" "$SHIM" "" "" "$GOT" >/dev/null
-assert_eq "per-org tokens land next to GH_TOKEN on each agent" \
-    $'GH_TOKEN=defval\nGH_TOKEN_vendor=vtok\nGH_TOKEN_acme_corp=atok' "$(cat "$d/codex.env")"
-assert_eq "per-org fan-out reaches every shim agent" \
-    $'GH_TOKEN=defval\nGH_TOKEN_vendor=vtok\nGH_TOKEN_acme_corp=atok' "$(cat "$d/cursor-agent.env")"
-unset GH_TOKEN SRC_VENDOR SRC_ACME
+GH_TOKEN=defval GH_TOKEN_fry=frytok GIT_HOST_TOKENS_FRYVAR=gamut
+TABLE="github.com=GH_TOKEN git.example.test=GH_TOKEN_fry"
+write_keyfiles "$d" "$SHIM" "" "" "$TABLE" >/dev/null
+assert_eq "table + named variables land next to GH_TOKEN on each agent" \
+    $'GH_TOKEN=defval\nGIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/codex.env")"
+assert_eq "table fan-out reaches every shim agent" \
+    $'GH_TOKEN=defval\nGIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/cursor-agent.env")"
+unset GH_TOKEN GH_TOKEN_fry
 
-# git_org_hosts (6th arg): the host each per-org token is bound to rides beside
-# it as GH_HOST_<owner> — a host is not a secret, so it needs no SRC_* lookup.
-d="$WORK/ck4h"; mkdir -p "$d"; chmod 700 "$d"
-GH_TOKEN=defval SRC_VENDOR=vtok SRC_ACME=atok
-GOH=$(printf 'vendor\tGH_HOST_vendor\tgithub.com\nacme-corp\tGH_HOST_acme_corp\tgit.example.test\n')
-write_keyfiles "$d" "$SHIM" "" "" "$GOT" "$GOH" >/dev/null
-assert_contains "GH_HOST_vendor rides beside its token" "$(cat "$d/codex.env")" "GH_HOST_vendor=github.com"
-assert_contains "GH_HOST_acme_corp rides beside its token" "$(cat "$d/codex.env")" "GH_HOST_acme_corp=git.example.test"
-unset GH_TOKEN SRC_VENDOR SRC_ACME
+# one variable serving several hosts collapses to one line (git_clone_env_pairs
+# and the keyfile writer dedupe by variable, so no duplicate rows appear).
+d="$WORK/ck4d"; mkdir -p "$d"; chmod 700 "$d"
+GH_TOKEN=defval SRC_SHARED=stok
+TABLE="github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED"
+write_keyfiles "$d" "codex" "" "" "$TABLE" >/dev/null
+assert_eq "one shared variable written once, not per host" \
+    $'GH_TOKEN=defval\nGIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED\nGH_TOKEN=defval\nSRC_SHARED=stok' "$(cat "$d/codex.env")"
+unset GH_TOKEN SRC_SHARED
 
-# 6th arg omitted entirely still works (no GH_HOST lines, no regression).
+# 5th arg omitted entirely still works (no table, no regression).
 d="$WORK/ck4o"; mkdir -p "$d"; chmod 700 "$d"
-GH_TOKEN=defval SRC_VENDOR=vtok SRC_ACME=atok
-write_keyfiles "$d" "$SHIM" "" "" "$GOT" >/dev/null
-assert_absent "6th arg omitted: no GH_HOST lines" "$(cat "$d/codex.env")" "GH_HOST_"
-unset GH_TOKEN SRC_VENDOR SRC_ACME
+GH_TOKEN=defval
+write_keyfiles "$d" "codex" "" "" >/dev/null
+assert_eq "5th arg omitted: no GIT_HOST_TOKENS line" "GH_TOKEN=defval" "$(cat "$d/codex.env")"
+unset GH_TOKEN
 
-# no orgs (empty / omitted git_org_tokens) → only GH_TOKEN, no regression
+# NEW FORM, end to end at the key-file level: a manifest that declares
+# git.hosts.github.com.token: GH_TOKEN_x resolves GIT_TOKEN_SOURCE=GH_TOKEN_x
+# (up.sh exports GH_TOKEN from it), so GH_TOKEN equal to that secret's VALUE
+# lands in every agent's key file alongside the table row naming its variable.
+d="$WORK/ck6"; mkdir -p "$d"; chmod 700 "$d"
+GH_TOKEN_x=new-token-value
+GH_TOKEN="${GH_TOKEN_x}"   # what up.sh does with GIT_TOKEN_SOURCE=GH_TOKEN_x
+TABLE="github.com=GH_TOKEN_x"
+write_keyfiles "$d" "$SHIM" "" "" "$TABLE" >/dev/null
+allhave=1; for a in $SHIM; do
+    [ "$(cat "$d/$a.env")" = $'GH_TOKEN=new-token-value\nGIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=new-token-value' ] || allhave=0
+done
+assert_eq "git.hosts.github.com.token: GH_TOKEN becomes GH_TOKEN (table value) in every agent env file" "1" "$allhave"
+unset GH_TOKEN GH_TOKEN_x
+
+# no table at all → only GH_TOKEN (old minimal composition, no regression)
 d="$WORK/ck5"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval
 write_keyfiles "$d" "claude" "" "" "" >/dev/null
-assert_eq "no orgs writes only GH_TOKEN (5th arg empty)" "GH_TOKEN=defval" "$(cat "$d/claude.env")"
-write_keyfiles "$d" "claude" "" "" >/dev/null   # 5th arg omitted entirely
-assert_eq "no orgs writes only GH_TOKEN (5th arg omitted)" "GH_TOKEN=defval" "$(cat "$d/claude.env")"
+assert_eq "no table writes only GH_TOKEN (5th arg empty)" "GH_TOKEN=defval" "$(cat "$d/claude.env")"
 unset GH_TOKEN
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git-credential-org.sh ──"
 # The in-container credential router: `get` on stdin (protocol/host/path),
-# first path segment = owner, return GH_TOKEN_<owner> → GH_TOKEN → gh fallback.
-# useHttpPath=true is what gives it the path line. Run the real script.
+# the request HOST resolved through GIT_HOST_TOKENS (the manifest's host→
+# variable table). Listed host → that variable's value by indirect expansion;
+# unlisted host → defer to gh when gh holds a login for it, else quit=1 with
+# a stderr line naming git.hosts.<host>.token. Run the real script.
 HELPER="$REPO/src/git-credential-org.sh"
-cred() { printf 'protocol=https\nhost=github.com\npath=%s\n' "$1" | env "${@:2}" bash "$HELPER" get; }
+gcred() { printf 'protocol=https\nhost=%s\npath=%s\n' "$1" "$2" | env "${@:3}" bash "$HELPER" get; }
 
-out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_HOST_vendor=github.com GH_TOKEN=defval)
-assert_contains "known owner → its per-org token" "$out" "password=vtok"
-assert_contains "per-org token uses x-access-token username" "$out" "username=x-access-token"
-assert_absent "per-org token is not the default" "$out" "password=defval"
+# A listed host returns ITS OWN token, under its own variable name — no owner
+# lookup, no sanitisation: the secrets.env variable exactly as written.
+out=$(gcred git.example.test o/r.git GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok)
+assert_contains "listed host → its token" "$out" "password=frytok"
+assert_contains "listed host uses x-access-token username" "$out" "username=x-access-token"
+assert_absent "listed host does not get another host's token" "$out" "password=xtok"
 
-out=$(cred other/repo.git GH_TOKEN=defval)   # no GH_TOKEN_other set
-assert_contains "unknown owner → default GH_TOKEN" "$out" "password=defval"
+# A request for host A never returns host B's token: the walk stops at the
+# matching row and only reads THAT row's variable.
+out=$(gcred a.test o/r.git GIT_HOST_TOKENS='a.test=SRC_A b.test=SRC_B' SRC_A=atok SRC_B=btok)
+assert_contains "request for host A returns host A's token" "$out" "password=atok"
+assert_absent "…never host B's token" "$out" "password=btok"
+out=$(gcred b.test o/r.git GIT_HOST_TOKENS='a.test=SRC_A b.test=SRC_B' SRC_A=atok SRC_B=btok)
+assert_contains "request for host B returns host B's token" "$out" "password=btok"
+assert_absent "…never host A's token" "$out" "password=atok"
 
-# owner sanitization parity with manifest.py:_canonical_token_var (- → _):
-# acme-corp reads GH_TOKEN_acme_corp, not GH_TOKEN_acme-corp.
-out=$(cred acme-corp/thing.git GH_TOKEN_acme_corp=atok GH_HOST_acme_corp=github.com GH_TOKEN=defval)
-assert_contains "hyphenated owner sanitized to GH_TOKEN_acme_corp" "$out" "password=atok"
+# A host differing only by case, or carrying the explicit default port git
+# passes for an https URL spelled with :443, still matches its row.
+out=$(gcred Git.Example.Test o/r.git GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok)
+assert_contains "mixed-case host still matches its row" "$out" "password=frytok"
+out=$(gcred git.example.test:443 o/r.git GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok)
+assert_contains "host:443 still matches the bare-host row" "$out" "password=frytok"
+out=$(gcred git.example.test o/r.git GIT_HOST_TOKENS='Git.Example.Test:443=SRC_FRY' SRC_FRY=frytok)
+assert_contains "a row spelled with case and :443 still matches a bare request" "$out" "password=frytok"
 
-# case-folding parity: a mixed-case URL owner (github is case-insensitive; the
-# manifest lowercases) must read the lowercased GH_TOKEN_<owner>, not fall back.
-out=$(cred PlanetExpress/ship.git GH_TOKEN_planetexpress=ptok GH_HOST_planetexpress=github.com GH_TOKEN=defval)
-assert_contains "mixed-case owner folds to GH_TOKEN_planetexpress" "$out" "password=ptok"
-assert_absent "mixed-case owner does not fall back to default" "$out" "password=defval"
-
-# No GH_HOST_<owner> binding at all → the per-org token is refused
-# EVERYWHERE, github.com included (an empty $bound never equals a real
-# $host) — the container default GH_TOKEN still answers for github.com.
-out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_TOKEN=defval)
-assert_contains "unbound per-org token is presented nowhere: falls back to default" "$out" "password=defval"
-assert_absent "unbound per-org token is presented nowhere: not the org token" "$out" "password=vtok"
-
-# neither the per-org nor the default token set → defer to gh (human login).
-# Mock gh so the fallback is deterministic and offline.
+# An UNLISTED host: no row, no gh login → quit=1, stderr naming
+# git.hosts.<host>.token. Mock gh so the fallback is deterministic and
+# offline.
 mkdir -p "$WORK/ghbin"
 cat > "$WORK/ghbin/gh" <<'MOCK'
 #!/bin/bash
+# gh auth token --hostname <h>: succeed only for the host we "logged into";
 # gh auth git-credential get: echo a fixed human credential.
+[ "$1" = auth ] && [ "$2" = token ] && [ "$3" = --hostname ] && {
+    [ "$4" = gh.example.test ] && exit 0 || exit 1; }
 [ "$1" = auth ] && { echo "username=human"; echo "password=humantok"; exit 0; }
 exit 1
 MOCK
 chmod +x "$WORK/ghbin/gh"
-out=$(printf 'protocol=https\nhost=github.com\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" bash "$HELPER" get)
-assert_contains "no token set → falls back to gh credential" "$out" "password=humantok"
+out=$(printf 'protocol=https\nhost=other.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "unlisted host, no gh login: clean exit" 0 "$rc"
+assert_eq "unlisted host, no gh login: tells git to quit" "quit=1" "$out"
+assert_contains "…stderr names git.hosts.<host>.token" \
+    "$(cat "$WORK/cred-err")" "no git.hosts.other.test.token"
 
-# Non-github origins (gitea, self-hosted — entrypoint installs the helper for
-# every GIT_CREDENTIAL_HOSTS origin): the owner lookup is host-agnostic, so a
-# gitea owner reads its own GH_TOKEN_<owner> exactly like a github one …
-gcred() { printf 'protocol=https\nhost=git.example.test\npath=%s\n' "$1" | env "${@:2}" bash "$HELPER" get; }
-out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok GH_HOST_emergence=git.example.test GH_TOKEN=defval)
-assert_contains "gitea owner → its per-org token" "$out" "password=etok"
-assert_absent "gitea owner does not get the github default" "$out" "password=defval"
+# An unlisted host WITH a stored gh login defers to gh (the human lane).
+out=$(printf 'protocol=https\nhost=gh.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" get)
+assert_contains "unlisted host with a gh login defers to gh" "$out" "password=humantok"
+assert_absent "…and never leaks the table token to it" "$out" "password=frytok"
 
-# Host binding (GH_HOST_<owner>, written by keyfiles.sh from
-# manifest.py:_org_hosts): a per-org token is only ever presented to the host
-# it was issued for — an ad-hoc clone of a same-named owner on ANY other host
-# gets no credential, not the wrong forge's token.
-out=$(cred vendor/lib.git GH_TOKEN_vendor=vtok GH_HOST_vendor=github.com GH_TOKEN=defval)
-assert_contains "binding matches the requested host → per-org token used" "$out" "password=vtok"
+# A LISTED host whose variable is unset (or empty) also defers to gh first —
+# gh decides whether IT holds a login for that host, so the human login is
+# offered only where gh itself was authenticated. gh holds no login for this
+# example host → quit=1.
+out=$(printf 'protocol=https\nhost=git.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GIT_HOST_TOKENS='git.example.test=SRC_FRY' bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "listed host with unset token: clean exit" 0 "$rc"
+assert_eq "listed host with unset token: quit=1" "quit=1" "$out"
+assert_contains "…stderr names the unset variable" \
+    "$(cat "$WORK/cred-err")" "git.hosts.git.example.test.token: 'SRC_FRY' is not set"
 
-out=$(gcred dmtrio/c.git GH_TOKEN_dmtrio=ghtok GH_HOST_dmtrio=github.com GH_TOKEN=defval 2>"$WORK/cred-bind-err")
-assert_eq "token bound to a different host: quit=1 exactly" "quit=1" "$out"
-assert_contains "…stderr names the bound host, not the requested one" \
-    "$(cat "$WORK/cred-bind-err")" "GH_TOKEN_dmtrio is bound to github.com, not git.example.test"
-
-out=$(gcred Emergence/filebrowser.git GH_TOKEN_emergence=etok 2>"$WORK/cred-unbound-err")
-assert_eq "no GH_HOST recorded → unbound, refused on gitea too" "quit=1" "$out"
-assert_contains "…stderr says it has no binding, not that it's bound elsewhere" \
-    "$(cat "$WORK/cred-unbound-err")" "has no GH_HOST_<owner> binding"
-
-out=$(cred emergence/x.git GH_TOKEN_emergence=etok GH_HOST_emergence=git.example.test GH_TOKEN=defval)
-assert_contains "gitea-bound token is never presented on github.com either" "$out" "password=defval"
-assert_absent "…not the gitea-bound token itself" "$out" "password=etok"
-
-# The wrong-host and unbound refusal on github.com fell through to the
-# container default with NO diagnostic — add one before the fall-through.
-out=$(cred acme/x.git GH_TOKEN_acme=atok GH_HOST_acme=gitea.example.test GH_TOKEN=defval 2>"$WORK/cred-fallback-bound-err")
-assert_contains "wrong-host refusal on github.com still falls back to the default token" "$out" "password=defval"
-assert_absent "…not the gitea-bound token itself" "$out" "password=atok"
-assert_contains "…stderr says which host it's bound to and that it fell back" \
-    "$(cat "$WORK/cred-fallback-bound-err")" "bound to gitea.example.test, not github.com — not presenting it"
-
-out=$(cred acme/x.git GH_TOKEN_acme=atok GH_TOKEN=defval 2>"$WORK/cred-fallback-unbound-err")
-assert_contains "unbound-on-github.com refusal still falls back to the default token" "$out" "password=defval"
-assert_contains "…stderr says it has no binding" \
-    "$(cat "$WORK/cred-fallback-unbound-err")" "has no GH_HOST_<owner> binding — not presenting it"
-
-# … but BOTH fall-backs are github-only. GH_TOKEN is the github machine user's
-# token and must never be presented to a third-party server; gh knows nothing
-# about other hosts. No per-org token → no credential at all (git fails 401,
-# loudly) and gh is never invoked.
+# The gh fallback itself still works for a host gh IS authenticated on
+# (exercised above); a listed host with the token set never invokes gh.
 rm -f "$WORK/gh-called"
 cat > "$WORK/ghbin/gh" <<'MOCK'
 #!/bin/bash
 touch "$(dirname "$0")/../gh-called"
-[ "$1" = auth ] && { echo "username=human"; echo "password=humantok"; exit 0; }
-exit 1
+exit 0
 MOCK
-out=$(printf 'protocol=https\nhost=git.example.test\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
-assert_rc "gitea, no per-org token: clean exit" 0 "$rc"
-assert_eq "gitea, no per-org token: tells git to quit" "quit=1" "$out"
-assert_contains "…names the missing var on stderr" "$(cat "$WORK/cred-err")" "no GH_TOKEN_nobody set for owner 'nobody' on git.example.test"
-[ -e "$WORK/gh-called" ] && fail "gh fallback invoked for a non-github host" || pass "gh fallback not invoked for a non-github host"
-# and the same request against github.com still takes the default → gh chain.
-out=$(printf 'protocol=https\nhost=github.com\npath=nobody/x.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_TOKEN=defval bash "$HELPER" get)
-assert_contains "github.com, no per-org token → default GH_TOKEN" "$out" "password=defval"
+out=$(gcred git.example.test o/r.git GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok)
+assert_contains "listed host with a token never touches gh" "$out" "password=frytok"
+[ -e "$WORK/gh-called" ] && fail "gh was invoked for a listed host with a token" || pass "gh not invoked for a listed host with a token"
 
-# explicit default port: git passes host=github.com:443 for a URL written
-# https://github.com:443/... — the gate must still recognize it as github.
-out=$(printf 'protocol=https\nhost=github.com:443\npath=nobody/x.git\n' | env -i GH_TOKEN=defval bash "$HELPER" get)
-assert_contains "github.com:443 still takes the github default" "$out" "password=defval"
-
-# hostnames are case-insensitive; git passes the URL's own spelling verbatim.
-out=$(printf 'protocol=https\nhost=GitHub.com\npath=nobody/x.git\n' | env -i GH_TOKEN=defval bash "$HELPER" get)
-assert_contains "mixed-case github host still takes the github default" "$out" "password=defval"
-
-# A hand-set GH_HOST_<owner> (e.g. via bin/update-agent-keys.sh) may be
-# spelled with different case/port than the request's normalized host —
-# normalise $bound the same way as $host before comparing.
-out=$(printf 'protocol=https\nhost=gitea.example.test\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_HOST_acme=Gitea.Example.Test:443 bash "$HELPER" get)
-assert_contains "hand-set binding spelled with case/port still matches" "$out" "password=atok"
+# hostnames are case-insensitive; git passes the URL's own spelling verbatim,
+# including an explicit :443 — the same normalisation manifest.py applies.
+out=$(gcred GitHub.COM nobody/x.git GIT_HOST_TOKENS='github.com=GH_TOKEN' GH_TOKEN=ghval)
+assert_contains "mixed-case CLI host takes its table row" "$out" "password=ghval"
+out=$(gcred github.com:443 nobody/x.git GIT_HOST_TOKENS='github.com=GH_TOKEN' GH_TOKEN=ghval)
+assert_contains "host:443 takes the bare-host row" "$out" "password=ghval"
 
 # A request with no host= line at all (git credential fill invoked by
 # hand) has nothing to route — quit=1 so git stops instead of falling through
 # to another helper or a prompt.
-out=$(printf 'protocol=https\npath=acme/x.git\n' | env GH_TOKEN_acme=atok GH_TOKEN=defval bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+out=$(printf 'protocol=https\npath=acme/x.git\n' | env GIT_HOST_TOKENS='a.test=SRC_A' SRC_A=atok bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
 assert_eq "no host= → quit=1" "quit=1" "$out"
 assert_rc "no host= → clean exit" 0 "$rc"
 assert_contains "no host= → stderr says why" "$(cat "$WORK/cred-err")" "git-credential-org: request carries no host= line — nothing to route"
 
 # store/erase are no-ops (stateless helper) — no output, clean exit.
-out=$(printf 'protocol=https\nhost=github.com\npath=vendor/lib.git\n' | GH_TOKEN_vendor=vtok bash "$HELPER" store); rc=$?
+out=$(printf 'protocol=https\nhost=git.example.test\npath=o/r.git\n' | GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" store); rc=$?
 assert_rc "store is a no-op (rc 0)" 0 "$rc"
 assert_eq "store produces no output" "" "$out"
 
+# Guards: the helper and the entrypoint must name NO forge for routing —
+# every host resolves through the one table. Comment lines may explain
+# history; no executable line may name one.
+forge_lines() { grep -vn '^[[:space:]]*#' "$1" | grep -v "^[0-9]*: *#" | grep 'github\.com' || true; }
+helper_leak=$(grep -v '^[[:space:]]*#' "$REPO/src/git-credential-org.sh" | grep -c 'github\.com' || true)
+assert_eq "helper: no github.com outside comment lines" "0" "$helper_leak"
+ep_leak=$(grep -v '^[[:space:]]*#' "$REPO/src/entrypoint.sh" | grep -c 'github\.com' || true)
+assert_eq "entrypoint: no github.com outside comment lines" "0" "$ep_leak"
+
 # ────────────────────────────────────────────────────────────────────────────
-echo "── entrypoint.sh: github.com credential-helper install ──"
-# entrypoint.sh installs git-credential-org as the github.com helper. VS Code's
+echo "── entrypoint.sh: per-host credential-helper install ──"
+# entrypoint.sh installs git-credential-org as the helper for every origin in
+# GIT_CREDENTIAL_HOSTS (no host hard-coded in the loop). VS Code's
 # dev-container GitHub feature pre-seeds — and can DUPLICATE, across windows/
 # re-attaches — credential.'https://github.com'.helper (= !gh auth git-credential)
 # before the entrypoint runs. A plain `git config` set then aborts ("cannot
@@ -340,11 +326,11 @@ assert_rc "plain set aborts on VS Code's duplicated pre-seed (the reported bug)"
 assert_contains "…with the multiple-values error" "$out" "cannot overwrite multiple values"
 
 # The fix: reset(empty)+add, verbatim from entrypoint.sh (minus `su … coder`),
-# looped over github.com plus the manifest's non-github origins
-# (GIT_CREDENTIAL_HOSTS, newline-separated — word-split on purpose).
-GIT_CREDENTIAL_HOSTS=$'https://git.example.test\n'
+# looped over GIT_CREDENTIAL_HOSTS (the git.hosts table's hosts plus every
+# https:// origin in repos:; newline-separated — word-split on purpose).
+GIT_CREDENTIAL_HOSTS=$'https://github.com\nhttps://git.example.test\n'
 install_helper() {
-  for origin in https://github.com $GIT_CREDENTIAL_HOSTS; do
+  for origin in $GIT_CREDENTIAL_HOSTS; do
     gc --unset-all "credential.$origin.helper" 2>/dev/null || true
     gc --add "credential.$origin.helper" ''
     gc --add "credential.$origin.helper" /usr/local/bin/git-credential-org
@@ -359,21 +345,21 @@ assert_rc "reset+add is idempotent on re-run" 0 "$rc"
 # ONLY the router — the empty reset dropped the inherited desktop bridge, so no
 # human-login leak. --get-urlmatch merges generic+host-specific honouring resets.
 eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://github.com/dmtrio/x.git)
-assert_eq "router is the sole effective github.com helper (bridge cleared)" \
+assert_eq "router is the sole effective CLI-host helper (bridge cleared)" \
     "/usr/local/bin/git-credential-org" "$eff"
 eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://git.example.test/Emergence/filebrowser.git)
 assert_eq "router is the sole effective helper for a manifest gitea origin" \
     "/usr/local/bin/git-credential-org" "$eff"
 eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://other.example.test/x/y.git)
-assert_eq "an origin NOT in the manifest keeps only the desktop bridge (router not installed)" \
+assert_eq "an origin NOT in GIT_CREDENTIAL_HOSTS keeps only the desktop bridge (router not installed)" \
     "!desktop-bridge" "$eff"
 
 # Drift pin: entrypoint.sh must keep the idempotent idiom. If anyone reverts to a
 # plain `git config … helper <value>` set, these fail loudly (mirrors the
 # up.sh/plugins.test.sh drift pins).
 EP=$(cat "$REPO/src/entrypoint.sh")
-assert_contains "entrypoint loops github.com plus the manifest's non-github origins" \
-    "$EP" 'for origin in https://github.com $GIT_CREDENTIAL_HOSTS; do'
+assert_contains "entrypoint loops every GIT_CREDENTIAL_HOSTS origin (no hard-coded host)" \
+    "$EP" 'for origin in $GIT_CREDENTIAL_HOSTS; do'
 assert_contains "entrypoint resets the helper list (--unset-all)" \
     "$EP" "--unset-all credential.'\$origin'.helper"
 assert_contains "entrypoint adds an empty reset before the router" \
@@ -382,7 +368,7 @@ assert_contains "entrypoint adds the router via --add (not a plain set)" \
     "$EP" "--add credential.'\$origin'.helper /usr/local/bin/git-credential-org"
 # The loop expands unquoted with globbing on; values are manifest-validated,
 # but word-splitting must not glob. Check set -f sits directly before the for.
-if grep -B1 '^for origin in https://github.com \$GIT_CREDENTIAL_HOSTS; do' "$REPO/src/entrypoint.sh" \
+if grep -B1 '^for origin in \$GIT_CREDENTIAL_HOSTS; do' "$REPO/src/entrypoint.sh" \
     | head -1 | grep -q '^set -f'; then
   pass "entrypoint loop is glob-safe (set -f)"
 else
@@ -390,14 +376,11 @@ else
 fi
 grep -q 'GIT_CREDENTIAL_HOSTS=\${GIT_CREDENTIAL_HOSTS:-}' "$REPO/compose/docker-compose.local.yml" \
     && pass "compose passes GIT_CREDENTIAL_HOSTS into the container" \
-    || fail "compose no longer passes GIT_CREDENTIAL_HOSTS (entrypoint would install github.com only)"
-grep -qF 'every non-github `https://` origin' "$REPO/src/README.md" \
-    && pass "src/README.md describes the router as multi-origin" \
-    || fail "src/README.md still describes git-credential-org as github-only"
+    || fail "compose no longer passes GIT_CREDENTIAL_HOSTS (entrypoint would install no helper at all)"
 grep -q 'GIT_CREDENTIAL_HOSTS="\$GIT_CREDENTIAL_HOSTS"' "$REPO/up.sh" \
     && pass "up.sh hands GIT_CREDENTIAL_HOSTS to compose" \
     || fail "up.sh no longer hands GIT_CREDENTIAL_HOSTS to compose"
-grep -q 'git.orgs.<owner>.token names a GH_TOKEN_<owner> var in secrets.env' "$REPO/up.sh" \
+grep -qF 'git.hosts.$_h.token names a variable set in secrets.env' "$REPO/up.sh" \
     && pass "up.sh warns with the non-github clone-failure message" \
     || fail "up.sh missing the non-github clone-failure warning text"
 grep -qF 'git_url_split "$RURL"' "$REPO/up.sh" \
@@ -409,12 +392,18 @@ grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
 grep -qF 'REPO_OWNER="${_p%%/*}"' "$REPO/up.sh" \
     && pass "up.sh derives REPO_OWNER from the shared host/path split" \
     || fail "up.sh derives REPO_OWNER from the shared host/path split"
-grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_ORG_TOKENS" "$GIT_ORG_HOSTS"' "$REPO/up.sh" \
-    && pass "up.sh passes GIT_ORG_HOSTS to write_keyfiles" \
-    || fail "up.sh no longer passes GIT_ORG_HOSTS to write_keyfiles"
-grep -qF 'no git.orgs token for this owner' "$REPO/src/git_notices.sh" \
-    && pass "git_notices.sh warns about an unbound credential owner" \
-    || fail "git_notices.sh missing the unbound-owner up-time notice"
+grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
+    && pass "up.sh passes GIT_HOST_TOKENS to write_keyfiles" \
+    || fail "up.sh no longer passes GIT_HOST_TOKENS to write_keyfiles"
+grep -qF 'git_clone_env_pairs "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
+    && pass "up.sh builds the bootstrap clone env via git_clone_env_pairs" \
+    || fail "up.sh no longer forwards GIT_HOST_TOKENS + row variables to the bootstrap clone"
+grep -qF '"${CLONE_ENV[@]}"' "$REPO/up.sh" \
+    && pass "up.sh passes the clone env as an array (pairs stay single argv words)" \
+    || fail "up.sh no longer expands CLONE_ENV as an array (space-separated pairs would word-split into separate -e args)"
+grep -qF 'no git.hosts.' "$REPO/src/git_notices.sh" \
+    && pass "git_notices.sh warns about a repo host with no git.hosts row" \
+    || fail "git_notices.sh missing the no-row up-time notice"
 grep -qF 'git host is not in capabilities.egress' "$REPO/src/git_notices.sh" \
     && pass "git_notices.sh warns when a bound git host is missing from capabilities.egress" \
     || fail "git_notices.sh missing the egress-coverage notice for a bound git host"
@@ -422,36 +411,31 @@ grep -qF 'git host is not in capabilities.egress' "$REPO/src/git_notices.sh" \
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git_notices.sh ──"
 # shellcheck disable=SC1091
-. "$REPO/src/git_notices.sh"   # defines git_owner_notices + git_egress_notices, no side effects
+. "$REPO/src/git_notices.sh"   # defines git_host_notices + git_egress_notices, no side effects
 
-out=$(git_owner_notices $'a\thttps://h.test/a.b/x.git\nb\thttps://h.test/a_b/y.git\n' '')
-assert_eq "git_owner_notices: a.b and a_b are different owners, two notice lines" \
-    "2" "$(printf '%s\n' "$out" | grep -c '^  note:')"
-assert_contains "git_owner_notices: notes h.test/a.b" "$out" "h.test/a.b"
-assert_contains "git_owner_notices: notes h.test/a_b" "$out" "h.test/a_b"
-
-out=$(git_owner_notices $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/acme/y.git\nc\thttps://h.test/*/z.git\nd\thttps://h.test/acme2/w.git\n' '')
-assert_eq "git_owner_notices: dedupes acme, a glob owner never swallows acme2 — exactly 3 notes" \
-    "3" "$(printf '%s\n' "$out" | grep -c '^  note:')"
-assert_contains "git_owner_notices: notes acme once" "$out" "h.test/acme:"
-assert_contains "git_owner_notices: notes the glob owner" "$out" 'h.test/*:'
-assert_contains "git_owner_notices: notes acme2" "$out" "h.test/acme2:"
-
-out=$(git_owner_notices $'a\thttps://h.test/acme/x.git\n' $'acme\tGH_TOKEN_acme\tSRC\n')
-assert_eq "git_owner_notices: an owner with a git.orgs token gets no notice" "" "$out"
-out=$(git_owner_notices $'a\thttps://github.com/acme/x.git\n' '')
-assert_eq "git_owner_notices: github.com never gets a notice" "" "$out"
-out=$(git_owner_notices $'a\tssh://git@h.test/acme/x.git\n' '')
-assert_eq "git_owner_notices: an ssh:// repo never gets a notice" "" "$out"
-
-# git_owner_notices now derives host/path via git_url_split (up.sh's own
-# split), not an inline copy — mixed-case host and an explicit :443 default
-# port must still normalize exactly as the clone loop's own derivation does.
-out=$(git_owner_notices $'a\thttps://Git.Example.Test:443/OrgA/x.git\n' '')
-assert_eq "git_owner_notices: via git_url_split, exactly one note" \
+out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h.test/a/y.git\n' '')
+assert_eq "git_host_notices: one notice per host, not per repo" \
     "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
-assert_contains "git_owner_notices: via git_url_split, host lowercased and :443 stripped, owner lowercased" \
-    "$out" "git.example.test/orga"
+assert_contains "git_host_notices: notes the host, not host/owner" "$out" "h.test: no git.hosts.h.test.token"
+
+out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h2.test/b/y.git\n' 'h.test=SRC_A')
+assert_eq "git_host_notices: a host WITH a table row gets no notice" \
+    "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+assert_contains "…and the row-less host is the one noticed" "$out" "h2.test: no git.hosts.h2.test.token"
+
+# Host normalisation: a row spelled with case and the explicit default port
+# still covers the request host, and a :port host row only covers :port.
+out=$(git_host_notices $'a\thttps://Git.Example.Test/a/x.git\n' 'Git.Example.Test:443=SRC_A')
+assert_eq "git_host_notices: a :443 row covers the bare host" "" "$out"
+out=$(git_host_notices $'a\thttps://Git.Example.Test:3000/a/x.git\n' 'git.example.test=SRC_A')
+assert_contains "git_host_notices: a :3000 repo is NOT covered by the bare-host row" "$out" "git.example.test:3000"
+
+# An ssh:// repo never gets a notice (it takes no HTTP credential at all),
+# and the CLI host keeps its implicit row, so it never notices either.
+out=$(git_host_notices $'a\tssh://git@h.test/a/x.git\n' '')
+assert_eq "git_host_notices: an ssh:// repo never gets a notice" "" "$out"
+out=$(git_host_notices $'a\thttps://github.com/acme/x.git\n' 'github.com=GH_TOKEN')
+assert_eq "git_host_notices: the CLI host with its row gets no notice" "" "$out"
 
 out=$(git_egress_notices $'https://git.example.test\n' "git.example.test" '')
 assert_eq "git_egress_notices: exact host match in EGRESS, no notice" "" "$out"
@@ -478,17 +462,15 @@ assert_contains "git_egress_notices: DNS-named host note mentions egress_cidrs" 
 grep -qF '. "$SCRIPT_DIR/src/git_notices.sh"' "$REPO/up.sh" \
     && pass "up.sh sources src/git_notices.sh" \
     || fail "up.sh no longer sources src/git_notices.sh"
-grep -qF 'git_owner_notices "$REPOS" "$GIT_ORG_TOKENS"' "$REPO/up.sh" \
-    && pass "up.sh calls git_owner_notices" \
-    || fail "up.sh no longer calls git_owner_notices"
+grep -qF 'git_host_notices "$REPOS" "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
+    && pass "up.sh calls git_host_notices" \
+    || fail "up.sh no longer calls git_host_notices"
 grep -qF 'git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' "$REPO/up.sh" \
     && pass "up.sh calls git_egress_notices" \
     || fail "up.sh no longer calls git_egress_notices"
 
 # The up-time notice loop's scheme guard must be case-insensitive and
-# admit only https:// (scp-style/ssh:// take no HTTP credential at all). The
-# loop itself now lives in src/git_notices.sh, not up.sh (see the
-# "── src/git_notices.sh ──" section below).
+# admit only https:// (scp-style/ssh:// take no HTTP credential at all).
 grep -qF '[ "$_rscheme" = https ] || continue' "$REPO/src/git_notices.sh" \
     && pass "git_notices.sh notice loop's scheme guard is the case-insensitive https check" \
     || fail "git_notices.sh notice loop's scheme guard is the case-insensitive https check"
@@ -885,45 +867,18 @@ out=$(uak mysite bogusagent VAR val 2>&1); rc=$?
 assert_rc "unknown agent rc 1" 1 "$rc"
 assert_contains "unknown agent message" "$out" "agent must be one of"
 
-# Regression: warn_unbound_org_token was called as `[ -n "$VALUE" ] &&
-# warn_unbound_org_token ...`, the LAST statement of set_var_in. On a removal
-# (VALUE empty) that `&&` itself returns 1 (its left side was false), and the
-# whole script runs under `set -e` — so a `common` removal aborted after the
-# first agent's file, leaving the var set in every file but the first.
+# Regression: the removal path of set_var_in used to end in
+# `[ -n "$VALUE" ] && warn_unbound_org_token ...` — on a removal that `&&`
+# returned 1 and, under the script's `set -e`, aborted after the first
+# agent's file, leaving the var set in every file but the first. The
+# warn/note helpers are gone now (per-owner routing is gone), but the
+# removal path must still complete across every agent file.
 RKP="$DAH/keys/removal"; mkdir -p "$RKP"
 for a in one two three; do printf 'FOO=bar\n' > "$RKP/$a.env"; chmod 600 "$RKP/$a.env"; done
 out=$(printf '\n' | uak removal common FOO 2>&1); rc=$?
 assert_rc "common removal across every agent file exits 0" 0 "$rc"
 allclear=1; for a in one two three; do grep -q '^FOO=' "$RKP/$a.env" && allclear=0; done
 assert_eq "common removal clears the var from every agent file" "1" "$allclear"
-
-# Fix C: removing GH_TOKEN_acme via `common` from agent files that still
-# carry GH_HOST_acme leaves an orphaned binding behind — note it once per
-# file (note_orphan_org_binding), not once per run.
-OKP="$DAH/keys/orphan"; mkdir -p "$OKP"
-for a in one two; do printf 'GH_TOKEN_acme=tok\nGH_HOST_acme=git.example.test\n' > "$OKP/$a.env"; chmod 600 "$OKP/$a.env"; done
-out=$(printf '\n' | uak orphan common GH_TOKEN_acme 2>"$WORK/orphan-err"); rc=$?
-assert_rc "common removal with an orphaned host binding exits 0" 0 "$rc"
-tokgone=1; for a in one two; do grep -q '^GH_TOKEN_acme=' "$OKP/$a.env" && tokgone=0; done
-assert_eq "common removal clears GH_TOKEN_acme from both agent files" "1" "$tokgone"
-assert_eq "common removal notes the orphaned binding once per file (two notes)" \
-    "2" "$(grep -c 'still set in' "$WORK/orphan-err")"
-
-# The unbound-binding warning is per FILE, not per run: in `common` mode one
-# agent's env already carrying GH_HOST_acme must never hide a sibling env
-# that still lacks it. Two agent files, only one already bound — setting
-# GH_TOKEN_acme via `common` must warn exactly once, naming the file that
-# still lacks the binding, and must still set the token in both files.
-UKP="$DAH/keys/unbound"; mkdir -p "$UKP"
-printf 'GH_HOST_acme=git.example.test\n' > "$UKP/one.env"; chmod 600 "$UKP/one.env"
-: > "$UKP/two.env"; chmod 600 "$UKP/two.env"
-out=$(uak unbound common GH_TOKEN_acme tok 2>"$WORK/unbound-err")
-assert_eq "common set with a mixed binding: exactly one warning line" \
-    "1" "$(grep -c 'set without a matching GH_HOST_<owner>' "$WORK/unbound-err")"
-assert_contains "common set with a mixed binding: warning names the unbound file" \
-    "$(cat "$WORK/unbound-err")" "in two.env"
-bothhave=1; for a in one two; do grep -q '^GH_TOKEN_acme=tok$' "$UKP/$a.env" || bothhave=0; done
-assert_eq "common set with a mixed binding: both files still get the token" "1" "$bothhave"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── run-*.sh token generation ──"
