@@ -27,88 +27,90 @@ GitHub rides the same path: agents act as the machine user (`GH_TOKEN`);
 your personal login never enters a container unless you `gh auth login`
 there, and agent PRs/comments show as the bot (you review and merge as you).
 
-## Per-org git identity
+## Per-host git identity
 
 When one machine user can't reach every repo (it isn't a member of every
-org), give the container its own token — and route by repo **owner** — from
-the manifest's `git:` block:
+org, or the repos live on more than one forge), give the container one
+token per host from the manifest's `git:` block:
 
 ```yaml
 git:
   name:  "Fry Agent"
   email: "agent+fry@example.com"
-  token: GH_TOKEN_fry              # this container's default credential (secrets.env var NAME)
-  orgs:                            # optional per-owner overrides (multi-org containers only)
-    planetexpress:
-      token: GH_TOKEN_planetexpress   # secrets.env var NAME
-      name:  "Leela Bot"              # optional — repo-local identity for planetexpress/* repos
-      email: "bot@planetexpress.example"
-      host:  github.com               # required when planetexpress has no repo in repos:
+  hosts:
+    git.example.org:
+      token: GH_TOKEN_example      # the NAME of a secrets.env variable
+    github.com:
+      token: GH_TOKEN_fry          # secrets.env var NAME
 ```
 
-`token`/`orgs.*.token` name vars in `secrets.env` (values never enter the
-manifest). At `up`, a repo owned by `<owner>` authenticates with
-`GH_TOKEN_<owner>` if set, else the container's `git.token`, else the global
-`GH_TOKEN` — resolved by the `git-credential-org` helper on every
-`github.com` fetch/push. A per-org token is presented only to its bound host
-(`repos:`-derived, or the declared `host:`) — never to another host — and
-only `github.com` has the `git.token`/global-`GH_TOKEN`/`gh` fall-backs; every
-other host gets the per-org token or nothing. A `git.orgs` owner with a `name`/`email` also gets
-that identity stamped repo-locally, so its commits carry the right author.
-A `token:` naming a var that isn't in `secrets.env` **hard-fails the
-apply** — never a silent fall-back to the wrong identity. This is routing +
-attribution, not isolation: every org's token sits in each agent's
+`hosts.<host>.token` names a variable in `secrets.env` (values never enter
+the manifest) and must be a valid variable name; the host is lowercased
+and an explicit `:443` stripped. Two keys that normalise to the same host
+are rejected, and so is a host key with anything beyond letters, digits,
+`.`, `-` and an optional `:port` — the table is the credential router's
+only source. A `token:` naming a variable that isn't set in `secrets.env`
+**hard-fails the apply** — never a silent fall-back to the wrong identity.
+A manifest with none of `git.hosts`, `git.token`, `git.orgs` keeps one
+implicit row, `github.com` → the global `GH_TOKEN`.
+
+At `up`, a repo on host `<host>` authenticates with the token variable its
+table row names — resolved by the `git-credential-org` helper on every
+fetch/push, and presented to no other host. A host with no row defers to
+the human's `gh` login when one exists for that host; otherwise the helper
+names the missing `git.hosts.<host>.token` and tells git to quit, so a
+private clone fails immediately instead of prompting. `http://` repo URLs
+are rejected outright (no credential over cleartext). This is routing +
+attribution, not isolation: every host's token sits in each agent's
 `<agent>.env`, so a repo whose token must be unreachable by other work
 belongs in a separate container.
 
+The old spellings feed the same table: `git.token: X` is the `github.com`
+row; each `git.orgs` entry is a row for the host it resolves to (its
+`host:` field, else the one `https://` host its owner's repos: URLs name).
+Two `git.orgs` entries resolving to one host must name the same token
+variable; `git.hosts` and either old spelling never mix in one manifest.
+Per-owner attribution (`git.orgs.<owner>.name/email`) still stamps a
+repo-local `user.name`/`user.email` at bootstrap clone — it is authorship
+only, never routing.
+
 ### Gitea and other self-hosted forges
 
-The same routing serves a non-github repo. `up` derives every non-github
-`https://` origin from `repos:` and the entrypoint installs the helper for
-each, so a repo at `https://git.example.test/Emergence/filebrowser.git`
-authenticates with `GH_TOKEN_emergence` (the var name keeps the `GH_TOKEN_`
-prefix on every forge — one naming rule, one scan, one router):
+The same table serves a non-github repo. `up` derives every `https://`
+origin from `repos:` (the entrypoint installs the helper for every
+`GIT_CREDENTIAL_HOSTS` host — the table's hosts plus every `https://`
+origin in `repos:`), so a repo at
+`https://git.example.test/Emergence/filebrowser.git` authenticates with
+the variable its row names:
 
 ```yaml
 forge: gitea
 repos:
   - https://git.example.test/Emergence/filebrowser.git
 git:
-  orgs:
-    Emergence:
+  hosts:
+    git.example.test:
       token: GH_TOKEN_emergence      # a gitea access token, in secrets.env
 capabilities:
   egress: [git.example.test]         # repo hosts are never auto-allowlisted
 ```
 
-Two things differ from github.com, both deliberate. The fall-backs are
-github-only. A non-github owner with no `GH_TOKEN_<owner>` gets **no**
-credential: the helper prints which var is missing and tells git to quit,
-so the clone fails immediately instead of prompting for a password, and
-neither the github machine user's `GH_TOKEN` nor the human `gh` login is
-ever offered to a third-party server. That also means a plain terminal or
-editor git client in the bottle has no credential for a non-github host:
-in a bottle, git to such a host authenticates only through `git.orgs`
-tokens, which reach the agent shims. The token is sent as the HTTP password
-with a fixed username; gitea accepts any username alongside an access
-token. `http://` repo URLs are rejected outright.
+The helper's only fall-back is the human `gh` login, and only when `gh`
+itself holds a login for that host. A host with no token and no `gh` login
+gets **no** credential: the helper prints which `git.hosts.<host>.token`
+is missing and tells git to quit, so the clone fails immediately instead
+of prompting for a password. That also means a plain terminal or editor
+git client in the bottle has no credential for a host the table doesn't
+carry. The token is sent as the HTTP password with a fixed username; gitea
+accepts any username alongside an access token.
 
-The router reads the owner as the first path segment, so a gitea served
-under a sub-path (`ROOT_URL https://host/git/`) derives owner `git` and
-finds no token; serve gitea at the host root or on its own hostname.
+The router reads the host from the request, not the path, so a gitea
+served under a sub-path (`ROOT_URL https://host/git/`) works as long as
+the table names the host. Serve gitea at the host root or on its own
+hostname so the URL's host matches the table.
 
-Owner names are the token key and carry no host: `up` refuses a manifest
-where an owner `git.orgs` routes a token for owns repos on two hosts (they
-would share `GH_TOKEN_<owner>`); use separate bottles. The same rule applies
-across owner spellings: `a.b` and `a_b` both become `GH_TOKEN_a_b`, so `up`
-refuses a manifest where either of two such owners has a `git.orgs` token.
-
-Each `git.orgs` token is bound to one host: the host its owner appears on in
-`repos:` (an `https://` URL), else an explicit `git.orgs.<owner>.host:` —
-required if the owner has no repo listed (write `github.com` for a github
-org). An owner whose listed repos are all scp-style, `ssh://` or `git://`
-must declare `host:` — those clones never use the token, and the host in
-such a URL is not validated, so it is never used for routing. The token is
-never presented to another host, and a token with no binding (for example
-one hand-set with `bin/update-agent-keys.sh` without `GH_HOST_<owner>`) is
-presented nowhere.
+Each host carries exactly one token: two rows for one host (from two old
+spellings, or two `git.hosts` keys that normalise together) are rejected
+unless they name the same variable. Repo hosts are never auto-allowlisted
+in the firewall — put each new host in `capabilities.egress` (or cover it
+with `capabilities.egress_cidrs`).

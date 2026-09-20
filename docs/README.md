@@ -9,8 +9,8 @@ user to a working container; this directory holds the extra context.
   host services, key updates, egress changes, and runtime helpers.
 - `TIPS.md` collects operational notes: resource tuning, shell aliases, `.env`
   overrides, and persistence.
-- `secrets.md` explains secret values, per-agent shim env files, and per-org
-  Git identity routing.
+- `secrets.md` explains secret values, per-agent shim env files, and per-host
+  Git credential routing.
 - `remote.md` explains the mosh jump, jump-reachable containers, tmux/herdr
   landing, and ntfy notifications.
 - `disk.md` explains where Docker disk goes (images vs. volumes), how to

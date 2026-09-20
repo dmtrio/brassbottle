@@ -704,22 +704,28 @@ class TestRepos(unittest.TestCase):
 
 
 class TestCredentialHosts(unittest.TestCase):
-    """GIT_CREDENTIAL_HOSTS: the non-github origins (scheme://host[:port], one
-    per line) entrypoint.sh installs git-credential-org under. github.com is
-    always installed, so it never appears here."""
+    """GIT_CREDENTIAL_HOSTS: the origins (scheme://host[:port], one per line)
+    entrypoint.sh installs git-credential-org under — every host the git.hosts
+    table names plus every https:// origin in repos:, github included. The
+    helper is installed for exactly this set; no host is hard-coded anywhere
+    else, and the helper itself carries no special case."""
 
-    def test_absent_repos_is_empty(self):
-        self.assertEqual(derive({})["GIT_CREDENTIAL_HOSTS"], "")
+    def test_declares_nothing_installs_the_cli_host(self):
+        # The implicit default row (github.com=GH_TOKEN) always installs the
+        # router for the CLI host — today's behaviour, table-derived.
+        self.assertEqual(derive({})["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
 
-    def test_github_only_manifest_is_empty(self):
+    def test_github_only_manifest_yields_github(self):
         d = derive({"repos": ["https://github.com/x/app.git",
                               "https://GitHub.com/y/lib.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
 
     def test_gitea_repo_yields_its_origin(self):
         d = derive({"forge": "gitea",
                     "repos": ["https://git.example.test/Emergence/filebrowser.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
+                         "https://git.example.test\nhttps://github.com\n")
 
     def test_mixed_hosts_distinct_sorted_lowercased(self):
         d = derive({"repos": [
@@ -733,17 +739,20 @@ class TestCredentialHosts(unittest.TestCase):
         self.assertEqual(
             d["GIT_CREDENTIAL_HOSTS"],
             "https://alpha.example.test:3000\n"
+            "https://github.com\n"
             "https://zeta.example.test\n")
 
     def test_userinfo_in_url_is_not_part_of_origin(self):
         d = derive({"repos": ["https://bot@git.example.test/x/y.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
+                         "https://git.example.test\nhttps://github.com\n")
 
-    def test_explicit_443_collapses_to_github(self):
+    def test_explicit_443_collapses_to_the_bare_host(self):
         d = derive({"repos": ["https://github.com:443/x/y.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
         d = derive({"repos": ["https://git.example.test:443/x/y.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
+                         "https://git.example.test\nhttps://github.com\n")
 
     def test_bad_host_is_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -755,49 +764,47 @@ class TestCredentialHosts(unittest.TestCase):
 
     def test_underscore_host_accepted(self):
         d = derive({"repos": ["https://git_internal.lan/o/r.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git_internal.lan\n")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
+                         "https://git_internal.lan\nhttps://github.com\n")
 
-    def test_owner_on_two_hosts_is_rejected(self):
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"repos": ["https://github.com/acme/a.git",
-                              "https://git.example.test/Acme/b.git"],
-                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
-        self.assertIn(
-            "owner 'acme' appears on more than one host (git.example.test, github.com)",
-            str(cm.exception))
-        # Passing case: same owner twice on ONE host with different repo names.
-        d = derive({"repos": ["https://github.com/acme/a.git",
-                              "https://github.com/acme/b.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+    def test_repos_hosts_and_table_hosts_merge_deduped(self):
+        d = derive({"repos": ["https://git.example.test/E/x.git"],
+                    "git": {"hosts": {"git.example.test": {"token": "GH_TOKEN_x"},
+                                      "Git.Other.Test:443": {"token": "GH_TOKEN_x"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_x"})
+        self.assertEqual(
+            d["GIT_CREDENTIAL_HOSTS"],
+            "https://git.example.test\n"
+            "https://git.other.test\n"
+            "https://github.com\n")
 
 
 class TestTokenRouting(unittest.TestCase):
-    """_check_token_routing: a canonical GH_TOKEN_<owner> var must map to
-    exactly one owner and one host, across repos: URLs and git.orgs keys."""
-
-    def test_two_host_guard_is_scheme_case_insensitive(self):
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"repos": ["HTTPS://github.com/acme/a.git",
-                              "https://git.example.test/acme/b.git"],
-                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
-        self.assertIn("appears on more than one host", str(cm.exception))
-
-    def test_two_host_guard_ignores_explicit_443(self):
-        d = derive({"repos": ["https://github.com/acme/a.git",
-                              "https://github.com:443/acme/b.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+    """What survives of the old owner-keyed routing checks: the http://
+    rejection and the owner/repo path requirement (both still repos:-level
+    rules). Tokens themselves route by HOST now — the per-owner canonical-var
+    machinery is gone, so a.b/a_b owner spellings no longer collide."""
 
     def test_http_repo_url_is_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["http://x.example.test/acme/a.git"]})
         self.assertIn("uses http://", str(cm.exception))
 
+    def test_http_repo_on_a_listed_host_is_rejected(self):
+        # A token must never go over plain http: an http:// repo on a host the
+        # table carries a token for is rejected outright (like every http://
+        # repo URL — cleartext credentials are refused, no exceptions).
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["http://git.example.test/acme/a.git"],
+                    "git": {"hosts": {"git.example.test": {"token": "GH_TOKEN_x"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_x"})
+        self.assertIn("uses http://", str(cm.exception))
+
     def test_https_repo_url_needs_owner_and_repo(self):
-        # The router treats the first path segment as owner (_routed_repo_owners)
-        # and the up-time notice does the same; a bare host or owner-only URL
-        # would silently break both, so require a full owner/repo path.
+        # The up-time attribution treats the first path segment as owner and
+        # the clone failure hint splits the host the same way; a bare host or
+        # owner-only URL would silently break both, so require a full
+        # owner/repo path.
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["https://git.example.test"]})
         self.assertIn("has no owner/repo path", str(cm.exception))
@@ -807,89 +814,78 @@ class TestTokenRouting(unittest.TestCase):
         d = derive({"repos": ["https://git.example.test/o/r"]})
         self.assertEqual(d["REPOS"], "r\thttps://git.example.test/o/r\n")
 
-    def test_two_host_guard_only_fires_for_routed_owners(self):
-        # No git.orgs token routed for openssl: a public owner on two hosts
-        # (github.com + its own forge) must derive fine.
+    def test_public_owner_on_two_hosts_never_fires_anything(self):
+        # No token routes for openssl: a public owner on two hosts (its own
+        # forge + github mirror) must derive fine — each host takes its own
+        # table row's credential.
         d = derive({"repos": ["https://github.com/openssl/openssl.git",
                               "https://git.openssl.org/openssl/tools.git"]})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.openssl.org\n")
-        # Add a git.orgs token that actually routes for openssl: now it fires.
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"repos": ["https://github.com/openssl/openssl.git",
-                              "https://git.openssl.org/openssl/tools.git"],
-                    "git": {"orgs": {"openssl": {"token": "GH_TOKEN_openssl"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_openssl"})
-        self.assertIn("appears on more than one host", str(cm.exception))
+        self.assertEqual(
+            d["GIT_CREDENTIAL_HOSTS"],
+            "https://git.openssl.org\nhttps://github.com\n")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
 
-    def test_orgs_owner_colliding_with_repo_owner_rejected(self):
-        with self.assertRaises(m.ManifestError) as cm:
-            derive({"repos": ["https://github.com/a_b/x.git"],
-                    "git": {"orgs": {"a.b": {"token": "GH_TOKEN_a_b"}}}},
+    def test_same_owner_spelling_cannot_collide_on_a_var_anymore(self):
+        # Old spellings 'a.b' and 'a_b' both sanitised to GH_TOKEN_a_b — one
+        # would receive the other's token. Tokens are routed by host and use
+        # the secrets.env variable exactly as written (no name mangling), so
+        # two such owners on ONE host with the same variable simply collapse
+        # into one row.
+        d = derive({"git": {"orgs": {"a.b": {"token": "GH_TOKEN_a_b", "host": "h.test"},
+                                     "a_b": {"token": "GH_TOKEN_a_b", "host": "h.test"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
-        self.assertIn("'a.b', 'a_b' both map to GH_TOKEN_a_b", str(cm.exception))
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN h.test=GH_TOKEN_a_b")
+        self.assertIn("a.b\t\t\n", d["GIT_ORG_IDENTITIES"])
+        self.assertIn("a_b\t\t\n", d["GIT_ORG_IDENTITIES"])
 
-    def test_repo_owners_colliding_across_hosts_rejected(self):
+    def test_same_host_two_tokens_from_orgs_is_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
-            derive({"repos": ["https://github.com/a_b/x.git",
-                              "https://git.example.test/a.b/y.git"],
-                    "git": {"orgs": {"a_b": {"token": "GH_TOKEN_a_b"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
-        self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
-
-    def test_scp_owner_spelling_collision_is_allowed_when_bound(self):
-        # scp/ssh/git:// owners are OUT OF SCOPE for _check_token_routing's
-        # spelling-collision check entirely (see its docstring): an scp
-        # clone never presents an https credential, so 'a-b' (scp-only) and
-        # 'a_b' (git.orgs, host: explicit) sanitising to the same canon
-        # cannot misroute anything — a_b's token is bound to github.com,
-        # where the helper refuses any other host regardless of what 'a-b'
-        # is spelled. Must derive clean, not raise.
-        d = derive({"repos": ["git@h.test:a-b/x.git"],
-                    "git": {"orgs": {"a_b": {"token": "GH_TOKEN_a_b",
-                                             "host": "github.com"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "a_b\tGH_HOST_a_b\tgithub.com\n")
+            derive({"git": {"orgs": {"a.b": {"token": "GH_TOKEN_a_b", "host": "h.test"},
+                                     "a_b": {"token": "GH_TOKEN_a_b2", "host": "h.test"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b GH_TOKEN_a_b2"})
+        self.assertIn(
+            "git.orgs owner 'a.b' and git.orgs owner 'a_b' both set a token for "
+            "h.test with different variables (GH_TOKEN_a_b, GH_TOKEN_a_b2)",
+            str(cm.exception))
 
     def test_owner_on_scp_github_and_https_gitea_binds_to_https_host(self):
         # The same owner spelled via scp-style (which never binds — see
         # _ssh_repo_owners) and via https on a different host: only the
-        # https-derived host binds, and derivation succeeds — the scp/ssh
-        # host no longer feeds the two-host guard in _check_token_routing.
+        # https-derived host carries the row, and derivation succeeds — the
+        # scp/ssh host is unvalidated and never used for routing.
         d = derive({"repos": ["git@github.com:acme/a.git",
                               "https://git.example.test/acme/b.git"],
                     "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "acme\tGH_HOST_acme\tgit.example.test\n")
+        self.assertEqual(d["GIT_HOST_TOKENS"],
+                         "git.example.test=GH_TOKEN_acme github.com=GH_TOKEN")
 
     def test_scp_owner_with_no_orgs_token_derives(self):
-        # Same repos:, but no git.orgs token routes for that canon — the
-        # collision check never fires (it only fires for owners git.orgs
-        # actually routes a token for), so this must derive fine.
         d = derive({"repos": ["git@h.test:a.b/x.git"]})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
 
 
 class TestOrgHosts(unittest.TestCase):
-    """_org_hosts: each routed per-org token is bound to the one host its
-    owner appears on in repos:, else the host declared in git.orgs.<owner>.host:,
-    else a hard error — no default — end to end with the token, so
-    git-credential-org can refuse a host mismatch."""
+    """Each git.orgs token resolves to exactly one host row: its declared
+    host:, else the one https:// host its owner's repos: URLs name — never a
+    guessed default (a wrong guess presents a token to the wrong forge)."""
 
-    def test_org_hosts_bind_to_repo_host(self):
+    def test_org_rows_bind_to_repo_host(self):
         d = derive({"repos": ["https://github.com/acme/a.git",
                               "https://git.example.test/Emergence/f.git"],
                     "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"},
                                      "Emergence": {"token": "GH_TOKEN_emergence"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_acme GH_TOKEN_emergence"})
+        # Sorted by host; github.com keeps its own row (the org's token there
+        # — an orgs row CLAIMS the CLI host, it does not fall back to it).
         self.assertEqual(
-            d["GIT_ORG_HOSTS"],
-            "acme\tGH_HOST_acme\tgithub.com\n"
-            "emergence\tGH_HOST_emergence\tgit.example.test\n")
+            d["GIT_HOST_TOKENS"],
+            "git.example.test=GH_TOKEN_emergence github.com=GH_TOKEN_acme")
 
-    def test_org_hosts_unlisted_owner_rejected_everywhere(self):
+    def test_org_unlisted_owner_rejected_everywhere(self):
         # No default host, ever: an owner git.orgs routes a token for that
         # appears in no repos: URL and declares no host: is a hard error even
-        # in an otherwise github-only bottle — the binding decides which host
+        # in an otherwise github-only bottle — the row decides which host
         # receives the token, and a wrong guess presents a token to the wrong
         # forge.
         with self.assertRaises(m.ManifestError) as cm:
@@ -900,7 +896,7 @@ class TestOrgHosts(unittest.TestCase):
             "(https:// to route this token) or set host: on its git.orgs entry",
             str(cm.exception))
 
-    def test_org_hosts_unlisted_owner_rejected_in_mixed_bottle(self):
+    def test_org_unlisted_owner_rejected_in_mixed_bottle(self):
         # This bottle has a non-github host installed (git.example.test, via
         # OrgA's repo), so OrgB — routed a token but never seen in repos: —
         # can no longer be silently assumed to be a github owner.
@@ -909,10 +905,10 @@ class TestOrgHosts(unittest.TestCase):
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"},
                                      "OrgB": {"token": "GH_TOKEN_orgb"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga GH_TOKEN_orgb"})
-        # owner routing folds to lowercase throughout GIT_ORG_TOKENS (see
-        # _canonical_token_var), so _org_hosts only ever sees "orgb" — the
-        # message must name the owner without pretending "orgb" is the
-        # literal manifest key (it's "OrgB"), so it never spells a dotted
+        # owner routing folds to lowercase throughout the git.orgs checks (the
+        # attribution matches the clone URL's owner), so the message names
+        # 'orgb' — the message must never pretend 'orgb' is the literal
+        # manifest key (it's "OrgB"), so it never spells a dotted
         # git.orgs.<owner>... path a user could paste back in the wrong case.
         self.assertIn(
             "git.orgs owner 'orgb': not in repos: — add its repo "
@@ -920,9 +916,9 @@ class TestOrgHosts(unittest.TestCase):
             str(cm.exception))
         self.assertNotIn("git.orgs.orgb", str(cm.exception))
 
-    def test_org_hosts_scp_only_owner_requires_declared_host(self):
+    def test_org_scp_only_owner_requires_declared_host(self):
         # OrgA's only repos: entry is scp-style (git@host:owner/x.git),
-        # which never routes an https owner directly, and the host in it is
+        # which never routes an https token directly, and the host in it is
         # unvalidated — so it never binds. Declaring host: explicitly is
         # required.
         with self.assertRaises(m.ManifestError) as cm:
@@ -931,7 +927,7 @@ class TestOrgHosts(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
         self.assertIn("listed only over scp-style/ssh:///git:// URLs", str(cm.exception))
 
-    def test_org_hosts_scp_github_owner_requires_declared_host(self):
+    def test_org_scp_github_owner_requires_declared_host(self):
         # Even a github-looking scp repo doesn't bind — the host is
         # unvalidated regardless of what it looks like, so host: must still
         # be declared explicitly.
@@ -941,7 +937,7 @@ class TestOrgHosts(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
         self.assertIn("listed only over scp-style/ssh:///git:// URLs", str(cm.exception))
 
-    def test_org_hosts_ssh_scheme_only_owner_requires_declared_host(self):
+    def test_org_ssh_scheme_only_owner_requires_declared_host(self):
         # Same as above but for the ssh:// form (ssh://host/owner/repo.git)
         # rather than scp-style (host:owner/repo.git).
         with self.assertRaises(m.ManifestError) as cm:
@@ -950,7 +946,7 @@ class TestOrgHosts(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
         self.assertIn("listed only over scp-style/ssh:///git:// URLs", str(cm.exception))
 
-    def test_org_hosts_scp_userless_owner_requires_declared_host(self):
+    def test_org_scp_userless_owner_requires_declared_host(self):
         # git's scp-like syntax makes the userinfo optional
         # (host:owner/repo.git, no user@) — must still be recognised as
         # scp-style, not misread as an unlisted owner, and still requires
@@ -961,9 +957,9 @@ class TestOrgHosts(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
         self.assertIn("listed only over scp-style/ssh:///git:// URLs", str(cm.exception))
 
-    def test_org_hosts_git_scheme_only_owner_requires_declared_host(self):
+    def test_org_git_scheme_only_owner_requires_declared_host(self):
         # git:// is treated the same as ssh:// — neither ever routes an
-        # https per-org token directly, nor binds the owner to the host it's
+        # https token directly, nor binds the owner to the host it's
         # spelled on.
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": ["git://git.example.test/OrgA/x.git"],
@@ -971,7 +967,7 @@ class TestOrgHosts(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
         self.assertIn("listed only over scp-style/ssh:///git:// URLs", str(cm.exception))
 
-    def test_org_hosts_scp_only_owner_with_declared_host_binds(self):
+    def test_org_scp_only_owner_with_declared_host_binds(self):
         # An scp-only owner with an explicit host: binds to the declared
         # host (not the unvalidated scp host, though they happen to agree
         # here) and the router is installed for it.
@@ -979,26 +975,22 @@ class TestOrgHosts(unittest.TestCase):
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga",
                                                "host": "git.example.test:3000"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "orga\tGH_HOST_orga\tgit.example.test:3000\n")
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test:3000\n")
+        self.assertEqual(
+            d["GIT_HOST_TOKENS"],
+            "git.example.test:3000=GH_TOKEN_orga github.com=GH_TOKEN")
+        self.assertEqual(
+            d["GIT_CREDENTIAL_HOSTS"],
+            "https://git.example.test:3000\nhttps://github.com\n")
 
-    def test_org_hosts_declared_host(self):
+    def test_org_declared_host(self):
         d = derive({"repos": ["https://git.example.test/OrgA/x.git"],
                     "git": {"orgs": {"OrgA": {"token": "GH_TOKEN_orga"},
                                      "OrgB": {"token": "GH_TOKEN_orgb",
                                               "host": "Git.Other.Test:443"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orga GH_TOKEN_orgb"})
-        self.assertIn("orgb\tGH_HOST_orgb\tgit.other.test\n", d["GIT_ORG_HOSTS"])
+        self.assertIn("git.other.test=GH_TOKEN_orgb", d["GIT_HOST_TOKENS"])
 
-    def test_declared_hosts_not_emitted(self):
-        # GIT_ORG_DECLARED_HOSTS is internal to derive() — up.sh never
-        # consumes it (GIT_ORG_HOSTS already carries the resolved binding).
-        d = derive({"git": {"orgs": {"OrgB": {"token": "GH_TOKEN_orgb",
-                                               "host": "git.other.test"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_orgb"})
-        self.assertNotIn("GIT_ORG_DECLARED_HOSTS", d)
-
-    def test_org_hosts_declared_host_disagrees_with_repos(self):
+    def test_org_declared_host_disagrees_with_repos(self):
         # The message must read "git.orgs owner 'orga'", not the case-folded
         # "git.orgs.orga" — the latter looks like a literal manifest key even
         # though 'orga' is owner_lc, not what the user typed (OrgA).
@@ -1012,7 +1004,40 @@ class TestOrgHosts(unittest.TestCase):
             "(git.example.test) — remove host: or fix the repos: URL",
             str(cm.exception))
 
-    def test_org_hosts_bad_declared_host(self):
+    def test_org_owner_on_two_https_hosts_is_ambiguous(self):
+        # A token row must land on ONE host; an owner whose https repos: URLs
+        # name two hosts is ambiguous and is rejected unless host: says which
+        # one. (The old per-owner routing rejected the same shape; the reason
+        # is host ambiguity now, not owner-keyed var sharing.)
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["https://github.com/acme/a.git",
+                              "https://git.example.test/Acme/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
+        self.assertIn(
+            "git.orgs owner 'acme': its repos: URLs name more than one host "
+            "(git.example.test, github.com)",
+            str(cm.exception))
+
+    def test_org_two_host_ambiguity_is_scheme_case_insensitive(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"repos": ["HTTPS://github.com/acme/a.git",
+                              "https://git.example.test/acme/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
+        self.assertIn("name more than one host", str(cm.exception))
+
+    def test_org_declared_host_resolves_two_host_ambiguity(self):
+        # A declared host: that matches one of the owner's https hosts picks
+        # the row's host explicitly — the ambiguity is resolved, not guessed.
+        d = derive({"repos": ["https://github.com/acme/a.git",
+                              "https://git.example.test/Acme/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme",
+                                              "host": "github.com"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_acme")
+
+    def test_org_bad_declared_host(self):
         with self.assertRaises(m.ManifestError) as cm:
             derive({"git": {"orgs": {"vendor": {"token": "GH_TOKEN_vendor",
                                                  "host": "h'$(x)'.test"}}}},
@@ -1035,34 +1060,23 @@ class TestOrgHosts(unittest.TestCase):
                    env={"GH_TOKEN_VARS": "GH_TOKEN_vendor"})
         self.assertIn("host: must be a non-empty host", str(cm.exception))
 
-    def test_org_hosts_empty_without_orgs(self):
-        self.assertEqual(derive({})["GIT_ORG_HOSTS"], "")
-
     def test_declared_host_installs_router(self):
-        # A declared host: with no matching repos: URL never entered
-        # GIT_CREDENTIAL_HOSTS before — the entrypoint installed no helper for
-        # it and git fell through to the desktop bridge. The router must be
-        # installed for every host a token is bound to.
+        # A declared host: with no matching repos: URL never entered the
+        # repos:-derived set — the entrypoint must still install the router
+        # for it, or the row is never consulted.
         d = derive({"repos": ["https://github.com/x/y.git"],
                     "git": {"orgs": {"OrgB": {"token": "GH_TOKEN_orgb",
                                                "host": "gitea.example.test"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_orgb"})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://gitea.example.test\n")
-
-    def test_declared_github_host_does_not_install_router(self):
-        # github.com already gets the router unconditionally (entrypoint.sh);
-        # a declared host: of github.com must not add a redundant entry.
-        d = derive({"repos": ["https://github.com/x/y.git"],
-                    "git": {"orgs": {"OrgB": {"token": "GH_TOKEN_orgb",
-                                               "host": "github.com"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_orgb"})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+        self.assertEqual(
+            d["GIT_CREDENTIAL_HOSTS"],
+            "https://gitea.example.test\nhttps://github.com\n")
 
     def test_unvalidated_scp_host_never_reaches_credential_hosts(self):
         # Direct injection probe: an scp-style repos: URL whose host segment
         # carries shell metacharacters. _ssh_repo_owners never validates that
         # host against HOST_RE (it's informational only), so it must never
-        # reach GIT_ORG_HOSTS or GIT_CREDENTIAL_HOSTS — both of which
+        # reach GIT_HOST_TOKENS or GIT_CREDENTIAL_HOSTS — both of which
         # entrypoint.sh interpolates into shell.
         with self.assertRaises(m.ManifestError) as cm:
             derive({"repos": [{"name": "x", "url": "git@a';id;'b:acme/x.git"}],
@@ -1077,28 +1091,34 @@ class TestOrgHosts(unittest.TestCase):
                     "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme",
                                                "host": "github.com"}}}},
                    env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
-        self.assertEqual(d["GIT_ORG_HOSTS"], "acme\tGH_HOST_acme\tgithub.com\n")
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
-        self.assertNotIn("';id;'", d["GIT_ORG_HOSTS"])
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_acme")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
+        self.assertNotIn("';id;'", d["GIT_HOST_TOKENS"])
         self.assertNotIn("';id;'", d["GIT_CREDENTIAL_HOSTS"])
 
 
 class TestGitIdentity(unittest.TestCase):
-    # GH_TOKEN_VARS mirrors the set up.sh scans from secrets.env (names only).
+    """git.token, git.orgs validation, and the implicit default row.
+
+    GH_TOKEN_VARS mirrors the set up.sh scans from secrets.env (names only)."""
     ENV = {"GH_TOKEN_VARS": "GH_TOKEN_hank GH_TOKEN_vendor GH_TOKEN_v2"}
 
     def _d(self, git):
         return derive({"git": git}, env=dict(self.ENV))
 
-    def test_absent_git_identity_is_empty(self):
+    def test_absent_git_identity_keeps_the_implicit_default(self):
+        # A manifest with none of git.hosts/git.token/git.orgs keeps today's
+        # implicit row github.com=GH_TOKEN, and GIT_TOKEN_SOURCE stays empty
+        # (GH_TOKEN keeps flowing straight from secrets.env).
         d = derive({})
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
-        self.assertEqual(d["GIT_ORG_TOKENS"], "")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
         self.assertEqual(d["GIT_ORG_IDENTITIES"], "")
 
-    def test_default_token_source(self):
+    def test_default_token_source_becomes_the_cli_host_row(self):
         d = self._d({"token": "GH_TOKEN_hank"})
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_hank")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_hank")
 
     def test_default_token_missing_var_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -1108,51 +1128,59 @@ class TestGitIdentity(unittest.TestCase):
             "manifest git identity failed validation:\n"
             "  git.token: GH_TOKEN_nope not found in secrets.env")
 
-    def test_per_org_token_routing_and_canonical_var(self):
-        d = self._d({"token": "GH_TOKEN_hank",
-                     "orgs": {"vendor": {"token": "GH_TOKEN_vendor", "host": "github.com",
-                                         "name": "Vendor Bot", "email": "bot@vendor.io"}}})
-        # owner<TAB>canonical_var<TAB>source_var — canonical is GH_TOKEN_<owner>.
-        self.assertEqual(d["GIT_ORG_TOKENS"], "vendor\tGH_TOKEN_vendor\tGH_TOKEN_vendor\n")
-        self.assertEqual(d["GIT_ORG_IDENTITIES"], "vendor\tVendor Bot\tbot@vendor.io\n")
-
-    def test_hyphenated_owner_sanitizes_to_underscore(self):
-        # canonical var replaces '-' with '_'; the source var name is unchanged.
-        d = self._d({"orgs": {"acme-corp": {"token": "GH_TOKEN_v2", "host": "github.com"}}})
-        self.assertEqual(d["GIT_ORG_TOKENS"], "acme-corp\tGH_TOKEN_acme_corp\tGH_TOKEN_v2\n")
-        self.assertEqual(d["GIT_ORG_IDENTITIES"], "acme-corp\t\t\n")
-
-    def test_mixed_case_owner_folds_to_lowercase(self):
-        # github owners are case-insensitive; the router derives the owner from
-        # the clone URL, so the emitted owner + canonical var fold to lowercase
-        # (a `PlanetExpress` manifest key must route a `planetexpress/*` clone).
-        d = self._d({"orgs": {"PlanetExpress": {"token": "GH_TOKEN_v2", "host": "github.com",
-                                                "name": "Leela Bot"}}})
-        self.assertEqual(d["GIT_ORG_TOKENS"],
-                         "planetexpress\tGH_TOKEN_planetexpress\tGH_TOKEN_v2\n")
-        self.assertEqual(d["GIT_ORG_IDENTITIES"], "planetexpress\tLeela Bot\t\n")
-
-    def test_case_insensitive_duplicate_owner_hard_fails(self):
+    def test_default_token_invalid_var_name_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:
-            self._d({"orgs": {"Acme": {"token": "GH_TOKEN_v2"},
-                              "acme": {"token": "GH_TOKEN_vendor"}}})
+            self._d({"token": "1TOKEN"})
         self.assertEqual(
             str(cm.exception),
             "manifest git identity failed validation:\n"
-            "  git.orgs: duplicate owner 'acme' (case-insensitive clash with 'Acme')")
+            "  git.token: '1TOKEN' is not a valid env var name")
 
-    def test_owner_canonical_collision_rejected(self):
+    def test_orgs_row_lands_on_declared_host(self):
+        d = self._d({"orgs": {"vendor": {"token": "GH_TOKEN_vendor", "host": "github.com",
+                                         "name": "Vendor Bot", "email": "bot@vendor.io"}}})
+        # The org's token becomes the github.com row; the plain GH_TOKEN
+        # export is untouched (GIT_TOKEN_SOURCE stays "" — no explicit claim).
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_vendor")
+        self.assertEqual(d["GIT_ORG_IDENTITIES"], "vendor\tVendor Bot\tbot@vendor.io\n")
+
+    def test_orgs_hyphenated_owner_is_a_plain_row_now(self):
+        # Routing is host-keyed and the secrets.env variable name is used
+        # exactly as written, so a hyphenated owner needs no sanitised
+        # GH_TOKEN_<owner> alias — the token routes by host, not by owner.
+        d = self._d({"orgs": {"acme-corp": {"token": "GH_TOKEN_v2", "host": "github.com"}}})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_v2")
+        self.assertEqual(d["GIT_ORG_IDENTITIES"], "acme-corp\t\t\n")
+
+    def test_orgs_owner_name_case_folds_for_attribution(self):
+        # Attribution (not routing) folds to lowercase: a `PlanetExpress`
+        # manifest key must still stamp the identity for `planetexpress/*`
+        # clones, whose owner case we don't control.
+        d = self._d({"orgs": {"PlanetExpress": {"token": "GH_TOKEN_v2", "host": "github.com",
+                                                "name": "Leela Bot"}}})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_v2")
+        self.assertEqual(d["GIT_ORG_IDENTITIES"], "planetexpress\tLeela Bot\t\n")
+
+    def test_case_insensitive_duplicate_owner_hard_fails(self):
+        # Owners are case-insensitive (attribution folds to lowercase), so two
+        # keys differing only in case are an ambiguity — reject rather than
+        # letting the last one win.
         with self.assertRaises(m.ManifestError) as cm:
-            derive({"git": {"orgs": {"a.b": {"token": "GH_TOKEN_a_b"},
-                                     "a_b": {"token": "GH_TOKEN_a_b"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
-        self.assertIn("both map to GH_TOKEN_a_b", str(cm.exception))
+            self._d({"orgs": {"Acme": {"token": "GH_TOKEN_v2"},
+                              "acme": {"token": "GH_TOKEN_vendor"}}})
+        self.assertIn("git.orgs: duplicate owner 'acme' (case-insensitive clash "
+                      "with 'Acme')", str(cm.exception))
 
-    def test_gitea_owner_with_underscore_and_dot_accepted(self):
-        d = derive({"git": {"orgs": {"my_org.v2": {"token": "GH_TOKEN_a_b",
-                                                    "host": "github.com"}}}},
-                   env={"GH_TOKEN_VARS": "GH_TOKEN_a_b"})
-        self.assertIn("my_org.v2\tGH_TOKEN_my_org_v2\t", d["GIT_ORG_TOKENS"])
+    def test_dotted_and_underscored_owners_no_longer_clash(self):
+        # No canonical GH_TOKEN_<owner> var exists any more, so 'a.b' and
+        # 'a_b' are just two owners; only two entries on ONE HOST with
+        # different tokens collide (see TestTokenRouting).
+        d = self._d({"orgs": {"a.b": {"token": "GH_TOKEN_v2", "host": "h.test"},
+                              "a_b": {"token": "GH_TOKEN_vendor", "host": "h2.test"}}})
+        self.assertEqual(
+            d["GIT_HOST_TOKENS"],
+            "github.com=GH_TOKEN h.test=GH_TOKEN_v2 h2.test=GH_TOKEN_vendor")
 
     def test_org_missing_token_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -1204,6 +1232,152 @@ class TestGitIdentity(unittest.TestCase):
             "manifest git identity failed validation:\n"
             "  git.token: GH_TOKEN_nope not found in secrets.env\n"
             "  git.orgs.vendor.token: GH_TOKEN_alsonope not found in secrets.env")
+
+
+class TestGitHosts(unittest.TestCase):
+    """The git.hosts spelling: one table, one row per host, the secrets.env
+    variable name exactly as written."""
+
+    ENV = {"GH_TOKEN_VARS": "GH_TOKEN_fry GH_TOKEN_x"}
+
+    def _d(self, git, repos=()):
+        return derive({"repos": list(repos), "git": git}, env=dict(self.ENV))
+
+    def test_derivation_sorted_space_separated_pairs(self):
+        d = self._d({"hosts": {"z.example.test": {"token": "GH_TOKEN_x"},
+                               "a.example.test": {"token": "GH_TOKEN_fry"}}})
+        self.assertEqual(
+            d["GIT_HOST_TOKENS"],
+            "a.example.test=GH_TOKEN_fry github.com=GH_TOKEN z.example.test=GH_TOKEN_x")
+
+    def test_host_keys_normalise_case_and_443(self):
+        d = self._d({"hosts": {"Git.Example.Test:443": {"token": "GH_TOKEN_x"}}})
+        self.assertEqual(
+            d["GIT_HOST_TOKENS"],
+            "git.example.test=GH_TOKEN_x github.com=GH_TOKEN")
+        self.assertIn("https://git.example.test", d["GIT_CREDENTIAL_HOSTS"])
+
+    def test_port_survives_normalisation(self):
+        d = self._d({"hosts": {"git.example.test:3000": {"token": "GH_TOKEN_x"}}})
+        self.assertEqual(
+            d["GIT_HOST_TOKENS"],
+            "git.example.test:3000=GH_TOKEN_x github.com=GH_TOKEN")
+        self.assertIn("https://git.example.test:3000", d["GIT_CREDENTIAL_HOSTS"])
+
+    def test_unset_secret_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_nope"}}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.git.example.test.token: GH_TOKEN_nope not found in secrets.env")
+
+    def test_invalid_var_name_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {"token": "1TOKEN"}}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.git.example.test.token: '1TOKEN' is not a valid env var name")
+
+    def test_malformed_host_hard_fails(self):
+        for bad in ("bad_host!", "-lead.test", "h'$(x)'.test",
+                    "two words.test", ""):
+            with self.subTest(host=bad):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self._d({"hosts": {bad: {"token": "GH_TOKEN_x"}}})
+                self.assertIn("is not a valid host", str(cm.exception))
+
+    def test_duplicate_normalised_host_hard_fails(self):
+        # Two keys that normalise to the same host are an error even when the
+        # tokens agree — the table is one row per host, and the ambiguity is
+        # the author's to resolve.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x"},
+                               "Git.Example.Test:443": {"token": "GH_TOKEN_x"}}})
+        self.assertIn("normalises to the same host as", str(cm.exception))
+
+    def test_list_host_value_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": ["a", "b"]}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.git.example.test: must be a map with token: (got a list)")
+
+    def test_hosts_section_itself_as_a_list_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": ["git.example.test"]})
+        self.assertIn("git.hosts: must be a map of <host>: {token} (got a list)",
+                      str(cm.exception))
+
+    def test_unknown_key_under_host_entry_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x",
+                                                    "name": "Bot"}}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.git.example.test: unsupported field(s): name (only token)")
+
+    def test_missing_token_under_host_entry_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {}}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.git.example.test.token: needs token: (a secrets.env var name)")
+
+    def test_mixed_spellings_hosts_plus_token_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x"}},
+                     "token": "GH_TOKEN_fry"})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts and git.token/git.orgs are both set — they are two "
+            "spellings of one routing table; declare git.hosts only")
+
+    def test_mixed_spellings_hosts_plus_orgs_hard_fails(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x"}},
+                     "orgs": {"vendor": {"token": "GH_TOKEN_vendor", "host": "github.com"}}})
+        self.assertIn("declare git.hosts only", str(cm.exception))
+
+    def test_empty_git_hosts_counts_as_undeclared(self):
+        # An empty git.hosts map adds no rows and is not a mixed-spelling
+        # declaration: git.token still works beside it.
+        d = self._d({"hosts": {}, "token": "GH_TOKEN_fry"})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_fry")
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_fry")
+
+    def test_hosts_row_for_the_cli_host_claims_the_export(self):
+        d = self._d({"hosts": {"github.com": {"token": "GH_TOKEN_x"}}})
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_x")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_x")
+
+    def test_host_not_named_keeps_the_implicit_default(self):
+        # A git.hosts table that names only other hosts leaves the CLI host
+        # on its implicit default row — the container keeps presenting
+        # GH_TOKEN to github.com (today's behaviour) and the named token to
+        # its own host only.
+        d = self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x"}}})
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
+        self.assertEqual(
+            d["GIT_HOST_TOKENS"],
+            "git.example.test=GH_TOKEN_x github.com=GH_TOKEN")
+
+    def test_token_and_hosts_spellings_derive_identically(self):
+        # Guard: git.token: X and git.hosts.github.com.token: X are the same
+        # table row — byte-identical derived output.
+        a = self._d({"token": "GH_TOKEN_x"})
+        b = self._d({"hosts": {"github.com": {"token": "GH_TOKEN_x"}}})
+        self.assertEqual(a, b)
+
+    def test_declared_nothing_matches_the_implicit_output(self):
+        a = derive({})
+        self.assertEqual(a["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
+        self.assertEqual(a["GIT_TOKEN_SOURCE"], "")
 
 
 class TestDerivedValues(unittest.TestCase):
