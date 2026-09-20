@@ -95,14 +95,6 @@ for v in $(grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' 
         PRESENT_SECRET_VARS="${PRESENT_SECRET_VARS:+$PRESENT_SECRET_VARS }$v"
     fi
 done
-# The set of GH_TOKEN* var names present in secrets.env (NAMES only — values
-# stay on the host). manifest.py validates every git.token / git.orgs.*.token
-# against this list, hard-failing a manifest that names a token var that isn't
-# set rather than silently falling back to the wrong identity.
-GH_TOKEN_VARS=""
-for v in $(compgen -v | grep -E '^GH_TOKEN' || true); do
-    if [ -n "${!v}" ]; then GH_TOKEN_VARS="${GH_TOKEN_VARS:+$GH_TOKEN_VARS }$v"; fi
-done
 DERIVED=$(
     {
         yq -o=json -I=0 "$MANIFEST"
@@ -124,7 +116,7 @@ DERIVED=$(
                 && [ "$(printf '%s\n' "$DOC" | wc -l)" -eq 1 ] || DOC='!'
             printf '%s\t%s\n' "$(basename "$(dirname "$f")")" "$DOC"
         done
-    } | PRESENT_SECRET_VARS="$PRESENT_SECRET_VARS" GH_TOKEN_VARS="$GH_TOKEN_VARS" \
+    } | PRESENT_SECRET_VARS="$PRESENT_SECRET_VARS" \
         SECRETS_FILE="$SECRETS_FILE" \
         GIT_NAME_DEFAULT="$(git config --global user.name 2>/dev/null || true)" \
         GIT_EMAIL_DEFAULT="$(git config --global user.email 2>/dev/null || true)" \
