@@ -226,53 +226,70 @@ assert_contains "host:443 still matches the bare-host row" "$out" "password=fryt
 out=$(gcred git.example.test o/r.git GIT_HOST_TOKENS='Git.Example.Test:443=SRC_FRY' SRC_FRY=frytok)
 assert_contains "a row spelled with case and :443 still matches a bare request" "$out" "password=frytok"
 
-# An UNLISTED host: no row, no gh login → quit=1, stderr naming
-# git.hosts.<host>.token. Mock gh so the fallback is deterministic and
-# offline.
-mkdir -p "$WORK/ghbin"
-cat > "$WORK/ghbin/gh" <<'MOCK'
+# The gh fallback serves a STORED gh login for EXACTLY the request host —
+# nothing else. gh normalises *.github.com to github.com and honours
+# GH_TOKEN/GITHUB_TOKEN (and their _ENTERPRISE variants) from its
+# environment, so letting gh decide would leak a token to a host the table
+# never named. The helper must decide from gh's own hosts file (exact host
+# key) and strip the four token variables from gh's environment. The stub
+# records every invocation plus any token variable that reaches it.
+GH_CONF="$WORK/ghconf"; mkdir -p "$GH_CONF" "$WORK/ghbin"
+printf 'github.com:\n    oauth_token: stored\n    user: someone\ngh.example.test:\n    oauth_token: stored\n    user: someone\n' > "$GH_CONF/hosts.yml"
+GH_CALLS="$WORK/gh-calls.log"; : > "$GH_CALLS"
+cat > "$WORK/ghbin/gh" <<MOCK
 #!/bin/bash
-# gh auth token --hostname <h>: succeed only for the host we "logged into";
-# gh auth git-credential get: echo a fixed human credential.
-[ "$1" = auth ] && [ "$2" = token ] && [ "$3" = --hostname ] && {
-    [ "$4" = gh.example.test ] && exit 0 || exit 1; }
-[ "$1" = auth ] && { echo "username=human"; echo "password=humantok"; exit 0; }
+echo "invoked \$*" >> "$GH_CALLS"
+env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)=' >> "$GH_CALLS"
+[ "\$1" = auth ] && { echo "username=human"; echo "password=humantok"; exit 0; }
 exit 1
 MOCK
 chmod +x "$WORK/ghbin/gh"
-out=$(printf 'protocol=https\nhost=other.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
-assert_rc "unlisted host, no gh login: clean exit" 0 "$rc"
-assert_eq "unlisted host, no gh login: tells git to quit" "quit=1" "$out"
-assert_contains "…stderr names git.hosts.<host>.token" \
-    "$(cat "$WORK/cred-err")" "no git.hosts.other.test.token"
 
-# An unlisted host WITH a stored gh login defers to gh (the human lane).
-out=$(printf 'protocol=https\nhost=gh.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" get)
-assert_contains "unlisted host with a gh login defers to gh" "$out" "password=humantok"
+# No hosts.yml at all: nothing stored, no fallback — quit=1, gh not invoked.
+GH_EMPTY="$WORK/ghconf-empty"; mkdir -p "$GH_EMPTY"
+out=$(printf 'protocol=https\nhost=gh.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_EMPTY" GH_TOKEN=envleak GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "no hosts.yml: clean exit" 0 "$rc"
+assert_eq "no hosts.yml: tells git to quit" "quit=1" "$out"
+assert_eq "no hosts.yml: gh never invoked" "" "$(cat "$GH_CALLS")"
+
+# A host NOT exactly listed (gh normalises api.github.com onto github.com,
+# and honours GH_TOKEN from the environment): quit=1 and gh is never
+# invoked, even with GH_TOKEN set and github.com carrying a row.
+out=$(printf 'protocol=https\nhost=api.github.com\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_CONF" GH_TOKEN=envleak GIT_HOST_TOKENS='github.com=GH_TOKEN' bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "not-exactly-listed host, GH_TOKEN set: clean exit" 0 "$rc"
+assert_eq "not-exactly-listed host: tells git to quit" "quit=1" "$out"
+assert_eq "…gh never invoked (no gh-normalisation shortcut)" "" "$(cat "$GH_CALLS")"
+
+# An unlisted host WITH a stored gh login (exact key in hosts.yml) defers to
+# gh (the human lane), and gh's environment carries NONE of the four token
+# variables — only the stored login can answer.
+out=$(printf 'protocol=https\nhost=gh.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_CONF" GH_TOKEN=envleak GITHUB_TOKEN=envleak2 GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok bash "$HELPER" get)
+assert_contains "unlisted host with a stored gh login defers to gh" "$out" "password=humantok"
 assert_absent "…and never leaks the table token to it" "$out" "password=frytok"
+assert_eq "…exactly one gh invocation" "1" "$(grep -c 'invoked' "$GH_CALLS")"
+assert_eq "…the stub sees none of the four token variables" \
+    "" "$(grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)=' "$GH_CALLS")"
 
-# A LISTED host whose variable is unset (or empty) also defers to gh first —
-# gh decides whether IT holds a login for that host, so the human login is
-# offered only where gh itself was authenticated. gh holds no login for this
-# example host → quit=1.
-out=$(printf 'protocol=https\nhost=git.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GIT_HOST_TOKENS='git.example.test=SRC_FRY' bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
-assert_rc "listed host with unset token: clean exit" 0 "$rc"
-assert_eq "listed host with unset token: quit=1" "quit=1" "$out"
+# A LISTED host whose variable is unset (or empty) takes the same path —
+# gh answers only when it holds a stored login for EXACTLY that host.
+calls_before=$(grep -c 'invoked' "$GH_CALLS")
+out=$(printf 'protocol=https\nhost=git.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_CONF" GIT_HOST_TOKENS='git.example.test=SRC_FRY' bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "listed host with unset token, no stored gh login: clean exit" 0 "$rc"
+assert_eq "listed host with unset token, no stored gh login: quit=1" "quit=1" "$out"
 assert_contains "…stderr names the unset variable" \
     "$(cat "$WORK/cred-err")" "git.hosts.git.example.test.token: 'SRC_FRY' is not set"
+assert_eq "…gh is never invoked for it" "$calls_before" "$(grep -c 'invoked' "$GH_CALLS")"
 
-# The gh fallback itself still works for a host gh IS authenticated on
-# (exercised above); a listed host with the token set never invokes gh.
-rm -f "$WORK/gh-called"
-cat > "$WORK/ghbin/gh" <<'MOCK'
-#!/bin/bash
-touch "$(dirname "$0")/../gh-called"
-exit 0
-MOCK
+# A listed host whose variable is unset but which HAS a stored gh login
+# defers instead of quitting.
+out=$(printf 'protocol=https\nhost=gh.example.test\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_CONF" GIT_HOST_TOKENS='gh.example.test=SRC_MISSING' bash "$HELPER" get)
+assert_contains "listed host with unset token but a stored gh login defers" "$out" "password=humantok"
+
+# A listed host with the token set never invokes gh.
+calls_before=$(grep -c 'invoked' "$GH_CALLS")
 out=$(gcred git.example.test o/r.git GIT_HOST_TOKENS='git.example.test=SRC_FRY' SRC_FRY=frytok)
 assert_contains "listed host with a token never touches gh" "$out" "password=frytok"
-[ -e "$WORK/gh-called" ] && fail "gh was invoked for a listed host with a token" || pass "gh not invoked for a listed host with a token"
-
+assert_eq "…gh still not invoked" "$calls_before" "$(grep -c 'invoked' "$GH_CALLS")"
 # hostnames are case-insensitive; git passes the URL's own spelling verbatim,
 # including an explicit :443 — the same normalisation manifest.py applies.
 out=$(gcred GitHub.COM nobody/x.git GIT_HOST_TOKENS='github.com=GH_TOKEN' GH_TOKEN=ghval)
