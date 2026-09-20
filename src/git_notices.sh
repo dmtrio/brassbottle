@@ -70,6 +70,61 @@ EOF
     return 0
 }
 
+# git_orgs_host_notice <REPOS> <GIT_HOST_TOKENS> <GIT_ORG_IDENTITIES>
+# Up-time notice: a git.orgs entry supplies its host's table row, so that one
+# token now serves EVERY owner whose https:// repos: URLs name the host — one
+# host carries one token. When a host has another owner besides the git.orgs
+# one, print one line naming git.hosts.<host>.token as the explicit way to
+# state that scope. bash-3.2 compatible: while-read over heredocs, no
+# associative arrays, no ${var,,}.
+git_orgs_host_notice() {
+    local repos="$1" git_host_tokens="$2" git_org_identities="$3"
+    local _rname _rurl _rscheme _h _host _owner _key _hosts_seen="" _owners         _count _pair _rowhost _rowvar
+    [ -n "$git_org_identities" ] || return 0   # no git.orgs entries: nothing to state
+    # Distinct https hosts in repos: order.
+    while IFS=$'\t' read -r _rname _rurl; do
+        [ -n "$_rname" ] || continue
+        _rscheme=$(printf '%s' "${_rurl%%://*}" | tr '[:upper:]' '[:lower:]')
+        [ "$_rscheme" = https ] || continue
+        git_url_split "$_rurl"; _host="${_h%:443}"
+        case " $_hosts_seen " in *" $_host "*) continue ;; esac
+        _hosts_seen="$_hosts_seen $_host"
+    done <<EOF
+$repos
+EOF
+    for _host in $_hosts_seen; do
+        # Distinct owners of this host; >1 means the row serves them all.
+        _owners=" "; _count=0
+        while IFS=$'\t' read -r _rname _rurl; do
+            [ -n "$_rname" ] || continue
+            _rscheme=$(printf '%s' "${_rurl%%://*}" | tr '[:upper:]' '[:lower:]')
+            [ "$_rscheme" = https ] || continue
+            git_url_split "$_rurl"
+            [ "${_h%:443}" = "$_host" ] || continue
+            _owner="${_p%%/*}"
+            _owner=$(printf '%s' "$_owner" | tr '[:upper:]' '[:lower:]')   # case-fold: the attribution matches the clone URL's owner
+            _key="$_host/$_owner"   # quoted in the case pattern below, so it is matched literally — never sanitise it
+            case "$_owners" in *" $_key "*) continue ;; esac
+            _owners="$_owners$_key "
+            _count=$((_count + 1))
+        done <<EOF
+$repos
+EOF
+        [ "$_count" -gt 1 ] || continue
+        _rowvar=""
+        for _pair in $git_host_tokens; do
+            case "$_pair" in *=*) ;; *) continue ;; esac
+            _rowhost=${_pair%%=*}
+            _rowhost=$(printf '%s' "$_rowhost" | tr '[:upper:]' '[:lower:]')
+            _rowhost=${_rowhost%:443}
+            if [ "$_rowhost" = "$_host" ]; then _rowvar=${_pair#*=}; break; fi
+        done
+        [ -n "$_rowvar" ] || continue
+        echo "  note: $_host: $_rowvar now serves every owner on this host (a git.orgs entry supplies this row) — one host carries one token; state it explicitly with git.hosts.$_host.token: $_rowvar"
+    done
+    return 0
+}
+
 # git_egress_notices <GIT_CREDENTIAL_HOSTS> <EGRESS> <EGRESS_CIDRS>
 # Egress notice: a host in GIT_CREDENTIAL_HOSTS — a repos: origin, or a host
 # the git.hosts table named with no repos: entry of its own (which the per-host

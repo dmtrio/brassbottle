@@ -431,6 +431,9 @@ grep -qF '"${CLONE_ENV[@]}"' "$REPO/up.sh" \
 grep -qF 'no git.hosts.' "$REPO/src/git_notices.sh" \
     && pass "git_notices.sh warns about a repo host with no git.hosts row" \
     || fail "git_notices.sh missing the no-row up-time notice"
+grep -qF 'git_orgs_host_notice' "$REPO/up.sh" \
+    && pass "up.sh calls the git.orgs shared-host notice" \
+    || fail "up.sh no longer calls git_orgs_host_notice"
 grep -qF 'git host is not in capabilities.egress' "$REPO/src/git_notices.sh" \
     && pass "git_notices.sh warns when a bound git host is missing from capabilities.egress" \
     || fail "git_notices.sh missing the egress-coverage notice for a bound git host"
@@ -444,6 +447,32 @@ out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h.test/a/y.git\n'
 assert_eq "git_host_notices: one notice per host, not per repo" \
     "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
 assert_contains "git_host_notices: notes the host, not host/owner" "$out" "h.test: no git.hosts.h.test.token"
+
+# git_orgs_host_notice: when a git.orgs entry supplies a host's table row and
+# repos: lists ANOTHER owner on that host, one line says that host's token
+# now serves every owner on it, naming git.hosts.<host>.token as the way to
+# state it.
+out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
+    'github.com=GH_TOKEN h.test=SRC_ACME' $'acme\t\t\n')
+assert_contains "git_orgs_host_notice: two owners on one host → one notice" "$out" \
+    "note: h.test: SRC_ACME now serves every owner on this host"
+assert_contains "…naming git.hosts.<host>.token as the way to state it" "$out" \
+    "state it explicitly with git.hosts.h.test.token: SRC_ACME"
+out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\n' 'h.test=SRC_ACME' $'acme\t\t\n')
+assert_eq "git_orgs_host_notice: a single-owner host is silent" "" "$out"
+out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
+    'github.com=GH_TOKEN' $'acme\t\t\n')
+assert_eq "git_orgs_host_notice: a host with no row has nothing to state" "" "$out"
+out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
+    'h.test=SRC_ACME' '')
+assert_eq "git_orgs_host_notice: no git.orgs entries → silent" "" "$out"
+out=$(git_orgs_host_notice $'a\thttps://h.test/Acme/x.git\nb\thttps://h.test/acme/y.git\n' \
+    'h.test=SRC_ACME' $'acme\t\t\n')
+assert_eq "git_orgs_host_notice: same owner twice on one host is one owner, silent" "" "$out"
+out=$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\nb\thttps://h.test/other/y.git\n' \
+    'h.test=SRC_ACME' $'acme\t\t\n')
+assert_contains "git_orgs_host_notice: an scp-only owner still leaves one https owner… silent" "" \
+    "$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\n' 'h.test=SRC_ACME' $'acme\t\t\n')"
 
 out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h2.test/b/y.git\n' 'h.test=SRC_A')
 assert_eq "git_host_notices: a host WITH a table row gets no notice" \

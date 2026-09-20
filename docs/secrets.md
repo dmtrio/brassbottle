@@ -70,8 +70,12 @@ belongs in a separate container.
 The old spellings feed the same table: `git.token: X` is the `github.com`
 row; each `git.orgs` entry is a row for the host it resolves to (its
 `host:` field, else the one `https://` host its owner's repos: URLs name).
-Two `git.orgs` entries resolving to one host must name the same token
-variable; `git.hosts` and either old spelling never mix in one manifest.
+One host carries one token: a `git.orgs` token serves every repository on
+the host it resolves to (a second owner on that host gets no separate
+token), and two `git.orgs` entries resolving to one host with different
+tokens is an error; `up` prints a note when a host has another owner. Two
+`git.hosts` keys that normalise to the same host are rejected outright;
+`git.hosts` and either old spelling never mix in one manifest.
 Per-owner attribution (`git.orgs.<owner>.name/email`) still stamps a
 repo-local `user.name`/`user.email` at bootstrap clone — it is authorship
 only, never routing.
