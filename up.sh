@@ -447,18 +447,20 @@ if [ -n "$REPOS" ]; then
     # explicitly for private-repo clones over HTTPS: GIT_HOST_TOKENS (the
     # manifest's host→variable routing table, derived by manifest.py) plus
     # every variable it names — git-credential-org resolves the clone's host
-    # through the table and reads each value by indirect expansion. Values are
-    # manifest-validated (env-var names, boring host charset), so no line
-    # carries whitespace; git_clone_env_pairs (src/keyfiles.sh, unit-tested)
-    # emits one VAR=VALUE per line and the array keeps each a single docker-exec
-    # argv word (a plain string would word-split the space-separated pairs into
-    # separate -e arguments and mangle the table).
+    # through the table and reads each value by indirect expansion. The NAMES
+    # are manifest-validated (env-var names, boring host charset); the VALUES
+    # are secrets and can be anything, so nothing is claimed about them —
+    # git_host_token_pairs (src/keyfiles.sh, unit-tested) emits one VAR=VALUE
+    # per line and the array keeps each pair a single docker-exec argv word
+    # regardless of what its value contains (a plain string would word-split
+    # the space-separated pairs into separate -e arguments and mangle the
+    # table).
     CLONE_ENV=()
     while IFS= read -r _pair; do
         [ -n "$_pair" ] || continue
         CLONE_ENV+=("-e" "$_pair")
     done <<EOF
-$(git_clone_env_pairs "$GIT_HOST_TOKENS")
+$(git_host_token_pairs "$GIT_HOST_TOKENS")
 EOF
     while IFS=$'\t' read -r RNAME RURL; do
         [ -n "$RNAME" ] || continue

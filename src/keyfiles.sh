@@ -15,20 +15,22 @@
 
 warn_missing() { echo "  ⚠ $1 not in secrets.env — $2 will not authenticate until set"; }
 
-# git_clone_env_pairs <git_host_tokens>
-#   Emit one VAR=VALUE per line for the bootstrap clone's `docker exec` env:
-#   GIT_HOST_TOKENS itself (the manifest's host→variable routing table, from
-#   manifest.py) plus every variable it names, read from the environment by
-#   indirect expansion. The clone exec isn't shim-launched, so without this the
-#   in-container git-credential-org would find no table and no token and a
-#   private clone would fail. up.sh reads one line at a time into `docker exec
-#   -e "$line"` args — values are manifest-validated (env-var names, boring
-#   host charset), so no line carries whitespace and each stays one argv word.
-#   A variable whose value is empty (the token was never set) is skipped: the
-#   helper then takes its gh/quit path for that host, exactly as it would for
-#   an unset variable. Deduped: one row var may serve several hosts.
+# git_host_token_pairs <git_host_tokens>
+#   Emit one VAR=VALUE per line for the git.hosts routing table's
+#   credentials: GIT_HOST_TOKENS itself (the manifest's host→variable table,
+#   from manifest.py) plus every variable it names, read from the environment
+#   by indirect expansion. One walk serves BOTH consumers: write_keyfiles
+#   builds the agent env files' shared block from it, and up.sh reads it one
+#   line at a time into the bootstrap clone's `docker exec -e "$line"` args
+#   (the clone exec isn't shim-launched, so without it the in-container
+#   git-credential-org would find no table and no token and a private clone
+#   would fail). Names are manifest-validated; values are secrets and can be
+#   anything — each line rides as ONE argv word regardless. A variable whose
+#   value is empty (the token was never set) is skipped: the helper then
+#   takes its gh/quit path for that host, exactly as it would for an unset
+#   variable. Deduped: one row var may serve several hosts.
 #   bash-3.2 compatible: no associative arrays, no ${var,,}.
-git_clone_env_pairs() {
+git_host_token_pairs() {
     local git_host_tokens="$1" pair var val seen=" "
     [ -n "$git_host_tokens" ] || return 0
     printf 'GIT_HOST_TOKENS=%s\n' "$git_host_tokens"
@@ -56,7 +58,7 @@ git_clone_env_pairs() {
 # Reads GH_TOKEN and every SOURCE var from the environment (indirect expansion).
 write_keyfiles() {
     local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" git_host_tokens="${5:-}"
-    local shared="" slot src hint agent a f pair var val seen
+    local shared="" slot src hint agent a f line gh_written
 
     # Shared block: legacy passthroughs + GH_TOKEN, built once. The
     # heredoc keeps the loop in this shell so the warns aren't lost to a pipe
@@ -71,30 +73,31 @@ write_keyfiles() {
     done <<EOF
 $plugin_env_secrets
 EOF
-    [ -n "${GH_TOKEN:-}" ] && shared="${shared}GH_TOKEN=$GH_TOKEN"$'\n'
 
-    # The git.hosts routing table rides in the shared block beside the token
+    # The git.hosts routing table rides in the shared block beside the token in the shared block beside the token
     # variables it names (a host is not a secret; it is here for convenience,
     # not confidentiality) — git-credential-org resolves each request's host
-    # through it and reads the row variable by indirect expansion. No
-    # warn_missing: an unset source var is a hard error in manifest.py (like
-    # agent_secrets), so it can't reach here.
+    # through it and reads the row variable by indirect expansion. Same walk
+    # the bootstrap clone env uses (git_host_token_pairs); no warn_missing:
+    # an unset source var is a hard error in manifest.py (like agent_secrets),
+    # so it can't reach here. The row variables carry GH_TOKEN whenever the
+    # CLI host's row names it — the default export below is then redundant and
+    # is skipped, so GH_TOKEN lands exactly once.
+    gh_written=""
     if [ -n "$git_host_tokens" ]; then
-        shared="${shared}GIT_HOST_TOKENS=${git_host_tokens}"$'\n'
-        seen=" "
-        for pair in $git_host_tokens; do
-            case "$pair" in *=*) ;; *) continue ;; esac
-            var=${pair#*=}
-            [ -n "$var" ] || continue
-            case "$seen" in *" $var "*) continue ;; esac
-            seen="$seen$var "
-            val="${!var:-}"
-            [ -n "$val" ] || continue
-            shared="${shared}${var}=${val}"$'\n'
-        done
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            shared="${shared}${line}"$'\n'
+            case "$line" in GH_TOKEN=*) gh_written=1 ;; esac
+        done <<EOF
+$(git_host_token_pairs "$git_host_tokens")
+EOF
+    fi
+    if [ -z "$gh_written" ] && [ -n "${GH_TOKEN:-}" ]; then
+        shared="${shared}GH_TOKEN=$GH_TOKEN"$'\n'
     fi
 
-    # Fan the shared block out to every shim agent. chmod 600 as each file is
+    # Fan the shared block out to every shim agent. chmod 600 as each file is to every shim agent. chmod 600 as each file is
     # created — it already holds secret values, so don't leave it at the umask
     # default even for the window until the trailing chmod.
     for a in $shim_agents; do
