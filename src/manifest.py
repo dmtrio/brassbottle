@@ -969,6 +969,7 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     # owner listed only over scp/ssh/git:// (whose spelling host is never
     # validated and never binds), and an owner in no repos: URL at all are
     # all hard errors: a wrong guess presents the token to the wrong forge.
+    org_routed = set()   # hosts whose table row a git.orgs entry supplied
     if records:
         https_owner_hosts = {}
         for host, owner in _routed_repo_owners(parsed_repos):
@@ -984,15 +985,19 @@ def _git_identity(parsed_repos, git, env, secrets_file):
                         f"({min(derived)}) — remove host: or fix the repos: URL")
                     continue
                 add_row(declared_host, src, field)
+                org_routed.add(declared_host)
             elif len(derived) > 1:
                 errors.append(
                     f"  {field}: its repos: URLs name more than one host "
                     f"({', '.join(sorted(derived))}) — set host: on its git.orgs "
                     "entry to say which one carries its token")
             elif derived:
-                add_row(next(iter(derived)), src, field)
+                host = next(iter(derived))
+                add_row(host, src, field)
+                org_routed.add(host)
             elif declared_host is not None:
                 add_row(declared_host, src, field)
+                org_routed.add(declared_host)
             elif owner_lc in ssh_owners:
                 errors.append(
                     f"  {field}: listed only over scp-style/ssh:///git:// URLs, "
@@ -1030,6 +1035,11 @@ def _git_identity(parsed_repos, git, env, secrets_file):
         "GIT_ORG_IDENTITIES": "".join(
             f"{o}\t{n}\t{e}\n" for o, _s, n, e, _h in records),
         "GIT_HOST_TOKENS": " ".join(f"{h}={rows[h]}" for h in sorted(rows)),
+        # Provenance, for the up-time shared-host notice: the hosts whose
+        # rows a git.orgs entry supplied — NOT the CLI host's row when that
+        # row came from git.token (already explicitly stated), so the notice
+        # never misattributes it to a git.orgs entry.
+        "GIT_ORG_ROUTED_HOSTS": " ".join(sorted(org_routed)),
     }
 
 
