@@ -349,11 +349,11 @@ RUN chmod +x /usr/local/bin/egress_broker_firewall.sh
 COPY src/remote_access.py /usr/local/lib/djinn/remote_access.py
 RUN chmod 644 /usr/local/lib/djinn/remote_access.py
 
-# Per-org git credential router (entrypoint installs it for github.com and
-# every non-github https origin in the manifest's repos: and every host a
-# git.orgs token is bound to). Routes by repo owner to GH_TOKEN_<owner>;
-# on github.com only, falls back to the container
-# GH_TOKEN then gh's human login. See src/git-credential-org.sh.
+# Per-host git credential router (entrypoint installs it for every host in
+# GIT_CREDENTIAL_HOSTS — the manifest's git.hosts table plus every https://
+# origin in repos:). Routes by request host through GIT_HOST_TOKENS; an
+# unlisted host defers to gh's human login when gh holds one for it. See
+# src/git-credential-org.sh.
 COPY src/git-credential-org.sh /usr/local/bin/git-credential-org
 RUN chmod +x /usr/local/bin/git-credential-org
 
