@@ -1033,6 +1033,33 @@ class TestOrgHosts(unittest.TestCase):
             "(git.example.test) — remove host: or fix the repos: URL",
             str(cm.exception))
 
+    def test_orgs_routed_hosts_carry_provenance(self):
+        # GIT_ORG_ROUTED_HOSTS: the hosts whose table rows a git.orgs entry
+        # supplied. A row that came from git.token is already explicitly
+        # stated — an unrelated git.orgs entry on another host must NOT put
+        # the CLI host in this list, or the shared-host notice would
+        # misattribute the CLI host's row to a git.orgs entry.
+        d = derive({"repos": ["https://github.com/acme/a.git",
+                              "https://github.com/other/b.git"],
+                    "git": {"token": "GH_TOKEN_fry",
+                            "orgs": {"emergence": {"token": "GH_TOKEN_x",
+                                                    "host": "git.example.test"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_fry GH_TOKEN_x"})
+        self.assertEqual(d["GIT_ORG_ROUTED_HOSTS"], "git.example.test")
+        d = derive({"repos": ["https://github.com/acme/a.git",
+                              "https://github.com/other/b.git"],
+                    "git": {"orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
+        self.assertEqual(d["GIT_ORG_ROUTED_HOSTS"], "github.com")
+        # An org entry that COLLAPSES into an equal row still resolves to
+        # that host.
+        d = derive({"repos": ["https://github.com/acme/a.git"],
+                    "git": {"token": "GH_TOKEN_acme",
+                            "orgs": {"acme": {"token": "GH_TOKEN_acme"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_acme"})
+        self.assertEqual(d["GIT_ORG_ROUTED_HOSTS"], "github.com")
+        self.assertEqual(derive({})["GIT_ORG_ROUTED_HOSTS"], "")
+
     def test_org_owner_on_two_https_hosts_is_ambiguous(self):
         # A token row must land on ONE host; an owner whose https repos: URLs
         # name two hosts is ambiguous and is rejected unless host: says which

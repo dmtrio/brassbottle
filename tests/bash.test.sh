@@ -517,27 +517,34 @@ assert_contains "git_host_notices: notes the host, not host/owner" "$out" "h.tes
 # git_orgs_host_notice: when a git.orgs entry supplies a host's table row and
 # repos: lists ANOTHER owner on that host, one line says that host's token
 # now serves every owner on it, naming git.hosts.<host>.token as the way to
-# state it.
+# state it. Only hosts a git.orgs entry actually routed to are in scope
+# (GIT_ORG_ROUTED_HOSTS).
 out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'github.com=GH_TOKEN h.test=SRC_ACME' $'acme\t\t\n')
+    'github.com=GH_TOKEN h.test=SRC_ACME' 'h.test')
 assert_contains "git_orgs_host_notice: two owners on one host → one notice" "$out" \
     "note: h.test: SRC_ACME now serves every owner on this host"
 assert_contains "…naming git.hosts.<host>.token as the way to state it" "$out" \
     "state it explicitly with git.hosts.h.test.token: SRC_ACME"
-out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\n' 'h.test=SRC_ACME' $'acme\t\t\n')
+# FALSE case: the host's row came from git.token and the git.orgs entry is
+# for ANOTHER host — the notice must not attribute the row to git.orgs.
+out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
+    'github.com=GH_TOKEN h.test=SRC_A' 'git.other.test')
+assert_eq "git_orgs_host_notice: a host whose row came from git.token stays silent" "" "$out"
+out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\n' 'h.test=SRC_ACME' 'h.test')
 assert_eq "git_orgs_host_notice: a single-owner host is silent" "" "$out"
 out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'github.com=GH_TOKEN' $'acme\t\t\n')
-assert_eq "git_orgs_host_notice: a host with no row has nothing to state" "" "$out"
+    'github.com=GH_TOKEN' 'github.com')
+assert_eq "git_orgs_host_notice: a row-less host is out of scope" "" "$out"
 out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
     'h.test=SRC_ACME' '')
 assert_eq "git_orgs_host_notice: no git.orgs entries → silent" "" "$out"
 out=$(git_orgs_host_notice $'a\thttps://h.test/Acme/x.git\nb\thttps://h.test/acme/y.git\n' \
-    'h.test=SRC_ACME' $'acme\t\t\n')
+    'h.test=SRC_ACME' 'h.test')
 assert_eq "git_orgs_host_notice: same owner twice on one host is one owner, silent" "" "$out"
 out=$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'h.test=SRC_ACME' $'acme\t\t\n')
+    'h.test=SRC_ACME' 'h.test')
 assert_contains "git_orgs_host_notice: an scp-only owner still leaves one https owner… silent" "" \
+    "$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\n' 'h.test=SRC_ACME' 'h.test')"
     "$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\n' 'h.test=SRC_ACME' $'acme\t\t\n')"
 
 out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h2.test/b/y.git\n' 'h.test=SRC_A')
