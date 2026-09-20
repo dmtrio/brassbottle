@@ -767,6 +767,19 @@ class TestCredentialHosts(unittest.TestCase):
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
                          "https://git_internal.lan\nhttps://github.com\n")
 
+    def test_egress_notice_hosts_drop_base_allowlisted(self):
+        # GIT_EGRESS_NOTICE_HOSTS: the subset of GIT_CREDENTIAL_HOSTS the
+        # up-time egress notice should check — a host the base allowlist
+        # already permits (github.com, mirrored from src/init-firewall.sh's
+        # ALLOWED_ZONES) is allowed without capabilities.egress, so warning
+        # about it would be false on every bottle.
+        d = derive({"repos": ["https://github.com/x/app.git",
+                              "https://git.example.test/o/r.git"]})
+        self.assertEqual(d["GIT_EGRESS_NOTICE_HOSTS"], "https://git.example.test\n")
+        self.assertEqual(derive({})["GIT_EGRESS_NOTICE_HOSTS"], "")
+        d = derive({"repos": ["https://github.com:443/x/y.git"]})
+        self.assertEqual(d["GIT_EGRESS_NOTICE_HOSTS"], "")
+
     def test_repos_hosts_and_table_hosts_merge_deduped(self):
         d = derive({"repos": ["https://git.example.test/E/x.git"],
                     "git": {"hosts": {"git.example.test": {"token": "GH_TOKEN_x"},

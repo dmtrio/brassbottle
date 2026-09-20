@@ -184,6 +184,14 @@ GIT_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?\Z")
 # host and never name a forge.
 CLI_TOKEN_VARS = {"github.com": "GH_TOKEN"}
 CLI_HOST = next(iter(CLI_TOKEN_VARS))
+
+# Git hosts the container's base allowlist already permits — mirrored from
+# src/init-firewall.sh's ALLOWED_ZONES (the firewall's default allowlist,
+# which no manifest edit extends; there is no host-side file to read it
+# from, so the git-relevant zones are kept here in step with it). The
+# up-time egress notice must not fire for these hosts: capabilities.egress
+# never has to name them.
+BASE_ALLOWLISTED_GIT_HOSTS = frozenset({"github.com"})
 # A bare hostname (optionally :port), lowercased before matching — shared by
 # _credential_hosts (repos: URLs, interpolated into shell by entrypoint.sh)
 # and _git_identity's git.orgs.<owner>.host: (interpolated into shell by
@@ -1155,6 +1163,17 @@ def derive(manifest, plugin_files, agent_files, env):
     for pair in out["GIT_HOST_TOKENS"].split():
         cred_hosts.add(f"https://{pair.split('=', 1)[0]}")
     out["GIT_CREDENTIAL_HOSTS"] = "".join(f"{o}\n" for o in sorted(cred_hosts))
+    # GIT_EGRESS_NOTICE_HOSTS: the subset of GIT_CREDENTIAL_HOSTS the egress
+    # notice should check — a host the base allowlist already permits is
+    # allowed without capabilities.egress, so warning about it would be
+    # false on every bottle. The comparison is by bare host (any port on a
+    # base-allowlisted name resolves into the same DNS zone).
+    notice_hosts = []
+    for line in sorted(cred_hosts):
+        if line.split("://", 1)[-1].split(":", 1)[0] in BASE_ALLOWLISTED_GIT_HOSTS:
+            continue
+        notice_hosts.append(line)
+    out["GIT_EGRESS_NOTICE_HOSTS"] = "".join(f"{o}\n" for o in notice_hosts)
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
     # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────

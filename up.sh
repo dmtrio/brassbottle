@@ -150,7 +150,7 @@ if [ -n "$GIT_TOKEN_SOURCE" ]; then GH_TOKEN="${!GIT_TOKEN_SOURCE}"; fi
 . "$SCRIPT_DIR/src/git_notices.sh"
 git_host_notices "$REPOS" "$GIT_HOST_TOKENS"
 git_orgs_host_notice "$REPOS" "$GIT_HOST_TOKENS" "$GIT_ORG_IDENTITIES"
-git_egress_notices "$GIT_CREDENTIAL_HOSTS" "$EGRESS" "$EGRESS_CIDRS"
+git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"
 
 COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
 [ -n "$SSH_PORT" ] && COMPOSE_FILES="$COMPOSE_FILES -f $SCRIPT_DIR/compose/docker-compose.ssh.yml"
