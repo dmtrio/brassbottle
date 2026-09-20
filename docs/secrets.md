@@ -56,10 +56,12 @@ implicit row, `github.com` → the global `GH_TOKEN`.
 
 At `up`, a repo on host `<host>` authenticates with the token variable its
 table row names — resolved by the `git-credential-org` helper on every
-fetch/push, and presented to no other host. A host with no row defers to
-the human's `gh` login when one exists for that host; otherwise the helper
-names the missing `git.hosts.<host>.token` and tells git to quit, so a
-private clone fails immediately instead of prompting. `http://` repo URLs
+fetch/push, and presented to no other host. A host with no row defers only
+to a stored `gh` login for exactly that host (an exact key in gh's hosts
+file; gh's token environment variables are stripped before gh runs, so
+only the stored login can answer); otherwise the helper names the missing
+`git.hosts.<host>.token` and tells git to quit, so a private clone fails
+immediately instead of prompting. `http://` repo URLs
 are rejected outright (no credential over cleartext). This is routing +
 attribution, not isolation: every host's token sits in each agent's
 `<agent>.env`, so a repo whose token must be unreachable by other work
@@ -96,7 +98,9 @@ capabilities:
 ```
 
 The helper's only fall-back is the human `gh` login, and only when `gh`
-itself holds a login for that host. A host with no token and no `gh` login
+holds a stored login for exactly that host (an exact key in gh's hosts
+file; the container's token environment variables never reach gh through
+the helper). A host with no token and no stored `gh` login
 gets **no** credential: the helper prints which `git.hosts.<host>.token`
 is missing and tells git to quit, so the clone fails immediately instead
 of prompting for a password. That also means a plain terminal or editor

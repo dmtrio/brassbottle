@@ -15,16 +15,23 @@
 # https URL spelled with it) stripped. A mismatch silently fails to match a
 # row — the exact bug this feature exists to prevent.
 #
-# An unlisted host defers to `gh auth git-credential` when gh holds a login
-# for that host (the human's interactive lane — one credential lane serves
-# agents AND humans); otherwise it answers quit=1 with a stderr line naming
+# An unlisted host defers to `gh auth git-credential` — but ONLY to a STORED
+# gh login for EXACTLY this host, never to anything else. gh normalises
+# *.github.com to github.com and honours GH_TOKEN/GITHUB_TOKEN (and their
+# _ENTERPRISE variants) from its environment, so letting gh decide would
+# present a token to a host the table never named. Two locks:
+#   • "gh holds a login" is an exact, fixed-string match of the host as a
+#     top-level key in gh's own hosts file
+#     (${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml) —
+#     gh's own normalisation never widens it;
+#   • when deferring, the four token variables are stripped from gh's
+#     environment, so only the stored login can answer.
+# No stored login for this host → quit=1 with a stderr line naming
 # git.hosts.<host>.token, so git fails immediately instead of prompting. A
-# listed host whose variable is unset (or empty) takes the same gh/quit path:
-# gh decides whether IT holds a login for that host, so the human login is
-# offered to a host only when gh itself was authenticated there.
+# listed host whose variable is unset (or empty) takes the same path.
 #
-# No host is special-cased here: every host — the table's, github's, any
-# forge's — resolves through the one GIT_HOST_TOKENS walk below.
+# No host is special-cased here: every host resolves through the one
+# GIT_HOST_TOKENS walk below.
 
 [ "$1" = get ] || exit 0                 # store/erase: no-op (stateless helper)
 
@@ -56,8 +63,13 @@ if [ -n "$tok" ]; then
     echo "username=x-access-token"
     echo "password=$tok"
 else
-    if gh auth token --hostname "$host" >/dev/null 2>&1; then
-        printf '%s\n' "$req" | gh auth git-credential get   # human fallback
+    gh_hosts="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
+    if [ -f "$gh_hosts" ] && grep -Fxq "$host:" "$gh_hosts"; then
+        # Stored gh login for exactly this host: defer, with every token
+        # variable stripped so only that login can answer.
+        printf '%s\n' "$req" | env -u GH_TOKEN -u GITHUB_TOKEN \
+            -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+            gh auth git-credential get   # human fallback
     else
         # No token for this host, and gh holds no login for it either: say
         # exactly what is wrong and tell git to stop — no other helper, no
