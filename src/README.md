@@ -15,8 +15,8 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
 - `keyfiles.sh` composes per-agent secret env files from `secrets.env` and the
   bottle's secret bindings.
 - `git_notices.sh` provides `git_url_split` (the host/path derivation the
-  clone loop uses) and prints the up-time notices — an unbound git.orgs
-  owner, or a bound git host missing from `capabilities.egress` — that
+  clone loop uses) and prints the up-time notices — a repo host with no
+  git.hosts row, or a git host missing from `capabilities.egress` — that
   `up.sh` sources and calls after deriving the manifest.
 - `wire_plugins.py` writes generated MCP config for each enabled agent.
 - `compose_rules.py` composes global rules, enabled plugin rule fragments, and
@@ -34,7 +34,10 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
 - `tmux-*`, `tmux.conf`, and `herdr-config.toml` support remote agent
   sessions. `mosh-server-wrapper.sh` is built into the jump image only
   (`jump/Dockerfile`).
-- `git-credential-org.sh` routes git credentials by repo owner, for github.com and every non-github `https://` origin in the manifest's `repos:` (fall-backs to `GH_TOKEN` and `gh` are github-only).
+- `git-credential-org.sh` routes git credentials by request host through the
+  manifest's git.hosts table (`GIT_HOST_TOKENS`, derived by manifest.py); an
+  unlisted host defers to `gh` when gh holds a login for it, else answers
+  `quit=1` naming the missing `git.hosts.<host>.token`.
 
 ## Testing
 

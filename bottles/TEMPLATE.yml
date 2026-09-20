@@ -21,21 +21,20 @@ forge: github                      # github | gitea (informational — the git
 git:
   name: ""                         # blank = your host git config
   email: ""
-  # token: (optional) the secrets.env VAR NAME holding this container's default
-  # git credential. Absent → the global GH_TOKEN (shared machine user). Set it
-  # to give the container its own identity token. up.sh HARD-FAILS if the named
-  # var isn't set in secrets.env (never a silent fall-back to the wrong token).
-  #   token: GH_TOKEN_fry
-  # orgs: (optional) per-owner credential + identity overrides, keyed by forge
-  # org/user name. A repo owned by <owner> authenticates with GH_TOKEN_<owner>
-  # (routed by git-credential-org) and, if name/email are given, commits under
-  # that identity. Single-org containers need no orgs: — git.token covers them.
-  #   orgs:
-  #     planetexpress:
-  #       token: GH_TOKEN_planetexpress   # secrets.env var name (required per org)
-  #       name:  "Leela Bot"              # optional — repo-local user.name for planetexpress/*
-  #       email: "bot@planetexpress.example"  # optional — repo-local user.email
-  #       host:  git.planetexpress.example    # REQUIRED when this owner's repos are not in repos: (write github.com for a github org) — derived from repos: otherwise, and there is no default
+  # hosts: (optional) the git credential table — one token per host, keyed by
+  # hostname (lowercased; a trailing :443 is stripped). Each token: names the
+  # secrets.env VARIABLE holding that host's token, exactly as written. A repo
+  # on <host> authenticates with that variable's value and no other host ever
+  # sees it. A manifest with none of git.hosts/git.token/git.orgs keeps one
+  # implicit row: github.com → the global GH_TOKEN.
+  #   hosts:
+  #     git.example.org:
+  #       token: GH_TOKEN_example          # secrets.env var NAME
+  #     github.com:
+  #       token: GH_TOKEN_fry              # secrets.env var NAME
+  # The old spellings feed the same table (git.token is the github.com row;
+  # each git.orgs entry is a row for the host its owner's repos resolve to).
+  # git.hosts never mixes with git.token/git.orgs in one manifest.
 
 memory: 10g
 
