@@ -104,10 +104,11 @@ replaces the token row.
 
 ### Gitea and other self-hosted forges
 
-The same table serves a non-github repo. `up` derives every `https://`
-origin from `repos:` (the entrypoint installs the helper for every
-`GIT_CREDENTIAL_HOSTS` host — the table's hosts plus every `https://`
-origin in `repos:`), so a repo at
+The same table serves a non-github repo. The entrypoint installs the
+helper for every `GIT_CREDENTIAL_HOSTS` host — the table's hosts, every
+`https://` origin in `repos:`, and the CLI host's origin always (row or
+no row: with no row the router answers `quit=1` there, never the desktop
+credential bridge) — so a repo at
 `https://git.example.test/Emergence/filebrowser.git` authenticates with
 the variable its row names:
 

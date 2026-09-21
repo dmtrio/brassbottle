@@ -706,27 +706,50 @@ class TestRepos(unittest.TestCase):
 class TestCredentialHosts(unittest.TestCase):
     """GIT_CREDENTIAL_HOSTS: the origins (scheme://host[:port], one per line)
     entrypoint.sh installs git-credential-org under — every host the git.hosts
-    table names plus every https:// origin in repos:, github included. The
-    helper is installed for exactly this set; no host is hard-coded anywhere
-    else, and the helper itself carries no special case."""
+    table names, every https:// origin in repos:, and the CLI host's origin
+    ALWAYS (row or no row: with the router installed but no row, an https
+    request ends in the router's quit=1; without the router the desktop
+    bridge would answer with the human's login). The helper is installed for
+    exactly this set; no host is hard-coded anywhere else, and the helper
+    itself carries no special case."""
 
-    def test_declares_nothing_derives_an_empty_table(self):
-        # Nothing declared → an EMPTY table: no row, no CLI-host credential
-        # helper, nothing implicit. A host no manifest row and no repo names
-        # installs no router at all.
+    def test_declares_nothing_installs_the_cli_host_router(self):
+        # Nothing declared → an EMPTY table and no GH_TOKEN — but the CLI
+        # host's https:// origin is ALWAYS in GIT_CREDENTIAL_HOSTS: the
+        # entrypoint installs the router for it, so an https request ends in
+        # the router's quit=1 instead of the desktop credential bridge (the
+        # human's login). Nothing implicit about the TOKEN — only the
+        # router's installation spot.
         d = derive({})
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
         self.assertEqual(d["GIT_HOST_TOKENS"], "")
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
 
     def test_repo_host_gets_the_router_even_with_an_empty_table(self):
         # Nothing declared but a github.com repo in repos:: the table stays
-        # empty and no GH_TOKEN is derived — yet the credential-host list
-        # still contains the repo's host, so the helper IS installed and can
-        # answer quit=1 instead of letting git prompt.
+        # empty and no GH_TOKEN is derived — the credential-host list still
+        # contains the repo's host exactly once, so the helper IS installed
+        # and can answer quit=1 instead of letting git prompt.
         d = derive({"repos": ["https://github.com/x/y.git"]})
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
         self.assertEqual(d["GIT_HOST_TOKENS"], "")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
+
+    def test_cli_host_origin_is_in_the_list_without_being_in_repos_or_table(self):
+        # A git.hosts manifest that names only ANOTHER host still gets the
+        # CLI host's origin in the router list (the router answers quit=1
+        # there; without it the desktop bridge would answer).
+        d = derive({"git": {"hosts": {"git.example.test": {"token": "GH_TOKEN_x"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_x"})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.test=GH_TOKEN_x")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
+                         "https://git.example.test\nhttps://github.com\n")
+        # No duplicate when the CLI host already has a table row...
+        d = derive({"git": {"hosts": {"github.com": {"token": "GH_TOKEN_x"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_x"})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
+        # ...or is already named by repos:.
+        d = derive({"repos": ["https://github.com/x/y.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
 
     def test_github_only_manifest_yields_github(self):
@@ -739,7 +762,7 @@ class TestCredentialHosts(unittest.TestCase):
         d = derive({"forge": "gitea",
                     "repos": ["https://git.example.test/Emergence/filebrowser.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
-                         "https://git.example.test\n")
+                         "https://git.example.test\nhttps://github.com\n")
 
     def test_mixed_hosts_distinct_sorted_lowercased(self):
         d = derive({"repos": [
@@ -759,14 +782,14 @@ class TestCredentialHosts(unittest.TestCase):
     def test_userinfo_in_url_is_not_part_of_origin(self):
         d = derive({"repos": ["https://bot@git.example.test/x/y.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
-                         "https://git.example.test\n")
+                         "https://git.example.test\nhttps://github.com\n")
 
     def test_explicit_443_collapses_to_the_bare_host(self):
         d = derive({"repos": ["https://github.com:443/x/y.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://github.com\n")
         d = derive({"repos": ["https://git.example.test:443/x/y.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
-                         "https://git.example.test\n")
+                         "https://git.example.test\nhttps://github.com\n")
 
     def test_bad_host_is_rejected(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -779,7 +802,7 @@ class TestCredentialHosts(unittest.TestCase):
     def test_underscore_host_accepted(self):
         d = derive({"repos": ["https://git_internal.lan/o/r.git"]})
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
-                         "https://git_internal.lan\n")
+                         "https://git_internal.lan\nhttps://github.com\n")
 
     def test_egress_notice_hosts_drop_base_allowlisted(self):
         # GIT_EGRESS_NOTICE_HOSTS: the subset of GIT_CREDENTIAL_HOSTS the
@@ -819,7 +842,8 @@ class TestCredentialHosts(unittest.TestCase):
         self.assertEqual(
             d["GIT_CREDENTIAL_HOSTS"],
             "https://git.example.test\n"
-            "https://git.other.test\n")
+            "https://git.other.test\n"
+            "https://github.com\n")   # the CLI host's origin, always
 
 
 class TestTokenRouting(unittest.TestCase):
@@ -1023,7 +1047,7 @@ class TestOrgHosts(unittest.TestCase):
             "git.example.test:3000=GH_TOKEN_orga")
         self.assertEqual(
             d["GIT_CREDENTIAL_HOSTS"],
-            "https://git.example.test:3000\n")
+            "https://git.example.test:3000\nhttps://github.com\n")
 
     def test_org_declared_host(self):
         d = derive({"repos": ["https://git.example.test/OrgA/x.git"],
@@ -1508,7 +1532,8 @@ class TestGitHosts(unittest.TestCase):
         d = self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x"}}})
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
         self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.test=GH_TOKEN_x")
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "https://git.example.test\n")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
+                         "https://git.example.test\nhttps://github.com\n")
 
     def test_nothing_declared_derives_an_empty_table(self):
         # The table holds only rows the manifest states. Nothing declared →
@@ -1612,7 +1637,7 @@ class TestGitHosts(unittest.TestCase):
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
         self.assertEqual(d["GIT_ORG_IDENTITIES"], "")
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
-                         "https://git.example.org\nhttps://other.test\n")
+                         "https://git.example.org\nhttps://github.com\nhttps://other.test\n")
 
     def test_host_author_still_requires_token(self):
         # token: is required under a git.hosts entry even when an author is
