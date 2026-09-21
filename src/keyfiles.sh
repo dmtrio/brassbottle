@@ -57,9 +57,18 @@ git_host_token_pairs() {
 #   git_host_tokens     GIT_HOST_TOKENS — space-separated host=SOURCEVAR pairs
 #                       (manifest.py); each SOURCEVAR is written under its own
 #                       name beside the table itself
-# Reads GH_TOKEN and every SOURCE var from the environment (indirect expansion).
+#   git_token_source    GIT_TOKEN_SOURCE — the CLI host's row variable
+#                       (manifest.py); GH_TOKEN is written from THIS variable
+#                       by indirect expansion, never from the calling
+#                       environment: empty = the CLI host has no row and no
+#                       GH_TOKEN line is written
+# Reads every SOURCE var (and the CLI host's row variable) from the
+# environment (indirect expansion). GH_TOKEN itself is never read from the
+# environment — a value in the caller's env reaches a key file only when a
+# table row names it.
 write_keyfiles() {
-    local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" git_host_tokens="${5:-}"
+    local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" \
+        git_host_tokens="${5:-}" git_token_source="${6:-}"
     local shared="" slot src hint agent a f line gh_written
 
     # Shared block: legacy passthroughs + GH_TOKEN, built once. The
@@ -82,9 +91,8 @@ EOF
     # through it and reads the row variable by indirect expansion. Same walk
     # the bootstrap clone env uses (git_host_token_pairs); no warn_missing:
     # an unset source var is a hard error in manifest.py (like agent_secrets),
-    # so it can't reach here. The row variables carry GH_TOKEN whenever the
-    # CLI host's row names it — the default export below is then redundant and
-    # is skipped, so GH_TOKEN lands exactly once.
+    # so it can't reach here. A row naming GH_TOKEN carries the plain
+    # GH_TOKEN line directly.
     gh_written=""
     if [ -n "$git_host_tokens" ]; then
         while IFS= read -r line; do
@@ -95,8 +103,16 @@ EOF
 $(git_host_token_pairs "$git_host_tokens")
 EOF
     fi
-    if [ -z "$gh_written" ] && [ -n "${GH_TOKEN:-}" ]; then
-        shared="${shared}GH_TOKEN=$GH_TOKEN"$'\n'
+    # GH_TOKEN reaches a key file ONLY as the CLI host row's token: when the
+    # CLI host has a row naming variable V (git_token_source,
+    # GIT_TOKEN_SOURCE from manifest.py), GH_TOKEN=<value of V>; when it has
+    # no row, git_token_source is empty and NO GH_TOKEN line is written —
+    # regardless of what the calling environment carries. Skipped when the
+    # walk above already wrote GH_TOKEN (a row naming GH_TOKEN itself), so
+    # GH_TOKEN lands exactly once.
+    if [ -z "$gh_written" ] && [ -n "$git_token_source" ]; then
+        val="${!git_token_source:-}"
+        [ -n "$val" ] && shared="${shared}GH_TOKEN=$val"$'\n'
     fi
 
     # Fan the shared block out to every shim agent. chmod 600 as each file is

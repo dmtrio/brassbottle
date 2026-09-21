@@ -176,12 +176,14 @@ OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\Z")
 # an optional :port is refused rather than silently unmatched.
 GIT_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?\Z")
 
-# The one-row CLI token table: the host whose table token is ALSO exported as
-# a plain CLI env var for tools that expect it (gh, non-shim git clients).
-# This is the ONLY place github.com is named for routing — the implicit
-# default row, GIT_TOKEN_SOURCE, and the entrypoint's helper install all
-# derive from this table; the helper, entrypoint and keyfiles route purely by
-# host and never name a forge.
+# The one-row CLI token table: the host whose table row's token is ALSO
+# written as the plain GH_TOKEN env var in every agent key file and the
+# bootstrap clone env, for tools that expect it (gh, non-shim git clients).
+# This is the ONLY place github.com is named for routing — GIT_TOKEN_SOURCE,
+# the keyfiles GH_TOKEN line and the clone env all derive from this table;
+# the helper, entrypoint and keyfiles route purely by host and never name a
+# forge. A host with no row in GIT_HOST_TOKENS carries NO token anywhere:
+# nothing about this table is implicit.
 CLI_TOKEN_VARS = {"github.com": "GH_TOKEN"}
 CLI_HOST = next(iter(CLI_TOKEN_VARS))
 
@@ -258,7 +260,7 @@ def _scalar(v, field, default=""):
     return str(v)
 
 
-def _identity_scalar(v, field):
+def _identity_scalar(v, field, errors=None):
     """_scalar plus the one rule every git identity field must satisfy: no
     tab, newline or carriage return. GIT_ORG_IDENTITIES and
     GIT_HOST_IDENTITIES records are tab-separated, one per line — a tab in a
@@ -267,12 +269,19 @@ def _identity_scalar(v, field):
     "Bad\tName\nb.test\tEvil" would attribute a repo to an identity nobody
     wrote). The top-level git.name/email ride the same rule: they pass
     through compose env vars into `su coder -c 'git config --global …'`, and
-    a newline there smuggles extra lines into that command. Named error
-    instead of silent corruption."""
+    a newline there smuggles extra lines into that command. A named error,
+    never silent corruption. When `errors` is given the message accumulates
+    there like every other git-identity error (the block raises once, with
+    all of them); without it the error raises immediately (the top-level
+    git.name/git.email are validated before that block)."""
     value = _scalar(v, field)
     if value and re.search(r"[\t\r\n]", value):
-        raise ManifestError(
-            f"manifest {field}: must not contain a tab, newline or carriage return")
+        if errors is None:
+            raise ManifestError(
+                f"manifest {field}: must not contain a tab, newline or carriage return")
+        errors.append(
+            f"  {field}: must not contain a tab, newline or carriage return")
+        return ""
     return value
 
 
@@ -797,14 +806,15 @@ def _git_identity(parsed_repos, git, env, secrets_file):
 
     Routing is by HOST, in one table: git.hosts maps each host to the
     secrets.env variable holding that host's token, exactly as written — no
-    owner sanitisation, no name mangling. A manifest that DECLARES git.hosts
-    gets exactly the rows it declares, nothing implicit. The old spellings
+    owner sanitisation, no name mangling. The table holds ONLY rows the
+    manifest states: git.hosts entries, or (old spellings, still accepted)
+    git.token as the CLI host's row and each git.orgs entry's row. Nothing
+    declared → an empty GIT_HOST_TOKENS; a repo whose host has no row clones
+    anonymously and a push needs git.hosts.<host>.token. The old spellings
     feed the same table: git.token: X is the github.com row; each git.orgs
     entry is a row for the host it resolves to (its declared host:, else the
     one https:// host its owner's repos: URLs name — never a guessed
-    default). A manifest WITHOUT git.hosts keeps the implicit default row
-    for the CLI host (github.com=GH_TOKEN) unless an old spelling already
-    gave that host a row.
+    default).
     token: that isn't a currently-set secrets.env var (PRESENT_SECRET_VARS
     lists the ones up.sh scanned — every non-empty variable secrets.env
     defines, so any variable name works as a token source, not just
@@ -818,13 +828,14 @@ def _git_identity(parsed_repos, git, env, secrets_file):
       GIT_HOST_TOKENS     space-separated host=VARNAME pairs, sorted by host
                           (the table; every row var is written beside it by
                           keyfiles.sh and forwarded to the bootstrap clone)
-      GIT_TOKEN_SOURCE    the CLI host's row variable whenever that row is
-                          not the implicit GH_TOKEN one (declared via
+      GIT_TOKEN_SOURCE    the CLI host's row variable (declared via
                           git.token, git.hosts.github.com.token, or a
-                          git.orgs claim — up.sh exports it as the plain
-                          GH_TOKEN via CLI_TOKEN_VARS); "" = the row is the
-                          implicit default: keep GH_TOKEN as sourced from
-                          secrets.env
+                          git.orgs claim) whenever it has one — the one
+                          variable keyfiles.sh writes the plain GH_TOKEN
+                          from and up.sh forwards to the clone env (its
+                          NAME only; the value is read from the secrets
+                          the caller already sourced); "" = the CLI host
+                          has NO row: no GH_TOKEN is written anywhere
       GIT_ORG_IDENTITIES  owner<TAB>name<TAB>email per line — per-owner
                           author attribution for the bootstrap clone; never
                           routing (owner is lowercased: attribution matches
@@ -866,8 +877,8 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     token_val = git.get("token")
     orgs_val = git.get("orgs")
     # "git.hosts is declared" — an EMPTY git.hosts map adds no rows and is
-    # not a declaration, so it neither conflicts with the old spellings nor
-    # suppresses the implicit default row.
+    # not a declaration, so it does not conflict with the old spellings
+    # (an empty table and git.token beside it are one github.com row).
     if isinstance(hosts_val, dict):
         hosts_declared = bool(hosts_val)
     else:
@@ -930,12 +941,13 @@ def _git_identity(parsed_repos, git, env, secrets_file):
             # a scalar each (a map/list is a named error), either may be
             # given alone, no charset rule beyond the shared one-line rule
             # (_identity_scalar — records are tab-separated, one per line).
-            name = _identity_scalar(spec.get("name"), f"git.hosts.{field_host}.name")
-            email = _identity_scalar(spec.get("email"), f"git.hosts.{field_host}.email")
+            name = _identity_scalar(spec.get("name"), f"git.hosts.{field_host}.name", errors)
+            email = _identity_scalar(spec.get("email"), f"git.hosts.{field_host}.email", errors)
             # token: is required on EVERY entry, author present or not — an
-            # author-only entry on the CLI host would derive zero token rows
-            # while GH_TOKEN is still exported, leaving gh as the machine
-            # user and git on a stored gh login: two identities on one host.
+            # author-only entry on the CLI host would derive zero token rows,
+            # leaving git on a stored gh login while the author attribution
+            # claims a bot identity the host never authenticated: declared,
+            # not derived.
             src = source(spec.get("token"),
                          f"git.hosts.{field_host}.token", required=True)
             if not src:
@@ -997,13 +1009,12 @@ def _git_identity(parsed_repos, git, env, secrets_file):
                             "(letters, digits, _ . and -, optional :port)")
                     else:
                         declared_host = host
+            name = _identity_scalar(spec.get("name"), f"{field}.name", errors)
+            email = _identity_scalar(spec.get("email"), f"{field}.email", errors)
             src = source(spec.get("token"), f"{field}.token", required=True)
             if not src:
                 continue
-            records.append((owner_lc, src,
-                            _identity_scalar(spec.get("name"), f"{field}.name"),
-                            _identity_scalar(spec.get("email"), f"{field}.email"),
-                            declared_host))
+            records.append((owner_lc, src, name, email, declared_host))
 
     # Resolve each git.orgs token to exactly one host — where the token row
     # lands. An https-derived host wins over a declared one only by agreeing
@@ -1055,25 +1066,13 @@ def _git_identity(parsed_repos, git, env, secrets_file):
     if errors:
         raise ManifestError("manifest git identity failed validation:\n" + "\n".join(errors))
 
-    # The implicit default row belongs to manifests WITHOUT git.hosts. A
-    # manifest that declares git.hosts gets exactly the rows it declares —
-    # nothing implicit, no CLI-host row, no credential host for it (unless
-    # repos: names it). A manifest without git.hosts (nothing declared, or
-    # git.token / git.orgs only) keeps today's behaviour: the CLI host's
-    # token is the plain GH_TOKEN from secrets.env unless an old spelling
-    # already gave the CLI host a row.
-    if not hosts_declared and CLI_HOST not in rows:
-        rows[CLI_HOST] = CLI_TOKEN_VARS[CLI_HOST]
-
-    # GIT_TOKEN_SOURCE: whatever row the CLI host ends up with is what the
-    # plain GH_TOKEN exports from — an explicitly declared row (git.hosts,
-    # git.token) AND a git.orgs-claimed row alike, so git and gh never act as
-    # two identities on the same host. Empty = the row IS the implicit
-    # GH_TOKEN one: keep GH_TOKEN as sourced from secrets.env.
+    # Nothing implicit: the table holds only rows the manifest stated above.
+    # A CLI host with no row gets NO token anywhere — keyfiles.sh and the
+    # bootstrap clone env write GH_TOKEN only when GIT_TOKEN_SOURCE names a
+    # row variable.
     cli_var = rows.get(CLI_HOST)
     return {
-        "GIT_TOKEN_SOURCE":
-            cli_var if cli_var not in (None, CLI_TOKEN_VARS[CLI_HOST]) else "",
+        "GIT_TOKEN_SOURCE": cli_var or "",
         "GIT_ORG_IDENTITIES": "".join(
             f"{o}\t{n}\t{e}\n" for o, _s, n, e, _h in records),
         "GIT_HOST_IDENTITIES": "".join(

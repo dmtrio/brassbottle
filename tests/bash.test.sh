@@ -69,10 +69,16 @@ out=$(git_host_token_pairs "github.com=GH_TOKEN git.example.test=SRC_FRY h2.test
 assert_eq "clone env dedupes one variable serving two hosts" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_FRY h2.test=SRC_FRY\nGH_TOKEN=cli_tok\nSRC_FRY=frytok' \
     "$out"
-# NEW FORM at the clone boundary: a manifest declaring
-# git.hosts.github.com.token: GH_TOKEN_x resolves GIT_TOKEN_SOURCE=GH_TOKEN_x
-# (up.sh then exports GH_TOKEN from it) and the clone env carries the table
-# row variable with that secret's VALUE — no bare GH_TOKEN forward needed.
+# An empty table (nothing declared) forwards NOTHING — not even a GH_TOKEN
+# the calling environment carries: the clone env is table-driven only.
+GH_TOKEN=ambient-leak
+out=$(git_host_token_pairs "")
+assert_eq "clone env with an empty table carries nothing (no GH_TOKEN forward)" "" "$out"
+unset GH_TOKEN
+# A manifest declaring git.hosts.github.com.token: GH_TOKEN_x resolves
+# GIT_TOKEN_SOURCE=GH_TOKEN_x (keyfiles resolves GH_TOKEN from it, the clone
+# env carries the table row variable with that secret's VALUE — no separate
+# bare GH_TOKEN forward to the clone).
 GH_TOKEN_x=new-token-value
 out=$(git_host_token_pairs "github.com=GH_TOKEN_x")
 assert_eq "clone env carries the git.hosts.github.com token variable" \
@@ -104,14 +110,17 @@ d="$WORK/ck1"; mkdir -p "$d"; chmod 700 "$d"
 MCP_GATEWAY_TOKEN=gwval GH_TOKEN=ghval SRC_C=ckey SRC_P=pkey
 PES=$(printf 'MCP_GATEWAY_TOKEN\tMCP_GATEWAY_TOKEN\tgateway (run ./service.sh gateway once)\n')
 AS=$(printf 'claude\tOBSIDIAN_ANNOTATED_KEY\tSRC_C\npi\tANNOTATED_WATCH_KEY\tSRC_P\n')
+# No git table, no GIT_TOKEN_SOURCE: GH_TOKEN stays out of every key file
+# even though the environment carries it — GH_TOKEN is written only from the
+# CLI host's table row (the 6th argument), never from the ambient env.
 write_keyfiles "$d" "$SHIM" "$PES" "$AS" >/dev/null
 
-assert_eq "claude.env = shared + its agent-scoped key" \
-    $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval\nOBSIDIAN_ANNOTATED_KEY=ckey' "$(cat "$d/claude.env")"
-assert_eq "codex.env = shared only (no binding)" \
-    $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval' "$(cat "$d/codex.env")"
+assert_eq "claude.env = shared + its agent-scoped key (no GH_TOKEN: no table)" \
+    $'MCP_GATEWAY_TOKEN=gwval\nOBSIDIAN_ANNOTATED_KEY=ckey' "$(cat "$d/claude.env")"
+assert_eq "codex.env = shared only (no binding, no GH_TOKEN)" \
+    $'MCP_GATEWAY_TOKEN=gwval' "$(cat "$d/codex.env")"
 assert_eq "pi.env carries its watch key" \
-    $'MCP_GATEWAY_TOKEN=gwval\nGH_TOKEN=ghval\nANNOTATED_WATCH_KEY=pkey' "$(cat "$d/pi.env")"
+    $'MCP_GATEWAY_TOKEN=gwval\nANNOTATED_WATCH_KEY=pkey' "$(cat "$d/pi.env")"
 EXPECTED_ENV_BASENAMES=$(printf '%s\n' $SHIM | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
 PRODUCED_ENV_BASENAMES=$(for f in "$d"/*.env; do
     basename "${f%.env}"
@@ -141,12 +150,16 @@ unset FOO BAR
 # The git.hosts table (5th arg) lands in the shared block beside every
 # variable it names — this is what git-credential-org resolves request hosts
 # through, so the table itself AND each named variable (under its own name,
-# exactly as written — no owner sanitisation) reach every shim agent.
+# exactly as written — no owner sanitisation) reach every shim agent. The
+# 6th argument is GIT_TOKEN_SOURCE, the CLI host's row variable: GH_TOKEN is
+# written from it by indirect expansion, never from the ambient environment.
 d="$WORK/ck4"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval GH_TOKEN_fry=frytok GIT_HOST_TOKENS_FRYVAR=gamut
 TABLE="github.com=GH_TOKEN git.example.test=GH_TOKEN_fry"
-write_keyfiles "$d" "$SHIM" "" "" "$TABLE" >/dev/null
-assert_eq "table + named variables land next to GH_TOKEN on each agent" \
+# github.com's row names GH_TOKEN itself, so GIT_TOKEN_SOURCE=GH_TOKEN and
+# the table walk already carries the plain GH_TOKEN line (exactly once).
+write_keyfiles "$d" "$SHIM" "" "" "$TABLE" "GH_TOKEN" >/dev/null
+assert_eq "table + named variables land beside the CLI host's GH_TOKEN (github row)" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/codex.env")"
 assert_eq "table fan-out reaches every shim agent" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/cursor-agent.env")"
@@ -157,52 +170,86 @@ unset GH_TOKEN GH_TOKEN_fry
 d="$WORK/ck4d"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval SRC_SHARED=stok
 TABLE="github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED"
-write_keyfiles "$d" "codex" "" "" "$TABLE" >/dev/null
+write_keyfiles "$d" "codex" "" "" "$TABLE" "GH_TOKEN" >/dev/null
 assert_eq "one shared variable written once, not per host" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED\nGH_TOKEN=defval\nSRC_SHARED=stok' "$(cat "$d/codex.env")"
 unset GH_TOKEN SRC_SHARED
 
 # OLD SPELLING, end to end at the key-file level: the git.token spelling is
-# the CLI host's row github.com=GH_TOKEN_x, so GH_TOKEN equal to that
-# secret's VALUE lands in every agent's key file — written once, not twice.
+# the CLI host's row github.com=GH_TOKEN_x, so GIT_TOKEN_SOURCE=GH_TOKEN_x
+# and GH_TOKEN equal to that secret's VALUE lands in every agent's key
+# file — written once, not twice. The value is read by indirect expansion
+# of the row variable, never from an ambient GH_TOKEN.
 d="$WORK/ck7"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN_x=old-form-value
-GH_TOKEN="${GH_TOKEN_x}"   # what up.sh does with GIT_TOKEN_SOURCE=GH_TOKEN_x
-write_keyfiles "$d" "$SHIM" "" "" "github.com=GH_TOKEN_x" >/dev/null
+write_keyfiles "$d" "$SHIM" "" "" "github.com=GH_TOKEN_x" "GH_TOKEN_x" >/dev/null
 allhave=1; for a in $SHIM; do
     [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=old-form-value\nGH_TOKEN=old-form-value' ] || allhave=0
 done
 assert_eq "git.token: X lands GH_TOKEN=<X's value> in every agent key file" "1" "$allhave"
-unset GH_TOKEN GH_TOKEN_x
+unset GH_TOKEN_x
 
-# 5th arg omitted entirely still works (no table, no regression).
+# 5th/6th args omitted entirely still work (no table, no CLI row): nothing
+# but the agent-scoped secrets — GH_TOKEN never appears without a row.
 d="$WORK/ck4o"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval
 write_keyfiles "$d" "codex" "" "" >/dev/null
-assert_eq "5th arg omitted: no GIT_HOST_TOKENS line" "GH_TOKEN=defval" "$(cat "$d/codex.env")"
+assert_eq "5th arg omitted: no GIT_HOST_TOKENS line, no GH_TOKEN" "" "$(cat "$d/codex.env")"
 unset GH_TOKEN
 
 # NEW FORM, end to end at the key-file level: a manifest that declares
-# git.hosts.github.com.token: GH_TOKEN_x resolves GIT_TOKEN_SOURCE=GH_TOKEN_x
-# (up.sh exports GH_TOKEN from it), so GH_TOKEN equal to that secret's VALUE
-# lands in every agent's key file alongside the table row naming its variable.
+# git.hosts.github.com.token: GH_TOKEN_x resolves GIT_TOKEN_SOURCE=GH_TOKEN_x,
+# so GH_TOKEN equal to that secret's VALUE lands in every agent's key file
+# alongside the table row naming its variable.
 d="$WORK/ck6"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN_x=new-token-value
-GH_TOKEN="${GH_TOKEN_x}"   # what up.sh does with GIT_TOKEN_SOURCE=GH_TOKEN_x
+GH_TOKEN=ambient-must-not-be-used
 TABLE="github.com=GH_TOKEN_x"
-write_keyfiles "$d" "$SHIM" "" "" "$TABLE" >/dev/null
+write_keyfiles "$d" "$SHIM" "" "" "$TABLE" "GH_TOKEN_x" >/dev/null
 allhave=1; for a in $SHIM; do
     [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=new-token-value\nGH_TOKEN=new-token-value' ] || allhave=0
 done
 assert_eq "git.hosts.github.com.token: GH_TOKEN becomes GH_TOKEN (table value) in every agent env file" "1" "$allhave"
 unset GH_TOKEN GH_TOKEN_x
 
-# no table at all → only GH_TOKEN (old minimal composition, no regression)
+# NOTHING DECLARED, end to end through the real derive: a manifest with no
+# git: section at all derives an empty table and an empty GIT_TOKEN_SOURCE;
+# feeding THOSE to write_keyfiles with GH_TOKEN and every row variable SET
+# in the environment still writes no GH_TOKEN and no table variable —
+# nothing reaches a key file that the manifest did not declare.
 d="$WORK/ck5"; mkdir -p "$d"; chmod 700 "$d"
-GH_TOKEN=defval
-write_keyfiles "$d" "claude" "" "" "" >/dev/null
-assert_eq "no table writes only GH_TOKEN (5th arg empty)" "GH_TOKEN=defval" "$(cat "$d/claude.env")"
-unset GH_TOKEN
+eval "$(printf '{"repos":["https://github.com/x/y.git"]}\n---agents---\na\t{"binary":"a","install":"x"}\n' \
+    | PRESENT_SECRET_VARS="GH_TOKEN GH_TOKEN_fry" SECRETS_FILE=/sec/secrets.env \
+      GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
+      python3 "$REPO/src/manifest.py" --derive)"
+assert_eq "nothing declared: GIT_HOST_TOKENS derives empty" "" "$GIT_HOST_TOKENS"
+assert_eq "nothing declared: GIT_TOKEN_SOURCE derives empty" "" "$GIT_TOKEN_SOURCE"
+GH_TOKEN=defval GH_TOKEN_fry=fryval
+write_keyfiles "$d" "claude" "" "" "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" >/dev/null
+assert_eq "nothing declared: no GH_TOKEN or table variable in the key file" "" "$(cat "$d/claude.env")"
+out=$(git_host_token_pairs "$GIT_HOST_TOKENS")
+assert_eq "nothing declared: the clone env is empty too" "" "$out"
+unset GH_TOKEN GH_TOKEN_fry
+
+# The matching positive: with git.hosts.github.com.token: GH_TOKEN_fry the
+# SAME real derive puts GH_TOKEN=<fry's value> in every key file and the
+# clone env.
+d="$WORK/ck8"; mkdir -p "$d"; chmod 700 "$d"
+eval "$(printf '{"repos":["https://github.com/x/y.git"],"git":{"hosts":{"github.com":{"token":"GH_TOKEN_fry"}}}}\n---agents---\na\t{"binary":"a","install":"x"}\n' \
+    | PRESENT_SECRET_VARS="GH_TOKEN_fry" SECRETS_FILE=/sec/secrets.env \
+      GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
+      python3 "$REPO/src/manifest.py" --derive)"
+assert_eq "declared row: GIT_TOKEN_SOURCE names the row variable" "GH_TOKEN_fry" "$GIT_TOKEN_SOURCE"
+GH_TOKEN_fry=fryval
+write_keyfiles "$d" "$SHIM" "" "" "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" >/dev/null
+allhave=1; for a in $SHIM; do
+    [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_fry\nGH_TOKEN_fry=fryval\nGH_TOKEN=fryval' ] || allhave=0
+done
+assert_eq "git.hosts.github.com.token: GH_TOKEN=<row value> in every key file" "1" "$allhave"
+out=$(git_host_token_pairs "$GIT_HOST_TOKENS")
+assert_eq "git.hosts.github.com.token: the clone env carries the row variable" \
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN_fry\nGH_TOKEN_fry=fryval' "$out"
+unset GH_TOKEN_fry
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git-credential-org.sh ──"
@@ -272,6 +319,16 @@ out=$(printf 'protocol=https\nhost=gh.example.test\npath=o/r.git\n' | env -i PAT
 assert_rc "no hosts.yml: clean exit" 0 "$rc"
 assert_eq "no hosts.yml: tells git to quit" "quit=1" "$out"
 assert_eq "no hosts.yml: gh never invoked" "" "$(cat "$GH_CALLS")"
+
+# An EMPTY table (a nothing-declared manifest) answers a CLI-host request
+# the same way: quit=1 naming git.hosts.github.com.token — the request never
+# falls through to gh, a prompt, or an implicit credential.
+out=$(printf 'protocol=https\nhost=github.com\npath=o/r.git\n' | env -i PATH="$WORK/ghbin:$PATH" GH_CONFIG_DIR="$GH_EMPTY" GH_TOKEN=envleak GIT_HOST_TOKENS='' bash "$HELPER" get 2>"$WORK/cred-err"); rc=$?
+assert_rc "empty table, CLI-host request: clean exit" 0 "$rc"
+assert_eq "empty table, CLI-host request: quit=1" "quit=1" "$out"
+assert_contains "…stderr names the missing key" "$(cat "$WORK/cred-err")" \
+    "git.hosts.github.com.token"
+assert_eq "…gh never invoked" "" "$(cat "$GH_CALLS")"
 
 # A host NOT exactly listed (gh normalises api.github.com onto github.com,
 # and honours GH_TOKEN from the environment): quit=1 and gh is never
@@ -487,9 +544,15 @@ grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
 grep -qF 'git_url_split "$repo_url"' "$REPO/src/git_identity.sh" \
     && pass "git_identity.sh splits the repo URL fresh in apply_repo_identity" \
     || fail "git_identity.sh no longer splits the repo URL fresh in apply_repo_identity"
-grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
-    && pass "up.sh passes GIT_HOST_TOKENS to write_keyfiles" \
-    || fail "up.sh no longer passes GIT_HOST_TOKENS to write_keyfiles"
+grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE"' "$REPO/up.sh" \
+    && pass "up.sh passes GIT_HOST_TOKENS + GIT_TOKEN_SOURCE to write_keyfiles" \
+    || fail "up.sh no longer passes GIT_HOST_TOKENS/GIT_TOKEN_SOURCE to write_keyfiles"
+# GH_TOKEN never rides the up.sh environment: the CLI host's row variable is
+# resolved directly by keyfiles.sh (its 6th argument) and the clone env —
+# nothing in up.sh consumes or forwards a GH_TOKEN value.
+up_gh_leak=$(grep -v '^[[:space:]]*#' "$REPO/up.sh" | grep -c 'GH_TOKEN' || true)
+assert_eq "up.sh names GH_TOKEN nowhere outside comments (nothing implicit to forward)" \
+    "0" "$up_gh_leak"
 grep -qF 'git_host_token_pairs "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
     && pass "up.sh builds the bootstrap clone env via git_host_token_pairs" \
     || fail "up.sh no longer forwards GIT_HOST_TOKENS + row variables to the bootstrap clone"
@@ -560,12 +623,27 @@ assert_eq "git_host_notices: a :443 row covers the bare host" "" "$out"
 out=$(git_host_notices $'a\thttps://Git.Example.Test:3000/a/x.git\n' 'git.example.test=SRC_A')
 assert_contains "git_host_notices: a :3000 repo is NOT covered by the bare-host row" "$out" "git.example.test:3000"
 
-# An ssh:// repo never gets a notice (it takes no HTTP credential at all),
-# and the CLI host keeps its implicit row, so it never notices either.
+# An ssh:// repo never gets a notice (it takes no HTTP credential at all).
 out=$(git_host_notices $'a\tssh://git@h.test/a/x.git\n' '')
 assert_eq "git_host_notices: an ssh:// repo never gets a notice" "" "$out"
+# The CLI host is no longer special: an https:// repo on it with a table row
+# is silent; with NO row it gets exactly one note (clones run anonymously, a
+# push needs git.hosts.<host>.token), like any other host.
 out=$(git_host_notices $'a\thttps://github.com/acme/x.git\n' 'github.com=GH_TOKEN')
 assert_eq "git_host_notices: the CLI host with its row gets no notice" "" "$out"
+out=$(git_host_notices $'a\thttps://github.com/acme/x.git\nb\thttps://github.com/acme/y.git\n' '')
+assert_eq "git_host_notices: the row-less CLI host gets ONE note, not one per repo" \
+    "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+assert_contains "…naming the host and the key" "$out" "github.com: no git.hosts.github.com.token"
+assert_contains "…saying clones run anonymously" "$out" "clones of its repos run anonymously"
+assert_contains "…and that a push needs the row" "$out" "a push needs git.hosts.github.com.token"
+# A host the table has a row for but which appears in NO repos: entry never
+# fires anything — there is no repo to clone anonymously.
+out=$(git_host_notices '' 'github.com=GH_TOKEN git.example.test=SRC_A')
+assert_eq "git_host_notices: no repos: at all is silent" "" "$out"
+out=$(git_host_notices $'a\thttps://h.test/a/x.git\n' 'github.com=GH_TOKEN')
+assert_eq "git_host_notices: a row for a host outside repos: stays silent" \
+    "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
 
 # End to end through the real derive: the notice list drops the
 # base-allowlisted CLI host, so the up-time egress notice is silent for it
@@ -652,6 +730,42 @@ git_url_split 'ssh://git@github.com/o/r.git'
 assert_eq "git_url_split: ssh:// URL owner" "o" "${_p%%/*}"
 git_url_split 'https://GitHub.com/o/r.git'
 assert_eq "git_url_split: host is lowercased (the case the mirror missed)" "github.com" "$_h"
+
+# ────────────────────────────────────────────────────────────────────────────
+echo "── anonymous clone with an empty table ──"
+# A nothing-declared manifest installs the router for every https:// repo
+# origin (GIT_CREDENTIAL_HOSTS) with an EMPTY GIT_HOST_TOKENS. That must not
+# break a NON-https clone: the helper is only ever consulted for https://, so
+# a file:// clone succeeds with the router installed and the table empty.
+# The router is a stub that would fail loudly if it were ever invoked, so
+# this also proves an empty table never consults it for a non-https clone.
+ANON="$WORK/anon"; mkdir -p "$ANON"
+git init -q "$ANON/work"
+git -C "$ANON/work" config user.name Anon
+git -C "$ANON/work" config user.email anon@example.test
+git -C "$ANON/work" commit -q --allow-empty -m seed
+git init -q --bare "$ANON/pub.git"
+git -C "$ANON/work" push -q "$ANON/pub.git" HEAD 2>/dev/null
+HELPER_LOG="$ANON/helper.log"; : > "$HELPER_LOG"
+cat > "$ANON/git-credential-org" <<MOCK
+#!/bin/bash
+echo "invoked \$*" >> "$HELPER_LOG"
+exit 1
+MOCK
+chmod +x "$ANON/git-credential-org"
+# Install the router exactly the way entrypoint.sh does (reset+add, global
+# scope) for the repo's https origin, with HOME pointed at the sandbox.
+export HOME="$ANON"
+git config --global --unset-all credential.https://github.com.helper 2>/dev/null || true
+git config --global --add credential.https://github.com.helper ''
+git config --global --add credential.https://github.com.helper "$ANON/git-credential-org"
+out=$(env HOME="$ANON" GIT_HOST_TOKENS='' PATH="$WORK/ghbin:$PATH" \
+    git clone -q "file://$ANON/pub.git" "$ANON/clone" 2>&1); rc=$?
+assert_rc "empty table: a non-https (file://) clone succeeds" 0 "$rc"
+assert_eq "…the router was never invoked for it" "" "$(cat "$HELPER_LOG")"
+assert_eq "…the clone is complete" "seed" "$(git -C "$ANON/clone" log -1 --format=%s)"
+unset HOME
+rm -rf "$ANON"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git_identity.sh ──"

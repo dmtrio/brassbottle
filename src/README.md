@@ -15,9 +15,14 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
 - `keyfiles.sh` composes per-agent secret env files from `secrets.env` and the
   bottle's secret bindings.
 - `git_notices.sh` provides `git_url_split` (the host/path derivation the
-  clone loop uses) and prints the up-time notices — a repo host with no
-  git.hosts row, or a git host missing from `capabilities.egress` — that
-  `up.sh` sources and calls after deriving the manifest.
+  clone loop uses) and prints the up-time notices — an https:// repo host
+  with no git.hosts row (clones run anonymously; a push needs
+  `git.hosts.<host>.token`), or a git host missing from
+  `capabilities.egress` — that `up.sh` sources and calls after deriving the
+  manifest.
+- `git_identity.sh` stamps per-repo author identity (git.orgs and
+  git.hosts name/email records) onto each clone after the bootstrap
+  `git clone`.
 - `wire_plugins.py` writes generated MCP config for each enabled agent.
 - `compose_rules.py` composes global rules, enabled plugin rule fragments, and
   the workspace contract (`/workspace/CONTRACT.md`) into each agent's rules file.

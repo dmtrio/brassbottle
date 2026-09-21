@@ -25,10 +25,9 @@ git:
   # hostname (lowercased; a trailing :443 is stripped). Each token: names the
   # secrets.env VARIABLE holding that host's token, exactly as written. A repo
   # on <host> authenticates with that variable's value and no other host ever
-  # sees it. A manifest that declares git.hosts gets exactly the rows it
-  # declares — no implicit row. Without git.hosts, github.com keeps one
-  # implicit row: the global GH_TOKEN (git.token/git.orgs may claim it
-  # instead).
+  # sees it. The table holds ONLY rows the manifest states — nothing is
+  # implicit. Without a row for a repo's host, clones of its repos run
+  # anonymously (public repos only); a push needs git.hosts.<host>.token.
   #   hosts:
   #     git.example.org:
   #       token: GH_TOKEN_example          # secrets.env var NAME
