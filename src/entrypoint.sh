@@ -146,8 +146,15 @@ su -c "git config --global credential.useHttpPath true" coder
 # login instead of the per-host token. The idempotent reset(empty)+add loop lives
 # in src/credential_router_install.sh (baked into the image beside the entrypoint's
 # other sourced helpers), so tests exercise the real loop, not a copy of it.
+#
+# The install is security-relevant setup, like the firewall below: a failed
+# install must fail the boot (up.sh surfaces the logs) rather than bring up a
+# bottle whose git authenticates through the desktop bridge as the human.
 . /usr/local/lib/djinn/credential_router_install.sh
-install_credential_router "$GIT_CREDENTIAL_HOSTS"
+if ! install_credential_router "$GIT_CREDENTIAL_HOSTS"; then
+    echo "FATAL: git credential router install failed — refusing to boot without it (git would fall back to the desktop credential bridge, the human's login; see the stderr line above for the failing origin)" >&2
+    exit 1
+fi
 
 # ── SSH mode vs attach mode ───────────────────────────────────────────────────
 # remote_access.py owns the START_SSHD decision — two independent paths can

@@ -534,6 +534,67 @@ assert_contains "…stderr carries the router's message" "$(cat "$WORK/fill-err"
     "no git.hosts.github.com.token"
 assert_eq "…the desktop bridge was never invoked" "" "$(cat "$BRIDGE_LOG")"
 
+# The DEFAULT path (no runner argument — the entrypoint's ONLY path): su is
+# stubbed to run its -c command in the sandbox HOME, exactly what the
+# container's su provides. Before the default-runner fix this path defined a
+# function named `runner` but invoked the (empty) VARIABLE — no git config
+# ever ran, rc stayed 0, and no test could see it because every test passed a
+# runner explicitly.
+seed_home
+su() { [ "$1" = -c ] || { echo "su stub: unexpected args: $*" >&2; return 64; }; \
+    HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" bash -c "$2"; }
+install_credential_router "$GIT_CREDENTIAL_HOSTS"; rc=$?
+assert_rc "DEFAULT path (no runner argument): clean exit" 0 "$rc"
+eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://github.com/dmtrio/x.git)
+assert_eq "DEFAULT path: router is the effective CLI-host helper" \
+    "/usr/local/bin/git-credential-org" "$eff"
+eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://git.example.test/Emergence/filebrowser.git)
+assert_eq "DEFAULT path: router installed for every derived origin" \
+    "/usr/local/bin/git-credential-org" "$eff"
+unset -f su
+
+# The bridge end-to-end through the DEFAULT path too: the su stub rewrites
+# the fixed in-image router path to the real script, so `git credential fill`
+# runs the real router exactly as the container would.
+seed_home
+su() { [ "$1" = -c ] || { echo "su stub: unexpected args: $*" >&2; return 64; }; \
+    HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" \
+    bash -c "${2//\/usr\/local\/bin\/git-credential-org/$REPO/src/git-credential-org.sh}"; }
+: > "$BRIDGE_LOG"
+install_credential_router "$GIT_CREDENTIAL_HOSTS"; rc=$?
+assert_rc "DEFAULT path install: clean exit" 0 "$rc"
+fill_out=$(printf 'protocol=https\nhost=github.com\npath=o/r.git\n' \
+    | HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" GIT_TERMINAL_PROMPT=0 \
+      GIT_HOST_TOKENS='' PATH="$WORK/ghbin:$PATH" \
+      git credential fill 2>"$WORK/fill-err"); rc=$?
+assert_rc "DEFAULT path: git stops (router said quit)" 128 "$rc"
+assert_absent "…no password returned" "$fill_out" "password="
+assert_contains "…stderr carries the router's message" "$(cat "$WORK/fill-err")" \
+    "no git.hosts.github.com.token"
+assert_eq "…the desktop bridge was never invoked (default path)" "" "$(cat "$BRIDGE_LOG")"
+unset -f su
+
+# A failing --add must be LOUD: the function returns non-zero and names the
+# origin. Only the --unset-all of a key that does not exist is tolerated
+# (first boot, a re-created bottle whose repos: changed).
+seed_home
+failing_runner() {
+    case "$1" in
+        *--unset-all*) HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" bash -c "$1" ;;
+        *github.com*)  return 3 ;;   # every github.com add fails
+        *)             HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" bash -c "$1" ;;
+    esac
+}
+out=$(install_credential_router "$GIT_CREDENTIAL_HOSTS" failing_runner 2>&1); rc=$?
+assert_rc "a failed router install is loud (non-zero)" 1 "$rc"
+assert_contains "…the error names the origin that failed" "$out" "https://github.com"
+assert_contains "…and says what it means (desktop-bridge fallback)" "$out" \
+    "desktop credential bridge"
+assert_eq "…the other origin still installed" \
+    "/usr/local/bin/git-credential-org" \
+    "$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credential.helper https://git.example.test/o/r.git)"
+unset -f failing_runner
+
 # Drift pin: the idempotent idiom lives in src/credential_router_install.sh
 # (sourced by entrypoint.sh and baked into the image); if anyone reverts to a
 # plain `git config … helper <value>` set, these fail loudly (mirrors the
@@ -550,16 +611,28 @@ assert_contains "the install function adds the router via --add (not a plain set
     "$CRI" "--add credential.'\$origin'.helper /usr/local/bin/git-credential-org"
 # The loop expands unquoted with globbing on; values are manifest-validated,
 # but word-splitting must not glob. Check set -f sits directly before the for.
-if grep -B1 '^        for origin in \$origins; do' "$REPO/src/credential_router_install.sh" \
-    | head -1 | grep -q 'set -f'; then
-  pass "credential-router install loop is glob-safe (set -f)"
+# The loop expands unquoted with globbing on; values are manifest-validated,
+# but word-splitting must not glob: `set -f` must sit inside the function
+# BEFORE the `for origin` word-split. (Order-checked by line number: the
+# failure-tracking line may sit between them.)
+sf_line=$(grep -n 'set -f' "$REPO/src/credential_router_install.sh" | head -1 | cut -d: -f1)
+for_line=$(grep -n 'for origin in \$origins' "$REPO/src/credential_router_install.sh" | head -1 | cut -d: -f1)
+if [ -n "$sf_line" ] && [ -n "$for_line" ] && [ "$sf_line" -lt "$for_line" ]; then
+  pass "credential-router install loop is glob-safe (set -f before the word-split)"
 else
-  fail "credential-router install loop is glob-safe (set -f)"
+  fail "credential-router install loop is glob-safe (set -f before the word-split)"
 fi
 assert_contains "entrypoint sources the credential-router install helper" \
     "$EP" '. /usr/local/lib/djinn/credential_router_install.sh'
 assert_contains "entrypoint calls install_credential_router with the derived list" \
     "$EP" 'install_credential_router "$GIT_CREDENTIAL_HOSTS"'
+# A failed install must fail the boot, not bring up a bottle that
+# authenticates as the human (set -e cannot see the failure through `if !`;
+# the FATAL exit is the entrypoint's own, matching the firewall's FATALs).
+assert_contains "entrypoint fails the boot when the router install fails" \
+    "$EP" 'FATAL: git credential router install failed'
+assert_contains "entrypoint's router-install failure exits (boot refused)" \
+    "$EP" 'exit 1'
 grep -q 'COPY src/credential_router_install.sh' "$REPO/Dockerfile" \
     && pass "Dockerfile bakes src/credential_router_install.sh into the image" \
     || fail "Dockerfile no longer copies credential_router_install.sh (entrypoint sourcing it would fail at boot)"
