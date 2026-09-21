@@ -29,12 +29,11 @@ git_url_split() {
 
 # git_host_notices <REPOS> <GIT_HOST_TOKENS>
 # Up-time notice: an https:// repos: host with NO row in the git.hosts table
-# has no credential at all — private clones of its repos will fail, with no
-# fall-back to human credentials (docs/secrets.md). Every host the table names
-# carries a token; the CLI host carries a row only when the manifest declares
-# no git.hosts (manifest.py then adds the implicit default), so the notice
-# only ever fires for a repo host the manifest never declared a token for.
-# Warn now, not
+# has no credential at all — clones of its repos run anonymously (public
+# repos only), and a push needs git.hosts.<host>.token in the manifest (the
+# table holds only rows the manifest states; there is no implicit default,
+# docs/secrets.md). This fires for ANY https:// repo host, the CLI host
+# included: no host carries a token it was not declared. Warn now, not
 # at the first failed clone. bash-3.2 compatible: while-read over heredocs, no
 # process substitution, no associative arrays. _seen tracks hosts already
 # reported, so a host with several repos: entries gets one notice, not one per
@@ -63,7 +62,7 @@ git_host_notices() {
             [ "$_rowhost" = "$_rhost" ] && { _has=1; break; }
         done
         if [ -z "$_has" ]; then
-            echo "  note: $_rhost: no git.hosts.$_rhost.token — private clones of its repos will fail (no fall-back to human credentials; see docs/secrets.md)"
+            echo "  note: $_rhost: no git.hosts.$_rhost.token — clones of its repos run anonymously (public repos only); a push needs git.hosts.$_rhost.token in the manifest (no fall-back to human credentials; see docs/secrets.md)"
         fi
     done <<EOF
 $repos
