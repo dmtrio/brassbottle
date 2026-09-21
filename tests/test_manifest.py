@@ -1171,6 +1171,19 @@ class TestGitIdentity(unittest.TestCase):
         self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
         self.assertEqual(d["GIT_ORG_IDENTITIES"], "")
 
+    def test_git_top_level_identity_field_rejects_tab_newline_cr(self):
+        # GIT_USER_NAME/GIT_USER_EMAIL ride into the container through
+        # compose env vars and `su coder -c 'git config --global …'` — a
+        # newline would smuggle whole extra commands into that su line, so
+        # the same one-line rule as the record tables applies here.
+        for field in ("name", "email"):
+            with self.subTest(field=field):
+                with self.assertRaises(m.ManifestError) as cm:
+                    derive({"git": {field: "Bad\tName\nx\ty"}})
+                self.assertIn(
+                    f"git.{field}: must not contain a tab, newline or "
+                    "carriage return", str(cm.exception))
+
     def test_default_token_source_becomes_the_cli_host_row(self):
         d = self._d({"token": "GH_TOKEN_hank"})
         self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_hank")
@@ -1259,6 +1272,19 @@ class TestGitIdentity(unittest.TestCase):
             str(cm.exception),
             "manifest git identity failed validation:\n"
             "  git.orgs.vendor.token: needs token: (a secrets.env var name)")
+
+    def test_org_identity_field_rejects_tab_newline_cr(self):
+        # GIT_ORG_IDENTITIES records are tab-separated, one per line: a tab
+        # inside a name would forge extra record fields and a newline would
+        # forge a record for another owner the manifest never declared.
+        for field in ("name", "email"):
+            with self.subTest(field=field):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self._d({"orgs": {"acme": {"token": "GH_TOKEN_v2",
+                                               field: "Bad\tName\nother\tEvil"}}})
+                self.assertIn(
+                    f"git.orgs.acme.{field}: must not contain a tab, newline "
+                    "or carriage return", str(cm.exception))
 
     def test_org_token_missing_var_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -1385,6 +1411,20 @@ class TestGitHosts(unittest.TestCase):
                                "Git.Example.Test:443": {"token": "GH_TOKEN_x"}}})
         self.assertIn("normalises to the same host as", str(cm.exception))
 
+    def test_rejected_duplicate_stops_processing(self):
+        # The duplicate error must stop the entry: a rejected duplicate is
+        # not processed further, so its own later errors (a bad token:, say)
+        # never pile onto the message — the fix is "drop one of the two
+        # entries", nothing else to act on.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x"},
+                               "Git.Example.Test:443": {"token": "GH_TOKEN_nope"}}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts: 'Git.Example.Test:443' normalises to the same host as "
+            "'git.hosts.git.example.test' — drop one of the two entries")
+
     def test_list_host_value_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"hosts": {"git.example.test": ["a", "b"]}})
@@ -1482,6 +1522,19 @@ class TestGitHosts(unittest.TestCase):
 
     # ── per-host author attribution (GIT_HOST_IDENTITIES) ────────────────
 
+    def test_host_identity_field_rejects_tab_newline_cr(self):
+        # GIT_HOST_IDENTITIES records are tab-separated, one per line: a tab
+        # inside a name would forge extra record fields and a newline would
+        # forge a record for another host the manifest never declared.
+        for field in ("name", "email"):
+            with self.subTest(field=field):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN_x",
+                                                           field: "Bad\tName\nb.test\tEvil"}}})
+                self.assertIn(
+                    f"git.hosts.git.example.org.{field}: must not contain a tab, "
+                    "newline or carriage return", str(cm.exception))
+
     def test_host_name_and_email_derive_host_identities(self):
         d = self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN_x",
                                                    "name": "Leela Bot",
@@ -1524,22 +1577,19 @@ class TestGitHosts(unittest.TestCase):
         self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
                          "https://git.example.org\nhttps://other.test\n")
 
-    def test_host_author_without_token_is_attribution_only(self):
-        # A name/email with no token: is allowed — it records the author and
-        # adds NO row to GIT_HOST_TOKENS (no credential exists for the host;
-        # private clones fail loudly at the router, as for any row-less host).
-        d = self._d({"hosts": {"git.example.org": {"name": "Leela Bot",
+    def test_host_author_still_requires_token(self):
+        # token: is required under a git.hosts entry even when an author is
+        # given: an author-only entry on the CLI host would derive zero token
+        # rows while GH_TOKEN is still exported — gh acting as the machine
+        # user while git falls back to a stored gh login is two identities on
+        # one host. Attribution rides BESIDE the token row, never instead.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.org": {"name": "Leela Bot",
                                                    "email": "bot@planetexpress.example"}}})
-        self.assertEqual(d["GIT_HOST_IDENTITIES"],
-                         "git.example.org\tLeela Bot\tbot@planetexpress.example\n")
-        self.assertEqual(d["GIT_HOST_TOKENS"], "")
-        self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
-
-    def test_host_author_without_token_and_without_repos_adds_no_credential_host(self):
-        # No token row → the host never enters GIT_CREDENTIAL_HOSTS on its
-        # own (the router is installed per table row or repos: origin).
-        d = self._d({"hosts": {"git.example.org": {"name": "Leela Bot"}}})
-        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.git.example.org.token: needs token: (a secrets.env var name)")
 
     def test_host_author_with_bad_token_var_still_hard_fails(self):
         # Optional token: is optional, not unvalidated: when it IS given it

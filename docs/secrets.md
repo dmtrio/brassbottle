@@ -84,16 +84,21 @@ only, never routing.
 
 ### Per-host author attribution
 
-A `git.hosts` entry may carry an optional `name`/`email` beside (or instead
-of) `token:`. At bootstrap clone, a repo whose URL host has such a record is
+A `git.hosts` entry may carry an optional `name`/`email` beside `token:`.
+At bootstrap clone, a repo whose remote URL's host has such a record is
 stamped repo-local `user.name`/`user.email`, so commits from that host carry
 that author instead of the bottle default (`git.name`/`git.email`); repos
-matching no record keep the default. Either field may be given alone.
-Validation is the same as the per-owner spellings: a scalar each (a map/list
-is a named error), and no charset rule. `token:` stays required unless the
-entry declares an author — an author-only entry adds no credential row, so
-the host routes nothing (its repos may be public; a private clone fails
-loudly at the router, as for any host without a token row).
+matching no record keep the default. Attribution is by the URL's host for
+`https://`, `ssh://` and scp-style remotes alike — the host is matched as
+the URL spells it (lowercased, an explicit `:443` stripped, like the token
+rows), so an `ssh://` URL with an explicit port does not match a host entry
+(the entry key carries no ssh port; only an explicit `:443` is stripped).
+Either field may be given alone; a tab, newline or carriage return is
+rejected in any identity field (records are tab-separated, one per line),
+and otherwise the validation is the same as the per-owner spellings: a
+scalar each (a map/list is a named error), no charset rule beyond that.
+`token:` stays required on every `git.hosts` entry — an author never
+replaces the token row.
 
 ### Gitea and other self-hosted forges
 

@@ -258,6 +258,24 @@ def _scalar(v, field, default=""):
     return str(v)
 
 
+def _identity_scalar(v, field):
+    """_scalar plus the one rule every git identity field must satisfy: no
+    tab, newline or carriage return. GIT_ORG_IDENTITIES and
+    GIT_HOST_IDENTITIES records are tab-separated, one per line — a tab in a
+    name would forge extra record fields, a newline would forge a record for
+    another owner or host the manifest never declared (e.g. a name of
+    "Bad\tName\nb.test\tEvil" would attribute a repo to an identity nobody
+    wrote). The top-level git.name/email ride the same rule: they pass
+    through compose env vars into `su coder -c 'git config --global …'`, and
+    a newline there smuggles extra lines into that command. Named error
+    instead of silent corruption."""
+    value = _scalar(v, field)
+    if value and re.search(r"[\t\r\n]", value):
+        raise ManifestError(
+            f"manifest {field}: must not contain a tab, newline or carriage return")
+    return value
+
+
 def _raw_flag(v, field):
     """Render like `yq '.x // false'` (no -r): the raw scalar as yq prints
     it. Downstream only ever compares against the literal string 'true'."""
@@ -814,14 +832,14 @@ def _git_identity(parsed_repos, git, env, secrets_file):
                           control, so both sides fold to lowercase)
       GIT_HOST_IDENTITIES host<TAB>name<TAB>email per line — per-host author
                           attribution for the bootstrap clone (git.hosts
-                          entries may declare name/email beside token:);
+                          entries may declare name/email beside token:;
+                          every entry still needs token: — attribution rides
+                          beside the credential row, never instead of it);
                           hosts normalised exactly like GIT_HOST_TOKENS rows
                           (lowercased, trailing :443 stripped), sorted by
-                          host. An entry with an author but no token adds a
-                          record here and NO row to GIT_HOST_TOKENS: the
-                          host gets attribution only, no credential (public
-                          clones need no token; private ones fail loudly at
-                          the router, as for any row-less host).
+                          host. No identity field may contain a tab, newline
+                          or carriage return (the records are
+                          tab-separated, one per line).
 
     Each git.orgs owner is case-insensitive (attribution folds to lowercase),
     so two keys differing only in case are an ambiguity and are rejected.
@@ -880,7 +898,6 @@ def _git_identity(parsed_repos, git, env, secrets_file):
         origin[host] = claimed_by
 
     # ── git.hosts (the current spelling) ─────────────────────────────────
-    host_keys = {}  # normalised host -> "git.hosts.<key>", per SUCCESSFUL entry
     if not _falsy(hosts_val):
         if not isinstance(hosts_val, dict):
             errors.append(
@@ -891,10 +908,11 @@ def _git_identity(parsed_repos, git, env, secrets_file):
             field_host = _normalize_git_host(host_key, "git.hosts", errors)
             if field_host is None:
                 continue
-            if field_host in host_keys:
+            if field_host in rows:
                 errors.append(
                     f"  git.hosts: '{host_key}' normalises to the same host as "
-                    f"'{host_keys[field_host]}' — drop one of the two entries")
+                    f"'{origin[field_host]}' — drop one of the two entries")
+                continue
             if _falsy(spec):
                 spec = {}
             if not isinstance(spec, dict):
@@ -910,28 +928,20 @@ def _git_identity(parsed_repos, git, env, secrets_file):
                 continue
             # name/email validate exactly like git.orgs.<owner>.name/email:
             # a scalar each (a map/list is a named error), either may be
-            # given alone, no charset rule — attribution is free-form.
-            name = _scalar(spec.get("name"), f"git.hosts.{field_host}.name")
-            email = _scalar(spec.get("email"), f"git.hosts.{field_host}.email")
-            # token is optional ONLY when an author is present: an entry
-            # with name/email but no token is an attribution-only host (its
-            # repos may be public), so it records the author and adds NO row
-            # to GIT_HOST_TOKENS — no credential exists for it, and a
-            # private clone fails loudly at the router exactly as for any
-            # row-less host. Without an author, token: stays required.
+            # given alone, no charset rule beyond the shared one-line rule
+            # (_identity_scalar — records are tab-separated, one per line).
+            name = _identity_scalar(spec.get("name"), f"git.hosts.{field_host}.name")
+            email = _identity_scalar(spec.get("email"), f"git.hosts.{field_host}.email")
+            # token: is required on EVERY entry, author present or not — an
+            # author-only entry on the CLI host would derive zero token rows
+            # while GH_TOKEN is still exported, leaving gh as the machine
+            # user and git on a stored gh login: two identities on one host.
             src = source(spec.get("token"),
-                         f"git.hosts.{field_host}.token",
-                         required=not (name or email))
+                         f"git.hosts.{field_host}.token", required=True)
             if not src:
-                if not (name or email):
-                    continue   # token error already recorded above
-                # Attribution-only host: no token row, author only.
-                host_identities[field_host] = (name, email)
-                host_keys[field_host] = f"git.hosts.{host_key}"
                 continue
             rows[field_host] = src
             origin[field_host] = f"git.hosts.{host_key}"
-            host_keys[field_host] = f"git.hosts.{host_key}"
             if name or email:
                 host_identities[field_host] = (name, email)
 
@@ -991,8 +1001,8 @@ def _git_identity(parsed_repos, git, env, secrets_file):
             if not src:
                 continue
             records.append((owner_lc, src,
-                            _scalar(spec.get("name"), f"{field}.name"),
-                            _scalar(spec.get("email"), f"{field}.email"),
+                            _identity_scalar(spec.get("name"), f"{field}.name"),
+                            _identity_scalar(spec.get("email"), f"{field}.email"),
                             declared_host))
 
     # Resolve each git.orgs token to exactly one host — where the token row
@@ -1204,8 +1214,8 @@ def derive(manifest, plugin_files, agent_files, env):
         raise ManifestError("forge must be github or gitea")
     out["FORGE"] = forge
     git = _section(manifest, "git")
-    out["GIT_USER_NAME"] = _scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
-    out["GIT_USER_EMAIL"] = _scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
+    out["GIT_USER_NAME"] = _identity_scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
+    out["GIT_USER_EMAIL"] = _identity_scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
     out.update(_git_identity(parsed_repos, git, env, secrets_file))
     # GIT_CREDENTIAL_HOSTS: every host a credential may be needed for — the
     # git.hosts table's hosts plus every https:// origin in repos: — one
