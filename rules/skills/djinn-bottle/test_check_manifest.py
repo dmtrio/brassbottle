@@ -181,9 +181,9 @@ class SecretRefs(unittest.TestCase):
                                 "OBSIDIAN_KEY_default_claude"})
 
     def test_collects_git_hosts_tokens_in_both_forms(self):
-        # git.hosts.<host> is one entry, or a list of entries that each serve
-        # named identities. A token may be any secrets.env name, so nothing
-        # here depends on a GH_TOKEN prefix.
+        # One entry or a list of entries: every token named is collected.
+        # A token may be any secrets.env name, so nothing here depends on a
+        # GH_TOKEN prefix.
         refs = cm.secret_refs({"git": {"hosts": {
             "git.example.org": {"token": "GITEA_TOKEN_leela",
                                 "name": "Leela Bot"},
@@ -275,6 +275,32 @@ class ValidatorOutput(unittest.TestCase):
 
     def test_blank_lines_are_dropped(self):
         self.assertEqual(cm._split_validator_output("\n\n"), ([], []))
+
+
+@unittest.skipUnless(shutil.which("yq"), "yq not installed")
+class GitHostsAgainstTheRealValidator(unittest.TestCase):
+    """check() over a git.hosts manifest, validated by this checkout's own
+    src/manifest.py: the tokens the manifest names must reach the validator
+    as present, whatever they are called."""
+
+    REPO = os.path.abspath(os.path.join(os.path.dirname(
+        os.path.abspath(__file__)), "..", "..", ".."))
+
+    def test_git_hosts_manifest_passes_with_any_token_name(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        draft = write(tmp, "coding-zoidberg.yml",
+                      "task: coding-zoidberg\n"
+                      "repos: [https://git.example.org/planet/express.git]\n"
+                      "git:\n"
+                      "  hosts:\n"
+                      "    git.example.org: {token: GITEA_TOKEN_zoidberg}\n"
+                      "    github.com: {token: GH_TOKEN_fry}\n"
+                      "agents: [claude]\n"
+                      "capabilities: {egress: [git.example.org]}\n")
+        errors, _, _ = cm.check(draft, manifests_dir=tmp,
+                                brassbottle=self.REPO)
+        self.assertEqual(errors, [])
 
 
 @unittest.skipUnless(shutil.which("yq"), "yq not installed")
