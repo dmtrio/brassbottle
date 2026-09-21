@@ -812,6 +812,16 @@ def _git_identity(parsed_repos, git, env, secrets_file):
                           routing (owner is lowercased: attribution matches
                           against the clone URL's owner, whose case we don't
                           control, so both sides fold to lowercase)
+      GIT_HOST_IDENTITIES host<TAB>name<TAB>email per line — per-host author
+                          attribution for the bootstrap clone (git.hosts
+                          entries may declare name/email beside token:);
+                          hosts normalised exactly like GIT_HOST_TOKENS rows
+                          (lowercased, trailing :443 stripped), sorted by
+                          host. An entry with an author but no token adds a
+                          record here and NO row to GIT_HOST_TOKENS: the
+                          host gets attribution only, no credential (public
+                          clones need no token; private ones fail loudly at
+                          the router, as for any row-less host).
 
     Each git.orgs owner is case-insensitive (attribution folds to lowercase),
     so two keys differing only in case are an ambiguity and are rejected.
@@ -852,6 +862,7 @@ def _git_identity(parsed_repos, git, env, secrets_file):
 
     rows = {}    # normalised host -> source var
     origin = {}  # normalised host -> the manifest spelling that claimed it
+    host_identities = {}  # normalised host -> (name, email) from git.hosts
 
     def add_row(host, src, claimed_by):
         """One row per host: a second claim for the same host with the same
@@ -869,6 +880,7 @@ def _git_identity(parsed_repos, git, env, secrets_file):
         origin[host] = claimed_by
 
     # ── git.hosts (the current spelling) ─────────────────────────────────
+    host_keys = {}  # normalised host -> "git.hosts.<key>", per SUCCESSFUL entry
     if not _falsy(hosts_val):
         if not isinstance(hosts_val, dict):
             errors.append(
@@ -879,11 +891,10 @@ def _git_identity(parsed_repos, git, env, secrets_file):
             field_host = _normalize_git_host(host_key, "git.hosts", errors)
             if field_host is None:
                 continue
-            if field_host in rows:
+            if field_host in host_keys:
                 errors.append(
                     f"  git.hosts: '{host_key}' normalises to the same host as "
-                    f"'{origin[field_host]}' — drop one of the two entries")
-                continue
+                    f"'{host_keys[field_host]}' — drop one of the two entries")
             if _falsy(spec):
                 spec = {}
             if not isinstance(spec, dict):
@@ -891,17 +902,38 @@ def _git_identity(parsed_repos, git, env, secrets_file):
                     f"  git.hosts.{field_host}: must be a map with token: "
                     f"(got a {_yaml_type(spec)})")
                 continue
-            extra = ",".join(k for k in spec if k != "token")
+            extra = ",".join(k for k in spec if k not in ("token", "name", "email"))
             if extra:
                 errors.append(
-                    f"  git.hosts.{field_host}: unsupported field(s): {extra} (only token)")
+                    f"  git.hosts.{field_host}: unsupported field(s): {extra} "
+                    "(only token, name, email)")
                 continue
+            # name/email validate exactly like git.orgs.<owner>.name/email:
+            # a scalar each (a map/list is a named error), either may be
+            # given alone, no charset rule — attribution is free-form.
+            name = _scalar(spec.get("name"), f"git.hosts.{field_host}.name")
+            email = _scalar(spec.get("email"), f"git.hosts.{field_host}.email")
+            # token is optional ONLY when an author is present: an entry
+            # with name/email but no token is an attribution-only host (its
+            # repos may be public), so it records the author and adds NO row
+            # to GIT_HOST_TOKENS — no credential exists for it, and a
+            # private clone fails loudly at the router exactly as for any
+            # row-less host. Without an author, token: stays required.
             src = source(spec.get("token"),
-                         f"git.hosts.{field_host}.token", required=True)
+                         f"git.hosts.{field_host}.token",
+                         required=not (name or email))
             if not src:
+                if not (name or email):
+                    continue   # token error already recorded above
+                # Attribution-only host: no token row, author only.
+                host_identities[field_host] = (name, email)
+                host_keys[field_host] = f"git.hosts.{host_key}"
                 continue
             rows[field_host] = src
             origin[field_host] = f"git.hosts.{host_key}"
+            host_keys[field_host] = f"git.hosts.{host_key}"
+            if name or email:
+                host_identities[field_host] = (name, email)
 
     # ── git.token (old spelling: the CLI host's row) ─────────────────────
     if not _falsy(token_val):
@@ -1034,6 +1066,8 @@ def _git_identity(parsed_repos, git, env, secrets_file):
             cli_var if cli_var not in (None, CLI_TOKEN_VARS[CLI_HOST]) else "",
         "GIT_ORG_IDENTITIES": "".join(
             f"{o}\t{n}\t{e}\n" for o, _s, n, e, _h in records),
+        "GIT_HOST_IDENTITIES": "".join(
+            f"{h}\t{n}\t{e}\n" for h, (n, e) in sorted(host_identities.items())),
         "GIT_HOST_TOKENS": " ".join(f"{h}={rows[h]}" for h in sorted(rows)),
         # Provenance, for the up-time shared-host notice: the hosts whose
         # rows a git.orgs entry supplied — NOT the CLI host's row when that

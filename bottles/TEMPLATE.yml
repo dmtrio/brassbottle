@@ -37,6 +37,18 @@ git:
   # The old spellings feed the same table (git.token is the github.com row;
   # each git.orgs entry is a row for the host its owner's repos resolve to).
   # git.hosts never mixes with git.token/git.orgs in one manifest.
+  #
+  # Optional per-host author: a host entry may carry name/email beside (or
+  # instead of) token: — repos cloned from that host are stamped repo-local
+  # user.name/user.email so commits carry that author instead of the bottle
+  # default (git.name/git.email above). Either may be given alone. A token:
+  # naming a variable that isn't set in secrets.env hard-fails the apply.
+  # A host entry with an author but no token adds no credential row —
+  # attribution only (its repos may be public; private clones fail loudly).
+  #     git.example.org:
+  #       token: GH_TOKEN_example          # secrets.env var NAME
+  #       name:  "Leela Bot"               # optional per-host author
+  #       email: "bot@planetexpress.example"
 
 memory: 10g
 

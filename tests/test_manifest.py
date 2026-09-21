@@ -1400,13 +1400,16 @@ class TestGitHosts(unittest.TestCase):
                       str(cm.exception))
 
     def test_unknown_key_under_host_entry_hard_fails(self):
+        # name/email became supported fields (per-host author attribution);
+        # anything else is still rejected.
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"hosts": {"git.example.test": {"token": "GH_TOKEN_x",
-                                                    "name": "Bot"}}})
+                                                    "tokne": "x"}}})
         self.assertEqual(
             str(cm.exception),
             "manifest git identity failed validation:\n"
-            "  git.hosts.git.example.test: unsupported field(s): name (only token)")
+            "  git.hosts.git.example.test: unsupported field(s): tokne "
+            "(only token, name, email)")
 
     def test_missing_token_under_host_entry_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:
@@ -1476,6 +1479,75 @@ class TestGitHosts(unittest.TestCase):
         a = self._d({"token": "GH_TOKEN_x"})
         b = self._d({"hosts": {"github.com": {"token": "GH_TOKEN_x"}}})
         self.assertEqual(a, b)
+
+    # ── per-host author attribution (GIT_HOST_IDENTITIES) ────────────────
+
+    def test_host_name_and_email_derive_host_identities(self):
+        d = self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN_x",
+                                                   "name": "Leela Bot",
+                                                   "email": "bot@planetexpress.example"}}})
+        self.assertEqual(d["GIT_HOST_IDENTITIES"],
+                         "git.example.org\tLeela Bot\tbot@planetexpress.example\n")
+        # The token row is unaffected.
+        self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.org=GH_TOKEN_x")
+
+    def test_host_identities_sorted_by_normalised_host(self):
+        d = self._d({"hosts": {"zeta.test": {"token": "GH_TOKEN_x", "name": "Z"},
+                               "Alpha.Test:443": {"token": "GH_TOKEN_x",
+                                                  "name": "A"}}})
+        self.assertEqual(d["GIT_HOST_IDENTITIES"],
+                         "alpha.test\tA\t\nzeta.test\tZ\t\n")
+
+    def test_host_name_without_email_derives_empty_email_field(self):
+        # Same "either may be given alone" behaviour as the per-owner
+        # git.orgs.<owner>.name/email: whichever is absent derives as empty.
+        d = self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN_x",
+                                                   "name": "Leela Bot"}}})
+        self.assertEqual(d["GIT_HOST_IDENTITIES"], "git.example.org\tLeela Bot\t\n")
+        d = self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN_x",
+                                                   "email": "bot@planetexpress.example"}}})
+        self.assertEqual(d["GIT_HOST_IDENTITIES"],
+                         "git.example.org\t\tbot@planetexpress.example\n")
+
+    def test_host_entry_without_author_derives_no_identity_record(self):
+        d = self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN_x"}}})
+        self.assertEqual(d["GIT_HOST_IDENTITIES"], "")
+
+    def test_no_author_under_any_host_derives_empty_identities_and_unchanged_keys(self):
+        d = self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN_x"},
+                               "other.test": {"token": "GH_TOKEN_x"}}})
+        self.assertEqual(d["GIT_HOST_IDENTITIES"], "")
+        self.assertEqual(d["GIT_HOST_TOKENS"],
+                         "git.example.org=GH_TOKEN_x other.test=GH_TOKEN_x")
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
+        self.assertEqual(d["GIT_ORG_IDENTITIES"], "")
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"],
+                         "https://git.example.org\nhttps://other.test\n")
+
+    def test_host_author_without_token_is_attribution_only(self):
+        # A name/email with no token: is allowed — it records the author and
+        # adds NO row to GIT_HOST_TOKENS (no credential exists for the host;
+        # private clones fail loudly at the router, as for any row-less host).
+        d = self._d({"hosts": {"git.example.org": {"name": "Leela Bot",
+                                                   "email": "bot@planetexpress.example"}}})
+        self.assertEqual(d["GIT_HOST_IDENTITIES"],
+                         "git.example.org\tLeela Bot\tbot@planetexpress.example\n")
+        self.assertEqual(d["GIT_HOST_TOKENS"], "")
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
+
+    def test_host_author_without_token_and_without_repos_adds_no_credential_host(self):
+        # No token row → the host never enters GIT_CREDENTIAL_HOSTS on its
+        # own (the router is installed per table row or repos: origin).
+        d = self._d({"hosts": {"git.example.org": {"name": "Leela Bot"}}})
+        self.assertEqual(d["GIT_CREDENTIAL_HOSTS"], "")
+
+    def test_host_author_with_bad_token_var_still_hard_fails(self):
+        # Optional token: is optional, not unvalidated: when it IS given it
+        # must still name a set secrets.env variable.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.org": {"name": "Leela Bot",
+                                                   "token": "GH_TOKEN_nope"}}})
+        self.assertIn("GH_TOKEN_nope not found in secrets.env", str(cm.exception))
 
     def test_declared_nothing_matches_the_implicit_output(self):
         a = derive({})
