@@ -281,6 +281,15 @@ def secret_refs(manifest):
             tok = _get(spec, "token") if isinstance(spec, dict) else None
             if isinstance(tok, str) and tok:
                 names.add(tok)
+    # git.hosts.<host> is one entry, or a list of entries that each serve
+    # named identities. Anything else is manifest.py's error to report.
+    hosts = _get(manifest, "git", "hosts", default={})
+    if isinstance(hosts, dict):
+        for value in hosts.values():
+            for spec in value if isinstance(value, list) else [value]:
+                tok = _get(spec, "token") if isinstance(spec, dict) else None
+                if isinstance(tok, str) and tok:
+                    names.add(tok)
     common = _get(manifest, "common_secrets", default={})
     if isinstance(common, dict):
         names.update(v for v in common.values() if isinstance(v, str) and v)

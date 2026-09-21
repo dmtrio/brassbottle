@@ -180,6 +180,28 @@ class SecretRefs(unittest.TestCase):
                                 "MCP_GATEWAY_TOKEN_prod",
                                 "OBSIDIAN_KEY_default_claude"})
 
+    def test_collects_git_hosts_tokens_in_both_forms(self):
+        # git.hosts.<host> is one entry, or a list of entries that each serve
+        # named identities. A token may be any secrets.env name, so nothing
+        # here depends on a GH_TOKEN prefix.
+        refs = cm.secret_refs({"git": {"hosts": {
+            "git.example.org": {"token": "GITEA_TOKEN_leela",
+                                "name": "Leela Bot"},
+            "github.com": [
+                {"token": "GH_TOKEN_fry_a", "identities": ["claude", "user"]},
+                {"token": "GH_TOKEN_fry_b", "identities": ["pi"]},
+            ],
+        }}})
+        self.assertEqual(refs, {"GITEA_TOKEN_leela", "GH_TOKEN_fry_a",
+                                "GH_TOKEN_fry_b"})
+
+    def test_malformed_git_hosts_is_left_to_the_validator(self):
+        # Structure errors are manifest.py's to report, by name. Collecting
+        # references must not crash on them first.
+        for hosts in ("github.com", ["github.com"], {"github.com": "x"},
+                      {"github.com": [None, "x", {"token": 7}]}):
+            self.assertEqual(cm.secret_refs({"git": {"hosts": hosts}}), set())
+
     def test_list_form_common_secrets(self):
         self.assertEqual(cm.secret_refs({"common_secrets": ["A_TOKEN"]}),
                          {"A_TOKEN"})
