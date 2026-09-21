@@ -131,8 +131,10 @@ su -c "git config --global safe.directory /workspace" coder
 # fall back to the shared gh login. No SSH keys. useHttpPath=true feeds the
 # repo path to the helper request (and makes credential caching per-path,
 # which is harmless here). Installed for every host in GIT_CREDENTIAL_HOSTS
-# (manifest.py: every host the git.hosts table names plus every https://
-# origin in repos:) — a gitea/self-hosted repo authenticates by host the same
+# (manifest.py: every host the git.hosts table names, every https:// origin
+# in repos:, and the CLI host's origin ALWAYS — row or no row, so an https
+# request there ends in the router's quit=1 instead of the desktop bridge's
+# human login) — a gitea/self-hosted repo authenticates by host the same
 # way. The helper carries no special case: every host resolves through the
 # one table, so a token is presented to its own host only.
 su -c "git config --global credential.useHttpPath true" coder
@@ -141,17 +143,11 @@ su -c "git config --global credential.useHttpPath true" coder
 # re-attaches. A plain `git config` set then aborts with "cannot overwrite multiple
 # values", leaving the router UNinstalled — and the desktop credential bridge
 # (credential.helper in /etc/gitconfig) answers first, so git ops leak the human's
-# login instead of the per-host token. Reset the helper list (empty value) and add
-# the router as the leading helper, per origin: idempotent across re-runs and
-# authoritative over the desktop bridge. Same idiom for every origin, so a
-# re-created bottle whose repos: changed converges too.
-set -f  # values are manifest-validated, but word-splitting below must not glob
-for origin in $GIT_CREDENTIAL_HOSTS; do
-    su -c "git config --global --unset-all credential.'$origin'.helper" coder 2>/dev/null || true
-    su -c "git config --global --add credential.'$origin'.helper ''" coder
-    su -c "git config --global --add credential.'$origin'.helper /usr/local/bin/git-credential-org" coder
-done
-set +f
+# login instead of the per-host token. The idempotent reset(empty)+add loop lives
+# in src/credential_router_install.sh (baked into the image beside the entrypoint's
+# other sourced helpers), so tests exercise the real loop, not a copy of it.
+. /usr/local/lib/djinn/credential_router_install.sh
+install_credential_router "$GIT_CREDENTIAL_HOSTS"
 
 # ── SSH mode vs attach mode ───────────────────────────────────────────────────
 # remote_access.py owns the START_SSHD decision — two independent paths can

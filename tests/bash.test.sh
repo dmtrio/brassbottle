@@ -8,7 +8,7 @@
 #   - allow-egress.sh       arg parsing + strict domain validation
 #   - update-agent-keys.sh  per-agent key edits (set / remove / common / list)
 #   - plugins/*/run.sh      host launchers' token generate-if-missing + persist
-#   - src/entrypoint.sh     github.com credential-helper install (idempotent idiom)
+#   - src/credential_router_install.sh  the per-host credential-router install loop
 # Out of scope: the rest of the container-internal scripts (init-firewall.sh, the
 # bulk of entrypoint.sh, mosh-server-wrapper.sh, tmux-*) — they run in a built
 # container, and the pure docker orchestration in up.sh (a test would only assert
@@ -475,20 +475,22 @@ out=$(gc credential.'https://github.com'.helper /usr/local/bin/git-credential-or
 assert_rc "plain set aborts on VS Code's duplicated pre-seed (the reported bug)" 5 "$rc"
 assert_contains "…with the multiple-values error" "$out" "cannot overwrite multiple values"
 
-# The fix: reset(empty)+add, verbatim from entrypoint.sh (minus `su … coder`),
-# looped over GIT_CREDENTIAL_HOSTS (the git.hosts table's hosts plus every
-# https:// origin in repos:; newline-separated — word-split on purpose).
+# The fix: the install loop is extracted from entrypoint.sh into
+# src/credential_router_install.sh (sourced; the real function is exercised
+# here, not a copy — same precedent as src/keyfiles.sh / src/git_notices.sh).
+# GIT_CREDENTIAL_HOSTS = the git.hosts table's hosts plus every https://
+# origin in repos: plus the CLI host's origin, always (manifest.py);
+# newline-separated — word-split on purpose.
 GIT_CREDENTIAL_HOSTS=$'https://github.com\nhttps://git.example.test\n'
-install_helper() {
-  for origin in $GIT_CREDENTIAL_HOSTS; do
-    gc --unset-all "credential.$origin.helper" 2>/dev/null || true
-    gc --add "credential.$origin.helper" ''
-    gc --add "credential.$origin.helper" /usr/local/bin/git-credential-org
-  done
-}
-seed_home; install_helper; rc=$?
+# shellcheck disable=SC1091
+. "$REPO/src/credential_router_install.sh"   # defines install_credential_router
+# The runner stands in for the entrypoint's `su -c "…" coder` (the test runs
+# as an unprivileged user): each call executes one shell string with HOME and
+# a SYSTEM gitconfig set, exactly what the container's su wrapper provides.
+cfg_runner() { HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" bash -c "$1"; }
+seed_home; install_credential_router "$GIT_CREDENTIAL_HOSTS" cfg_runner; rc=$?
 assert_rc "reset+add succeeds despite the duplicated pre-seed" 0 "$rc"
-install_helper; rc=$?   # container restart / re-attach runs it again
+install_credential_router "$GIT_CREDENTIAL_HOSTS" cfg_runner; rc=$?   # container restart / re-attach runs it again
 assert_rc "reset+add is idempotent on re-run" 0 "$rc"
 
 # The payoff: the effective helper chain git would use for a github.com URL is
@@ -504,26 +506,65 @@ eff=$(HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" git config --get-urlmatch credentia
 assert_eq "an origin NOT in GIT_CREDENTIAL_HOSTS keeps only the desktop bridge (router not installed)" \
     "!desktop-bridge" "$eff"
 
-# Drift pin: entrypoint.sh must keep the idempotent idiom. If anyone reverts to a
+# End to end through real git: for the CLI host with an EMPTY routing table,
+# `git credential fill` must end in the router's quit=1 and must NOT return
+# the desktop bridge's credential. The bridge helper records every
+# invocation; the router is the REAL src/git-credential-org.sh.
+BRIDGE_LOG="$WORK/bridge.log"; : > "$BRIDGE_LOG"
+cat > "$WORK/bridgebin-fake" <<MOCK
+#!/bin/bash
+echo "invoked \$*" >> "$BRIDGE_LOG"
+echo "username=human"
+echo "password=humantok"
+MOCK
+chmod +x "$WORK/bridgebin-fake"
+# Point the installed router line at the real script (the function's default
+# bakes the in-image path; the test overrides it in the same global scope).
+gc --unset-all credential.https://github.com.helper 2>/dev/null || true
+gc --add credential.https://github.com.helper ''
+gc --add credential.https://github.com.helper "$REPO/src/git-credential-org.sh"
+fill_out=$(printf 'protocol=https\nhost=github.com\npath=o/r.git\n' \
+    | HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" GIT_TERMINAL_PROMPT=0 \
+      GIT_HOST_TOKENS='' PATH="$WORK/ghbin:$PATH" \
+      git credential fill 2>"$WORK/fill-err"); rc=$?
+assert_rc "git credential fill with an empty table: git stops (router said quit)" 128 "$rc"
+assert_absent "…no credential is returned" "$fill_out" "password=humantok"
+assert_absent "…no password at all" "$fill_out" "password="
+assert_contains "…stderr carries the router's message" "$(cat "$WORK/fill-err")" \
+    "no git.hosts.github.com.token"
+assert_eq "…the desktop bridge was never invoked" "" "$(cat "$BRIDGE_LOG")"
+
+# Drift pin: the idempotent idiom lives in src/credential_router_install.sh
+# (sourced by entrypoint.sh and baked into the image); if anyone reverts to a
 # plain `git config … helper <value>` set, these fail loudly (mirrors the
 # up.sh/plugins.test.sh drift pins).
+CRI=$(cat "$REPO/src/credential_router_install.sh")
 EP=$(cat "$REPO/src/entrypoint.sh")
-assert_contains "entrypoint loops every GIT_CREDENTIAL_HOSTS origin (no hard-coded host)" \
-    "$EP" 'for origin in $GIT_CREDENTIAL_HOSTS; do'
-assert_contains "entrypoint resets the helper list (--unset-all)" \
-    "$EP" "--unset-all credential.'\$origin'.helper"
-assert_contains "entrypoint adds an empty reset before the router" \
-    "$EP" "--add credential.'\$origin'.helper ''"
-assert_contains "entrypoint adds the router via --add (not a plain set)" \
-    "$EP" "--add credential.'\$origin'.helper /usr/local/bin/git-credential-org"
+assert_contains "the install function loops every GIT_CREDENTIAL_HOSTS origin (no hard-coded host)" \
+    "$CRI" 'for origin in $origins; do'
+assert_contains "the install function resets the helper list (--unset-all)" \
+    "$CRI" "--unset-all credential.'\$origin'.helper"
+assert_contains "the install function adds an empty reset before the router" \
+    "$CRI" "--add credential.'\$origin'.helper ''"
+assert_contains "the install function adds the router via --add (not a plain set)" \
+    "$CRI" "--add credential.'\$origin'.helper /usr/local/bin/git-credential-org"
 # The loop expands unquoted with globbing on; values are manifest-validated,
 # but word-splitting must not glob. Check set -f sits directly before the for.
-if grep -B1 '^for origin in \$GIT_CREDENTIAL_HOSTS; do' "$REPO/src/entrypoint.sh" \
-    | head -1 | grep -q '^set -f'; then
-  pass "entrypoint loop is glob-safe (set -f)"
+if grep -B1 '^        for origin in \$origins; do' "$REPO/src/credential_router_install.sh" \
+    | head -1 | grep -q 'set -f'; then
+  pass "credential-router install loop is glob-safe (set -f)"
 else
-  fail "entrypoint loop is glob-safe (set -f)"
+  fail "credential-router install loop is glob-safe (set -f)"
 fi
+assert_contains "entrypoint sources the credential-router install helper" \
+    "$EP" '. /usr/local/lib/djinn/credential_router_install.sh'
+assert_contains "entrypoint calls install_credential_router with the derived list" \
+    "$EP" 'install_credential_router "$GIT_CREDENTIAL_HOSTS"'
+grep -q 'COPY src/credential_router_install.sh' "$REPO/Dockerfile" \
+    && pass "Dockerfile bakes src/credential_router_install.sh into the image" \
+    || fail "Dockerfile no longer copies credential_router_install.sh (entrypoint sourcing it would fail at boot)"
+assert_contains "the entrypoint comment names the router install helper" \
+    "$EP" 'credential_router_install.sh'
 grep -q 'GIT_CREDENTIAL_HOSTS=\${GIT_CREDENTIAL_HOSTS:-}' "$REPO/compose/docker-compose.local.yml" \
     && pass "compose passes GIT_CREDENTIAL_HOSTS into the container" \
     || fail "compose no longer passes GIT_CREDENTIAL_HOSTS (entrypoint would install no helper at all)"

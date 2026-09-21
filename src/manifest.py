@@ -1217,15 +1217,22 @@ def derive(manifest, plugin_files, agent_files, env):
     out["GIT_USER_EMAIL"] = _identity_scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
     out.update(_git_identity(parsed_repos, git, env, secrets_file))
     # GIT_CREDENTIAL_HOSTS: every host a credential may be needed for — the
-    # git.hosts table's hosts plus every https:// origin in repos: — one
-    # scheme://host[:port] per line, distinct and sorted. entrypoint.sh
-    # installs the router for each, and git-credential-org resolves every
-    # request's host through GIT_HOST_TOKENS. Every host here is validated
-    # (HOST_RE for a repos: URL, GIT_HOST_RE/HOST_RE for a table row), so
-    # nothing unvalidated reaches the entrypoint's shell interpolation.
+    # git.hosts table's hosts, every https:// origin in repos:, and the CLI
+    # host's origin ALWAYS (row or no row: the entrypoint installs the router
+    # for every origin here, and a CLI host missing from the list would let
+    # VS Code's pre-seeded gh helper / the desktop bridge answer with the
+    # human's login; with the router installed but no row it answers quit=1
+    # naming git.hosts.<host>.token) — one scheme://host[:port] per line,
+    # distinct and sorted, data-driven from CLI_TOKEN_VARS (no new host
+    # literal). git-credential-org resolves every request's host through
+    # GIT_HOST_TOKENS. Every host here is validated (HOST_RE for a repos:
+    # URL, GIT_HOST_RE/HOST_RE for a table row), so nothing unvalidated
+    # reaches the entrypoint's shell interpolation.
     cred_hosts = set(repo_origins)
     for pair in out["GIT_HOST_TOKENS"].split():
         cred_hosts.add(f"https://{pair.split('=', 1)[0]}")
+    for cli_host in CLI_TOKEN_VARS:
+        cred_hosts.add(f"https://{cli_host}")
     out["GIT_CREDENTIAL_HOSTS"] = "".join(f"{o}\n" for o in sorted(cred_hosts))
     # GIT_EGRESS_NOTICE_HOSTS: the subset of GIT_CREDENTIAL_HOSTS the egress
     # notice should check — a host the base allowlist already permits is

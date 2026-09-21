@@ -23,6 +23,10 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
 - `git_identity.sh` stamps per-repo author identity (git.orgs and
   git.hosts name/email records) onto each clone after the bootstrap
   `git clone`.
+- `credential_router_install.sh` holds the idempotent per-origin
+  `git config` loop the container entrypoint runs to install
+  `git-credential-org` for every `GIT_CREDENTIAL_HOSTS` host (the entrypoint
+  sources it from `/usr/local/lib/djinn/`).
 - `wire_plugins.py` writes generated MCP config for each enabled agent.
 - `compose_rules.py` composes global rules, enabled plugin rule fragments, and
   the workspace contract (`/workspace/CONTRACT.md`) into each agent's rules file.

@@ -356,6 +356,10 @@ RUN chmod 644 /usr/local/lib/djinn/remote_access.py
 # src/git-credential-org.sh.
 COPY src/git-credential-org.sh /usr/local/bin/git-credential-org
 RUN chmod +x /usr/local/bin/git-credential-org
+# The router's per-origin install loop (sourced by entrypoint.sh, unit-tested
+# by tests/bash.test.sh against real `git config`).
+COPY src/credential_router_install.sh /usr/local/lib/djinn/credential_router_install.sh
+RUN chmod 644 /usr/local/lib/djinn/credential_router_install.sh
 
 # ── SSH server (always installed, runs only when SSH_ENABLED=true) ──────────
 # One image everywhere: Mac attach-mode and any remote Linux host. The manifest's ssh:
