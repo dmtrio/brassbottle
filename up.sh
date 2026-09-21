@@ -485,20 +485,18 @@ EOF
                         echo "WARNING: clone of '$RNAME' failed — for a non-github host check capabilities.egress includes it (repo hosts are never auto-allowlisted), then that git.hosts.$_h.token names a variable set in secrets.env (the github GH_TOKEN and gh login are never sent to other hosts)"
                         ;;
                 esac; }
-        # Per-repo identity attribution: if this repo's OWNER has a git.orgs
-        # override with a name/email, or its HOST has one in its git.hosts
-        # entry, stamp it as the repo-local user.name/email so commits carry
-        # the right identity. Repos matching neither inherit the container-
-        # global identity from entrypoint.sh. The two tables never coexist in
-        # one manifest (manifest.py rejects git.hosts beside git.token/git.orgs),
-        # so git_identity_for's owner-then-host order is never a precedence
-        # decision — whichever table is populated is the only one that can
-        # match. Owner = first path segment (see the host/path derivation
-        # above); the lookup lowercases both sides.
-        REPO_OWNER="${_p%%/*}"
-        IDENT=$(git_identity_for "$REPO_OWNER" "$_h")
-        ID_NAME="${IDENT%%$'\t'*}"; ID_EMAIL="${IDENT#*$'\t'}"
-        stamp_repo_identity "$CNAME" "$RNAME" "$ID_NAME" "$ID_EMAIL"
+        # Per-repo identity attribution: a repo whose OWNER has a git.orgs
+        # override with a name/email, or whose HOST has one in its git.hosts
+        # entry, is stamped repo-local user.name/email so commits carry the
+        # right identity. Repos matching neither inherit the container-global
+        # identity from entrypoint.sh. The two tables never coexist in one
+        # manifest (manifest.py rejects git.hosts beside git.token/git.orgs),
+        # so there is no precedence question between the two lookups.
+        # apply_repo_identity splits $RURL fresh itself — the lookup cannot
+        # be retargeted by a stale $_h/$_p from earlier in the loop (only the
+        # clone-failure hint above consumes those).
+        apply_repo_identity "$CNAME" "$RNAME" "$RURL" \
+            "$GIT_ORG_IDENTITIES" "$GIT_HOST_IDENTITIES"
     done <<EOF
 $REPOS
 EOF

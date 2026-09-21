@@ -541,8 +541,7 @@ grep -qF -- '. "$SCRIPT_DIR/src/git_notices.sh"' up.sh \
 # Same shape again for the per-repo author attribution (git.hosts name/email
 # and git.orgs name/email; logic unit-tested by tests/bash.test.sh).
 grep -qF -- '. "$SCRIPT_DIR/src/git_identity.sh"' up.sh \
-    && grep -qF -- 'git_identity_for "$REPO_OWNER" "$_h"' up.sh \
-    && grep -qF -- 'stamp_repo_identity "$CNAME" "$RNAME" "$ID_NAME" "$ID_EMAIL"' up.sh \
+    && grep -qF -- 'apply_repo_identity "$CNAME" "$RNAME" "$RURL" \' up.sh \
     && pass "up.sh sources + calls src/git_identity.sh" \
     || fail "up.sh no longer wires to src/git_identity.sh (update this suite!)"
 

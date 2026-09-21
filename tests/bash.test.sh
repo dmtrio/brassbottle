@@ -482,9 +482,11 @@ grep -qF 'git_url_split "$RURL"' "$REPO/up.sh" \
 grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
     && pass "up.sh clone warning matches on host, not URL" \
     || fail "up.sh clone warning matches on host, not URL"
-grep -qF 'REPO_OWNER="${_p%%/*}"' "$REPO/up.sh" \
-    && pass "up.sh derives REPO_OWNER from the shared host/path split" \
-    || fail "up.sh derives REPO_OWNER from the shared host/path split"
+# The owner split moved into src/git_identity.sh: apply_repo_identity splits
+# the URL fresh itself, so up.sh passes $RURL instead of derived fragments.
+grep -qF 'git_url_split "$repo_url"' "$REPO/src/git_identity.sh" \
+    && pass "git_identity.sh splits the repo URL fresh in apply_repo_identity" \
+    || fail "git_identity.sh no longer splits the repo URL fresh in apply_repo_identity"
 grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
     && pass "up.sh passes GIT_HOST_TOKENS to write_keyfiles" \
     || fail "up.sh no longer passes GIT_HOST_TOKENS to write_keyfiles"
@@ -654,46 +656,61 @@ assert_eq "git_url_split: host is lowercased (the case the mirror missed)" "gith
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git_identity.sh ──"
 # shellcheck disable=SC1091
-. "$REPO/src/git_identity.sh"   # defines git_identity_for + stamp_repo_identity, no side effects
+. "$REPO/src/git_identity.sh"   # defines git_identity_for + apply_repo_identity, no side effects
 
-# git_identity_for <owner> <host>: the author that applies to a repo URL.
-# A per-owner GIT_ORG_IDENTITIES record and a per-host GIT_HOST_IDENTITIES
-# record never coexist in one manifest (manifest.py rejects git.hosts beside
-# git.token/git.orgs), so the owner-then-host order is never a precedence
-# decision — whichever table is populated is the only one that can match.
-GIT_ORG_IDENTITIES=$'acme\tOrg Bot\torg-bot@acme.test\n'
-GIT_HOST_IDENTITIES=""
-out=$(git_identity_for Acme whatever.test)
+# git_identity_for <owner> <host> <org_identities> <host_identities>: the two
+# tables are ARGUMENTS, never globals. A per-owner GIT_ORG_IDENTITIES record
+# and a per-host GIT_HOST_IDENTITIES record never coexist in one manifest
+# (manifest.py rejects git.hosts beside git.token/git.orgs), so the
+# owner-then-host order is never a precedence decision — whichever table is
+# populated is the only one that can match. Empty tables work under set -u.
+ORG=$'acme\tOrg Bot\torg-bot@acme.test\n'
+HOST=$'host-a.test\tHost Bot\thost-bot@hosta.test\n'
+out=$(git_identity_for Acme whatever.test "$ORG" "")
 assert_eq "per-owner record matches a mixed-case owner" $'Org Bot\torg-bot@acme.test' "$out"
-GIT_ORG_IDENTITIES=""
-GIT_HOST_IDENTITIES=$'host-a.test\tHost Bot\thost-bot@hosta.test\n'
-out=$(git_identity_for someone host-a.test)
+out=$(git_identity_for someone host-a.test "" "$HOST")
 assert_eq "per-host record matches its host" $'Host Bot\thost-bot@hosta.test' "$out"
-out=$(git_identity_for someone host-b.test)
+out=$(git_identity_for someone host-b.test "" "$HOST")
 assert_eq "an unlisted host yields empty (container default applies)" "" "$out"
+out=$(git_identity_for someone whatever.test "" "")
+assert_eq "empty tables yield empty (set -u safe)" "" "$out"
 # Host normalisation: the record is stored normalised (lowercased, :443
 # stripped — exactly like GIT_HOST_TOKENS rows), but the URL's own spelling
 # must still match.
-out=$(git_identity_for someone HOST-A.TEST)
+out=$(git_identity_for someone HOST-A.TEST "" "$HOST")
 assert_eq "a differently-cased URL host still matches the record" $'Host Bot\thost-bot@hosta.test' "$out"
-out=$(git_identity_for someone host-a.test:443)
+out=$(git_identity_for someone host-a.test:443 "" "$HOST")
 assert_eq "a :443 URL host still matches the bare-host record" $'Host Bot\thost-bot@hosta.test' "$out"
-out=$(git_identity_for someone host-a.test:3000)
+out=$(git_identity_for someone host-a.test:3000 "" "$HOST")
 assert_eq "a :3000 URL host does NOT match the bare-host record" "" "$out"
 # Either field alone.
-GIT_HOST_IDENTITIES=$'host-a.test\tOnly Name\t\nhost-c.test\t\tonly@mail.test\n'
-out=$(git_identity_for someone host-a.test)
+HOST=$'host-a.test\tOnly Name\t\nhost-c.test\t\tonly@mail.test\n'
+out=$(git_identity_for someone host-a.test "" "$HOST")
 assert_eq "a name-only record yields name + empty email" $'Only Name\t' "$out"
-out=$(git_identity_for someone host-c.test)
+out=$(git_identity_for someone host-c.test "" "$HOST")
 assert_eq "an email-only record yields empty name + email" $'\tonly@mail.test' "$out"
-unset GIT_ORG_IDENTITIES GIT_HOST_IDENTITIES
+unset ORG HOST
 
-# stamp_repo_identity: the real stamping, against real local clones — no
-# docker. The function execs `docker exec … bash -c <git config payload>`;
-# the test swaps docker for a shim that replays the SAME bash -c payload in
-# a sandbox dir (REPO_NAME becomes the clone dir name there), so the exact
-# git commands the function runs are exercised. HOME/XDG/GH_CONFIG_DIR stay
-# inside the temp dirs throughout.
+# Bind the emitter to the parser: run the REAL src/manifest.py --derive on a
+# small manifest with a host author (same shape as the egress-notice test
+# above), eval the derived assignments, and hand the DERIVED
+# GIT_HOST_IDENTITIES — not a hand-typed record — to apply_repo_identity
+# below. The record shape the parser emits and the shape the lookup parses
+# therefore cannot drift apart silently.
+eval "$(printf '{"repos":["https://host-a.test/o/a.git"],"git":{"hosts":{"host-a.test":{"token":"GH_TOKEN_x","name":"Leela Bot","email":"bot@planetexpress.example"}}}}\n---agents---\na\t{"binary":"a","install":"x"}\n' \
+    | PRESENT_SECRET_VARS="GH_TOKEN_x" SECRETS_FILE=/sec/secrets.env \
+      GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
+      python3 "$REPO/src/manifest.py" --derive)"
+assert_eq "derive emits the host identity record" \
+    $'host-a.test\tLeela Bot\tbot@planetexpress.example\n' "$GIT_HOST_IDENTITIES"
+
+# apply_repo_identity: the ONE call up.sh makes per repo — it splits the URL
+# fresh itself, looks up the author from the two tables (arguments, empty
+# tables fine), and stamps. The docker shim replays the exact bash -c
+# payload in a sandbox dir standing in for the container's
+# /workspace/repos, so the real git commands the payload runs are exercised.
+# HOME/XDG/GH_CONFIG_DIR stay inside the temp dirs throughout, and the
+# caller's env is restored afterwards.
 STAMP_WORK=$(cd "$(mktemp -d)" && pwd -P)
 export STAMP_WORK
 # Preserve the caller's HOME/XDG/GH_CONFIG_DIR — restored after this section,
@@ -714,8 +731,7 @@ done
 git -C "$STAMP_WORK/clone-a" remote set-url origin https://host-a.test/o/a.git
 git -C "$STAMP_WORK/clone-b" remote set-url origin https://host-b.test/o/b.git
 # docker shim: walk argv, collect the -e VAR=VALUE pairs, grab the payload
-# after `bash -c`, and run it from the sandbox dir (standing in for the
-# container's /workspace/repos).
+# (the last argv word, after `bash -c`), and run it from the sandbox dir.
 DOCKER_SHIM="$STAMP_WORK/bin"; mkdir -p "$DOCKER_SHIM"
 cat > "$DOCKER_SHIM/docker" <<'MEOCK'
 #!/bin/bash
@@ -728,36 +744,50 @@ for a in "$@"; do
     esac
 done
 payload="$last"
-# The payload names the in-container checkout /workspace/repos/<name>; in the
-# sandbox the clones live directly under $STAMP_WORK, so rewrite the prefix.
+# The payload names the in-container checkout /workspace/repos/<name>; in
+# the sandbox the clones live directly under $STAMP_WORK, so rewrite the
+# prefix.
 payload="${payload//\/workspace\/repos\//$STAMP_WORK/}"
 cd "$STAMP_WORK"
 env "${envs[@]}" bash -c "$payload"
 MEOCK
 chmod +x "$DOCKER_SHIM/docker"
-PATH="$DOCKER_SHIM:$PATH" stamp_repo_identity djinn-test clone-a "Host Bot" "host-bot@hosta.test"
-assert_eq "clone A: host author stamped as repo-local user.name" "Host Bot" "$(git -C "$STAMP_WORK/clone-a" config user.name)"
-assert_eq "clone A: host author stamped as repo-local user.email" "host-bot@hosta.test" "$(git -C "$STAMP_WORK/clone-a" config user.email)"
-PATH="$DOCKER_SHIM:$PATH" stamp_repo_identity djinn-test clone-b "" ""
-assert_eq "clone B: nothing stamped (empty identity is a no-op)" "" "$(git -C "$STAMP_WORK/clone-b" config --local user.name || true)"
+# The honest call: each clone's ACTUAL `git remote get-url origin` goes
+# through apply_repo_identity, exactly what up.sh runs — no hand-fed author.
+PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-a \
+    "$(git -C "$STAMP_WORK/clone-a" remote get-url origin)" "" "$GIT_HOST_IDENTITIES"
+assert_eq "clone A: host author stamped as repo-local user.name" "Leela Bot" "$(git -C "$STAMP_WORK/clone-a" config user.name)"
+assert_eq "clone A: host author stamped as repo-local user.email" "bot@planetexpress.example" "$(git -C "$STAMP_WORK/clone-a" config user.email)"
+PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-b \
+    "$(git -C "$STAMP_WORK/clone-b" remote get-url origin)" "" "$GIT_HOST_IDENTITIES"
+assert_eq "clone B: nothing stamped (no record for its host)" "" "$(git -C "$STAMP_WORK/clone-b" config --local user.name || true)"
 # A repo-local identity wins over the global default when committing.
 author_a=$(git -C "$STAMP_WORK/clone-a" var GIT_AUTHOR_IDENT)
 author_b=$(git -C "$STAMP_WORK/clone-b" var GIT_AUTHOR_IDENT)
 case "$author_a" in
-    "Host Bot <host-bot@hosta.test>"*) pass "clone A: git var GIT_AUTHOR_IDENT starts with the host author" ;;
+    "Leela Bot <bot@planetexpress.example>"*) pass "clone A: git var GIT_AUTHOR_IDENT starts with the host author" ;;
     *) fail "clone A: git var GIT_AUTHOR_IDENT starts with the host author"; printf '     got: [%s]\n' "$author_a" ;;
 esac
 case "$author_b" in
     "Default Bot <default@bot.test>"*) pass "clone B: git var GIT_AUTHOR_IDENT starts with the default author" ;;
     *) fail "clone B: git var GIT_AUTHOR_IDENT starts with the default author"; printf '     got: [%s]\n' "$author_b" ;;
 esac
+# Host normalisation end to end: a differently-cased, :443-spelled remote
+# still matches the derived (normalised) record — routed through the same
+# apply_repo_identity call, with the clone's actual remote URL.
+git -C "$STAMP_WORK/clone-a" remote set-url origin https://Host-A.Test:443/o/a.git
+PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-a \
+    "$(git -C "$STAMP_WORK/clone-a" remote get-url origin)" "" "$GIT_HOST_IDENTITIES"
+assert_eq "a mixed-case :443 remote still matches the derived record" "Leela Bot" "$(git -C "$STAMP_WORK/clone-a" config user.name)"
 # Per-owner record still stamps its repo (Guard — the git.orgs path through
-# the same functions, unchanged behaviour).
-GIT_ORG_IDENTITIES=$'acme\tOrg Bot\torg-bot@acme.test\n'
-GIT_HOST_IDENTITIES=""
-PATH="$DOCKER_SHIM:$PATH" stamp_repo_identity djinn-test clone-a "Org Bot" "org-bot@acme.test"
-assert_eq "per-owner record still stamps its repo (Guard)" "Org Bot" "$(git -C "$STAMP_WORK/clone-a" config user.name)"
-unset GIT_ORG_IDENTITIES GIT_HOST_IDENTITIES
+# the same functions, unchanged behaviour), routed the same way: empty host
+# table, the org table carrying the owner's record.
+ORG=$'acme\tOrg Bot\torg-bot@acme.test\n'
+git -C "$STAMP_WORK/clone-b" remote set-url origin https://forge.test/acme/b.git
+PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-b \
+    "$(git -C "$STAMP_WORK/clone-b" remote get-url origin)" "$ORG" ""
+assert_eq "per-owner record still stamps its repo (Guard)" "Org Bot" "$(git -C "$STAMP_WORK/clone-b" config user.name)"
+unset ORG HOST
 rm -rf "$STAMP_WORK"
 # Restore; if the caller had no HOME, keep one defined (set -u below) inside
 # the temp tree rather than unsetting it.
@@ -767,16 +797,14 @@ if [ -n "$_STAMP_GHCONF" ]; then GH_CONFIG_DIR="$_STAMP_GHCONF"; else unset GH_C
 unset STAMP_WORK _STAMP_HOME _STAMP_XDG _STAMP_GHCONF
 
 # Drift pins: up.sh sources the extracted identity helper and routes the
-# bootstrap clone's attribution through it.
+# bootstrap clone's attribution through the ONE call, passing the URL and
+# both tables as arguments.
 grep -qF '. "$SCRIPT_DIR/src/git_identity.sh"' "$REPO/up.sh" \
     && pass "up.sh sources src/git_identity.sh" \
     || fail "up.sh no longer sources src/git_identity.sh"
-grep -qF 'IDENT=$(git_identity_for "$REPO_OWNER" "$_h")' "$REPO/up.sh" \
-    && pass "up.sh derives the repo identity via git_identity_for" \
-    || fail "up.sh no longer derives the repo identity via git_identity_for"
-grep -qF 'stamp_repo_identity "$CNAME" "$RNAME" "$ID_NAME" "$ID_EMAIL"' "$REPO/up.sh" \
-    && pass "up.sh stamps via stamp_repo_identity" \
-    || fail "up.sh no longer stamps via stamp_repo_identity"
+grep -qF 'apply_repo_identity "$CNAME" "$RNAME" "$RURL" \' "$REPO/up.sh" \
+    && pass "up.sh stamps via apply_repo_identity (the one call, tables as args)" \
+    || fail "up.sh no longer stamps via apply_repo_identity"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── common.sh ──"
