@@ -132,7 +132,7 @@ echo ",$EGRESS_ALL," | grep -qF ",blob.core.windows.net," \
 # full emitted variable set. grep first: quoted multi-line values (e.g.
 # PLUGIN_MCP_ENTRIES) have continuation lines that are not assignments.
 EMITTED=$(printf '%s\n' "$ALL_DERIVED" | grep -oE '^[A-Z_]+=' | tr -d = | LC_ALL=C sort | tr '\n' ' ')
-EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS ENABLE_EGRESS_BROKER FORGE GIT_CREDENTIAL_HOSTS GIT_EGRESS_NOTICE_HOSTS GIT_HOST_TOKENS GIT_ORG_IDENTITIES GIT_ORG_ROUTED_HOSTS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS MEM_LIMIT PLUGINS PLUGINS_ENABLED PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES PLUGIN_SERVICES PLUGIN_SETUP REMOTE_JUMP REMOTE_NOTIFY REMOTE_SHELL REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
+EXPECTED="AGENTS_COMPOSE_YAML AGENTS_ENABLED AGENTS_MCP_JSON AGENT_SECRETS AGENT_SERVERS_JSON AGENT_SERVER_SLOTS CONTAINER_NTFY_TOPIC CONTAINER_NTFY_URL EGRESS EGRESS_CIDRS ENABLE_EGRESS_BROKER FORGE GIT_CREDENTIAL_HOSTS GIT_EGRESS_NOTICE_HOSTS GIT_HOST_IDENTITIES GIT_HOST_TOKENS GIT_ORG_IDENTITIES GIT_ORG_ROUTED_HOSTS GIT_TOKEN_SOURCE GIT_USER_EMAIL GIT_USER_NAME HOST_MCP_PORTS MEM_LIMIT PLUGINS PLUGINS_ENABLED PLUGIN_COMPOSE_YAML PLUGIN_ENV_SECRETS PLUGIN_MCP_ENTRIES PLUGIN_SERVICES PLUGIN_SETUP REMOTE_JUMP REMOTE_NOTIFY REMOTE_SHELL REPOS SHIM_AGENTS SSH_BIND SSH_PORT "
 [ "$EMITTED" = "$EXPECTED" ] \
     && pass "--derive emits exactly the variable set up.sh consumes" \
     || fail "emitted variable set changed (update up.sh consumers + this pin): $EMITTED"
@@ -538,6 +538,12 @@ grep -qF -- '. "$SCRIPT_DIR/src/git_notices.sh"' up.sh \
     && grep -qF -- 'git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' up.sh \
     && pass "up.sh sources + calls src/git_notices.sh" \
     || fail "up.sh no longer wires to src/git_notices.sh (update this suite!)"
+# Same shape again for the per-repo author attribution (git.hosts name/email
+# and git.orgs name/email; logic unit-tested by tests/bash.test.sh).
+grep -qF -- '. "$SCRIPT_DIR/src/git_identity.sh"' up.sh \
+    && grep -qF -- 'apply_repo_identity "$CNAME" "$RNAME" "$RURL" \' up.sh \
+    && pass "up.sh sources + calls src/git_identity.sh" \
+    || fail "up.sh no longer wires to src/git_identity.sh (update this suite!)"
 
 echo "── host-side bash unit tests (tests/bash.test.sh) ──"
 BASH_OUT=$(bash "$SCRIPT_DIR/tests/bash.test.sh" 2>&1) \

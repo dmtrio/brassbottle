@@ -152,6 +152,12 @@ git_host_notices "$REPOS" "$GIT_HOST_TOKENS"
 git_orgs_host_notice "$REPOS" "$GIT_HOST_TOKENS" "$GIT_ORG_ROUTED_HOSTS"
 git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"
 
+# Per-repo author attribution (src/git_identity.sh, sourced here — the real
+# lookup/stamping logic is unit-tested by tests/bash.test.sh, same precedent
+# as git_notices.sh). Two tables, never coexisting in one manifest:
+# GIT_ORG_IDENTITIES (git.orgs) and GIT_HOST_IDENTITIES (git.hosts name/email).
+. "$SCRIPT_DIR/src/git_identity.sh"
+
 COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
 [ -n "$SSH_PORT" ] && COMPOSE_FILES="$COMPOSE_FILES -f $SCRIPT_DIR/compose/docker-compose.ssh.yml"
 
@@ -479,26 +485,18 @@ EOF
                         echo "WARNING: clone of '$RNAME' failed — for a non-github host check capabilities.egress includes it (repo hosts are never auto-allowlisted), then that git.hosts.$_h.token names a variable set in secrets.env (the github GH_TOKEN and gh login are never sent to other hosts)"
                         ;;
                 esac; }
-        # Per-repo identity attribution: if this repo's OWNER has a git.orgs
-        # override with a name/email, stamp it as the repo-local user.name/email
-        # so commits to that owner's repos carry the right identity. Repos whose
-        # owner has no override inherit the container-global identity from
-        # entrypoint.sh.
-        # Owner = first path segment (see the host/path derivation above).
-        REPO_OWNER="${_p%%/*}"
-        # case-fold to match GIT_ORG_IDENTITIES (lowercased owners). tr, not
-        # ${VAR,,}: up.sh runs on the host, and macOS ships bash 3.2 where that
-        # expansion is a syntax error.
-        REPO_OWNER=$(printf '%s' "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
-        IDENT=$(printf '%s' "$GIT_ORG_IDENTITIES" | awk -F'\t' -v o="$REPO_OWNER" '$1==o{print $2"\t"$3; exit}')
-        ID_NAME="${IDENT%%$'\t'*}"; ID_EMAIL="${IDENT#*$'\t'}"
-        if [ -n "$ID_NAME" ] || [ -n "$ID_EMAIL" ]; then
-            docker exec -e "REPO_NAME=$RNAME" -e "ID_NAME=$ID_NAME" -e "ID_EMAIL=$ID_EMAIL" -u coder "$CNAME" bash -c '
-                d="/workspace/repos/$REPO_NAME"; [ -d "$d/.git" ] || exit 0
-                [ -n "$ID_NAME" ]  && git -C "$d" config user.name  "$ID_NAME"
-                [ -n "$ID_EMAIL" ] && git -C "$d" config user.email "$ID_EMAIL"
-                :' || true
-        fi
+        # Per-repo identity attribution: a repo whose OWNER has a git.orgs
+        # override with a name/email, or whose HOST has one in its git.hosts
+        # entry, is stamped repo-local user.name/email so commits carry the
+        # right identity. Repos matching neither inherit the container-global
+        # identity from entrypoint.sh. The two tables never coexist in one
+        # manifest (manifest.py rejects git.hosts beside git.token/git.orgs),
+        # so there is no precedence question between the two lookups.
+        # apply_repo_identity splits $RURL fresh itself — the lookup cannot
+        # be retargeted by a stale $_h/$_p from earlier in the loop (only the
+        # clone-failure hint above consumes those).
+        apply_repo_identity "$CNAME" "$RNAME" "$RURL" \
+            "$GIT_ORG_IDENTITIES" "$GIT_HOST_IDENTITIES"
     done <<EOF
 $REPOS
 EOF

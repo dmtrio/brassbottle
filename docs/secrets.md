@@ -82,6 +82,24 @@ Per-owner attribution (`git.orgs.<owner>.name/email`) still stamps a
 repo-local `user.name`/`user.email` at bootstrap clone — it is authorship
 only, never routing.
 
+### Per-host author attribution
+
+A `git.hosts` entry may carry an optional `name`/`email` beside `token:`.
+At bootstrap clone, a repo whose remote URL's host has such a record is
+stamped repo-local `user.name`/`user.email`, so commits from that host carry
+that author instead of the bottle default (`git.name`/`git.email`); repos
+matching no record keep the default. Attribution is by the URL's host for
+`https://`, `ssh://` and scp-style remotes alike — the host is matched as
+the URL spells it (lowercased, an explicit `:443` stripped, like the token
+rows), so an `ssh://` URL with an explicit port does not match a host entry
+(the entry key carries no ssh port; only an explicit `:443` is stripped).
+Either field may be given alone; a tab, newline or carriage return is
+rejected in any identity field (records are tab-separated, one per line),
+and otherwise the validation is the same as the per-owner spellings: a
+scalar each (a map/list is a named error), no charset rule beyond that.
+`token:` stays required on every `git.hosts` entry — an author never
+replaces the token row.
+
 ### Gitea and other self-hosted forges
 
 The same table serves a non-github repo. `up` derives every `https://`
