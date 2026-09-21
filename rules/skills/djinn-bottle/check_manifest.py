@@ -281,8 +281,9 @@ def secret_refs(manifest):
             tok = _get(spec, "token") if isinstance(spec, dict) else None
             if isinstance(tok, str) and tok:
                 names.add(tok)
-    # git.hosts.<host> is one entry, or a list of entries that each serve
-    # named identities. Anything else is manifest.py's error to report.
+    # git.hosts.<host> is read as one entry or a list of entries, so every
+    # token it names is declared present. Whether the shape itself is valid
+    # is manifest.py's to decide and report.
     hosts = _get(manifest, "git", "hosts", default={})
     if isinstance(hosts, dict):
         for value in hosts.values():
@@ -412,8 +413,6 @@ def run_real_validator(draft_path, draft, brassbottle):
     env = dict(os.environ)
     env.update({
         "PRESENT_SECRET_VARS": " ".join(sorted(refs)),
-        "GH_TOKEN_VARS": " ".join(sorted(n for n in refs
-                                         if n.startswith("GH_TOKEN"))),
         "SECRETS_FILE": "<host secrets.env — not readable from a container>",
         "GIT_NAME_DEFAULT": "checker", "GIT_EMAIL_DEFAULT": "checker@example",
         # Only consumed when the manifest asks for ntfy; a placeholder keeps
