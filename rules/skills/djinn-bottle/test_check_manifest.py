@@ -180,8 +180,9 @@ class SecretRefs(unittest.TestCase):
                                 "MCP_GATEWAY_TOKEN_prod",
                                 "OBSIDIAN_KEY_default_claude"})
 
-    def test_collects_git_hosts_tokens_in_both_forms(self):
-        # One entry or a list of entries: every token named is collected.
+    def test_collects_every_git_hosts_token_whatever_the_shape(self):
+        # Collection is deliberately more permissive than the validator, which
+        # accepts one entry per host: a list's tokens are collected too.
         # A token may be any secrets.env name, so nothing here depends on a
         # GH_TOKEN prefix.
         refs = cm.secret_refs({"git": {"hosts": {

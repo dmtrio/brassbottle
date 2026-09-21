@@ -281,9 +281,10 @@ def secret_refs(manifest):
             tok = _get(spec, "token") if isinstance(spec, dict) else None
             if isinstance(tok, str) and tok:
                 names.add(tok)
-    # git.hosts.<host> is read as one entry or a list of entries, so every
-    # token it names is declared present. Whether the shape itself is valid
-    # is manifest.py's to decide and report.
+    # Collect a token from a host's entry, and from each entry if the value
+    # is a list, so that no token a bottle names is ever reported missing.
+    # The validator accepts a single entry per host; whether a given shape is
+    # valid is manifest.py's to decide and report.
     hosts = _get(manifest, "git", "hosts", default={})
     if isinstance(hosts, dict):
         for value in hosts.values():
