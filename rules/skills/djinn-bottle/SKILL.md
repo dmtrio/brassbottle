@@ -76,7 +76,7 @@ Then drill **only** when something implies it:
 |---|---|
 | "phone access", "from my laptop", "long-running" | `remote.shell: tmux \| herdr \| bash`; `remote: {shell, notify}` — phone access is the default (jump-reachable); allocate ports only for optional features (§4) |
 | "also reachable from my Mac" | `ssh:` + port allocation (§4) — Mac Remote-SSH only |
-| repos owned by an org that isn't the default identity | `git.orgs.<owner>: {token, name, email, host}` — host: required when the owner's repos are not in repos: (github.com for a github org); otherwise derived from repos: — see `docs/secrets.md`; the checker (§6) enforces this, with or without a `--brassbottle` checkout |
+| a repository the bottle clones or pushes over `https://` | `git.hosts.<host>: {token, name, email}` — one entry per host; `token` is a `secrets.env` variable name and is required, `name`/`email` set the author for repositories cloned from that host. github.com is an entry like any other. A host with only public repositories needs no entry. See `docs/secrets.md` |
 | a plugin whose README names a secret slot | `common_secrets:` / `agent_secrets:` (§5) |
 | an API/service the container must reach | `capabilities.egress:` — domains only, no scheme, no path |
 | talking to something on the LAN | `capabilities.egress_cidrs:` |
