@@ -1182,6 +1182,63 @@ class TestGitHosts(unittest.TestCase):
 
 
 
+class TestEnabledIdentities(unittest.TestCase):
+    """The git.hosts identity set is the ENABLED mcp-capable agents' binaries
+    (the set SHIM_AGENTS is derived from) plus 'user' — not every shipped
+    mcp-capable descriptor. A catch-all must not enumerate agents the
+    manifest does not enable, and `identities:` naming a shipped-but-
+    unenabled agent is rejected."""
+
+    KIMI = {"binary": "kimi", "install": "x",
+            "mcp": {"config_path": ".kimi/mcp.json", "format": "json",
+                    "dialect": "mcpServers", "env_refs": True}}
+
+    def _derive_with_kimi(self, git, agents):
+        agent_files = dict(AGENT_FILES)
+        agent_files["kimi"] = self.KIMI
+        return derive({"git": git, "agents": agents}, agent_files=agent_files,
+                      env={"GH_TOKEN_VARS": "GH_TOKEN_x"})
+
+    def test_identity_of_a_shipped_but_unenabled_agent_is_rejected(self):
+        # kimi ships a descriptor but this manifest does not enable it: its
+        # binary is not an identity here, and the error names the ENABLED
+        # set (claude only), not every shipped agent.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._derive_with_kimi(
+                {"hosts": {"github.com": [{"token": "GH_TOKEN_x",
+                                           "identities": ["kimi"]}]}},
+                ["claude"])
+        self.assertIn("unknown identity 'kimi'", str(cm.exception))
+        self.assertIn(
+            "(an enabled agent of this bottle or 'user' — one of claude, user)",
+            str(cm.exception))
+
+    def test_catch_all_records_name_only_enabled_shim_agents(self):
+        d = self._derive_with_kimi(
+            {"hosts": {"github.com": {"token": "GH_TOKEN_x"}}},
+            ["claude", "pi", "codex", "cursor", "aider"])
+        self.assertEqual(
+            [rec.split("\t")[0] for rec in d["GIT_IDENTITY_TOKEN_SOURCES"].splitlines()],
+            [*d["SHIM_AGENTS"].split(), "user"])
+
+    def test_golden_full_yml_identities_match_its_shim_agents(self):
+        # The golden manifest plus a catch-all CLI row: the identities in
+        # GIT_IDENTITY_TOKEN_SOURCES are exactly the manifest's SHIM_AGENTS
+        # plus 'user' — no shipped-but-unenabled agent appears.
+        out = subprocess.run(
+            ["yq", "-o=json", "-I=0", ".agents",
+             str(REPO / "tests" / "fixtures" / "golden" / "full.yml")],
+            capture_output=True, text=True, check=True).stdout
+        agents = json.loads(out)
+        d = derive({"agents": agents,
+                    "git": {"hosts": {"github.com": {"token": "GH_TOKEN_x"}}}},
+                   env={"GH_TOKEN_VARS": "GH_TOKEN_x"})
+        self.assertEqual(
+            [rec.split("\t")[0] for rec in d["GIT_IDENTITY_TOKEN_SOURCES"].splitlines()],
+            [*d["SHIM_AGENTS"].split(), "user"])
+        self.assertEqual(d["SHIM_AGENTS"], "claude codex cursor-agent pi")
+
+
 class TestGitIdentities(unittest.TestCase):
     """The git.hosts LIST form: per-identity token rows, the rules the brief
     states (one appearance per identity per host, at most one catch-all,

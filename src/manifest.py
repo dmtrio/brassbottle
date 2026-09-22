@@ -981,9 +981,10 @@ def _git_identity(git, env, secrets_file, identity_names, forge_declared):
     """
     token_vars = set((env.get("PRESENT_SECRET_VARS") or env.get("GH_TOKEN_VARS")
                       or "").split())
-    # Valid git.hosts list-form identities: enabled agents' binary names (the
-    # shims that read the env files — the same names agent_secrets validates
-    # its `agent:` field against) plus the literal `user`.
+    # Valid git.hosts list-form identities: ENABLED mcp-capable agents'
+    # binary names — exactly the set SHIM_AGENTS is derived from, so a
+    # catch-all record can never name a shim the container does not run —
+    # plus the literal `user`.
     known_identities = frozenset(identity_names or ()) | {"user"}
     errors = []
     if forge_declared:
@@ -1240,12 +1241,24 @@ def derive(manifest, plugin_files, agent_files, env):
     repo_origins = {line for line in
                     _credential_hosts(url for _name, url in parsed_repos).splitlines()
                     if line}
+    # ── Enabled agents (needed BEFORE the git: section) ─────────────────
+    # The git.hosts identity set is the ENABLED mcp-capable agents' binaries
+    # — the same set SHIM_AGENTS is derived from (the shims that read the
+    # key files). The `tools:` rejection and the list-type check stay in the
+    # Agents section below (error order unchanged); only the enabled lookup
+    # happens here, and the Agents section reuses it.
+    tools_val = manifest.get("agents")
+    if _falsy(tools_val):
+        tools_val = default_tools
+    enabled_mcp_binaries = frozenset(
+        agents[name]["binary"] for name in agent_dir_names
+        if isinstance(tools_val, list) and _tool_installed(tools_val, name)
+        and agents[name]["mcp"] is not None)
     git = _section(manifest, "git")
     out["GIT_USER_NAME"] = _identity_scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
     out["GIT_USER_EMAIL"] = _identity_scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
     out.update(_git_identity(git, env, secrets_file,
-                             frozenset(agents[name]["binary"]
-                                       for name in mcp_agent_dir_names),
+                             enabled_mcp_binaries,
                              forge_declared="forge" in manifest))
     # GIT_CREDENTIAL_HOSTS: every host a credential may be needed for — the
     # git.hosts table's hosts (catch-all and per-identity rows alike: the
@@ -1292,9 +1305,7 @@ def derive(manifest, plugin_files, agent_files, env):
     if "tools" in manifest:
         raise ManifestError(
             "manifest tools: was renamed to agents: — update the manifest (same values)")
-    tools = manifest.get("agents")
-    if _falsy(tools):
-        tools = default_tools
+    tools = tools_val   # read + defaulted above, for the enabled-identity set
     if not isinstance(tools, list):
         raise ManifestError("manifest agents: must be a list")
     enabled_agent_dirs = sorted(name for name in agent_dir_names if _tool_installed(tools, name))
