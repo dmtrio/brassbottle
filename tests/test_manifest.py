@@ -40,7 +40,7 @@ PROXYMAN = {"host_port": 8813,
                         "hint": "proxyman (run ./service.sh proxyman once)"}},
             "mcp": {"proxyman": {"command": "mcp-remote",
                                  "args": ["http://host.docker.internal:${HOST_PORT}/mcp",
-                                          "--header", "X-API-Key: ${PROXYMAN_BRIDGE_KEY}"],
+                                          "--allow-http", "--header", "X-API-Key: ${PROXYMAN_BRIDGE_KEY}"],
                                  "requires": ["PROXYMAN_BRIDGE_KEY"]}}}
 BROWSER = {"host_port": 8814,
            "install": MCP_REMOTE_INSTALL,
@@ -48,7 +48,7 @@ BROWSER = {"host_port": 8814,
                        "hint": "browser (run ./service.sh browser once)"}},
            "mcp": {"browser": {"command": "mcp-remote",
                                "args": ["http://host.docker.internal:${HOST_PORT}/mcp",
-                                        "--header", "X-API-Key: ${RESEARCH_BROWSER_KEY}"],
+                                        "--allow-http", "--header", "X-API-Key: ${RESEARCH_BROWSER_KEY}"],
                                "requires": ["RESEARCH_BROWSER_KEY"]}}}
 OBSIDIAN = {"secrets": {"OBSIDIAN_ANNOTATED_KEY": {}},
             "egress": ["mcp-obsidian.dmetr.io"],
@@ -314,6 +314,36 @@ class TestErrorTable(unittest.TestCase):
                 name in instructions,
                 f"BASE_IMAGE_BINS claims the image provides {name!r}, but no "
                 "Dockerfile instruction installs it (comments do not count)")
+
+    def test_every_plain_http_mcp_remote_plugin_passes_allow_http(self):
+        """Pin: the browser MCP stopped connecting once the Dockerfile's
+        ^0.1.38 range resolved to mcp-remote 0.1.49, which exits before dialing
+        a plain-http URL to any host but localhost unless --allow-http is on
+        argv. browser and proxyman declare that argv themselves (a local
+        command spec, not a url: the shim renderer covers), so each must carry
+        the flag; anything new of the same shape is caught here too."""
+        offenders, seen = [], []
+        for path in sorted((REPO / "plugins").glob("*/plugin.yml")):
+            doc = json.loads(subprocess.run(
+                ["yq", "-o=json", "-I=0", "."], input=path.read_text(),
+                capture_output=True, text=True, check=True).stdout)
+            for name, spec in ((doc or {}).get("mcp") or {}).items():
+                if spec.get("command") != "mcp-remote":
+                    continue
+                url = (spec.get("args") or [""])[0].lower()
+                # mcp-remote's own guard, spelled out rather than imported so
+                # this fails on the plugin file, not on a missing helper.
+                if not url.startswith("http://") or url.startswith(
+                        ("http://localhost", "http://127.0.0.1")):
+                    continue
+                seen.append(f"{path.parent.name}/{name}")
+                if "--allow-http" not in spec["args"]:
+                    offenders.append(f"{path.parent.name}/{name}")
+        self.assertEqual(seen, ["browser/browser", "proxyman/proxyman"])
+        self.assertEqual(
+            offenders, [],
+            "these mcp-remote servers dial plain http to a non-localhost host "
+            "without --allow-http; mcp-remote 0.1.49 refuses that before dialing")
 
     def test_no_plugin_re_pins_a_base_tool(self):
         """REGRESSION: the trap this replaced — one pin per plugin, one prefix."""

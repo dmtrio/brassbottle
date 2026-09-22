@@ -632,6 +632,7 @@ def _merge_named_entry(path, name, entry):
 
 
 MCP_REMOTE_BIN = "mcp-remote"
+MCP_REMOTE_ALLOW_HTTP = "--allow-http"
 
 
 def _shim_remote_spec(spec):
@@ -655,10 +656,15 @@ def _shim_remote_spec(spec):
     agent gains native support, rather than being baked into every plugin's
     declaration.
 
+    --allow-http always follows the URL: mcp-remote (0.1.49) refuses a plain
+    http URL to any host but localhost before dialing without it, every one
+    of our host-side bridges is exactly that shape, and the flag is inert on
+    https.
+
     Header order follows the spec's, so rendering is deterministic and goldens
     are stable.
     """
-    args = [spec["url"]]
+    args = [spec["url"], MCP_REMOTE_ALLOW_HTTP]
     for name, value in (spec.get("headers") or {}).items():
         args += ["--header", f"{name}: {value}"]
     return {"command": MCP_REMOTE_BIN, "args": args}

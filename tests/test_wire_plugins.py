@@ -446,7 +446,7 @@ class TestShimRemoteSpec(unittest.TestCase):
     def test_url_leads_and_each_header_becomes_a_header_flag(self):
         self.assertEqual(wire_plugins._shim_remote_spec(self.SPEC), {
             "command": "mcp-remote",
-            "args": ["https://mcp-obsidian.dmetr.io/mcp", "--header",
+            "args": ["https://mcp-obsidian.dmetr.io/mcp", "--allow-http", "--header",
                      "Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"],
         })
 
@@ -458,22 +458,35 @@ class TestShimRemoteSpec(unittest.TestCase):
         """The reason this beats the native rendering it falls back from: a
         named env_refs field is bearer-only, the shim is not."""
         rendered = wire_plugins._shim_remote_spec(
-            {"url": "http://h.test/mcp", "headers": {"X-API-Key": "${K}"}})
-        self.assertEqual(rendered["args"], ["http://h.test/mcp", "--header", "X-API-Key: ${K}"])
+            {"url": "https://h.test/mcp", "headers": {"X-API-Key": "${K}"}})
+        self.assertEqual(rendered["args"], ["https://h.test/mcp", "--allow-http", "--header", "X-API-Key: ${K}"])
 
     def test_multiple_headers_keep_spec_order(self):
         rendered = wire_plugins._shim_remote_spec({
-            "url": "http://h.test/mcp",
+            "url": "https://h.test/mcp",
             "headers": {"Authorization": "Bearer ${A}", "X-Trace": "${B}"}})
         self.assertEqual(rendered["args"], [
-            "http://h.test/mcp",
+            "https://h.test/mcp", "--allow-http",
             "--header", "Authorization: Bearer ${A}",
             "--header", "X-Trace: ${B}"])
 
     def test_no_headers_is_just_the_url(self):
         self.assertEqual(
-            wire_plugins._shim_remote_spec({"url": "http://h.test/mcp"}),
-            {"command": "mcp-remote", "args": ["http://h.test/mcp"]})
+            wire_plugins._shim_remote_spec({"url": "https://h.test/mcp"}),
+            {"command": "mcp-remote", "args": ["https://h.test/mcp", "--allow-http"]})
+
+    def test_plain_http_to_the_docker_host_carries_allow_http(self):
+        """Pin: mcp-remote 0.1.49 exits with "Non-HTTPS URLs are only allowed
+        for localhost or when --allow-http flag is provided" before dialing
+        http://host.docker.internal, so the browser MCP failed to connect in
+        every container built after the ^0.1.38 range resolved to it. The flag
+        always follows the URL, ahead of the headers; it is inert on https."""
+        rendered = wire_plugins._shim_remote_spec(
+            {"url": "http://host.docker.internal:8815/mcp",
+             "headers": {"X-API-Key": "${K}"}})
+        self.assertEqual(rendered["args"], [
+            "http://host.docker.internal:8815/mcp", "--allow-http",
+            "--header", "X-API-Key: ${K}"])
 
 
 class TestRenderForAgent(unittest.TestCase):
@@ -1258,7 +1271,7 @@ class TestRunIntegration(QuietTestCase):
             raw = (home / ".cursor" / "mcp.json").read_text()
             entry = json.loads(raw)["mcpServers"]["two-slot"]
             self.assertEqual(entry, {"command": "mcp-remote", "args": [
-                "https://example.test/mcp",
+                "https://example.test/mcp", "--allow-http",
                 "--header", "Authorization: Bearer ${TOKEN_A}",
                 "--header", "X-Trace: ${TOKEN_B}:${TOKEN_A}"]})
 
