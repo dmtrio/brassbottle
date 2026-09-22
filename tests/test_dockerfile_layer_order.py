@@ -149,5 +149,35 @@ class EnabledSetArgScopeTests(unittest.TestCase):
         self.assertGreater(arg, loop)
 
 
+class UserSectionSystemPathTests(unittest.TestCase):
+    """Between `USER $USERNAME` and `USER root` the build runs unprivileged, and a
+    COPY there lands root-owned. A bare `chmod` on a system path in that
+    section fails only at build time ("Operation not permitted"), which the
+    unit suites never reach: a COPY of the shim template plus `chmod 644`
+    broke CI that way. Any chmod on a path outside the home directory in the
+    user section must go through sudo."""
+
+    def _user_section(self):
+        ins = _instructions()
+        start = next(i for i, x in enumerate(ins) if x.startswith("USER $USERNAME"))
+        end = next(i for i, x in enumerate(ins) if x.startswith("USER root"))
+        self.assertLess(start, end)
+        return ins[start:end]
+
+    def test_system_path_chmod_in_the_user_section_uses_sudo(self):
+        offenders = []
+        for ins in self._user_section():
+            if not ins.startswith("RUN"):
+                continue
+            for cmd in ins.replace("\\\n", " ").split(";"):
+                for part in cmd.split("&&"):
+                    part = part.strip()
+                    if part.startswith("RUN "):
+                        part = part[4:].strip()
+                    if part.startswith("chmod ") and "/home/" not in part:
+                        offenders.append(part)
+        self.assertEqual(offenders, [], "bare chmod on a system path while unprivileged: %r" % offenders)
+
+
 if __name__ == "__main__":
     unittest.main()
