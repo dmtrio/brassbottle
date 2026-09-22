@@ -3,9 +3,8 @@
 
 Owns `<egress_root>/egress.db`: one SQLite database that is both the open
 decision queue and the append-only audit trail for egress filings. Stdlib
-only; host-side (macOS and Linux). A leaf module: nothing in it imports
-another repo module except `import_open`, which lazily imports the
-egress_log helpers to migrate open requests at cutover.
+only; host-side (macOS and Linux). A leaf module: it imports no other repo
+module.
 
 Schema (SQLite, journal_mode=WAL, foreign_keys=ON):
 
@@ -214,8 +213,15 @@ class Event:
     fields: dict[str, Any]
 
 
-def _utc_now(dt: datetime) -> datetime:
-    """Normalize to UTC-aware and truncate to second resolution."""
+def _utc_now(dt: datetime | None) -> datetime:
+    """Normalize to UTC-aware and truncate to second resolution.
+
+    None means "the real current time" — the same convention the legacy
+    log helpers used, which callers outside this module (endpoint writes,
+    denylist entries) rely on.
+    """
+    if dt is None:
+        return datetime.now(timezone.utc).replace(microsecond=0)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).replace(microsecond=0)
@@ -274,6 +280,335 @@ def _check_sqlite_header(path: Path) -> None:
         raise EgressStoreError(f"cannot read {path}: {exc}") from exc
     if header != SQLITE_HEADER:
         raise EgressStoreError(f"{path} is not a SQLite database")
+
+
+# -- legacy monthly JSONL log (read-only import helpers) ---------------------
+#
+# The pre-store audit log was a set of monthly JSONL files under
+# <egress_root>/log/. The broker stopped writing it when the store became
+# the state; the files stay on disk, and `import_open` reads the CURRENT
+# month's file once at cutover to carry still-open requests across. The
+# helpers below are private to that one import — nothing else may call
+# them, and the store gains no other dependency on the legacy format.
+
+_LEGACY_EVENT_KINDS = frozenset(
+    {
+        "requested",
+        "notified",
+        "hit",
+        "allowed",
+        "denied",
+        "applied",
+        "apply_failed",
+    }
+)
+_LEGACY_CARRY_FORWARD_KIND = "carry_forward"
+_LEGACY_CLOSING_KINDS = frozenset({"allowed", "denied"})
+_LEGACY_OPEN_STATE_KINDS = frozenset({"requested", "notified", "hit"})
+_LEGACY_META_KEYS = ("container", "host", "port", "uid", "comm", "reason")
+
+
+@dataclass(frozen=True)
+class _LegacyOpenRequest:
+    """One still-open request as the legacy fold saw it (queue membership
+    plus whatever fields the month file happened to carry)."""
+
+    request_id: str
+    state: str
+    container: str | None = None
+    host: str | None = None
+    port: int | None = None
+    opened_at: str | None = None
+
+
+@dataclass(frozen=True)
+class _LegacyRequestDetails:
+    """Operator-facing fields for one open request, from the month file."""
+
+    request_id: str
+    container: str
+    host: str
+    port: int
+    hit_count: int
+    uid: int | None = None
+    comm: str | None = None
+    reason: str | None = None
+
+
+def _legacy_month_filename(dt: datetime) -> str:
+    utc = _utc_now(dt)
+    return f"{utc.year:04d}-{utc.month:02d}.jsonl"
+
+
+def _legacy_log_path(root: Path, filename: str) -> Path:
+    return Path(root) / "log" / filename
+
+
+def _legacy_month_records(root: Path, when: datetime) -> list[dict[str, Any]]:
+    path = _legacy_log_path(root, _legacy_month_filename(when))
+    if not path.is_file():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line:
+            continue
+        parsed = json.loads(line)
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return records
+
+
+def _legacy_parse_jsonl_lines(
+    data: bytes,
+    *,
+    path: Path,
+) -> tuple[list[dict[str, Any]], int]:
+    """Parse JSONL bytes; discard an unparsable final line only."""
+    if not data:
+        return [], 0
+
+    text = data.decode("utf-8")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    records: list[dict[str, Any]] = []
+    skipped = 0
+    for index, line in enumerate(lines):
+        if not line:
+            if index < len(lines) - 1:
+                raise EgressStoreError(
+                    f"empty line in legacy log {path} at line {index + 1}"
+                )
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if index == len(lines) - 1:
+                skipped = 1
+                LOG.info(
+                    "egress_store legacy read discarded torn trailing line"
+                    " path=%s line=%d",
+                    path.name,
+                    index + 1,
+                )
+                break
+            raise EgressStoreError(
+                f"corrupt legacy log line in {path} at line {index + 1}: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise EgressStoreError(
+                f"corrupt legacy log line in {path} at line {index + 1}:"
+                " not a JSON object"
+            )
+        records.append(parsed)
+    return records, skipped
+
+
+def _legacy_read_file_records(
+    path: Path,
+    *,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Read records from one legacy log file starting at byte offset."""
+    if not path.is_file():
+        return [], offset
+    size = path.stat().st_size
+    if offset > size:
+        return _legacy_read_file_records(path, offset=0)
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read()
+    records, skipped = _legacy_parse_jsonl_lines(data, path=path)
+    return records, offset + len(data)
+
+
+def _legacy_merge_open_fields(
+    record: dict[str, Any],
+    existing: _LegacyOpenRequest | None,
+    *,
+    kind: str,
+) -> tuple[str | None, str | None, int | None, str | None]:
+    container = record.get("container")
+    host = record.get("host")
+    port = record.get("port")
+    if not isinstance(container, str):
+        container = existing.container if existing else None
+    if not isinstance(host, str):
+        host = existing.host if existing else None
+    if not isinstance(port, int):
+        port = existing.port if existing else None
+
+    if kind == "requested" and isinstance(record.get("ts"), str):
+        opened_at = record["ts"]
+    elif isinstance(record.get("opened_at"), str):
+        opened_at = record["opened_at"]
+    elif existing is not None:
+        opened_at = existing.opened_at
+    else:
+        opened_at = None
+    return container, host, port, opened_at
+
+
+def _legacy_apply_record(
+    open_map: dict[str, _LegacyOpenRequest],
+    record: dict[str, Any],
+    *,
+    index: int,
+) -> None:
+    kind = record.get("kind")
+    if kind == _LEGACY_CARRY_FORWARD_KIND:
+        if index != 0:
+            raise EgressStoreError(
+                "carry_forward record must be first line of legacy log file"
+                f" (got line {index + 1})"
+            )
+        open_map.clear()
+        for item in record.get("open") or []:
+            if not isinstance(item, dict):
+                continue
+            request_id = item.get("request_id") or item.get("id")
+            state = item.get("state")
+            if not isinstance(request_id, str) or not isinstance(state, str):
+                continue
+            container = item.get("container")
+            host = item.get("host")
+            port = item.get("port")
+            opened_at = item.get("opened_at")
+            open_map[request_id] = _LegacyOpenRequest(
+                request_id=request_id,
+                state=state,
+                container=container if isinstance(container, str) else None,
+                host=host if isinstance(host, str) else None,
+                port=port if isinstance(port, int) else None,
+                opened_at=opened_at if isinstance(opened_at, str) else None,
+            )
+        return
+
+    if kind not in _LEGACY_EVENT_KINDS:
+        raise EgressStoreError(f"unknown legacy log event kind {kind!r}")
+
+    request_id = record.get("request_id")
+    if not isinstance(request_id, str):
+        raise EgressStoreError("legacy log event record missing request_id")
+
+    if kind in _LEGACY_CLOSING_KINDS:
+        open_map.pop(request_id, None)
+        return
+
+    if kind in _LEGACY_OPEN_STATE_KINDS:
+        existing = open_map.get(request_id)
+        container, host, port, opened_at = _legacy_merge_open_fields(
+            record,
+            existing,
+            kind=kind,
+        )
+        open_map[request_id] = _LegacyOpenRequest(
+            request_id=request_id,
+            state=kind,
+            container=container,
+            host=host,
+            port=port,
+            opened_at=opened_at,
+        )
+        return
+
+    # applied / apply_failed — audit-only; queue membership unchanged.
+
+
+def _legacy_fold_records(
+    records: list[dict[str, Any]],
+) -> dict[str, _LegacyOpenRequest]:
+    # SECURITY INVARIANT: this fold tracks queue membership (open vs answered
+    # requests) only. It must never accumulate allowed hosts or expose egress
+    # permit predicates — ipset allowed-domains is the sole authority.
+    open_map: dict[str, _LegacyOpenRequest] = {}
+    for index, record in enumerate(records):
+        _legacy_apply_record(open_map, record, index=index)
+    return open_map
+
+
+def _legacy_fold_queue(root: Path, *, now: datetime) -> dict[str, _LegacyOpenRequest]:
+    """Replay the CURRENT month's legacy file into open requests.
+
+    Read-only: unlike the old writer-side fold, a missing month file simply
+    yields no state instead of creating one — the import must never write
+    to the legacy log.
+    """
+    path = _legacy_log_path(root, _legacy_month_filename(now))
+    if not path.is_file():
+        return {}
+    records, _offset = _legacy_read_file_records(path, offset=0)
+    return _legacy_fold_records(records)
+
+
+def _legacy_build_details(
+    request_id: str,
+    meta: dict[str, object],
+    hit_count: int,
+    open_req: _LegacyOpenRequest,
+) -> _LegacyRequestDetails | None:
+    """Reconcile folded queue state with the request's own log records."""
+    container = meta.get("container", open_req.container)
+    host = meta.get("host", open_req.host)
+    port = meta.get("port", open_req.port)
+    if not isinstance(container, str) or not isinstance(host, str) or not isinstance(port, int):
+        return None
+
+    uid = meta.get("uid")
+    comm = meta.get("comm")
+    reason = meta.get("reason")
+    return _LegacyRequestDetails(
+        request_id=request_id,
+        container=container,
+        host=host,
+        port=port,
+        hit_count=hit_count,
+        uid=uid if isinstance(uid, int) else None,
+        comm=comm if isinstance(comm, str) else None,
+        reason=reason if isinstance(reason, str) else None,
+    )
+
+
+def _legacy_request_details_for_ids(
+    root: Path,
+    request_ids: list[str],
+    *,
+    queue: dict[str, _LegacyOpenRequest],
+    now: datetime,
+) -> dict[str, _LegacyRequestDetails]:
+    """Build details for many requests in ONE pass over the month file."""
+    wanted = {rid for rid in request_ids if rid in queue}
+    if not wanted:
+        return {}
+
+    meta: dict[str, dict[str, object]] = {rid: {} for rid in wanted}
+    hit_counts: dict[str, int] = {rid: 1 for rid in wanted}
+    for record in _legacy_month_records(root, now):
+        request_id = record.get("request_id")
+        if request_id not in wanted:
+            continue
+        kind = record.get("kind")
+        if kind == "requested":
+            for key in _LEGACY_META_KEYS:
+                if key in record:
+                    meta[request_id][key] = record[key]
+        elif kind == "hit":
+            count = record.get("count", 1)
+            if isinstance(count, int) and count > 0:
+                hit_counts[request_id] += count
+
+    details: dict[str, _LegacyRequestDetails] = {}
+    for request_id in wanted:
+        built = _legacy_build_details(
+            request_id,
+            meta[request_id],
+            hit_counts[request_id],
+            queue[request_id],
+        )
+        if built is not None:
+            details[request_id] = built
+    return details
 
 
 class EgressStore:
@@ -899,37 +1234,60 @@ class EgressStore:
 
     # -- migration ---------------------------------------------------------
 
-    def import_open(self, log: Any, *, now: datetime) -> int:
-        """Import still-open requests from the monthly JSONL log, once.
+    def request_count(self) -> int:
+        """Number of request rows of ANY status — the once-guard for the
+        legacy-log import (a non-empty database has already been cut over)."""
+        with self._lock:
+            cursor = self._conn.execute("SELECT COUNT(*) FROM requests")
+            return int(cursor.fetchone()[0])
 
-        `log` is an egress_log.EgressLog — the ONLY egress_log dependency in
-        this module, imported lazily below so the store stays a leaf module
-        otherwise. Folds the queue, fills uid/comm/reason/hit_count from the
-        current month's records, and inserts each open request as an `open`
-        row with a single `requested` event carrying {"imported": true}
-        (plus a `hit` event with count = hit_count - 1 when hits exceed 1).
+    def events(self, *, kind: str | None = None) -> list[Event]:
+        """Every event, optionally one kind, in id order — audit reads."""
+        with self._lock:
+            if kind is None:
+                cursor = self._conn.execute(
+                    "SELECT id, request_id, kind, ts, fields FROM events ORDER BY id"
+                )
+            else:
+                cursor = self._conn.execute(
+                    "SELECT id, request_id, kind, ts, fields FROM events"
+                    " WHERE kind = ? ORDER BY id",
+                    (kind,),
+                )
+            return [self._event(raw) for raw in cursor.fetchall()]
+
+    def import_open(self, *, now: datetime) -> int:
+        """Import still-open requests from the legacy monthly JSONL log, once.
+
+        Reads `<root>/log/<current-month>.jsonl` — including its
+        carry_forward header — folds the queue, fills uid/comm/reason and
+        hit_count from the current month's records, and inserts each open
+        request as an `open` row with a single `requested` event carrying
+        {"imported": true} (plus a `hit` event with count = hit_count - 1
+        when hits exceed 1). Ids already present are skipped.
 
         A request known only from a carry-forward header imports with uid,
         comm, reason and hold_seconds NULL and hit_count 1 — see the module
-        docstring for the accepted loss. Ids already present are skipped.
+        docstring for the accepted loss. The broker calls this only on first
+        start with an empty database; the legacy files are never read again
+        after that, and are never written by this module.
+
         Returns the number of rows inserted.
         """
-        from egress_log import request_details_for_ids
-
         now_ts = _utc_now(now)
-        queue = log.fold_queue(now=now_ts)
-        details = request_details_for_ids(
-            log, list(queue.open_requests.keys()), queue=queue, now=now_ts
+        queue = _legacy_fold_queue(self._root, now=now_ts)
+        details = _legacy_request_details_for_ids(
+            self._root, list(queue), queue=queue, now=now_ts
         )
         started = time.monotonic()
         with self._lock:
             with self._transaction():
                 inserted = 0
-                for request_id in sorted(queue.open_requests):
+                for request_id in sorted(queue):
                     if self._fetch_row(request_id) is not None:
                         continue
                     detail = details.get(request_id)
-                    open_req = queue.open_requests[request_id]
+                    open_req = queue[request_id]
                     container = detail.container if detail else open_req.container
                     host = detail.host if detail else open_req.host
                     port = detail.port if detail else open_req.port

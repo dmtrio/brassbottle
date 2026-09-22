@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for the SQLite egress request store (queue + audit)."""
-
 from __future__ import annotations
-
+import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -10,20 +10,18 @@ import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
-import egress_log  # noqa: E402
 import egress_store  # noqa: E402
-
+from egress_store import _iso_ts  # noqa: E402
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
 NOW_PLUS_1 = NOW + timedelta(seconds=1)
 NOW_PLUS_2 = NOW + timedelta(seconds=2)
 MAY = datetime(2026, 5, 20, 10, 0, 0, tzinfo=timezone.utc)
+MARCH = datetime(2026, 3, 31, 12, 0, 0, tzinfo=timezone.utc)
+APRIL = datetime(2026, 4, 2, 9, 0, 0, tzinfo=timezone.utc)
 AUG_END = datetime(2026, 8, 31, 23, 0, 0, tzinfo=timezone.utc)
 SEP_START = datetime(2026, 9, 1, 0, 5, 0, tzinfo=timezone.utc)
-
-
 def _open_kwargs(**overrides):
     kwargs = {
         "request_id": "req-1",
@@ -40,11 +38,10 @@ def _open_kwargs(**overrides):
     kwargs.update(overrides)
     return kwargs
 
-
 class EgressStoreTests(unittest.TestCase):
+
     def _store(self, root: Path) -> egress_store.EgressStore:
         return egress_store.EgressStore(root)
-
     # -- 1. schema and on-disk state -------------------------------------
 
     def test_fresh_root_creates_wal_db_with_schema_version_1(self):
@@ -52,7 +49,6 @@ class EgressStoreTests(unittest.TestCase):
             root = Path(tmp)
             store = self._store(root)
             self.addCleanup(store.shutdown)
-
             db = root / "egress.db"
             self.assertTrue(db.is_file())
             probe = sqlite3.connect(db)
@@ -101,7 +97,6 @@ class EgressStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
-
             self.assertEqual(
                 [
                     (row[1], row[2], row[3], row[5])
@@ -162,7 +157,6 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(root)
             store.open_or_hit(**_open_kwargs())
             store.shutdown()
-
             reopened = self._store(root)
             self.addCleanup(reopened.shutdown)
             row = reopened.get("req-1")
@@ -187,7 +181,6 @@ class EgressStoreTests(unittest.TestCase):
             store._conn.execute("UPDATE schema_version SET version = 2")
             store._conn.commit()
             store.shutdown()
-
             with self.assertRaises(egress_store.EgressStoreError):
                 self._store(root)
 
@@ -197,16 +190,13 @@ class EgressStoreTests(unittest.TestCase):
             (root / "egress.db").write_bytes(b"this is definitely not a database file")
             with self.assertRaises(egress_store.EgressStoreError):
                 self._store(root)
-
     # -- 2. open_or_hit ---------------------------------------------------
 
     def test_open_or_hit_new_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
-
             row, is_new = store.open_or_hit(**_open_kwargs())
-
             self.assertTrue(is_new)
             self.assertEqual(row.request_id, "req-1")
             self.assertEqual(row.container, "coding-brassbottle")
@@ -232,7 +222,6 @@ class EgressStoreTests(unittest.TestCase):
             self.assertIsNone(row.denylist_zone)
             self.assertIsNone(row.denylist_scope)
             self.assertIsNone(row.decision_body)
-
             events = store.events_for("req-1")
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0].kind, "requested")
@@ -255,11 +244,9 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             row, is_new = store.open_or_hit(
                 **_open_kwargs(request_id="req-other", now=NOW_PLUS_1)
             )
-
             self.assertFalse(is_new)
             self.assertEqual(row.request_id, "req-1")
             self.assertEqual(row.hit_count, 2)
@@ -276,7 +263,6 @@ class EgressStoreTests(unittest.TestCase):
             store.open_or_hit(**_open_kwargs())
             events_before = store.count_events()
             rows_before = store.list_open()
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.open_or_hit(
                     **_open_kwargs(
@@ -286,7 +272,6 @@ class EgressStoreTests(unittest.TestCase):
                         port=22,
                     )
                 )
-
             self.assertEqual(store.count_events(), events_before)
             self.assertEqual(store.list_open(), rows_before)
 
@@ -295,15 +280,12 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             row, is_new = store.open_or_hit(
                 **_open_kwargs(request_id="fresh-id", now=NOW_PLUS_1)
             )
-
             self.assertFalse(is_new)
             self.assertEqual(row.request_id, "req-1")
             self.assertEqual(row.hit_count, 2)
-
     # -- 3. close ----------------------------------------------------------
 
     def test_close_to_allowed(self):
@@ -312,7 +294,6 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
             body = {"decision": "allow", "scope": "live"}
-
             closed = store.close(
                 request_id="req-1",
                 status="allowed",
@@ -321,7 +302,6 @@ class EgressStoreTests(unittest.TestCase):
                 scope="live",
                 decision_body=body,
             )
-
             self.assertEqual(closed.status, "allowed")
             self.assertEqual(closed.decided_at, NOW_PLUS_2)
             self.assertEqual(closed.decided_by, "admin")
@@ -346,7 +326,6 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
             body = {"decision": "deny", "reason": "denylist", "zone": "evil.example"}
-
             closed = store.close(
                 request_id="req-1",
                 status="denied",
@@ -357,7 +336,6 @@ class EgressStoreTests(unittest.TestCase):
                 denylist_scope="global",
                 decision_body=body,
             )
-
             self.assertEqual(closed.status, "denied")
             self.assertEqual(closed.decided_at, NOW_PLUS_2)
             self.assertEqual(closed.decided_by, "denylist")
@@ -387,7 +365,6 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
             body = {"decision": "deny", "reason": "stale"}
-
             closed = store.close(
                 request_id="req-1",
                 status="stale",
@@ -396,7 +373,6 @@ class EgressStoreTests(unittest.TestCase):
                 deny_reason="stale",
                 decision_body=body,
             )
-
             self.assertEqual(closed.status, "stale")
             self.assertEqual(closed.decided_by, "sweep")
             self.assertEqual(closed.decision_body, body)
@@ -422,7 +398,6 @@ class EgressStoreTests(unittest.TestCase):
             )
             count_before = store.count_events()
             row_before = store.get("req-1")
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.close(
                     request_id="req-1",
@@ -431,7 +406,6 @@ class EgressStoreTests(unittest.TestCase):
                     decided_by="cli",
                     decision_body={"decision": "deny"},
                 )
-
             self.assertEqual(store.count_events(), count_before)
             self.assertEqual(store.get("req-1"), row_before)
 
@@ -440,7 +414,6 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.close(
                     request_id="req-1",
@@ -449,7 +422,6 @@ class EgressStoreTests(unittest.TestCase):
                     decided_by="cli",
                     decision_body={"decision": "deny"},
                 )
-
     # -- 4. mark_apply -----------------------------------------------------
 
     def test_mark_apply_applied(self):
@@ -457,9 +429,7 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             row = store.mark_apply(request_id="req-1", outcome="applied", now=NOW_PLUS_1)
-
             self.assertEqual(row.status, "open")
             self.assertEqual(row.apply_status, "applied")
             self.assertEqual(row.apply_attempts, 1)
@@ -474,11 +444,9 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             row = store.mark_apply(
                 request_id="req-1", outcome="apply_failed", now=NOW_PLUS_1
             )
-
             self.assertEqual(row.status, "open")
             self.assertEqual(row.apply_status, "apply_failed")
             self.assertEqual(row.apply_attempts, 1)
@@ -499,11 +467,9 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             row = store.mark_apply(
                 request_id="req-1", outcome="ip_requires_cidr", now=NOW_PLUS_1
             )
-
             self.assertEqual(row.status, "open")
             self.assertEqual(row.apply_status, "ip_requires_cidr")
             self.assertEqual(row.apply_attempts, 1)
@@ -526,9 +492,7 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
             store.mark_apply(request_id="req-1", outcome="apply_failed", now=NOW_PLUS_1)
-
             row = store.mark_apply(request_id="req-1", outcome="applied", now=NOW_PLUS_2)
-
             self.assertEqual(row.apply_attempts, 2)
             self.assertEqual(row.apply_status, "applied")
             self.assertIsNone(row.last_error)
@@ -542,10 +506,8 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.mark_apply(request_id="req-1", outcome="pending", now=NOW_PLUS_1)
-
     # -- 5. mark_persist -----------------------------------------------------
 
     def test_mark_persist_persisted_sets_status_and_appends_event(self):
@@ -554,11 +516,9 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs(request_id="req-p"))
             events_before = store.count_events(request_id="req-p")
-
             row = store.mark_persist(
                 request_id="req-p", outcome="persisted", now=NOW_PLUS_1
             )
-
             self.assertEqual(row.persist_status, "persisted")
             self.assertEqual(store.count_events(request_id="req-p"), events_before + 1)
             self.assertEqual(
@@ -575,11 +535,9 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs(request_id="req-q"))
             events_before = store.count_events(request_id="req-q")
-
             row = store.mark_persist(
                 request_id="req-q", outcome="persist_failed", now=NOW_PLUS_1
             )
-
             self.assertEqual(row.persist_status, "persist_failed")
             self.assertEqual(store.count_events(request_id="req-q"), events_before + 1)
             self.assertEqual(
@@ -604,7 +562,6 @@ class EgressStoreTests(unittest.TestCase):
                     )
             finally:
                 store._conn = real_conn
-
             row = store.get("req-1")
             self.assertEqual(row, row_before)
             self.assertIsNone(row.persist_status)
@@ -616,10 +573,8 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.mark_persist(request_id="req-1", outcome="denied", now=NOW_PLUS_1)
-
     # -- mark_notified -------------------------------------------------------
 
     def test_mark_notified_appends_event_only(self):
@@ -628,9 +583,7 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
             row_before = store.get("req-1")
-
             store.mark_notified("req-1", NOW_PLUS_1)
-
             self.assertEqual(store.get("req-1"), row_before)
             self.assertEqual(
                 [event.kind for event in store.events_for("req-1")],
@@ -642,10 +595,8 @@ class EgressStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.mark_notified("no-such", NOW)
-
     # -- 6. denylist suppressed hits ------------------------------------------
 
     def _denylist_row(self, store: egress_store.EgressStore) -> None:
@@ -671,9 +622,7 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             self._denylist_row(store)
             events_before = store.count_events()
-
             row = store.suppressed_hit("req-1", NOW_PLUS_2)
-
             self.assertEqual(row.status, "denied")
             self.assertEqual(row.hit_count, 2)
             self.assertEqual(row.last_hit_at, NOW_PLUS_2)
@@ -687,10 +636,8 @@ class EgressStoreTests(unittest.TestCase):
             store.open_or_hit(**_open_kwargs())
             events_before = store.count_events()
             row_before = store.get("req-1")
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.suppressed_hit("req-1", NOW_PLUS_1)
-
             self.assertEqual(store.get("req-1"), row_before)
             self.assertEqual(store.count_events(), events_before)
 
@@ -706,7 +653,6 @@ class EgressStoreTests(unittest.TestCase):
                 decided_by="cli",
                 decision_body={"decision": "deny"},
             )
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.suppressed_hit("req-1", NOW_PLUS_2)
 
@@ -714,29 +660,23 @@ class EgressStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
-
             with self.assertRaises(egress_store.EgressStoreError):
                 store.suppressed_hit("no-such", NOW)
-
     # -- 7. atomicity ----------------------------------------------------------
 
     def _fail_event_inserts(self, store: egress_store.EgressStore):
         """Patch the store's connection so any event insert raises; returns
         the real connection for the caller's finally block."""
         real_conn = store._conn
-
         class _FailingConn:
             def execute(self, sql, parameters=()):
                 if "INSERT INTO events" in sql:
                     raise RuntimeError("injected event-write failure")
                 return real_conn.execute(sql, parameters)
-
             def commit(self):
                 real_conn.commit()
-
             def rollback(self):
                 real_conn.rollback()
-
         store._conn = _FailingConn()
         return real_conn
 
@@ -746,14 +686,12 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
             row_before = store.get("req-1")
-
             real_conn = self._fail_event_inserts(store)
             try:
                 with self.assertRaises(RuntimeError):
                     store.mark_apply(request_id="req-1", outcome="applied", now=NOW_PLUS_1)
             finally:
                 store._conn = real_conn
-
             self.assertEqual(store.get("req-1"), row_before)
             self.assertEqual(store.count_events(kind="applied"), 0)
 
@@ -761,14 +699,12 @@ class EgressStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
-
             real_conn = self._fail_event_inserts(store)
             try:
                 with self.assertRaises(RuntimeError):
                     store.open_or_hit(**_open_kwargs())
             finally:
                 store._conn = real_conn
-
             self.assertIsNone(store.get("req-1"))
             self.assertEqual(store.list_open(), [])
             self.assertEqual(store.count_events(), 0)
@@ -779,7 +715,6 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             store.open_or_hit(**_open_kwargs())
             row_before = store.get("req-1")
-
             real_conn = self._fail_event_inserts(store)
             try:
                 with self.assertRaises(RuntimeError):
@@ -793,14 +728,12 @@ class EgressStoreTests(unittest.TestCase):
                     )
             finally:
                 store._conn = real_conn
-
             row = store.get("req-1")
             self.assertEqual(row, row_before)
             self.assertEqual(row.status, "open")
             self.assertIsNone(row.decision_body)
             self.assertIsNone(row.decided_at)
             self.assertEqual(store.count_events(kind="allowed"), 0)
-
     # -- 8. concurrency ---------------------------------------------------------
 
     def test_concurrent_open_or_hit_on_one_key(self):
@@ -809,7 +742,6 @@ class EgressStoreTests(unittest.TestCase):
             self.addCleanup(store.shutdown)
             barrier = threading.Barrier(2, timeout=30)
             errors = []
-
             def worker(request_id):
                 try:
                     barrier.wait()
@@ -819,7 +751,6 @@ class EgressStoreTests(unittest.TestCase):
                         )
                 except BaseException as exc:  # collected, asserted below
                     errors.append(exc)
-
             threads = [
                 threading.Thread(target=worker, args=(request_id,))
                 for request_id in ("concurrent-1", "concurrent-2")
@@ -828,18 +759,15 @@ class EgressStoreTests(unittest.TestCase):
                 thread.start()
             for thread in threads:
                 thread.join(timeout=30)
-
             self.assertFalse(any(thread.is_alive() for thread in threads),
                              "both threads must finish")
             self.assertEqual(errors, [])
-
             open_rows = store.list_open()
             self.assertEqual(len(open_rows), 1)
             self.assertEqual(open_rows[0].hit_count, 100)
             self.assertEqual(store.count_events(kind="requested"), 1)
             self.assertEqual(store.count_events(kind="hit"), 99)
             self.assertEqual(store.count_events(), 100)
-
     # -- 9. list_open / list_recent ---------------------------------------------
 
     def test_list_open_ordering_and_container_filter(self):
@@ -853,7 +781,6 @@ class EgressStoreTests(unittest.TestCase):
             store.open_or_hit(
                 **_open_kwargs(request_id="req-a", container="bottle-a", now=NOW_PLUS_1)
             )
-
             self.assertEqual(
                 [row.request_id for row in store.list_open()],
                 ["req-1", "req-a", "req-b"],
@@ -883,32 +810,27 @@ class EgressStoreTests(unittest.TestCase):
                 )
             still_open_id = "req-open"
             store.open_or_hit(**_open_kwargs(request_id=still_open_id))
-
             recent = store.list_recent(since=NOW)
             self.assertEqual(
                 [row.request_id for row in recent],
                 ["req-late", "req-mid", "req-early"],
                 "newest first, boundary row included",
             )
-
             boundary = store.list_recent(since=NOW_PLUS_1)
             self.assertEqual(
                 [row.request_id for row in boundary],
                 ["req-late", "req-mid"],
                 "a row decided exactly at since is included",
             )
-
             limited = store.list_recent(since=NOW, limit=2)
             self.assertEqual(
                 [row.request_id for row in limited],
                 ["req-late", "req-mid"],
             )
-
             self.assertEqual(
                 [row.request_id for row in store.list_recent(since=NOW_PLUS_2)],
                 ["req-late"],
             )
-
     # -- events_for / count_events ------------------------------------------------
 
     def test_events_for_in_id_order(self):
@@ -927,7 +849,6 @@ class EgressStoreTests(unittest.TestCase):
                 decided_by="cli",
                 decision_body={"decision": "deny"},
             )
-
             events = store.events_for("req-1")
             self.assertEqual(
                 [event.id for event in events],
@@ -946,14 +867,12 @@ class EgressStoreTests(unittest.TestCase):
             store.open_or_hit(**_open_kwargs(request_id="req-1"))
             store.open_or_hit(**_open_kwargs(request_id="req-2", host="api.github.com"))
             store.mark_notified("req-1", NOW_PLUS_1)
-
             self.assertEqual(store.count_events(), 3)
             self.assertEqual(store.count_events(kind="requested"), 2)
             self.assertEqual(store.count_events(kind="notified"), 1)
             self.assertEqual(store.count_events(kind="allowed"), 0)
             self.assertEqual(store.count_events(request_id="req-1"), 2)
             self.assertEqual(store.count_events(kind="hit", request_id="req-1"), 0)
-
     # -- get -----------------------------------------------------------------------
 
     def test_get_unknown_request_returns_none(self):
@@ -961,31 +880,33 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             self.assertIsNone(store.get("no-such"))
-
     # -- 10. import_open -------------------------------------------------------------
 
     def test_import_open_current_month_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            log = egress_log.EgressLog(root)
-            log.append(
-                "requested",
-                "req-imp",
-                ts=MAY,
-                container="coding-brassbottle",
-                host="docs.stripe.com",
-                port=443,
-                uid=1000,
-                comm="curl",
-                reason="api docs",
+            self._write_legacy_log(
+                root,
+                MAY,
+                [
+                    {
+                        "ts": "2026-05-20T10:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-imp",
+                        "container": "coding-brassbottle",
+                        "host": "docs.stripe.com",
+                        "port": 443,
+                        "uid": 1000,
+                        "comm": "curl",
+                        "reason": "api docs",
+                    },
+                    {"ts": "2026-05-20T10:00:01Z", "kind": "hit", "request_id": "req-imp", "count": 1},
+                    {"ts": "2026-05-20T10:00:02Z", "kind": "hit", "request_id": "req-imp", "count": 1},
+                ],
             )
-            log.append("hit", "req-imp", ts=MAY, count=1)
-            log.append("hit", "req-imp", ts=MAY, count=1)
-
             store = self._store(root)
             self.addCleanup(store.shutdown)
-            inserted = store.import_open(log, now=MAY)
-
+            inserted = store.import_open(now=MAY)
             self.assertEqual(inserted, 1)
             row = store.get("req-imp")
             self.assertIsNotNone(row)
@@ -1006,45 +927,52 @@ class EgressStoreTests(unittest.TestCase):
     def test_import_open_second_call_inserts_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            log = egress_log.EgressLog(root)
-            log.append(
-                "requested",
-                "req-imp",
-                ts=MAY,
-                container="coding-brassbottle",
-                host="docs.stripe.com",
-                port=443,
+            self._write_legacy_log(
+                root,
+                MAY,
+                [
+                    {
+                        "ts": "2026-05-20T10:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-imp",
+                        "container": "coding-brassbottle",
+                        "host": "docs.stripe.com",
+                        "port": 443,
+                    }
+                ],
             )
             store = self._store(root)
             self.addCleanup(store.shutdown)
-            self.assertEqual(store.import_open(log, now=MAY), 1)
-            self.assertEqual(store.import_open(log, now=MAY), 0)
+            self.assertEqual(store.import_open(now=MAY), 1)
+            self.assertEqual(store.import_open(now=MAY), 0)
             self.assertEqual(store.count_events(), 1)
 
     def test_import_open_carried_forward_request_has_null_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            log = egress_log.EgressLog(root)
-            log.append(
-                "requested",
-                "req-carry",
-                ts=AUG_END,
-                container="coding-brassbottle",
-                host="docs.stripe.com",
-                port=443,
-                uid=1000,
-                comm="curl",
-                reason="api docs",
+            self._write_legacy_log(
+                root,
+                SEP_START,
+                [
+                    {
+                        "ts": "2026-09-01T00:05:00Z",
+                        "kind": "carry_forward",
+                        "open": [
+                            {
+                                "request_id": "req-carry",
+                                "state": "requested",
+                                "container": "coding-brassbottle",
+                                "host": "docs.stripe.com",
+                                "port": 443,
+                                "opened_at": "2026-08-31T23:00:00Z",
+                            }
+                        ],
+                    }
+                ],
             )
-            # An append in the next month rotates the log and writes the
-            # carry-forward header; the prior month's records are not read
-            # again, so uid/comm/reason are lost for the import.
-            log.append("notified", "req-carry", ts=SEP_START)
-
             store = self._store(root)
             self.addCleanup(store.shutdown)
-            inserted = store.import_open(log, now=SEP_START)
-
+            inserted = store.import_open(now=SEP_START)
             self.assertEqual(inserted, 1)
             row = store.get("req-carry")
             self.assertIsNotNone(row)
@@ -1065,14 +993,19 @@ class EgressStoreTests(unittest.TestCase):
     def test_import_open_skips_ids_already_in_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            log = egress_log.EgressLog(root)
-            log.append(
-                "requested",
-                "req-imp",
-                ts=MAY,
-                container="coding-brassbottle",
-                host="docs.stripe.com",
-                port=443,
+            self._write_legacy_log(
+                root,
+                MAY,
+                [
+                    {
+                        "ts": "2026-05-20T10:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-imp",
+                        "container": "coding-brassbottle",
+                        "host": "docs.stripe.com",
+                        "port": 443,
+                    }
+                ],
             )
             store = self._store(root)
             self.addCleanup(store.shutdown)
@@ -1085,37 +1018,304 @@ class EgressStoreTests(unittest.TestCase):
                 )
             )
             events_before = store.count_events()
-
-            self.assertEqual(store.import_open(log, now=MAY), 0)
+            self.assertEqual(store.import_open(now=MAY), 0)
             self.assertEqual(store.count_events(), events_before)
+    # -- 11. legacy import helpers (fold/parse semantics, ported from the
+    #       retired log module's own tests) ------------------------------
 
-    # -- 11. Dark import audit ---------------------------------------------------------
-
-    def test_dark_no_file_outside_store_mentions_egress_store(self):
-        store_path = Path(egress_store.__file__).resolve()
-        offenders = []
-        for dirname in ("src", "bin"):
-            base = REPO_ROOT / dirname
-            for path in sorted(base.rglob("*")):
-                if not path.is_file():
-                    continue
-                if path.resolve() == store_path:
-                    continue
-                if path.suffix in {".pyc", ".pyo"} or "__pycache__" in path.parts:
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                if "egress_store" in text:
-                    offenders.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(
-            offenders,
-            [],
-            "the store is Dark: no file outside src/egress_store.py may mention it",
+    def _write_legacy_log(self, root: Path, when: datetime, lines: list[dict]) -> Path:
+        path = egress_store._legacy_log_path(
+            root, egress_store._legacy_month_filename(when)
         )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = "".join(
+            json.dumps(line, separators=(",", ":"), sort_keys=True) + "\n"
+            for line in lines
+        )
+        path.write_text(payload, encoding="utf-8")
+        return path
 
+    def test_legacy_fold_is_stateless_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                MARCH,
+                [
+                    {
+                        "ts": "2026-03-31T12:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-a",
+                        "container": "cb",
+                        "host": "docs.stripe.com",
+                        "port": 443,
+                    }
+                ],
+            )
+            first = egress_store._legacy_fold_queue(root, now=MARCH)
+            second = egress_store._legacy_fold_queue(root, now=MARCH)
+            self.assertEqual(set(first), {"req-a"})
+            self.assertEqual(set(second), {"req-a"})
+            # Read-only: nothing appears beside the log, and no month file is
+            # created for a month that has none.
+            self.assertEqual(sorted(q.name for q in root.iterdir()), ["log"])
+            self.assertEqual(
+                sorted(q.name for q in (root / "log").iterdir()),
+                ["2026-03.jsonl"],
+            )
 
+    def test_legacy_fold_on_empty_root_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                egress_store._legacy_fold_queue(Path(tmp), now=SEP_START), {}
+            )
+
+    def test_legacy_carry_forward_carries_open_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                SEP_START,
+                [
+                    {
+                        "ts": "2026-09-01T00:05:00Z",
+                        "kind": "carry_forward",
+                        "open": [
+                            {
+                                "request_id": "req-a",
+                                "state": "requested",
+                                "container": "coding-brassbottle",
+                                "host": "docs.stripe.com",
+                                "port": 443,
+                                "opened_at": "2026-08-31T23:00:00Z",
+                            }
+                        ],
+                    }
+                ],
+            )
+            state = egress_store._legacy_fold_queue(root, now=SEP_START)
+            self.assertIn("req-a", state)
+            req = state["req-a"]
+            self.assertEqual(req.container, "coding-brassbottle")
+            self.assertEqual(req.host, "docs.stripe.com")
+            self.assertEqual(req.port, 443)
+            self.assertEqual(req.opened_at, "2026-08-31T23:00:00Z")
+
+    def test_legacy_carry_forward_mid_file_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                APRIL,
+                [
+                    {
+                        "ts": "2026-04-02T09:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-a",
+                    }
+                ],
+            )
+            path = egress_store._legacy_log_path(
+                root, egress_store._legacy_month_filename(APRIL)
+            )
+            lines = path.read_text(encoding="utf-8").splitlines()
+            lines.insert(1, json.dumps({"ts": "2026-04-02T10:00:00Z", "kind": "carry_forward", "open": []}))
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with self.assertRaises(egress_store.EgressStoreError):
+                egress_store._legacy_fold_queue(root, now=APRIL)
+
+    def test_legacy_closed_request_leaves_no_host_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                APRIL,
+                [
+                    {
+                        "ts": "2026-04-02T09:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-i",
+                        "host": "secret.example.com",
+                    },
+                    {
+                        "ts": "2026-04-02T09:01:00Z",
+                        "kind": "allowed",
+                        "request_id": "req-i",
+                    },
+                ],
+            )
+            state = egress_store._legacy_fold_queue(root, now=APRIL)
+            self.assertEqual(state, {})
+
+    def test_legacy_torn_trailing_line_discarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                APRIL,
+                [
+                    {
+                        "ts": "2026-04-02T09:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-e",
+                    },
+                    {
+                        "ts": "2026-04-02T09:00:00Z",
+                        "kind": "notified",
+                        "request_id": "req-e",
+                    },
+                ],
+            )
+            path = egress_store._legacy_log_path(
+                root, egress_store._legacy_month_filename(APRIL)
+            )
+            with path.open("ab") as handle:
+                handle.write(b'{"ts":"2026-04-02T10:00:00Z","kind":"hit","request')
+            state = egress_store._legacy_fold_queue(root, now=APRIL)
+            self.assertEqual(state["req-e"].state, "notified")
+
+    def test_legacy_unparsable_middle_line_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                APRIL,
+                [
+                    {
+                        "ts": "2026-04-02T09:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-f",
+                    }
+                ],
+            )
+            path = egress_store._legacy_log_path(
+                root, egress_store._legacy_month_filename(APRIL)
+            )
+            lines = path.read_text(encoding="utf-8").splitlines()
+            lines.insert(
+                1,
+                json.dumps(
+                    {
+                        "ts": "2026-04-02T09:00:00Z",
+                        "kind": "notified",
+                        "request_id": "req-f",
+                    }
+                ),
+            )
+            # A bad line between two good ones: not a torn trailing line.
+            lines.insert(2, "{not valid json")
+            lines.append(
+                json.dumps(
+                    {
+                        "ts": "2026-04-02T09:00:01Z",
+                        "kind": "hit",
+                        "request_id": "req-f",
+                    }
+                )
+            )
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with self.assertRaises(egress_store.EgressStoreError):
+                egress_store._legacy_fold_queue(root, now=APRIL)
+
+    def test_legacy_unknown_event_kind_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                APRIL,
+                [
+                    {
+                        "ts": "2026-04-02T09:00:00Z",
+                        "kind": "expired",
+                        "request_id": "req-g",
+                    }
+                ],
+            )
+            with self.assertRaises(egress_store.EgressStoreError):
+                egress_store._legacy_fold_queue(root, now=APRIL)
+
+    def test_legacy_details_for_ids_reads_hits_and_meta_in_one_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_legacy_log(
+                root,
+                MAY,
+                [
+                    {
+                        "ts": "2026-05-20T10:00:00Z",
+                        "kind": "requested",
+                        "request_id": "req-imp",
+                        "container": "coding-brassbottle",
+                        "host": "docs.stripe.com",
+                        "port": 443,
+                        "uid": 1000,
+                        "comm": "curl",
+                        "reason": "api docs",
+                    },
+                    {"ts": "2026-05-20T10:00:01Z", "kind": "hit", "request_id": "req-imp", "count": 1},
+                    {"ts": "2026-05-20T10:00:02Z", "kind": "hit", "request_id": "req-imp", "count": 1},
+                ],
+            )
+            queue = egress_store._legacy_fold_queue(root, now=MAY)
+            details = egress_store._legacy_request_details_for_ids(
+                root, list(queue), queue=queue, now=MAY
+            )
+            detail = details["req-imp"]
+            self.assertEqual(detail.container, "coding-brassbottle")
+            self.assertEqual(detail.host, "docs.stripe.com")
+            self.assertEqual(detail.port, 443)
+            self.assertEqual(detail.uid, 1000)
+            self.assertEqual(detail.comm, "curl")
+            self.assertEqual(detail.reason, "api docs")
+            self.assertEqual(detail.hit_count, 3)
+
+    def test_legacy_details_for_ids_empty_when_wanted_not_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(
+                egress_store._legacy_request_details_for_ids(
+                    root, ["req-x"], queue={}, now=MAY
+                ),
+                {},
+            )
+
+    def test_legacy_fold_never_exposes_allowlist_names(self):
+        forbidden = re.compile(r"(?i)(allow|approve|permit)")
+        for name in dir(egress_store):
+            if not name.startswith("_legacy_") and not name.startswith("import_open"):
+                continue
+            with self.subTest(name=name):
+                self.assertIsNone(
+                    forbidden.search(name),
+                    f"name {name!r} suggests an egress allowlist API",
+                )
+    # -- 12. timestamp helpers ---------------------------------------------------
+
+    def test_iso_ts_formats_and_defaults_to_now(self):
+        self.assertEqual(_iso_ts(NOW), "2026-09-23T12:00:00Z")
+        self.assertEqual(_iso_ts(NOW.replace(tzinfo=None)), "2026-09-23T12:00:00Z")
+        current = _iso_ts(None)
+        self.assertRegex(current, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+    # -- 13. request_count / events reads ------------------------------------------
+
+    def test_request_count_and_events_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(Path(tmp))
+            self.addCleanup(store.shutdown)
+            self.assertEqual(store.request_count(), 0)
+            store.open_or_hit(**_open_kwargs())
+            store.open_or_hit(**_open_kwargs(request_id="req-2", host="api.github.com"))
+            store.mark_notified("req-1", NOW_PLUS_1)
+            self.assertEqual(store.request_count(), 2)
+            self.assertEqual(
+                [event.kind for event in store.events()],
+                ["requested", "requested", "notified"],
+            )
+            self.assertEqual(
+                [event.request_id for event in store.events(kind="requested")],
+                ["req-1", "req-2"],
+            )
+            self.assertEqual(store.events(kind="allowed"), [])
 def _open_kwargs_fields():
     return {
         "container": "coding-brassbottle",
@@ -1126,7 +1326,5 @@ def _open_kwargs_fields():
         "reason": "api docs",
         "hold_seconds": 90,
     }
-
-
 if __name__ == "__main__":
     unittest.main()

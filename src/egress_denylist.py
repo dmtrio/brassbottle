@@ -31,12 +31,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-# egress_log is a LEAF module (stdlib imports only — see its own docstring),
-# so importing _iso_ts from it here creates no cycle: this is the
-# same direction this module already imports in (see egress_broker_host's
-# top, which imports EgressLog from here too). Do not duplicate these two
-# implementations a third time.
-from egress_log import _iso_ts
+# egress_store is a LEAF module (stdlib imports only — see its own docstring),
+# so importing _iso_ts from it here creates no cycle: the store is where the
+# timestamp helpers live since the legacy JSONL log was retired. Do not
+# duplicate this implementation a third time.
+from egress_store import _iso_ts
 
 LOG = logging.getLogger(__name__)
 
