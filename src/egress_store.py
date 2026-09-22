@@ -42,7 +42,8 @@ Schema (SQLite, journal_mode=WAL, foreign_keys=ON):
       id              INTEGER PRIMARY KEY
       request_id      TEXT NOT NULL REFERENCES requests
       kind            TEXT NOT NULL      -- requested | hit | notified | allowed |
-                                         -- denied | applied | apply_failed | stale
+                                         -- denied | applied | apply_failed |
+                                         -- persisted | persist_failed | stale
       ts              TEXT NOT NULL      -- ISO 8601 UTC
       fields          TEXT               -- JSON, the kind's extra fields
                                          -- (count, scope, reason, decided_by, zone)
@@ -804,15 +805,19 @@ class EgressStore:
         return updated
 
     def mark_persist(self, *, request_id: str, outcome: str, now: datetime) -> RequestRow:
-        """Record the persistent-deny write outcome; no event of its own.
+        """Record the persistent-deny write outcome.
 
-        outcome must be persisted | persist_failed. The `denied` event
-        already carries the zone, so this only sets persist_status.
+        outcome must be persisted | persist_failed. Like every state change
+        except `suppressed_hit`, this appends its event in the same
+        transaction as the row update: `persisted` sets persist_status and
+        appends a `persisted` event; `persist_failed` sets it and appends a
+        `persist_failed` event. Each carries fields {"outcome": <outcome>}.
         """
         if outcome not in PERSIST_OUTCOMES:
             raise EgressStoreError(
                 f"invalid persist outcome {outcome!r} (must be one of {sorted(PERSIST_OUTCOMES)})"
             )
+        now_ts = _utc_now(now)
         started = time.monotonic()
         with self._lock:
             with self._transaction():
@@ -822,6 +827,7 @@ class EgressStore:
                     "UPDATE requests SET persist_status = ? WHERE request_id = ?",
                     (outcome, request_id),
                 )
+                self._insert_event(request_id, outcome, now_ts, {"outcome": outcome})
                 updated = self._fetch_row(request_id)
                 assert updated is not None
         self._log_boundary("mark_persist", request_id, updated.status, started, outcome=outcome)
