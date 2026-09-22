@@ -12,12 +12,14 @@
 #
 # Git routing is PER IDENTITY: every env file carries only the rows that
 # serve its identity — the catch-all/simple-form table (GIT_HOST_TOKENS:
-# simple-form git.hosts entries, git.token, git.orgs, and a list-form
-# host's catch-all entry) plus the rows of the list-form entries that name
-# it (GIT_IDENTITY_HOST_TOKENS records), and GH_TOKEN only when ITS
-# github.com row exists (its own row's variable, or the catch-all's). An
-# identity no entry names and no catch-all covers gets no row for that
-# host and no GH_TOKEN: one agent's env file never contains another
+# simple-form git.hosts entries and a list-form host's catch-all entry)
+# plus the rows of the list-form entries that name it
+# (GIT_IDENTITY_HOST_TOKENS records), and GH_TOKEN only when ITS
+# github.com row exists — resolved from the identity's own
+# GIT_IDENTITY_TOKEN_SOURCES record (manifest.py emits one for every
+# identity the container can run as, named by an entry or covered by the
+# catch-all). An identity whose table has no row for the CLI host gets no
+# row there and no GH_TOKEN: one agent's env file never contains another
 # entry's token.
 #
 # The VALUES come from the current environment via indirect expansion
@@ -86,21 +88,21 @@ EOF
     printf '%s' "$out"
 }
 
-# identity_source <ident> <git_token_source> <git_identity_token_sources>
+# identity_source <ident> <git_identity_token_sources>
 #   The variable GH_TOKEN is written from for identity <ident>: the CLI
-#   host's row variable of ITS OWN table (a GIT_IDENTITY_TOKEN_SOURCES
-#   record: ident<TAB>VAR) when one of its entries names the CLI host, else
-#   GIT_TOKEN_SOURCE (the catch-all's CLI row). Empty = no CLI-host row for
-#   this identity anywhere: no GH_TOKEN line.
+#   host's row variable of ITS OWN table — a GIT_IDENTITY_TOKEN_SOURCES
+#   record (ident<TAB>VAR; manifest.py emits one for every identity the
+#   container can run as, named by an entry or covered by the catch-all).
+#   Empty = no CLI-host row for this identity anywhere: no GH_TOKEN line.
 identity_source() {
-    local ident="$1" git_token_source="$2" git_identity_token_sources="$3"
+    local ident="$1" git_identity_token_sources="$2"
     local rid rvar
     while IFS=$'\t' read -r rid rvar; do
         [ "$rid" = "$ident" ] && { printf '%s' "$rvar"; return 0; }
     done <<EOF
 $git_identity_token_sources
 EOF
-    printf '%s' "$git_token_source"
+    return 0
 }
 
 # git_env_block <pairs> <cli_source>
@@ -141,7 +143,7 @@ git_env_block() {
     return 0
 }
 
-# write_keyfiles <keys_dir> <shim_agents> <plugin_env_secrets> <agent_secrets> [<git_host_tokens> [<git_token_source> [<git_identity_host_tokens> [<git_identity_token_sources>]]]]
+# write_keyfiles <keys_dir> <shim_agents> <plugin_env_secrets> <agent_secrets> [<git_host_tokens> [<git_identity_host_tokens> [<git_identity_token_sources>]]]
 #   keys_dir            already exists, mode 700, wiped of *.env by the caller
 #   shim_agents         space-separated agent names (match the Dockerfile shims)
 #   plugin_env_secrets  legacy shared passthrough records (currently empty)
@@ -150,25 +152,24 @@ git_env_block() {
 #                       the catch-all/simple-form table (manifest.py); each
 #                       SOURCEVAR is written under its own name beside the
 #                       table itself, in EVERY identity's file
-#   git_token_source    GIT_TOKEN_SOURCE — the catch-all's CLI host row
-#                       variable (manifest.py); the plain GH_TOKEN is written
-#                       from THIS variable for identities with no github.com
-#                       row of their own, by indirect expansion, never from
-#                       the calling environment: empty = no catch-all CLI row
 #   git_identity_host_tokens  GIT_IDENTITY_HOST_TOKENS — identity<TAB>pairs
 #                       records (manifest.py): the rows of the list-form
 #                       entries naming each identity; a named row overrides
 #                       the catch-all row for its host
 #   git_identity_token_sources  GIT_IDENTITY_TOKEN_SOURCES — identity<TAB>VAR
-#                       records (manifest.py): each identity's own CLI-host
-#                       row variable, written as its plain GH_TOKEN
+#                       records (manifest.py): each identity's effective
+#                       CLI-host row variable (its named github.com row, else
+#                       the catch-all's), written as its plain GH_TOKEN by
+#                       indirect expansion, never from the calling
+#                       environment. No record for an identity = no CLI-host
+#                       row in its table: no GH_TOKEN line.
 # Writes one file per shim agent AND user.env (the `user` identity, sourced
 # by the image's .bashrc — git routing only, never plugin secrets). Reads
 # every SOURCE var from the environment (indirect expansion).
 write_keyfiles() {
     local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" \
-        git_host_tokens="${5:-}" git_token_source="${6:-}" \
-        git_identity_host_tokens="${7:-}" git_identity_token_sources="${8:-}"
+        git_host_tokens="${5:-}" \
+        git_identity_host_tokens="${6:-}" git_identity_token_sources="${7:-}"
     local shared="" slot src hint agent a f line pairs cli_source
 
     # Shared block: legacy passthroughs. The heredoc keeps the loop in this
@@ -193,7 +194,7 @@ EOF
     # the umask default even for the window until the trailing chmod.
     for a in $shim_agents; do
         pairs=$(identity_table "$a" "$git_host_tokens" "$git_identity_host_tokens")
-        cli_source=$(identity_source "$a" "$git_token_source" "$git_identity_token_sources")
+        cli_source=$(identity_source "$a" "$git_identity_token_sources")
         { printf '%s' "$shared"; git_env_block "$pairs" "$cli_source"; } > "$keys_dir/$a.env"
         chmod 600 "$keys_dir/$a.env"
     done
@@ -203,7 +204,7 @@ EOF
     # exactly like an agent's, but NO plugin secrets: those are agent-scoped
     # and never reached the human's shell before per-identity key files.
     pairs=$(identity_table user "$git_host_tokens" "$git_identity_host_tokens")
-    cli_source=$(identity_source user "$git_token_source" "$git_identity_token_sources")
+    cli_source=$(identity_source user "$git_identity_token_sources")
     { git_env_block "$pairs" "$cli_source"; } > "$keys_dir/user.env"
     chmod 600 "$keys_dir/user.env"
 

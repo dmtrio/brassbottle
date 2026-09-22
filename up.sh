@@ -138,23 +138,22 @@ fi
 # The CLI host's token never rides the up.sh environment (secrets.env may
 # define GH_TOKEN, but nothing here consumes or forwards it): keyfiles.sh
 # resolves the plain GH_TOKEN per identity from the identity's own CLI-host
-# row (GIT_IDENTITY_TOKEN_SOURCES) or the catch-all's (GIT_TOKEN_SOURCE —
-# CLI_TOKEN_VARS, in manifest.py, is the one place that names the CLI host
-# for routing). GIT_TOKEN_SOURCE empty = the catch-all has NO CLI row: no
-# GH_TOKEN line for unnamed identities.
+# row — a GIT_IDENTITY_TOKEN_SOURCES record, which manifest.py emits for
+# every identity the container can run as (a named github.com row, else the
+# catch-all's). CLI_TOKEN_VARS, in manifest.py, is the one place that names
+# the CLI host for routing. No record = no CLI row for that identity: no
+# GH_TOKEN line.
 
 # Up-time notices (a repo host with no git.hosts row; a bound git host missing
 # from capabilities.egress) — the real logic lives in src/git_notices.sh (sourced
 # here, unit-tested by tests/bash.test.sh), the same precedent as keyfiles.sh.
 . "$SCRIPT_DIR/src/git_notices.sh"
 git_host_notices "$REPOS" "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS"
-git_orgs_host_notice "$REPOS" "$GIT_HOST_TOKENS" "$GIT_ORG_ROUTED_HOSTS"
 git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"
 
 # Per-repo author attribution (src/git_identity.sh, sourced here — the real
 # lookup/stamping logic is unit-tested by tests/bash.test.sh, same precedent
-# as git_notices.sh). Two tables, never coexisting in one manifest:
-# GIT_ORG_IDENTITIES (git.orgs) and GIT_HOST_IDENTITIES (git.hosts name/email).
+# as git_notices.sh). One table: GIT_HOST_IDENTITIES (git.hosts name/email).
 . "$SCRIPT_DIR/src/git_identity.sh"
 
 COMPOSE_FILES="-f $SCRIPT_DIR/compose/docker-compose.local.yml"
@@ -206,7 +205,7 @@ rm -f "$KEYS_PATH"/*.env
 # value lookups happen against the secrets.env this shell already sourced.
 . "$SCRIPT_DIR/src/keyfiles.sh"
 write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES"
+    "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES"
 
 # ── Host paths + platform ─────────────────────────────────────────────────────
 ARTIFACTS_PATH="$BASE_PATH/artifacts/$NAME"
@@ -456,9 +455,9 @@ if [ -n "$REPOS" ]; then
     # The bootstrap exec isn't shim-launched and runs as NO agent and NO
     # identity, so it takes the catch-all/simple-form rows ONLY:
     # GIT_HOST_TOKENS (manifest.py's catch-all table — simple-form git.hosts
-    # entries, git.token, git.orgs, and a list-form host's catch-all entry;
-    # rows that serve named identities only are deliberately NOT here) plus
-    # every variable it names — git-credential-org resolves the clone's host
+    # entries and a list-form host's catch-all entry; rows that serve named
+    # identities only are deliberately NOT here) plus every variable it
+    # names — git-credential-org resolves the clone's host
     # through the table and reads each value by indirect expansion. A
     # manifest serving a host through named identities only clones it
     # anonymously; that is the stated rule, and the failed-clone warning
@@ -494,18 +493,14 @@ EOF
                         echo "WARNING: clone of '$RNAME' failed — for a non-github host check capabilities.egress includes it (repo hosts are never auto-allowlisted), then that git.hosts.$_h.token names a variable set in secrets.env (a token is presented to the host its own row names, never to another host; gh logins are never sent anywhere)"
                         ;;
                 esac; }
-        # Per-repo identity attribution: a repo whose OWNER has a git.orgs
-        # override with a name/email, or whose HOST has one in its git.hosts
-        # entry, is stamped repo-local user.name/email so commits carry the
-        # right identity. Repos matching neither inherit the container-global
-        # identity from entrypoint.sh. The two tables never coexist in one
-        # manifest (manifest.py rejects git.hosts beside git.token/git.orgs),
-        # so there is no precedence question between the two lookups.
-        # apply_repo_identity splits $RURL fresh itself — the lookup cannot
-        # be retargeted by a stale $_h/$_p from earlier in the loop (only the
-        # clone-failure hint above consumes those).
-        apply_repo_identity "$CNAME" "$RNAME" "$RURL" \
-            "$GIT_ORG_IDENTITIES" "$GIT_HOST_IDENTITIES"
+        # Per-repo identity attribution: a repo whose HOST has a name/email
+        # record in its git.hosts entry is stamped repo-local
+        # user.name/user.email so commits carry the right identity. Repos
+        # matching no record inherit the container-global identity from
+        # entrypoint.sh. apply_repo_identity splits $RURL fresh itself — the
+        # lookup cannot be retargeted by a stale $_h/$_p from earlier in the
+        # loop (only the clone-failure hint above consumes those).
+        apply_repo_identity "$CNAME" "$RNAME" "$RURL" "$GIT_HOST_IDENTITIES"
     done <<EOF
 $REPOS
 EOF

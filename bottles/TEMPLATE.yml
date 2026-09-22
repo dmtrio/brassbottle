@@ -14,9 +14,6 @@ task: coding                       # label: coding | research | ... (information
 #                                  # git init at /workspace/repos/scratch
 #  - https://github.com/org/app.git                # name = URL basename
 #  - {name: lib, url: https://github.com/org/lib.git}
-forge: github                      # github | gitea (informational — the git
-                                   # credential router covers github.com plus
-                                   # every non-github https:// host in repos:)
 
 git:
   name: ""                         # blank = your host git config
@@ -57,10 +54,6 @@ git:
   #
   # A row for a host OTHER than github.com must not name GH_TOKEN: gh reads
   # that variable from its environment and sends it to github.com.
-  # The old spellings feed the same catch-all table (git.token is the
-  # github.com row; each git.orgs entry is a row for the host its owner's
-  # repos resolve to) and are still accepted, meaning "everyone". git.hosts
-  # never mixes with git.token/git.orgs in one manifest.
   #
   # Optional per-host author (SIMPLE FORM only): a host entry may carry
   # name/email beside token: — repos cloned from that host are stamped
