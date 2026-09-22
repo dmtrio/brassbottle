@@ -1979,6 +1979,9 @@ chmod +x "$DJBOX/bin/allow-egress.sh"
 out=$(cd "$DJBOX" && ./djinn allow --watch extra 2>&1); rc=$?
 assert_rc "allow --watch (removed) exits 2" 2 "$rc"
 assert_contains "allow --watch names the compose singleton" "$out" "./djinn egress start"
+# The whole operator message, literally: one line, both commands, nothing else.
+expected_watch_msg='allow --watch was removed: run ./djinn egress start, then open the URL from ./djinn egress url'
+if [ "$out" = "$expected_watch_msg" ]; then pass "allow --watch prints exactly the one-line pointer"; else fail "allow --watch pointer line drifted"; printf '     got: [%s]\n' "$out"; fi
 out=$(cd "$DJBOX" && ./djinn allow foo example.com 2>&1); rc=$?
 assert_rc "allow <container> <domain> routes to allow-egress.sh" 0 "$rc"
 assert_contains "allow forwards container and domain" "$out" "ROUTE_ALLOW_EGRESS foo example.com"

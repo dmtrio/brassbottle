@@ -54,6 +54,8 @@ out=$(./djinn allow --watch 2>&1); rc=$?
 assert_rc "allow --watch (removed) → rc 2" 2 "$rc"
 assert_contains "allow --watch names ./djinn egress start" "$out" "./djinn egress start"
 assert_contains "allow --watch names the admin URL source" "$out" "./djinn egress url"
+expected_watch_msg='allow --watch was removed: run ./djinn egress start, then open the URL from ./djinn egress url'
+if [ "$out" = "$expected_watch_msg" ]; then pass "allow --watch prints exactly the one-line pointer"; else fail "allow --watch pointer line drifted"; printf '     got: [%s]\n' "$out"; fi
 
 echo "── ./djinn deny/deny --list/undeny: dispatch to src/egress_denylist.py ──"
 # deny/undeny are glue, same as every other subcommand: they hand off to
