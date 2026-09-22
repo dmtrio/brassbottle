@@ -164,8 +164,8 @@ def undeny_hint(zone: str, scope: str) -> str:
     """The `./djinn undeny ...` command that lifts a persisted deny entry.
 
     One implementation, two callers: egress_broker.py's HTTP 403 body (the
-    container-side denial the requesting process sees) and egress_watch.py's
-    operator acknowledgment line (format_denylist_ack) — both used to build
+    container-side denial the requesting process sees) and an operator-facing
+    caller's acknowledgment line (format_denylist_ack) — both used to build
     this string independently and could drift.
     """
     if scope == "global":

@@ -1976,15 +1976,9 @@ cat > "$DJBOX/bin/allow-egress.sh" <<'MOCK'
 echo "ROUTE_ALLOW_EGRESS $*"
 MOCK
 chmod +x "$DJBOX/bin/allow-egress.sh"
-cat > "$DJBOX/src/egress_watch.py" <<'MOCK'
-#!/usr/bin/env python3
-import sys
-print("ROUTE_EGRESS_WATCH", " ".join(sys.argv[1:]))
-MOCK
-chmod +x "$DJBOX/src/egress_watch.py"
 out=$(cd "$DJBOX" && ./djinn allow --watch extra 2>&1); rc=$?
-assert_rc "allow --watch routes to egress_watch.py" 0 "$rc"
-assert_contains "allow --watch execs watcher" "$out" "ROUTE_EGRESS_WATCH extra"
+assert_rc "allow --watch (removed) exits 2" 2 "$rc"
+assert_contains "allow --watch names the compose singleton" "$out" "./djinn egress start"
 out=$(cd "$DJBOX" && ./djinn allow foo example.com 2>&1); rc=$?
 assert_rc "allow <container> <domain> routes to allow-egress.sh" 0 "$rc"
 assert_contains "allow forwards container and domain" "$out" "ROUTE_ALLOW_EGRESS foo example.com"

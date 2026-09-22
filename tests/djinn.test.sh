@@ -45,15 +45,26 @@ out=$(./djinn bogus 2>&1); rc=$?
 assert_rc "unknown subcommand → rc 1" 1 "$rc"
 assert_contains "unknown subcommand names it" "$out" "unknown subcommand 'bogus'"
 
+echo "── ./djinn allow --watch: removed, points at the compose singleton ──"
+# The interactive terminal watcher is gone — the egress broker runs as a
+# compose singleton. The arm stays (rather than falling through to
+# allow-egress.sh, which would treat --watch as a container name) to point
+# the operator at the replacement with a distinct exit code.
+out=$(./djinn allow --watch 2>&1); rc=$?
+assert_rc "allow --watch (removed) → rc 2" 2 "$rc"
+assert_contains "allow --watch names ./djinn egress start" "$out" "./djinn egress start"
+assert_contains "allow --watch names the admin URL source" "$out" "./djinn egress url"
+
 echo "── ./djinn deny/deny --list/undeny: dispatch to src/egress_denylist.py ──"
 # deny/undeny are glue, same as every other subcommand: they hand off to
 # src/egress_denylist.py's add/list/remove subcommands (all real logic —
 # scope validation, atomic write, the daemon-first POST — is unit-tested in
 # tests/test_egress_denylist.py). This proves only the WIRING: the right
 # Python subcommand is actually reached, DJINN_HOME is resolved from
-# BASE_PATH (not guessed by the Python side — the same failure mode called
-# out for `allow --watch` above), and a usage error raised by Python
-# surfaces with djinn's own exit code, not swallowed by the bash dispatcher.
+# BASE_PATH (not guessed by the Python side — the same failure mode the
+# removed `allow --watch` arm used to guard against, see above), and a
+# usage error raised by Python surfaces with djinn's own exit code, not
+# swallowed by the bash dispatcher.
 DENY_HOME="$(mktemp -d)"
 trap 'rm -rf "$DENY_HOME"' EXIT
 

@@ -21,7 +21,6 @@ Usage: ./djinn <subcommand> [args...]
   admin    [--port N]               admin plane UI daemon (http://127.0.0.1:8817)
   versions audit                 read-only audit of the version-selection
                                    inventory (versions.yml + version-locations.yml)
-  allow    --watch                  interactive egress approval watcher
   allow    <container> <domain...>  add domains to a running container's egress allowlist
   deny     <zone> (--bottle <name> | --global) [--reason "..."]   persist a deny entry
   deny     --list                                                 list deny entries
@@ -48,24 +47,20 @@ case "${1:-}" in
     allow)
         shift
         if [ "${1:-}" = "--watch" ]; then
-            shift
-            # Source common.sh and hand the resolved home to Python in the
-            # environment, exactly as backup.sh does. Without this the watcher
-            # falls back to its own guess ($SCRIPT_DIR/.djinn), because the
-            # Python side reads only the DJINN_HOME *variable* and never
-            # ./.env — so a DJINN_HOME set there would leave the watcher
-            # polling an empty queue that nothing writes to, looking perfectly
-            # healthy while every container got a 401 on a token it could not
-            # match. Sourced late, so the usage/error paths above stay free of
-            # any ./.env dependency.
+            # The interactive terminal watcher was removed: the egress broker
+            # now runs as a compose singleton (`./djinn egress start`), which
+            # serves the same approval queue to the admin plane and to ntfy.
+            # Sourced late, so the usage/error paths above stay free of any
+            # ./.env dependency.
             . "$SCRIPT_DIR/src/common.sh"
-            exec env DJINN_HOME="$BASE_PATH" python3 "$SCRIPT_DIR/src/egress_watch.py" "$@"
+            echo "allow --watch was removed: run ./djinn egress start, then open the URL from ./djinn egress url" >&2
+            exit 2
         fi
         exec "$SCRIPT_DIR/bin/allow-egress.sh" "$@"
         ;;
     deny)
         shift
-        # Same DJINN_HOME resolution as `allow --watch`: source common.sh
+        # Same DJINN_HOME resolution as `allow --watch` above: source common.sh
         # late (usage/error paths stay ./.env-free) and hand BASE_PATH to
         # Python via the environment, never guessed by the Python side.
         . "$SCRIPT_DIR/src/common.sh"
