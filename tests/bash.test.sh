@@ -3,7 +3,7 @@
 # Hand-rolled execute-and-assert (same style as plugins.test.sh; no bats
 # dependency). Covers:
 #   - src/keyfiles.sh   key-file composition (sourced by up.sh)
-#   - src/git_notices.sh    up-time git.orgs/egress notices (sourced by up.sh)
+#   - src/git_notices.sh    up-time git host/egress notices (sourced by up.sh)
 #   - common.sh             BASE_PATH resolution (default / env / ./.env / broken)
 #   - allow-egress.sh       arg parsing + strict domain validation
 #   - update-agent-keys.sh  per-agent key edits (set / remove / common / list)
@@ -75,10 +75,10 @@ GH_TOKEN=ambient-leak
 out=$(git_host_token_pairs "")
 assert_eq "clone env with an empty table carries nothing (no GH_TOKEN forward)" "" "$out"
 unset GH_TOKEN
-# A manifest declaring git.hosts.github.com.token: GH_TOKEN_x resolves
-# GIT_TOKEN_SOURCE=GH_TOKEN_x (keyfiles resolves GH_TOKEN from it, the clone
-# env carries the table row variable with that secret's VALUE — no separate
-# bare GH_TOKEN forward to the clone).
+# A manifest declaring git.hosts.github.com.token: GH_TOKEN_x puts the row
+# in GIT_HOST_TOKENS (keyfiles resolves each identity's plain GH_TOKEN from
+# its own record, the clone env carries the table row variable with that
+# secret's VALUE — no separate bare GH_TOKEN forward to the clone).
 GH_TOKEN_x=new-token-value
 out=$(git_host_token_pairs "github.com=GH_TOKEN_x")
 assert_eq "clone env carries the git.hosts.github.com token variable" \
@@ -88,7 +88,7 @@ unset GH_TOKEN_x
 unset GH_TOKEN SRC_FRY SRC_X
 
 # warn_unbound_org_token and note_orphan_org_binding are gone with per-owner
-# routing (GH_HOST_<owner> bindings no longer exist): a host token is routed
+# routing (per-owner bindings no longer exist): a host token is routed
 # by the GIT_HOST_TOKENS row up.sh writes from the manifest, so update-agent-
 # keys.sh has nothing to warn about — it edits values, never the table.
 if grep -q 'warn_unbound_org_token\|note_orphan_org_binding' "$REPO/src/keyfiles.sh" \
@@ -106,13 +106,22 @@ SHIM="$(for f in "$REPO"/agents/*/agent.yml; do yq -r 'select(has("mcp")) | .bin
 SHIM="${SHIM% }"
 [ -n "$SHIM" ] || fail "no mcp-capable agents derived from agents/*/agent.yml (yq missing or descriptors moved?)"
 
+# The per-identity GH_TOKEN source records: one ident<TAB>VAR record per
+# identity write_keyfiles composes a file for (shim agents + user) — the
+# shape manifest.py emits for every identity the container can run as.
+id_sources() {  # <var> — records naming <var> as every identity's CLI row
+    local var="$1" a out=""
+    for a in $SHIM user; do out="${out}${a}"$'\t'"${var}"$'\n'; done
+    printf '%s' "$out"
+}
+
 d="$WORK/ck1"; mkdir -p "$d"; chmod 700 "$d"
 MCP_GATEWAY_TOKEN=gwval GH_TOKEN=ghval SRC_C=ckey SRC_P=pkey
 PES=$(printf 'MCP_GATEWAY_TOKEN\tMCP_GATEWAY_TOKEN\tgateway (run ./service.sh gateway once)\n')
 AS=$(printf 'claude\tOBSIDIAN_ANNOTATED_KEY\tSRC_C\npi\tANNOTATED_WATCH_KEY\tSRC_P\n')
-# No git table, no GIT_TOKEN_SOURCE: GH_TOKEN stays out of every key file
-# even though the environment carries it — GH_TOKEN is written only from the
-# CLI host's table row (the 6th argument), never from the ambient env.
+# No git table, no identity token sources: GH_TOKEN stays out of every key
+# file even though the environment carries it — GH_TOKEN is written only
+# from an identity's own token-sources record, never from the ambient env.
 write_keyfiles "$d" "$SHIM" "$PES" "$AS" >/dev/null
 
 assert_eq "claude.env = shared + its agent-scoped key (no GH_TOKEN: no table)" \
@@ -152,14 +161,16 @@ unset FOO BAR
 # variable it names — this is what git-credential-org resolves request hosts
 # through, so the table itself AND each named variable (under its own name,
 # exactly as written — no owner sanitisation) reach every shim agent. The
-# 6th argument is GIT_TOKEN_SOURCE, the CLI host's row variable: GH_TOKEN is
-# written from it by indirect expansion, never from the ambient environment.
+# 7th argument is GIT_IDENTITY_TOKEN_SOURCES: each identity's CLI-host row
+# variable, and GH_TOKEN is written from THAT record by indirect expansion,
+# never from the ambient environment.
 d="$WORK/ck4"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval GH_TOKEN_fry=frytok GIT_HOST_TOKENS_FRYVAR=gamut
 TABLE="github.com=GH_TOKEN git.example.test=GH_TOKEN_fry"
-# github.com's row names GH_TOKEN itself, so GIT_TOKEN_SOURCE=GH_TOKEN and
-# the table walk already carries the plain GH_TOKEN line (exactly once).
-write_keyfiles "$d" "$SHIM" "" "" "$TABLE" "GH_TOKEN" >/dev/null
+# github.com's row names GH_TOKEN itself, so every identity's CLI row is
+# GH_TOKEN and the table walk already carries the plain GH_TOKEN line
+# (exactly once).
+write_keyfiles "$d" "$SHIM" "" "" "$TABLE" "" "$(id_sources GH_TOKEN)" >/dev/null
 assert_eq "table + named variables land beside the CLI host's GH_TOKEN (github row)" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN\\ git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/codex.env")"
 assert_eq "table fan-out reaches every shim agent" \
@@ -171,23 +182,22 @@ unset GH_TOKEN GH_TOKEN_fry
 d="$WORK/ck4d"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN=defval SRC_SHARED=stok
 TABLE="github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED"
-write_keyfiles "$d" "codex" "" "" "$TABLE" "GH_TOKEN" >/dev/null
+write_keyfiles "$d" "codex" "" "" "$TABLE" "" "$(printf 'codex\tGH_TOKEN\n')" >/dev/null
 assert_eq "one shared variable written once, not per host" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN\\ git.example.test=SRC_SHARED\\ h2.test=SRC_SHARED\nGH_TOKEN=defval\nSRC_SHARED=stok' "$(cat "$d/codex.env")"
 unset GH_TOKEN SRC_SHARED
 
-# OLD SPELLING, end to end at the key-file level: the git.token spelling is
-# the CLI host's row github.com=GH_TOKEN_x, so GIT_TOKEN_SOURCE=GH_TOKEN_x
-# and GH_TOKEN equal to that secret's VALUE lands in every agent's key
-# file — written once, not twice. The value is read by indirect expansion
-# of the row variable, never from an ambient GH_TOKEN.
+# The CLI row end to end at the key-file level: the github.com row naming
+# GH_TOKEN_x makes GH_TOKEN equal to that secret's VALUE land in every
+# agent's key file — written once, not twice. The value is read by indirect
+# expansion of the row variable, never from an ambient GH_TOKEN.
 d="$WORK/ck7"; mkdir -p "$d"; chmod 700 "$d"
-GH_TOKEN_x=old-form-value
-write_keyfiles "$d" "$SHIM" "" "" "github.com=GH_TOKEN_x" "GH_TOKEN_x" >/dev/null
+GH_TOKEN_x=row-value
+write_keyfiles "$d" "$SHIM" "" "" "github.com=GH_TOKEN_x" "" "$(id_sources GH_TOKEN_x)" >/dev/null
 allhave=1; for a in $SHIM; do
-    [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=old-form-value\nGH_TOKEN=old-form-value' ] || allhave=0
+    [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=row-value\nGH_TOKEN=row-value' ] || allhave=0
 done
-assert_eq "git.token: X lands GH_TOKEN=<X's value> in every agent key file" "1" "$allhave"
+assert_eq "the CLI host's row lands GH_TOKEN=<row's value> in every agent key file" "1" "$allhave"
 unset GH_TOKEN_x
 
 # 5th/6th args omitted entirely still work (no table, no CLI row): nothing
@@ -199,14 +209,15 @@ assert_eq "5th arg omitted: no GIT_HOST_TOKENS line, no GH_TOKEN" "" "$(cat "$d/
 unset GH_TOKEN
 
 # NEW FORM, end to end at the key-file level: a manifest that declares
-# git.hosts.github.com.token: GH_TOKEN_x resolves GIT_TOKEN_SOURCE=GH_TOKEN_x,
-# so GH_TOKEN equal to that secret's VALUE lands in every agent's key file
-# alongside the table row naming its variable.
+# git.hosts.github.com.token: GH_TOKEN_x puts the row in the table, and its
+# variable becomes every identity's CLI row — so GH_TOKEN equal to that
+# secret's VALUE lands in every agent's key file alongside the table row
+# naming its variable.
 d="$WORK/ck6"; mkdir -p "$d"; chmod 700 "$d"
 GH_TOKEN_x=new-token-value
 GH_TOKEN=ambient-must-not-be-used
 TABLE="github.com=GH_TOKEN_x"
-write_keyfiles "$d" "$SHIM" "" "" "$TABLE" "GH_TOKEN_x" >/dev/null
+write_keyfiles "$d" "$SHIM" "" "" "$TABLE" "" "$(id_sources GH_TOKEN_x)" >/dev/null
 allhave=1; for a in $SHIM; do
     [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_x\nGH_TOKEN_x=new-token-value\nGH_TOKEN=new-token-value' ] || allhave=0
 done
@@ -214,7 +225,7 @@ assert_eq "git.hosts.github.com.token: GH_TOKEN becomes GH_TOKEN (table value) i
 unset GH_TOKEN GH_TOKEN_x
 
 # NOTHING DECLARED, end to end through the real derive: a manifest with no
-# git: section at all derives an empty table and an empty GIT_TOKEN_SOURCE;
+# git: section at all derives an empty table and no identity token sources;
 # feeding THOSE to write_keyfiles with GH_TOKEN and every row variable SET
 # in the environment still writes no GH_TOKEN and no table variable —
 # nothing reaches a key file that the manifest did not declare.
@@ -224,9 +235,9 @@ eval "$(printf '{"repos":["https://github.com/x/y.git"]}\n---agents---\na\t{"bin
       GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
       python3 "$REPO/src/manifest.py" --derive)"
 assert_eq "nothing declared: GIT_HOST_TOKENS derives empty" "" "$GIT_HOST_TOKENS"
-assert_eq "nothing declared: GIT_TOKEN_SOURCE derives empty" "" "$GIT_TOKEN_SOURCE"
+assert_eq "nothing declared: no identity token sources derive" "" "$GIT_IDENTITY_TOKEN_SOURCES"
 GH_TOKEN=defval GH_TOKEN_fry=fryval
-write_keyfiles "$d" "claude" "" "" "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" >/dev/null
+write_keyfiles "$d" "claude" "" "" "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 assert_eq "nothing declared: no GH_TOKEN or table variable in the key file" "" "$(cat "$d/claude.env")"
 out=$(git_host_token_pairs "$GIT_HOST_TOKENS")
 assert_eq "nothing declared: the clone env is empty too" "" "$out"
@@ -234,15 +245,26 @@ unset GH_TOKEN GH_TOKEN_fry
 
 # The matching positive: with git.hosts.github.com.token: GH_TOKEN_fry the
 # SAME real derive puts GH_TOKEN=<fry's value> in every key file and the
-# clone env.
+# clone env (every identity's token-sources record names the row variable).
 d="$WORK/ck8"; mkdir -p "$d"; chmod 700 "$d"
-eval "$(printf '{"repos":["https://github.com/x/y.git"],"git":{"hosts":{"github.com":{"token":"GH_TOKEN_fry"}}}}\n---agents---\na\t{"binary":"a","install":"x"}\n' \
+# Real shipped agent descriptors: up.sh streams every agents/<name>/agent.yml
+# to manifest.py, so tests that derive then compose key files for the SHIM
+# agents must do the same (identities are the mcp-capable binaries).
+real_agents_json() {
+    for f in "$REPO"/agents/*/agent.yml; do
+        printf '%s\t' "$(basename "$(dirname "$f")")"
+        yq -o=json -I=0 "$f"
+    done
+}
+
+eval "$(printf '{"repos":["https://github.com/x/y.git"],"git":{"hosts":{"github.com":{"token":"GH_TOKEN_fry"}}}}\n---agents---\n%s\n' "$(real_agents_json)" \
     | PRESENT_SECRET_VARS="GH_TOKEN_fry" SECRETS_FILE=/sec/secrets.env \
       GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
       python3 "$REPO/src/manifest.py" --derive)"
-assert_eq "declared row: GIT_TOKEN_SOURCE names the row variable" "GH_TOKEN_fry" "$GIT_TOKEN_SOURCE"
+assert_eq "declared row: every identity's token source names the row variable" \
+    "$(id_sources GH_TOKEN_fry)" "$(printf '%s' "$GIT_IDENTITY_TOKEN_SOURCES")"
 GH_TOKEN_fry=fryval
-write_keyfiles "$d" "$SHIM" "" "" "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" >/dev/null
+write_keyfiles "$d" "$SHIM" "" "" "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 allhave=1; for a in $SHIM; do
     [ "$(cat "$d/$a.env")" = $'GIT_HOST_TOKENS=github.com=GH_TOKEN_fry\nGH_TOKEN_fry=fryval\nGH_TOKEN=fryval' ] || allhave=0
 done
@@ -281,7 +303,11 @@ derive_id_manifest() {  # $1 = the github.com entries JSON array
 eval "$(derive_id_manifest '[{"token":"GH_TOKEN_fry_a","identities":["claude","user"]},{"token":"GH_TOKEN_fry_b","identities":["pi","codex"]}]')"
 assert_eq "list form: the catch-all table carries only the simple-form host" \
     "git.example.org=GITEA_TOKEN_example" "$GIT_HOST_TOKENS"
-assert_eq "list form: no catch-all CLI row, GIT_TOKEN_SOURCE empty" "" "$GIT_TOKEN_SOURCE"
+assert_eq "list form: no catch-all CLI row, the unnamed identity has no token source" "" \
+    "$(grep '^cursor-agent\|^gemini' <<EOF
+$GIT_IDENTITY_TOKEN_SOURCES
+EOF
+)"
 assert_eq "list form: per-identity tables (full table per named identity)" \
     $'claude\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\ncodex\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_b\npi\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_b\nuser\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\n' \
     "$GIT_IDENTITY_HOST_TOKENS"
@@ -301,7 +327,7 @@ unset GITEA_TOKEN_example GH_TOKEN_fry_a GH_TOKEN_fry_b
 IDHOME="$WORK/idhome"; IDKEYS="$IDHOME/.agent-keys"; mkdir -p "$IDKEYS"; chmod 700 "$IDKEYS"
 GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
 write_keyfiles "$IDKEYS" "claude pi codex cursor-agent" "" "" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+    "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 
 assert_eq "claude.env: its own table (gitea everyone-row + its github row) and GH_TOKEN=<a>" \
     $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\\ github.com=GH_TOKEN_fry_a\nGITEA_TOKEN_example=gitea-val\nGH_TOKEN_fry_a=fry-a-val\nGH_TOKEN=fry-a-val' \
@@ -414,7 +440,7 @@ eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude","pi",
       NTFY_URL="" NTFY_TOPIC="" python3 "$REPO/src/manifest.py" --derive)"
 GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
 write_keyfiles "$IDB_KEYS" "claude pi codex cursor-agent" "" "" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+    "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 assert_eq "setup: user.env carries the user identity exactly like claude's" \
     "$(cat "$IDB_KEYS/user.env")" "$(cat "$IDB_KEYS/claude.env")"
 assert_eq "setup: pi.env is EMPTY (named by no entry, no catch-all, no simple host)" \
@@ -434,7 +460,7 @@ assert_absent "unnamed agent: no token value" "$(cat "$WORK/ua-dump")" "fry-a-va
 eval "$(derive_id_manifest "$IDB_MANIFEST")"
 GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
 write_keyfiles "$IDB2_KEYS" "claude pi codex cursor-agent" "" "" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+    "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 assert_eq "setup b: cursor-agent.env is gitea-only (no github row, no GH_TOKEN)" \
     $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\nGITEA_TOKEN_example=gitea-val' \
     "$(cat "$IDB2_KEYS/cursor-agent.env")"
@@ -490,7 +516,7 @@ eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude","pi",
       NTFY_URL="" NTFY_TOPIC="" python3 "$REPO/src/manifest.py" --derive)"
 GH_TOKEN_fry_a=fry-a-val GITEA_TOKEN_example=gitea-val
 write_keyfiles "$IDB3_KEYS" "claude pi codex cursor-agent" "" "" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+    "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 assert_eq "setup d: user.env carries the gitea row only (user NOT named on github.com)" \
     $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\nGITEA_TOKEN_example=gitea-val' \
     "$(cat "$IDB3_KEYS/user.env")"
@@ -578,11 +604,16 @@ assert_contains "helper with claude's env: the gitea row still answers" "$out" "
 eval "$(derive_id_manifest '[{"token":"GH_TOKEN_fry_a","identities":["claude","user"]},{"token":"GH_TOKEN_fry_b","identities":["pi","codex"]},{"token":"GH_TOKEN_fry_c"}]')"
 assert_eq "catch-all: the catch-all table carries the simple host + the catch-all row" \
     "git.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_c" "$GIT_HOST_TOKENS"
-assert_eq "catch-all: GIT_TOKEN_SOURCE names the catch-all row" "GH_TOKEN_fry_c" "$GIT_TOKEN_SOURCE"
+assert_eq "catch-all: the unnamed identity's token source is the catch-all row" \
+    $'cursor-agent\tGH_TOKEN_fry_c' \
+    "$(grep '^cursor-agent' <<EOF
+$GIT_IDENTITY_TOKEN_SOURCES
+EOF
+)"
 IDCATCH="$WORK/idcatch"; mkdir -p "$IDCATCH"; chmod 700 "$IDCATCH"
 GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val GH_TOKEN_fry_c=fry-c-val
 write_keyfiles "$IDCATCH" "claude pi codex cursor-agent" "" "" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+    "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 assert_eq "catch-all: an unnamed identity takes the catch-all row + GH_TOKEN" \
     $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\\ github.com=GH_TOKEN_fry_c\nGITEA_TOKEN_example=gitea-val\nGH_TOKEN_fry_c=fry-c-val\nGH_TOKEN=fry-c-val' \
     "$(cat "$IDCATCH/cursor-agent.env")"
@@ -601,7 +632,7 @@ UHOME="$WORK/uhome"; mkdir -p "$UHOME/.agent-keys"
 GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
 eval "$(derive_id_manifest '[{"token":"GH_TOKEN_fry_a","identities":["claude","user"]},{"token":"GH_TOKEN_fry_b","identities":["pi","codex"]}]')"
 write_keyfiles "$UHOME/.agent-keys" "claude" "" "" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+    "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 { printf 'case $- in *i*) ;; *) return;; esac\n'; cat "$REPO/src/user-keys-landing.bashrc"; } > "$UHOME/.bashrc"
 out=$(env -i HOME="$UHOME" PATH="$PATH" TERM=dumb bash -ic 'printf "GH_TOKEN=%s\n" "${GH_TOKEN-UNSET}"' 2>/dev/null)
 assert_contains "bash -ic: the user identity's GH_TOKEN is set" "$out" "GH_TOKEN=fry-a-val"
@@ -649,13 +680,13 @@ for kd in "$d" "$IDKEYS" "$IDCATCH" "$UHOME/.agent-keys"; do
 done
 
 # ── coding-hank's shape end to end through the real shim: a NON-EMPTY git
-# table (git.token spelling) AND a resolved agent_secrets row for the SAME
-# agent. The git block and the appended plugin slot must land on SEPARATE
+# table AND a resolved agent_secrets row for the SAME agent. The git block
+# and the appended plugin slot must land on SEPARATE
 # lines (a lost trailing newline would fuse them: GH_TOKEN=<tok>KEY=<val>),
 # and sourcing the file through the real generated shim must set BOTH.
 echo "── key file shape: git table + agent secrets in one file, through the real shim ──"
 HK="$WORK/hank"; HK_KEYS="$HK/.agent-keys"; mkdir -p "$HK_KEYS"; chmod 700 "$HK_KEYS"
-eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude"],"plugins":["obsidian-annotated"],"git":{"token":"GH_TOKEN_hank"},"agent_secrets":[{"agent":"claude","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_claude"}]}\nobsidian-annotated\t{"secrets":{"OBSIDIAN_ANNOTATED_KEY":{}}}\n---agents---\nclaude\t{"binary":"claude","install":"x","mcp":{"config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove"}}\n' \
+eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude"],"plugins":["obsidian-annotated"],"git":{"hosts":{"github.com":{"token":"GH_TOKEN_hank"}}},"agent_secrets":[{"agent":"claude","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_claude"}]}\nobsidian-annotated\t{"secrets":{"OBSIDIAN_ANNOTATED_KEY":{}}}\n---agents---\nclaude\t{"binary":"claude","install":"x","mcp":{"config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove"}}\n' \
     | PRESENT_SECRET_VARS="GH_TOKEN_hank OBSIDIAN_KEY_claude" SECRETS_FILE=/sec/secrets.env \
       GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
       python3 "$REPO/src/manifest.py" --derive)"
@@ -665,7 +696,7 @@ HANK_SECRET='hank obsidian $key value'
 GH_TOKEN_hank=hank-token-value OBSIDIAN_KEY_claude="$HANK_SECRET"
 write_keyfiles "$HK_KEYS" "claude" "" \
     "$(printf 'claude\tOBSIDIAN_ANNOTATED_KEY\tOBSIDIAN_KEY_claude\n')" \
-    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" \
+    "$GIT_HOST_TOKENS" \
     "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 bad=$(env_shape_ok "$HK_KEYS")
 assert_eq "coding-hank shape: file ends with a newline, every line is VAR=..." "" "$bad"
@@ -1120,8 +1151,8 @@ grep -qF 'git_url_split "$repo_url"' "$REPO/src/git_identity.sh" \
     && pass "git_identity.sh splits the repo URL fresh in apply_repo_identity" \
     || fail "git_identity.sh no longer splits the repo URL fresh in apply_repo_identity"
 grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" \' "$REPO/up.sh" \
-    && grep -qF '"$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES"' "$REPO/up.sh" \
-    && pass "up.sh passes GIT_HOST_TOKENS + GIT_TOKEN_SOURCE + identity tables to write_keyfiles" \
+    && grep -qF '"$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES"' "$REPO/up.sh" \
+    && pass "up.sh passes GIT_HOST_TOKENS + the identity tables to write_keyfiles" \
     || fail "up.sh no longer passes the git tables to write_keyfiles"
 # GH_TOKEN never rides the up.sh environment: the CLI host's row variable is
 # resolved directly by keyfiles.sh (its 6th argument) and the clone env —
@@ -1138,9 +1169,6 @@ grep -qF '"${CLONE_ENV[@]}"' "$REPO/up.sh" \
 grep -qF 'no git.hosts.' "$REPO/src/git_notices.sh" \
     && pass "git_notices.sh warns about a repo host with no git.hosts row" \
     || fail "git_notices.sh missing the no-row up-time notice"
-grep -qF 'git_orgs_host_notice' "$REPO/up.sh" \
-    && pass "up.sh calls the git.orgs shared-host notice" \
-    || fail "up.sh no longer calls git_orgs_host_notice"
 grep -qF 'git host is not in capabilities.egress' "$REPO/src/git_notices.sh" \
     && pass "git_notices.sh warns when a bound git host is missing from capabilities.egress" \
     || fail "git_notices.sh missing the egress-coverage notice for a bound git host"
@@ -1154,38 +1182,6 @@ out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h.test/a/y.git\n'
 assert_eq "git_host_notices: one notice per host, not per repo" \
     "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
 assert_contains "git_host_notices: notes the host, not host/owner" "$out" "h.test: no git.hosts.h.test.token"
-
-# git_orgs_host_notice: when a git.orgs entry supplies a host's table row and
-# repos: lists ANOTHER owner on that host, one line says that host's token
-# now serves every owner on it, naming git.hosts.<host>.token as the way to
-# state it. Only hosts a git.orgs entry actually routed to are in scope
-# (GIT_ORG_ROUTED_HOSTS).
-out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'github.com=GH_TOKEN h.test=SRC_ACME' 'h.test')
-assert_contains "git_orgs_host_notice: two owners on one host → one notice" "$out" \
-    "note: h.test: SRC_ACME now serves every owner on this host"
-assert_contains "…naming git.hosts.<host>.token as the way to state it" "$out" \
-    "state it explicitly with git.hosts.h.test.token: SRC_ACME"
-# FALSE case: the host's row came from git.token and the git.orgs entry is
-# for ANOTHER host — the notice must not attribute the row to git.orgs.
-out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'github.com=GH_TOKEN h.test=SRC_A' 'git.other.test')
-assert_eq "git_orgs_host_notice: a host whose row came from git.token stays silent" "" "$out"
-out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\n' 'h.test=SRC_ACME' 'h.test')
-assert_eq "git_orgs_host_notice: a single-owner host is silent" "" "$out"
-out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'github.com=GH_TOKEN' 'github.com')
-assert_eq "git_orgs_host_notice: a row-less host is out of scope" "" "$out"
-out=$(git_orgs_host_notice $'a\thttps://h.test/acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'h.test=SRC_ACME' '')
-assert_eq "git_orgs_host_notice: no git.orgs entries → silent" "" "$out"
-out=$(git_orgs_host_notice $'a\thttps://h.test/Acme/x.git\nb\thttps://h.test/acme/y.git\n' \
-    'h.test=SRC_ACME' 'h.test')
-assert_eq "git_orgs_host_notice: same owner twice on one host is one owner, silent" "" "$out"
-out=$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\nb\thttps://h.test/other/y.git\n' \
-    'h.test=SRC_ACME' 'h.test')
-assert_contains "git_orgs_host_notice: an scp-only owner still leaves one https owner… silent" "" \
-    "$(git_orgs_host_notice $'a\tgit@h.test:acme/x.git\n' 'h.test=SRC_ACME' 'h.test')"
 
 out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h2.test/b/y.git\n' 'h.test=SRC_A')
 assert_eq "git_host_notices: a host WITH a table row gets no notice" \
@@ -1348,38 +1344,32 @@ echo "── src/git_identity.sh ──"
 # shellcheck disable=SC1091
 . "$REPO/src/git_identity.sh"   # defines git_identity_for + apply_repo_identity, no side effects
 
-# git_identity_for <owner> <host> <org_identities> <host_identities>: the two
-# tables are ARGUMENTS, never globals. A per-owner GIT_ORG_IDENTITIES record
-# and a per-host GIT_HOST_IDENTITIES record never coexist in one manifest
-# (manifest.py rejects git.hosts beside git.token/git.orgs), so the
-# owner-then-host order is never a precedence decision — whichever table is
-# populated is the only one that can match. Empty tables work under set -u.
-ORG=$'acme\tOrg Bot\torg-bot@acme.test\n'
+# git_identity_for <host> <git_host_identities>: the table is an ARGUMENT,
+# never a global — a stale leftover value cannot retarget the lookup. Empty
+# tables work under set -u.
 HOST=$'host-a.test\tHost Bot\thost-bot@hosta.test\n'
-out=$(git_identity_for Acme whatever.test "$ORG" "")
-assert_eq "per-owner record matches a mixed-case owner" $'Org Bot\torg-bot@acme.test' "$out"
-out=$(git_identity_for someone host-a.test "" "$HOST")
+out=$(git_identity_for host-a.test "$HOST")
 assert_eq "per-host record matches its host" $'Host Bot\thost-bot@hosta.test' "$out"
-out=$(git_identity_for someone host-b.test "" "$HOST")
+out=$(git_identity_for host-b.test "$HOST")
 assert_eq "an unlisted host yields empty (container default applies)" "" "$out"
-out=$(git_identity_for someone whatever.test "" "")
-assert_eq "empty tables yield empty (set -u safe)" "" "$out"
+out=$(git_identity_for whatever.test "")
+assert_eq "an empty table yields empty (set -u safe)" "" "$out"
 # Host normalisation: the record is stored normalised (lowercased, :443
 # stripped — exactly like GIT_HOST_TOKENS rows), but the URL's own spelling
 # must still match.
-out=$(git_identity_for someone HOST-A.TEST "" "$HOST")
+out=$(git_identity_for HOST-A.TEST "$HOST")
 assert_eq "a differently-cased URL host still matches the record" $'Host Bot\thost-bot@hosta.test' "$out"
-out=$(git_identity_for someone host-a.test:443 "" "$HOST")
+out=$(git_identity_for host-a.test:443 "$HOST")
 assert_eq "a :443 URL host still matches the bare-host record" $'Host Bot\thost-bot@hosta.test' "$out"
-out=$(git_identity_for someone host-a.test:3000 "" "$HOST")
+out=$(git_identity_for host-a.test:3000 "$HOST")
 assert_eq "a :3000 URL host does NOT match the bare-host record" "" "$out"
 # Either field alone.
 HOST=$'host-a.test\tOnly Name\t\nhost-c.test\t\tonly@mail.test\n'
-out=$(git_identity_for someone host-a.test "" "$HOST")
+out=$(git_identity_for host-a.test "$HOST")
 assert_eq "a name-only record yields name + empty email" $'Only Name\t' "$out"
-out=$(git_identity_for someone host-c.test "" "$HOST")
+out=$(git_identity_for host-c.test "$HOST")
 assert_eq "an email-only record yields empty name + email" $'\tonly@mail.test' "$out"
-unset ORG HOST
+unset HOST
 
 # Bind the emitter to the parser: run the REAL src/manifest.py --derive on a
 # small manifest with a host author (same shape as the egress-notice test
@@ -1395,8 +1385,8 @@ assert_eq "derive emits the host identity record" \
     $'host-a.test\tLeela Bot\tbot@planetexpress.example\n' "$GIT_HOST_IDENTITIES"
 
 # apply_repo_identity: the ONE call up.sh makes per repo — it splits the URL
-# fresh itself, looks up the author from the two tables (arguments, empty
-# tables fine), and stamps. The docker shim replays the exact bash -c
+# fresh itself, looks up the author from the host table (an argument, empty
+# table fine), and stamps. The docker shim replays the exact bash -c
 # payload in a sandbox dir standing in for the container's
 # /workspace/repos, so the real git commands the payload runs are exercised.
 # HOME/XDG/GH_CONFIG_DIR stay inside the temp dirs throughout, and the
@@ -1445,11 +1435,11 @@ chmod +x "$DOCKER_SHIM/docker"
 # The honest call: each clone's ACTUAL `git remote get-url origin` goes
 # through apply_repo_identity, exactly what up.sh runs — no hand-fed author.
 PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-a \
-    "$(git -C "$STAMP_WORK/clone-a" remote get-url origin)" "" "$GIT_HOST_IDENTITIES"
+    "$(git -C "$STAMP_WORK/clone-a" remote get-url origin)" "$GIT_HOST_IDENTITIES"
 assert_eq "clone A: host author stamped as repo-local user.name" "Leela Bot" "$(git -C "$STAMP_WORK/clone-a" config user.name)"
 assert_eq "clone A: host author stamped as repo-local user.email" "bot@planetexpress.example" "$(git -C "$STAMP_WORK/clone-a" config user.email)"
 PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-b \
-    "$(git -C "$STAMP_WORK/clone-b" remote get-url origin)" "" "$GIT_HOST_IDENTITIES"
+    "$(git -C "$STAMP_WORK/clone-b" remote get-url origin)" "$GIT_HOST_IDENTITIES"
 assert_eq "clone B: nothing stamped (no record for its host)" "" "$(git -C "$STAMP_WORK/clone-b" config --local user.name || true)"
 # A repo-local identity wins over the global default when committing.
 author_a=$(git -C "$STAMP_WORK/clone-a" var GIT_AUTHOR_IDENT)
@@ -1467,17 +1457,8 @@ esac
 # apply_repo_identity call, with the clone's actual remote URL.
 git -C "$STAMP_WORK/clone-a" remote set-url origin https://Host-A.Test:443/o/a.git
 PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-a \
-    "$(git -C "$STAMP_WORK/clone-a" remote get-url origin)" "" "$GIT_HOST_IDENTITIES"
+    "$(git -C "$STAMP_WORK/clone-a" remote get-url origin)" "$GIT_HOST_IDENTITIES"
 assert_eq "a mixed-case :443 remote still matches the derived record" "Leela Bot" "$(git -C "$STAMP_WORK/clone-a" config user.name)"
-# Per-owner record still stamps its repo (Guard — the git.orgs path through
-# the same functions, unchanged behaviour), routed the same way: empty host
-# table, the org table carrying the owner's record.
-ORG=$'acme\tOrg Bot\torg-bot@acme.test\n'
-git -C "$STAMP_WORK/clone-b" remote set-url origin https://forge.test/acme/b.git
-PATH="$DOCKER_SHIM:$PATH" apply_repo_identity djinn-test clone-b \
-    "$(git -C "$STAMP_WORK/clone-b" remote get-url origin)" "$ORG" ""
-assert_eq "per-owner record still stamps its repo (Guard)" "Org Bot" "$(git -C "$STAMP_WORK/clone-b" config user.name)"
-unset ORG HOST
 rm -rf "$STAMP_WORK"
 # Restore; if the caller had no HOME, keep one defined (set -u below) inside
 # the temp tree rather than unsetting it.
@@ -1488,12 +1469,12 @@ unset STAMP_WORK _STAMP_HOME _STAMP_XDG _STAMP_GHCONF
 
 # Drift pins: up.sh sources the extracted identity helper and routes the
 # bootstrap clone's attribution through the ONE call, passing the URL and
-# both tables as arguments.
+# the host table as arguments.
 grep -qF '. "$SCRIPT_DIR/src/git_identity.sh"' "$REPO/up.sh" \
     && pass "up.sh sources src/git_identity.sh" \
     || fail "up.sh no longer sources src/git_identity.sh"
-grep -qF 'apply_repo_identity "$CNAME" "$RNAME" "$RURL" \' "$REPO/up.sh" \
-    && pass "up.sh stamps via apply_repo_identity (the one call, tables as args)" \
+grep -qF 'apply_repo_identity "$CNAME" "$RNAME" "$RURL" "$GIT_HOST_IDENTITIES"' "$REPO/up.sh" \
+    && pass "up.sh stamps via apply_repo_identity (the one call, host table as arg)" \
     || fail "up.sh no longer stamps via apply_repo_identity"
 
 # ────────────────────────────────────────────────────────────────────────────

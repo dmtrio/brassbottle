@@ -85,8 +85,7 @@ only source. A `token:` naming a variable that isn't set in `secrets.env`
 A manifest gets exactly the rows it declares — nothing is implicit. Without
 a row for a repo's host (catch-all or per identity), clones of its repos
 run anonymously (public repos only) and a push needs
-`git.hosts.<host>.token`. The old `git.token`/`git.orgs` spellings feed the
-catch-all table and still mean "everyone".
+`git.hosts.<host>.token`.
 
 A row for a host other than `github.com` must not name `GH_TOKEN`: `gh`
 reads that variable from its environment and sends it to github.com, so a
@@ -111,19 +110,13 @@ A `git.hosts` value is either a map (one row serving every identity) or a
 list of per-identity entries (see above). Its optional `name`/`email`
 fields are per-HOST author attribution and are rejected inside a list-form
 entry — a list-form host cannot carry an author; declare the author on a
-simple-form host entry. The old spellings feed the catch-all table:
-`git.token: X` is the `github.com` row; each `git.orgs` entry is a row for
-the host it resolves to (its `host:` field, else the one `https://` host
-its owner's repos: URLs name). One host carries one token per identity: a
-`git.orgs` token serves every repository on the host it resolves to (a
-second owner on that host gets no separate token), and two `git.orgs`
-entries resolving to one host with different tokens is an error; `up`
-prints a note when a host has another owner. Two `git.hosts` keys that
-normalise to the same host are rejected outright; `git.hosts` and either
-old spelling never mix in one manifest. Per-owner attribution
-(`git.orgs.<owner>.name/email`) still stamps a repo-local
-`user.name`/`user.email` at bootstrap clone — it is authorship only, never
-routing.
+simple-form host entry. One host carries one token per identity: a host's
+row serves every repository on it (a second owner on that host gets no
+separate token), and two entries resolving to one host with different
+tokens is an error. Two `git.hosts` keys that normalise to the same host
+are rejected outright. Attribution (a host entry's `name`/`email`) still
+stamps a repo-local `user.name`/`user.email` at bootstrap clone — it is
+authorship only, never routing.
 
 ### Per-host author attribution
 
@@ -139,7 +132,7 @@ so an `ssh://` URL with an explicit port does not match a host entry (the
 entry key carries no ssh port; only an explicit `:443` is stripped).
 Either field may be given alone; a tab, newline or carriage return is
 rejected in any identity field (records are tab-separated, one per line),
-and otherwise the validation is the same as the per-owner spellings: a
+and otherwise the validation is the same as for every identity field: a
 scalar each (a map/list is a named error), no charset rule beyond that.
 `token:` stays required on every `git.hosts` entry — an author never
 replaces the token row. In the LIST form `name`/`email` are rejected
@@ -157,7 +150,6 @@ credential bridge) — so a repo at
 the variable its row names:
 
 ```yaml
-forge: gitea
 repos:
   - https://git.example.test/Emergence/filebrowser.git
 git:

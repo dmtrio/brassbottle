@@ -1,16 +1,12 @@
 REPOS='alpha	https://github.com/example/alpha.git
 beta	https://github.com/example/beta.git
 '
-FORGE=github
 GIT_USER_NAME='Golden Tester'
 GIT_USER_EMAIL=golden@example.com
-GIT_TOKEN_SOURCE=''
-GIT_ORG_IDENTITIES=''
 GIT_HOST_IDENTITIES=''
 GIT_HOST_TOKENS=''
 GIT_IDENTITY_HOST_TOKENS=''
 GIT_IDENTITY_TOKEN_SOURCES=''
-GIT_ORG_ROUTED_HOSTS=''
 GIT_CREDENTIAL_HOSTS='https://github.com
 '
 GIT_EGRESS_NOTICE_HOSTS=''

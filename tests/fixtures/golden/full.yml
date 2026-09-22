@@ -1,5 +1,4 @@
 task: coding
-forge: github
 memory: 4g
 agents: [claude, codex, pi, cursor, aider]
 repos:

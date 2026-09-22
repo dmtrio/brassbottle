@@ -43,7 +43,7 @@ Behavioral fidelity notes (each is pinned by tests/test_manifest.py):
   (egress, egress_cidrs) keep their empty slots byte-for-byte.
 - agent_for_ref suffix matching is descriptor-derived per mcp-capable agent,
   longest suffix first so _cursor_agent beats _claude.
-- Error ordering matches the old top-to-bottom flow: forge → plugins list →
+- Error ordering matches the old top-to-bottom flow: plugins list →
   ssh/remote → identity refs (aggregated) → per-plugin egress +
   mcp entries (fail-fast) → ntfy. Messages are byte-identical to the bash,
   except the ssh/remote block, which PLN - default jump reachability P1
@@ -166,11 +166,6 @@ REPO_DIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
 # /tmp/djinn-services/ inside the container (src/plugin_services.py) — a
 # boring charset keeps it stable across the docker-exec/tmux/heredoc hops.
 SERVICE_NAME_RE = re.compile(r"^[a-z0-9-]+\Z")
-# Forge org/user name (git.orgs key). GitHub's own rule: alphanumerics and
-# single hyphens, no leading/trailing hyphen — widened for gitea, whose owners
-# may contain '_' and '.'. The owner no longer keys a token var (tokens are
-# routed by host), so the charset only has to stay a sane forge name.
-OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\Z")
 # A git.hosts key: a bare hostname (optionally :port), lowercased before
 # matching. Stricter than HOST_RE (no underscore): the normalized host becomes
 # a credential-routing key that entrypoint.sh word-splits and git-credential-org
@@ -181,8 +176,8 @@ GIT_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?\Z")
 # The one-row CLI token table: the host whose table row's token is ALSO
 # written as the plain GH_TOKEN env var in every agent key file and the
 # bootstrap clone env, for tools that expect it (gh, non-shim git clients).
-# This is the ONLY place github.com is named for routing — GIT_TOKEN_SOURCE,
-# the keyfiles GH_TOKEN line and the clone env all derive from this table;
+# This is the ONLY place github.com is named for routing — the GIT_IDENTITY_TOKEN_SOURCES
+# records, the keyfiles GH_TOKEN line and the clone env all derive from this table;
 # the helper, entrypoint and keyfiles route purely by host and never name a
 # forge. A host with no row in GIT_HOST_TOKENS carries NO token anywhere:
 # nothing about this table is implicit.
@@ -197,9 +192,8 @@ CLI_HOST = next(iter(CLI_TOKEN_VARS))
 # never has to name them.
 BASE_ALLOWLISTED_GIT_HOSTS = frozenset({"github.com"})
 # A bare hostname (optionally :port), lowercased before matching — shared by
-# _credential_hosts (repos: URLs, interpolated into shell by entrypoint.sh)
-# and _git_identity's git.orgs.<owner>.host: (interpolated into shell by
-# git-credential-org.sh). One charset, one place, so the two never drift.
+# _credential_hosts (repos: URLs, interpolated into shell by entrypoint.sh).
+# One charset, one place, so the callers never drift.
 HOST_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?(?::[0-9]{1,5})?\Z")
 DOMAIN_RE = re.compile(
     r"^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
@@ -264,10 +258,10 @@ def _scalar(v, field, default=""):
 
 def _identity_scalar(v, field, errors=None):
     """_scalar plus the one rule every git identity field must satisfy: no
-    tab, newline or carriage return. GIT_ORG_IDENTITIES and
-    GIT_HOST_IDENTITIES records are tab-separated, one per line — a tab in a
+    tab, newline or carriage return. GIT_HOST_IDENTITIES records are
+    tab-separated, one per line — a tab in a
     name would forge extra record fields, a newline would forge a record for
-    another owner or host the manifest never declared (e.g. a name of
+    another host the manifest never declared (e.g. a name of
     "Bad\tName\nb.test\tEvil" would attribute a repo to an identity nobody
     wrote). The top-level git.name/email ride the same rule: they pass
     through compose env vars into `su coder -c 'git config --global …'`, and
@@ -736,52 +730,6 @@ def _credential_hosts(urls):
     return "".join(f"{o}\n" for o in sorted(origins))
 
 
-def _routed_repo_owners(parsed_repos):
-    """Yield (host, owner) for every https:// repos: URL — the parse the
-    git.orgs host resolution needs, kept in one place so it can't drift from
-    _credential_hosts' own. host and owner are lowercased and host has a
-    trailing :443 stripped, matching _credential_hosts' parse. A URL that
-    doesn't match https://host/owner/… (already rejected upstream by
-    derive()'s repos: validation) is skipped rather than raising."""
-    for _name, url in parsed_repos:
-        m = re.match(r"^https://(?:[^@/]*@)?([^/]+)/([^/]+)", url, re.IGNORECASE)
-        if not m:
-            continue
-        host = m.group(1).lower()
-        if host.endswith(":443"):
-            host = host[:-len(":443")]
-        yield host, m.group(2).lower()
-
-
-def _ssh_repo_owners(parsed_repos):
-    """Yield the lowercased owner of every scp-style, ssh:// or git://
-    repos: URL — none of these ever route an https token (see
-    _routed_repo_owners). The owner here does NOT bind to any host: the host
-    is unvalidated (never checked against HOST_RE, unlike _credential_hosts'
-    and _routed_repo_owners' hosts) and MUST NOT reach any shell-interpolated
-    output — not GIT_CREDENTIAL_HOSTS, not GIT_HOST_TOKENS. It is
-    informational only (drives one error message): an owner listed only via
-    scp/ssh/git:// must declare host: explicitly for its git.orgs token to
-    get a row. Matched separately from _routed_repo_owners' https:// parse:
-    scp-style is [user@]host:owner/... (no scheme — git's own syntax makes
-    the userinfo optional, e.g. plain git.example.test:OrgA/x.git with the
-    server-side user implied); ssh:// and git:// are
-    scheme://[user@]host[:port]/owner/... (case-insensitive scheme).
-    scp_re's host segment ([^/:]+ before the literal :) can never contain a
-    '/', so it can't match a scheme's '://' — https://host/... and
-    ssh://host/... both fail scp_re (the ':' immediately followed by '/' has
-    no [^/:]+ to its left), leaving ssh_re to handle ssh:// and git://. Owner
-    is lowercased."""
-    scp_re = re.compile(r"^(?:[^/@:]+@)?([^/:]+):([^/]+)/")
-    ssh_re = re.compile(r"^(?:ssh|git)://(?:[^@/]*@)?([^/:]+)(?::[0-9]+)?/([^/]+)/",
-                         re.IGNORECASE)
-    for _name, url in parsed_repos:
-        m = scp_re.match(url) or ssh_re.match(url)
-        if not m:
-            continue
-        yield m.group(2).lower()
-
-
 def _normalize_git_host(raw, field, errors):
     """One git.hosts key, normalised the way the helper normalises git's own
     request: lowercased, a trailing :443 (the explicit default port git passes
@@ -935,7 +883,7 @@ def _git_hosts_list_entries(field_host, host_key, entries, source,
             per_id[field_host] = src
 
 
-def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
+def _git_identity(git, env, secrets_file, identity_names, forge_declared):
     """Derive git credential routing from the git: section — NAMES only, per the
     module contract (up.sh resolves the secret VALUES).
 
@@ -964,33 +912,33 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
     author goes.
 
     GIT_HOST_TOKENS keeps its meaning as the CATCH-ALL/SIMPLE-FORM table:
-    simple-form hosts, git.token, git.orgs, and the catch-all entry of a
-    list-form host — exactly the rows that serve everyone, the bootstrap
-    clone (which runs as no identity) included. Each identity NAMED by a
-    list-form entry additionally gets GIT_IDENTITY_HOST_TOKENS records
-    (identity<TAB>host=VAR pairs, one record per line, sorted by identity)
-    and — when its github.com row exists — a GIT_IDENTITY_TOKEN_SOURCES
-    record (identity<TAB>VAR) so keyfiles.sh can write that identity's own
-    plain GH_TOKEN. An identity named by no entry and not covered by a
-    catch-all gets no row for that host and no GH_TOKEN.
+    simple-form hosts and the catch-all entry of a list-form host — exactly
+    the rows that serve everyone, the bootstrap clone (which runs as no
+    identity) included. Each identity NAMED by a list-form entry
+    additionally gets GIT_IDENTITY_HOST_TOKENS records (identity<TAB>host=VAR
+    pairs, one record per line, sorted by identity) and — when its effective
+    table has a github.com row — a GIT_IDENTITY_TOKEN_SOURCES record
+    (identity<TAB>VAR) so keyfiles.sh can write that identity's own plain
+    GH_TOKEN. An identity named by no entry and not covered by a catch-all
+    gets no row for that host and no GH_TOKEN.
 
-    The table holds ONLY rows the manifest states: git.hosts entries, or
-    (old spellings, still accepted) git.token as the CLI host's row and each
-    git.orgs entry's row. Nothing declared → empty tables; a repo whose host
-    has no row (in the reader's own table) clones anonymously and a push
-    needs git.hosts.<host>.token. The old spellings feed the same
-    catch-all/simple table: git.token: X is the github.com row; each
-    git.orgs entry is a row for the host it resolves to (its declared
-    host:, else the one https:// host its owner's repos: URLs name — never a
-    guessed default). token: that isn't a currently-set secrets.env var
+    The table holds ONLY rows the manifest states: git.hosts entries.
+    Nothing declared → empty tables; a repo whose host has no row (in the
+    reader's own table) clones anonymously and a push needs
+    git.hosts.<host>.token. token: that isn't a currently-set secrets.env var
     (PRESENT_SECRET_VARS lists the ones up.sh scanned — every non-empty
     variable secrets.env defines, so any variable name works as a token
     source, not just GH_TOKEN*-prefixed ones) is a hard error — never a
     silent fall-back to the wrong identity, which is the whole reason this
     exists.
 
-    git.hosts and the old spellings (git.token / git.orgs) are two spellings
-    of ONE table and never combine: declaring both is a hard error.
+    Rejected by name, reported together with the other git: errors:
+      • git.token — removed; the CLI host's row is declared as
+        git.hosts.github.com.token: <var>;
+      • git.orgs — removed; one row per host is declared as
+        git.hosts.<host>: {token, name, email};
+      • top-level forge: — remove it, nothing reads it (token routing is
+        git.hosts).
 
     Also rejected (fold-in): a row for a NON-CLI-host that names a variable
     in CLI_TOKEN_VARS.values() (GH_TOKEN) — gh reads that variable from its
@@ -1000,19 +948,10 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
     Emits:
       GIT_HOST_TOKENS     space-separated host=VARNAME pairs, sorted by host
                           — the catch-all/simple-form table (simple-form
-                          git.hosts entries, git.token, git.orgs, and a
-                          list-form host's catch-all entry); every row var
-                          is written beside it by keyfiles.sh and forwarded
-                          to the bootstrap clone, which runs as no identity
-      GIT_TOKEN_SOURCE    the CLI host's row variable (declared via
-                          git.token, git.hosts.github.com.token, or a
-                          git.orgs claim) whenever the CATCH-ALL table has
-                          one — the variable keyfiles.sh writes the plain
-                          GH_TOKEN from for identities with no named github.com
-                          row (its NAME only; the value is read from the
-                          secrets the caller already sourced); "" = the
-                          catch-all has NO CLI row: no GH_TOKEN for
-                          unnamed identities
+                          git.hosts entries and a list-form host's catch-all
+                          entry); every row var is written beside it by
+                          keyfiles.sh and forwarded to the bootstrap clone,
+                          which runs as no identity
       GIT_IDENTITY_HOST_TOKENS
                           identity<TAB>host=VARNAME pairs per line, sorted
                           by identity then host — the rows of the entries
@@ -1022,14 +961,13 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
       GIT_IDENTITY_TOKEN_SOURCES
                           identity<TAB>VARNAME per line, sorted by identity
                           — the CLI host's row variable of each identity's
-                          OWN table (a named github.com entry); keyfiles.sh
-                          writes that identity's plain GH_TOKEN from it,
-                          falling back to GIT_TOKEN_SOURCE when absent
-      GIT_ORG_IDENTITIES  owner<TAB>name<TAB>email per line — per-owner
-                          author attribution for the bootstrap clone; never
-                          routing (owner is lowercased: attribution matches
-                          against the clone URL's owner, whose case we don't
-                          control, so both sides fold to lowercase)
+                          EFFECTIVE table (a named github.com entry, else
+                          the catch-all's): emitted for EVERY identity the
+                          container can run as, named by an entry or not, so
+                          keyfiles.sh writes each identity's plain GH_TOKEN
+                          from exactly one mechanism — its own record. No
+                          record = the identity's table has NO CLI row: no
+                          GH_TOKEN.
       GIT_HOST_IDENTITIES host<TAB>name<TAB>email per line — per-host author
                           attribution for the bootstrap clone (git.hosts
                           entries may declare name/email beside token:;
@@ -1040,9 +978,6 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
                           host. No identity field may contain a tab, newline
                           or carriage return (the records are
                           tab-separated, one per line).
-
-    Each git.orgs owner is case-insensitive (attribution folds to lowercase),
-    so two keys differing only in case are an ambiguity and are rejected.
     """
     token_vars = set((env.get("PRESENT_SECRET_VARS") or env.get("GH_TOKEN_VARS")
                       or "").split())
@@ -1051,6 +986,9 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
     # its `agent:` field against) plus the literal `user`.
     known_identities = frozenset(identity_names or ()) | {"user"}
     errors = []
+    if forge_declared:
+        errors.append(
+            "  forge: remove it, nothing reads it (token routing is git.hosts)")
 
     def source(val, field, required):
         src = _scalar(val, field)
@@ -1067,43 +1005,20 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
         return src
 
     hosts_val = git.get("hosts")
-    token_val = git.get("token")
-    orgs_val = git.get("orgs")
-    # "git.hosts is declared" — an EMPTY git.hosts map adds no rows and is
-    # not a declaration, so it does not conflict with the old spellings
-    # (an empty table and git.token beside it are one github.com row).
-    if isinstance(hosts_val, dict):
-        hosts_declared = bool(hosts_val)
-    else:
-        hosts_declared = not _falsy(hosts_val)
-    if hosts_declared and (not _falsy(token_val) or not _falsy(orgs_val)):
-        raise ManifestError(
-            "manifest git identity failed validation:\n"
-            "  git.hosts and git.token/git.orgs are both set — they are two "
-            "spellings of one routing table; declare git.hosts only")
+    if not _falsy(git.get("token")):
+        errors.append(
+            "  git.token: removed — name the variable on the CLI host's row "
+            "instead: git.hosts.github.com.token: <var>")
+    if not _falsy(git.get("orgs")):
+        errors.append(
+            "  git.orgs: removed — declare one row per host instead: "
+            "git.hosts.<host>: {token, name, email}")
 
     rows = {}    # normalised host -> source var (catch-all/simple rows)
     origin = {}  # normalised host -> the manifest spelling that claimed it
     host_identities = {}  # normalised host -> (name, email) from git.hosts
     identity_rows = {}    # identity -> {normalised host: source var}, the
                           # rows of the list-form entries that name it
-
-    def add_row(host, src, claimed_by, field):
-        """One row per host: a second claim for the same host with the same
-        variable collapses into it; with a different variable it is an error —
-        one host carries exactly one token, so two spellings naming different
-        tokens for one host would silently race."""
-        if host in rows:
-            if rows[host] != src:
-                errors.append(
-                    f"  {origin[host]} and {claimed_by} both set a token for "
-                    f"{host} with different variables ({rows[host]}, {src}) — "
-                    "a host carries exactly one token")
-            return
-        if _cli_var_row(errors, host, src, field):
-            return
-        rows[host] = src
-        origin[host] = claimed_by
 
     # ── git.hosts (the current spelling) ─────────────────────────────────
     if not _falsy(hosts_val):
@@ -1139,9 +1054,9 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
                     f"  git.hosts.{field_host}: unsupported field(s): {extra} "
                     "(only token, name, email)")
                 continue
-            # name/email validate exactly like git.orgs.<owner>.name/email:
-            # a scalar each (a map/list is a named error), either may be
-            # given alone, no charset rule beyond the shared one-line rule
+            # name/email validate like every git identity field: a scalar
+            # each (a map/list is a named error), either may be given alone,
+            # no charset rule beyond the shared one-line rule
             # (_identity_scalar — records are tab-separated, one per line).
             name = _identity_scalar(spec.get("name"), f"git.hosts.{field_host}.name", errors)
             email = _identity_scalar(spec.get("email"), f"git.hosts.{field_host}.email", errors)
@@ -1161,120 +1076,13 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
             if name or email:
                 host_identities[field_host] = (name, email)
 
-    # ── git.token (old spelling: the CLI host's row) ─────────────────────
-    if not _falsy(token_val):
-        default_src = source(token_val, "git.token", required=False)
-        if default_src:
-            add_row(CLI_HOST, default_src, "git.token", "git.token")
-
-    # ── git.orgs (old spelling: per-owner tokens, resolved to hosts) ──────
-    records = []          # (owner_lc, source_var, name, email, declared_host|None)
-    seen_owners = {}      # lowercased owner → the manifest key that claimed it
-    if not _falsy(orgs_val):
-        if not isinstance(orgs_val, dict):
-            errors.append("  git.orgs: must be a map of <owner>: {token, name, email, host}")
-            orgs_val = {}
-        for owner, spec in orgs_val.items():
-            field = f"git.orgs.{owner}"
-            if not isinstance(owner, str) or not OWNER_RE.match(owner):
-                errors.append(f"  git.orgs: illegal owner '{owner}' (a forge org/user name)")
-                continue
-            owner_lc = owner.lower()
-            if owner_lc in seen_owners:
-                errors.append(f"  git.orgs: duplicate owner '{owner}' "
-                              f"(case-insensitive clash with '{seen_owners[owner_lc]}')")
-                continue
-            seen_owners[owner_lc] = owner
-            if _falsy(spec):
-                spec = {}
-            if not isinstance(spec, dict):
-                errors.append(f"  {field}: must be a map of {{token, name, email, host}}")
-                continue
-            extra = ",".join(k for k in spec if k not in ("token", "name", "email", "host"))
-            if extra:
-                errors.append(f"  {field}: unsupported field(s): {extra} (only token, name, email, host)")
-                continue
-            raw_host = spec.get("host")
-            declared_host = None
-            if "host" in spec and (_falsy(raw_host) or raw_host == ""):
-                errors.append(
-                    f"  {field}.host: must be a non-empty host "
-                    "(letters, digits, _ . and -, optional :port)")
-            elif not _falsy(raw_host):
-                if not isinstance(raw_host, str):
-                    errors.append(f"  {field}.host: must be a string")
-                else:
-                    host = raw_host.lower()
-                    if host.endswith(":443"):
-                        host = host[:-len(":443")]
-                    if not HOST_RE.match(host):
-                        errors.append(
-                            f"  git.orgs.{owner}: host '{host}' is not a valid host "
-                            "(letters, digits, _ . and -, optional :port)")
-                    else:
-                        declared_host = host
-            name = _identity_scalar(spec.get("name"), f"{field}.name", errors)
-            email = _identity_scalar(spec.get("email"), f"{field}.email", errors)
-            src = source(spec.get("token"), f"{field}.token", required=True)
-            if not src:
-                continue
-            records.append((owner_lc, src, name, email, declared_host))
-
-    # Resolve each git.orgs token to exactly one host — where the token row
-    # lands. An https-derived host wins over a declared one only by agreeing
-    # with it; a disagreement, an owner spread over several https hosts, an
-    # owner listed only over scp/ssh/git:// (whose spelling host is never
-    # validated and never binds), and an owner in no repos: URL at all are
-    # all hard errors: a wrong guess presents the token to the wrong forge.
-    org_routed = set()   # hosts whose table row a git.orgs entry supplied
-    if records:
-        https_owner_hosts = {}
-        for host, owner in _routed_repo_owners(parsed_repos):
-            https_owner_hosts.setdefault(owner, set()).add(host)
-        ssh_owners = set(_ssh_repo_owners(parsed_repos))
-        for owner_lc, src, _name, _email, declared_host in records:
-            field = f"git.orgs owner '{owner_lc}'"
-            derived = https_owner_hosts.get(owner_lc, set())
-            if derived and declared_host is not None:
-                if declared_host not in derived:
-                    errors.append(
-                        f"  {field}: host: {declared_host} disagrees with repos: "
-                        f"({min(derived)}) — remove host: or fix the repos: URL")
-                    continue
-                add_row(declared_host, src, field, f"{field}.token")
-                org_routed.add(declared_host)
-            elif len(derived) > 1:
-                errors.append(
-                    f"  {field}: its repos: URLs name more than one host "
-                    f"({', '.join(sorted(derived))}) — set host: on its git.orgs "
-                    "entry to say which one carries its token")
-            elif derived:
-                host = next(iter(derived))
-                add_row(host, src, field, f"{field}.token")
-                org_routed.add(host)
-            elif declared_host is not None:
-                add_row(declared_host, src, field, f"{field}.host")
-                org_routed.add(declared_host)
-            elif owner_lc in ssh_owners:
-                errors.append(
-                    f"  {field}: listed only over scp-style/ssh:///git:// URLs, "
-                    "which never use this token — set host: on its git.orgs entry "
-                    "to route https clones (github.com for a github org; "
-                    "host:port if the forge serves https on a non-443 port)")
-            else:
-                errors.append(
-                    f"  {field}: not in repos: — add its repo "
-                    "(https:// to route this token) or set host: on its git.orgs "
-                    "entry (github.com for a github org)")
-
     if errors:
         raise ManifestError("manifest git identity failed validation:\n" + "\n".join(errors))
 
     # Nothing implicit: the table holds only rows the manifest stated above.
     # A CLI host with no row gets NO token anywhere — keyfiles.sh and the
-    # bootstrap clone env write GH_TOKEN only when GIT_TOKEN_SOURCE names a
-    # row variable.
-    cli_var = rows.get(CLI_HOST)
+    # bootstrap clone env write GH_TOKEN only when an identity's effective
+    # table has a row for the CLI host (GIT_IDENTITY_TOKEN_SOURCES).
     # Per-identity tables: each identity a list-form entry names gets the
     # rows of the entries that name it, layered over the catch-all rows for
     # every host nothing names it for (a named row overrides the catch-all
@@ -1290,10 +1098,16 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
         cli = table.get(CLI_HOST)
         if cli:
             identity_cli[ident] = cli
+    # Identities named by NO entry still ride the catch-all: their table IS
+    # the catch-all, so when the catch-all carries a CLI-host row they get a
+    # token-sources record too — the plain GH_TOKEN comes from exactly one
+    # mechanism, the identity's own record, for named and unnamed identities
+    # alike.
+    catch_all_cli = rows.get(CLI_HOST)
+    if catch_all_cli:
+        for ident in sorted(known_identities):
+            identity_cli.setdefault(ident, catch_all_cli)
     return {
-        "GIT_TOKEN_SOURCE": cli_var or "",
-        "GIT_ORG_IDENTITIES": "".join(
-            f"{o}\t{n}\t{e}\n" for o, _s, n, e, _h in records),
         "GIT_HOST_IDENTITIES": "".join(
             f"{h}\t{n}\t{e}\n" for h, (n, e) in sorted(host_identities.items())),
         "GIT_HOST_TOKENS": " ".join(f"{h}={rows[h]}" for h in sorted(rows)),
@@ -1301,11 +1115,6 @@ def _git_identity(parsed_repos, git, env, secrets_file, identity_names):
             f"{ident}\t{identity_tokens[ident]}\n" for ident in sorted(identity_tokens)),
         "GIT_IDENTITY_TOKEN_SOURCES": "".join(
             f"{ident}\t{identity_cli[ident]}\n" for ident in sorted(identity_cli)),
-        # Provenance, for the up-time shared-host notice: the hosts whose
-        # rows a git.orgs entry supplied — NOT the CLI host's row when that
-        # row came from git.token (already explicitly stated), so the notice
-        # never misattributes it to a git.orgs entry.
-        "GIT_ORG_ROUTED_HOSTS": " ".join(sorted(org_routed)),
     }
 
 
@@ -1431,16 +1240,13 @@ def derive(manifest, plugin_files, agent_files, env):
     repo_origins = {line for line in
                     _credential_hosts(url for _name, url in parsed_repos).splitlines()
                     if line}
-    forge = _scalar(manifest.get("forge"), "forge") or "github"
-    if forge not in ("github", "gitea"):
-        raise ManifestError("forge must be github or gitea")
-    out["FORGE"] = forge
     git = _section(manifest, "git")
     out["GIT_USER_NAME"] = _identity_scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
     out["GIT_USER_EMAIL"] = _identity_scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
-    out.update(_git_identity(parsed_repos, git, env, secrets_file,
+    out.update(_git_identity(git, env, secrets_file,
                              frozenset(agents[name]["binary"]
-                                       for name in mcp_agent_dir_names)))
+                                       for name in mcp_agent_dir_names),
+                             forge_declared="forge" in manifest))
     # GIT_CREDENTIAL_HOSTS: every host a credential may be needed for — the
     # git.hosts table's hosts (catch-all and per-identity rows alike: the
     # router must be installed for a host whose tokens serve named

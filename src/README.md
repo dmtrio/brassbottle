@@ -44,9 +44,8 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
   needs `git.hosts.<host>.token`), or a git host missing from
   `capabilities.egress` — that `up.sh` sources and calls after deriving the
   manifest.
-- `git_identity.sh` stamps per-repo author identity (git.orgs and
-  git.hosts name/email records) onto each clone after the bootstrap
-  `git clone`.
+- `git_identity.sh` stamps per-repo author identity (git.hosts name/email
+  records) onto each clone after the bootstrap `git clone`.
 - `credential_router_install.sh` holds the idempotent per-origin
   `git config` loop the container entrypoint runs to install
   `git-credential-org` for every `GIT_CREDENTIAL_HOSTS` host (the entrypoint
