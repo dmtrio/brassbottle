@@ -69,8 +69,9 @@ discipline) that the harness supplies separately.
   unavailable; a skip is never a pass. `tests/egress.smoke.sh` is
   operator-run on a Mac host with a live bottle — it cannot run in CI or in a
   container.
-- **Known baseline failure:** `tests.test_jump_host` (`IpTests`) fails on
-  `main` as well as on feature branches (observed 2026-09). Compare against a
+- **Known baseline failures:** some suites fail on `main` as well as on
+  feature branches (observed 2026-09): `tests.test_jump_host` (`IpTests`,
+  `StartTests`) and `tests.test_compose_rules.RunTests`. Compare against a
   `main` baseline before blaming your change, and say so in the PR when your
   diff is not the cause.
 - Adjacent suites (`agents/*/test_*.py`, `plugins/*/test_*.py`) are loaded by
