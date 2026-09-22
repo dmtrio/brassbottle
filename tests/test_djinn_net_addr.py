@@ -115,5 +115,52 @@ class ValidateStaticTests(unittest.TestCase):
             na.validate_static(self.NET, "nope", "X")
 
 
+class EgressAddressTests(unittest.TestCase):
+    NET = ipaddress.IPv4Network("172.30.0.0/24")
+
+    def test_default_is_offset_three(self):
+        # offset 1 is the jump, offset 2 the tunnel — the egress broker takes
+        # the third slot from the top so bottles can file at a stable address.
+        self.assertEqual(na.resolve_egress_ip(env={}), "172.30.0.252")
+        self.assertEqual(str(na.top_address(self.NET, 3)), "172.30.0.252")
+
+    def test_tracks_a_subnet_override(self):
+        env = {"DJINN_SUBNET": "10.9.0.0/24"}
+        self.assertEqual(na.resolve_egress_ip(env=env), "10.9.0.252")
+
+    def test_operator_override_is_honoured(self):
+        env = {"DJINN_EGRESS_IP": "172.30.0.40"}
+        self.assertEqual(na.resolve_egress_ip(env=env), "172.30.0.40")
+
+    def test_override_on_the_jump_slot_is_refused(self):
+        # The registry, not compose's IPAM, names the collision: an override
+        # equal to the jump's address must fail here with a message naming
+        # jump, not as "Address already in use" inside compose.
+        jump_addr = str(na.top_address(self.NET, 1))
+        env = {"DJINN_EGRESS_IP": jump_addr}
+        with self.assertRaises(ValueError) as ctx:
+            na.resolve_egress_ip(env=env)
+        self.assertIn("jump", str(ctx.exception))
+
+    def test_override_on_the_tunnel_slot_is_refused(self):
+        tunnel_addr = str(na.top_address(self.NET, 2))
+        env = {"DJINN_EGRESS_IP": tunnel_addr}
+        with self.assertRaises(ValueError) as ctx:
+            na.resolve_egress_ip(env=env)
+        self.assertIn("tunnel", str(ctx.exception))
+
+    def test_own_default_is_not_reported_as_a_collision(self):
+        own = str(na.top_address(self.NET, 3))
+        env = {"DJINN_EGRESS_IP": own}
+        self.assertEqual(na.resolve_egress_ip(env=env), own)
+
+    def test_jump_and_tunnel_overrides_avoid_the_egress_slot(self):
+        egress_addr = str(na.top_address(self.NET, 3))
+        with self.assertRaises(ValueError):
+            na.validate_static(self.NET, egress_addr, "DJINN_JUMP_IP", own_offset=1)
+        with self.assertRaises(ValueError):
+            na.validate_static(self.NET, egress_addr, "DJINN_NEWT_IP", own_offset=2)
+
+
 if __name__ == "__main__":
     unittest.main()

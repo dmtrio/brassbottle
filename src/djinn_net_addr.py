@@ -43,7 +43,36 @@ MIN_PREFIXLEN_FOR_DERIVED = 29
 # otherwise compose fails with an opaque "Address already in use", or worse
 # the sibling is stopped, this one takes its address, and the NEXT start of
 # the sibling is what breaks, far from the cause.
-SINGLETON_OFFSETS = {1: "jump", 2: "tunnel"}
+SINGLETON_OFFSETS = {1: "jump", 2: "tunnel", 3: "egress"}
+
+# The egress broker container's slot (djinn-net). Bottles file blocked egress
+# at this address (EGRESS_BROKER_HOST), so it must be as stable as the jump's.
+EGRESS_ADDRESS_OFFSET = 3
+ENV_EGRESS_IP = "DJINN_EGRESS_IP"
+
+
+def resolve_egress_ip(
+    env: dict[str, str] | None = None,
+    subnet: ipaddress.IPv4Network | None = None,
+) -> str:
+    """Static bridge address for the egress broker container.
+
+    Same contract as jump_config.resolve_jump_ip, expressed against the shared
+    registry so an operator override that lands on the jump or tunnel slot is
+    rejected HERE (a named error) instead of as an opaque IPAM failure inside
+    compose. Callers pass the LIVE djinn-net subnet when the bridge exists —
+    ensure_net deliberately only *warns* when an existing bridge has a
+    different subnet and still returns 0, so deriving from the desired value
+    alone would compute an address on a network that does not exist.
+    """
+    env = os.environ if env is None else env
+    subnet = resolve_subnet(env) if subnet is None else subnet
+    override = (env.get(ENV_EGRESS_IP) or "").strip()
+    if override:
+        return validate_static(
+            subnet, override, ENV_EGRESS_IP, own_offset=EGRESS_ADDRESS_OFFSET
+        )
+    return str(top_address(subnet, EGRESS_ADDRESS_OFFSET, ENV_EGRESS_IP))
 
 
 def resolve_subnet(env: dict[str, str] | None = None) -> ipaddress.IPv4Network:
