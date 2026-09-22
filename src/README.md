@@ -17,6 +17,15 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
   `GIT_IDENTITY_HOST_TOKENS`/`GIT_IDENTITY_TOKEN_SOURCES` records (one per
   identity a list-form git.hosts entry names) that `keyfiles.sh` builds each
   identity's env file from.
+- `version_contracts.py` holds the typed version-selection contracts (PLN -
+  Managed Versions, Step 1 — Dark): the `versions.yml` catalog schema, the
+  manifest `versions:` override validator (takes an in-memory Catalog;
+  nothing wires it yet), candidate and build-receipt records, the canonical
+  SHA-256 hash, and the status model whose component_state() is the only
+  place requested/resolved/built/running/external/deferred are derived.
+  Candidates and receipts are the persisted records; assert_persistable()
+  rejects secret-shaped field names inside them. Step 2 builds the inventory
+  and audit on this; Step 7 wires it into `djinn versions` and `up`.
 - `keyfiles.sh` composes per-agent secret env files from `secrets.env` and
   the bottle's secret bindings — plus `user.env`, the `user` identity's git
   routing (sourced by the image's `.bashrc` in interactive shells), which
