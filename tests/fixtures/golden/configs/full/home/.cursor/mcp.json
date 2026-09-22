@@ -8,6 +8,7 @@
       "command": "mcp-remote",
       "args": [
         "https://mcp.axiom.co/mcp",
+        "--allow-http",
         "--header",
         "Authorization: Bearer ${AXIOM_TOKEN}"
       ]
@@ -16,6 +17,7 @@
       "command": "mcp-remote",
       "args": [
         "https://mcp-obsidian.dmetr.io/mcp",
+        "--allow-http",
         "--header",
         "Authorization: Bearer ${OBSIDIAN_ANNOTATED_KEY}"
       ]

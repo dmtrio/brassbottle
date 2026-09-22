@@ -7,7 +7,9 @@
 #
 # Plaintext http:// to the Docker host is deliberate: the listener is
 # localhost-only on the Mac, and the shim does not require TLS (verified with
-# mcp-remote 0.1.49 — full initialize + tools/list over http://).
+# mcp-remote 0.1.49 — full initialize + tools/list over http://). The shim
+# renderer adds --allow-http for it: 0.1.49 exits before dialing a plain-http
+# URL to any host but localhost without that flag.
 #
 # The url dials ${HOST_PORT}, not a hardcoded 8811, so a manifest
 # `plugin_ports: {gateway: N}` override moves the firewall grant and the

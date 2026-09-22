@@ -12,5 +12,5 @@ secrets:
 mcp:
   proxyman:
     command: mcp-remote
-    args: ["http://host.docker.internal:${HOST_PORT}/mcp", "--header", "X-API-Key: ${PROXYMAN_BRIDGE_KEY}"]
+    args: ["http://host.docker.internal:${HOST_PORT}/mcp", "--allow-http", "--header", "X-API-Key: ${PROXYMAN_BRIDGE_KEY}"]
     requires: [PROXYMAN_BRIDGE_KEY]

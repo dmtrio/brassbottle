@@ -13,5 +13,5 @@ secrets:
 mcp:
   browser:
     command: mcp-remote
-    args: ["http://host.docker.internal:${HOST_PORT}/mcp", "--header", "X-API-Key: ${RESEARCH_BROWSER_KEY}"]
+    args: ["http://host.docker.internal:${HOST_PORT}/mcp", "--allow-http", "--header", "X-API-Key: ${RESEARCH_BROWSER_KEY}"]
     requires: [RESEARCH_BROWSER_KEY]

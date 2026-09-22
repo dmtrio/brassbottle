@@ -8,6 +8,7 @@
       "command": "mcp-remote",
       "args": [
         "https://mcp.axiom.co/mcp",
+        "--allow-http",
         "--header",
         "Authorization: Bearer ${AXIOM_TOKEN}"
       ]
