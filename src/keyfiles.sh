@@ -211,10 +211,13 @@ EOF
     # override source is validated by manifest.py, while an unset common source
     # is omitted before it becomes a resolved record. `user` never appears in
     # AGENT_SECRETS (identities validate against agent binaries), so the human
-    # env file stays routing-only.
+    # env file stays routing-only. Values are shell-quoted (%q) like the git
+    # block: these lines are sourced, so a value with spaces, quotes or $
+    # must round-trip byte-identically (an unquoted append runs the value's
+    # words as commands).
     while IFS=$'\t' read -r agent slot src; do
         [ -n "$agent" ] || continue
-        echo "$slot=${!src}" >> "$keys_dir/$agent.env"
+        printf '%s=%q\n' "$slot" "${!src}" >> "$keys_dir/$agent.env"
     done <<EOF
 $agent_secrets
 EOF

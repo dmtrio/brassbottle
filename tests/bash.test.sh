@@ -330,7 +330,7 @@ assert_eq "user.env is mode 600 (the keys dir mounts read-only mode 600)" "600" 
 # ── the real generated launchers (src/agent_shim.sh — the SAME function the
 # Dockerfile runs) with the key files above ──
 . "$REPO/src/agent_shim.sh"
-IDSHIMS="$WORK/idshims"; IDSTUBS="$WORK/idstubs"; mkdir -p "$IDSHIMS" "$IDSTUBS"
+IDSHIMS="$WORK/agent-shims/.agent-shims"; IDSTUBS="$WORK/idstubs"; mkdir -p "$IDSHIMS" "$IDSTUBS"
 for b in claude pi codex cursor-agent; do
     write_agent_shim "$IDSHIMS/$b" "$b"
     cat > "$IDSTUBS/$b" <<MOCK
@@ -370,6 +370,108 @@ assert_contains "shim cursor-agent: the gitea row still reaches an unnamed agent
     "$(cat "$WORK/env-cursor")" "GITEA_TOKEN_example=gitea-val"
 assert_absent "shim cursor-agent: no github.com row" "$(cat "$WORK/env-cursor")" "github.com="
 assert_absent "shim cursor-agent: no GH_TOKEN" "$(cat "$WORK/env-cursor")" "GH_TOKEN="
+
+# ── a shim must CLEAR its parent's identity: agents are launched from
+# interactive shells (VS Code terminal, herdr, tmux), and the user's shell
+# exports user.env (the image's .bashrc piece); a shimmed agent spawning
+# another passes its own env along. The shim SETS what its file says but
+# must also CLEAR what it does not — GH_TOKEN, GITHUB_TOKEN, GIT_HOST_TOKENS
+# and every variable the INHERITED table names — or the child authenticates
+# as the parent's/user's identity through git and gh. Each pin below runs
+# the REAL generated shim from a shell that has ALREADY sourced the REAL
+# src/user-keys-landing.bashrc with a REAL user.env (write_keyfiles from
+# real derive output), against the env-dumping stub.
+
+# (a) UNNAMED agent, empty env file, launched from the user's shell: nothing
+# of the user's identity may reach the agent process.
+# (b) gitea-only agent, no github.com row: its own table and variables only.
+# (c) nested spawn: shim claude (named, token A) then from inside it the
+# shim for pi (unnamed): pi sees none of A.
+IDB_HOME="$WORK/idbhome"; IDB_KEYS="$IDB_HOME/.agent-keys"
+IDB2_HOME="$WORK/idb2home"; IDB2_KEYS="$IDB2_HOME/.agent-keys"
+mkdir -p "$IDB_KEYS" "$IDB2_KEYS"
+IDB_STUBS="$WORK/idbstubs"; mkdir -p "$IDB_STUBS"
+mk_dump_stub() { cat > "$IDB_STUBS/$1" <<'MOCK'
+#!/bin/bash
+env | LC_ALL=C sort > "${STUB_ENV_OUT:?}"
+MOCK
+chmod +x "$IDB_STUBS/$1"
+}
+mk_dump_stub claude; mk_dump_stub pi; mk_dump_stub cursor-agent
+user_shell() {  # <args...> — an interactive-shell stand-in that sourced the REAL piece
+    env -i HOME="$US_HOME" PATH="$US_STUBS:$IDSHIMS:/usr/bin:/bin" TERM=dumb \
+        STUB_ENV_OUT="${STUB_ENV_OUT-}" STUB_ENV_OUT2="${STUB_ENV_OUT2-}" STUB_NESTED="${STUB_NESTED-}" \
+        bash -c '. '"$REPO"'/src/user-keys-landing.bashrc; exec "$@"' _ "$@"
+}
+
+# (a) github list form ONLY (no simple-form host): pi/cursor-agent named by
+# no entry, no catch-all, no simple host — empty env files.
+IDB_MANIFEST='[{"token":"GH_TOKEN_fry_a","identities":["claude","user"]},{"token":"GH_TOKEN_fry_b","identities":["codex"]}]'
+eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude","pi","codex","cursor"],"git":{"hosts":{"github.com":%s}}}\n---agents---\n%s\n' \
+    "$IDB_MANIFEST" "$(id_agents_json)" \
+    | PRESENT_SECRET_VARS="GITEA_TOKEN_example GH_TOKEN_fry_a GH_TOKEN_fry_b GH_TOKEN_fry_c" \
+      SECRETS_FILE=/sec/secrets.env GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" \
+      NTFY_URL="" NTFY_TOPIC="" python3 "$REPO/src/manifest.py" --derive)"
+GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
+write_keyfiles "$IDB_KEYS" "claude pi codex cursor-agent" "" "" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+assert_eq "setup: user.env carries the user identity exactly like claude's" \
+    "$(cat "$IDB_KEYS/user.env")" "$(cat "$IDB_KEYS/claude.env")"
+assert_eq "setup: pi.env is EMPTY (named by no entry, no catch-all, no simple host)" \
+    "" "$(cat "$IDB_KEYS/pi.env")"
+US_HOME="$IDB_HOME"; US_STUBS="$IDB_STUBS"
+out=$(user_shell bash -c 'printf "GH_TOKEN=%s|GHT=%s" "${GH_TOKEN-}" "${GIT_HOST_TOKENS-}"')
+assert_contains "setup: the user-lane shell carries the user identity" "$out" "GH_TOKEN=fry-a-val"
+assert_contains "setup: …and its routing table" "$out" "GHT=github.com=GH_TOKEN_fry_a"
+STUB_ENV_OUT="$WORK/ua-dump" user_shell bash "$IDSHIMS/cursor-agent" >/dev/null 2>&1
+assert_absent "unnamed agent: no GH_TOKEN comes through" "$(cat "$WORK/ua-dump")" "GH_TOKEN="
+assert_absent "unnamed agent: no GIT_HOST_TOKENS" "$(cat "$WORK/ua-dump")" "GIT_HOST_TOKENS="
+assert_absent "unnamed agent: none of the user's token variables" "$(cat "$WORK/ua-dump")" "GH_TOKEN_fry_a"
+assert_absent "unnamed agent: no token value" "$(cat "$WORK/ua-dump")" "fry-a-val"
+
+# (b) gitea-only agent (own table, no github row), user-lane launch: its own
+# table and variables ONLY — the shell's GH_TOKEN must not leak to gh.
+eval "$(derive_id_manifest "$IDB_MANIFEST")"
+GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
+write_keyfiles "$IDB2_KEYS" "claude pi codex cursor-agent" "" "" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+assert_eq "setup b: cursor-agent.env is gitea-only (no github row, no GH_TOKEN)" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\nGITEA_TOKEN_example=gitea-val' \
+    "$(cat "$IDB2_KEYS/cursor-agent.env")"
+US_HOME="$IDB2_HOME"
+STUB_ENV_OUT="$WORK/ub-dump" user_shell bash "$IDSHIMS/cursor-agent" >/dev/null 2>&1
+assert_contains "gitea-only agent: its own table" "$(cat "$WORK/ub-dump")" \
+    "GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example"
+assert_contains "gitea-only agent: its own token variable" "$(cat "$WORK/ub-dump")" \
+    "GITEA_TOKEN_example=gitea-val"
+assert_absent "gitea-only agent: no GH_TOKEN (git routes, gh acts as nobody)" \
+    "$(cat "$WORK/ub-dump")" "GH_TOKEN="
+assert_absent "gitea-only agent: no inherited user token variable" \
+    "$(cat "$WORK/ub-dump")" "GH_TOKEN_fry_a"
+assert_absent "gitea-only agent: no inherited token value" "$(cat "$WORK/ub-dump")" "fry-a-val"
+assert_absent "gitea-only agent: no github row inherited" "$(cat "$WORK/ub-dump")" "github.com="
+
+# (c) nested spawn: user shell → shim claude (token A) → from inside it shim
+# pi (unnamed): pi must see none of A, only its own gitea-only identity.
+cat > "$IDB_STUBS/claude" <<'MOCK'
+#!/bin/bash
+env | LC_ALL=C sort > "${STUB_ENV_OUT:?}"
+if [ -n "${STUB_NESTED:-}" ]; then
+    STUB_ENV_OUT="${STUB_ENV_OUT2:?}" exec bash "$STUB_NESTED"
+fi
+MOCK
+US_HOME="$IDB2_HOME"
+STUB_ENV_OUT="$WORK/uc-claude" STUB_ENV_OUT2="$WORK/uc-pi" STUB_NESTED="$IDSHIMS/pi" \
+    user_shell bash "$IDSHIMS/claude" >/dev/null 2>&1
+assert_contains "nested: the claude hop carried token A (chain works)" \
+    "$(cat "$WORK/uc-claude")" "GH_TOKEN=fry-a-val"
+assert_contains "nested: pi keeps its own gitea identity" "$(cat "$WORK/uc-pi")" \
+    "GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example"
+assert_contains "nested: pi's own token variable" "$(cat "$WORK/uc-pi")" "GITEA_TOKEN_example=gitea-val"
+assert_absent "nested: pi sees none of claude's GH_TOKEN" "$(cat "$WORK/uc-pi")" "GH_TOKEN="
+assert_absent "nested: pi sees none of claude's token variable" "$(cat "$WORK/uc-pi")" "GH_TOKEN_fry_a"
+assert_absent "nested: pi sees none of claude's token value" "$(cat "$WORK/uc-pi")" "fry-a-val"
+unset GH_TOKEN_fry_a GH_TOKEN_fry_b GITEA_TOKEN_example
 
 # ── the helper answers per identity: git-credential-org run with each
 # identity's own environment (env sourced exactly the way the shim exports
@@ -480,14 +582,19 @@ eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude"],"plu
     | PRESENT_SECRET_VARS="GH_TOKEN_hank OBSIDIAN_KEY_claude" SECRETS_FILE=/sec/secrets.env \
       GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
       python3 "$REPO/src/manifest.py" --derive)"
-GH_TOKEN_hank=hank-token-value OBSIDIAN_KEY_claude=hank-obsidian-key
+# The plugin secret's value contains a space and a $: the append must quote
+# it (%q, like the git block) so the sourced value round-trips byte-identically.
+HANK_SECRET='hank obsidian $key value'
+GH_TOKEN_hank=hank-token-value OBSIDIAN_KEY_claude="$HANK_SECRET"
 write_keyfiles "$HK_KEYS" "claude" "" \
     "$(printf 'claude\tOBSIDIAN_ANNOTATED_KEY\tOBSIDIAN_KEY_claude\n')" \
     "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" \
     "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
 bad=$(env_shape_ok "$HK_KEYS")
 assert_eq "coding-hank shape: file ends with a newline, every line is VAR=..." "" "$bad"
-HSHIMS="$WORK/hshims"; HSTUBS="$WORK/hstubs"; mkdir -p "$HSHIMS" "$HSTUBS"
+sourced=$(env -i bash -c 'set -a; . "$1"; printf "%s" "$OBSIDIAN_ANNOTATED_KEY"' _ "$HK_KEYS/claude.env")
+assert_eq "a secret with a space and a \$ sources back to itself" "$HANK_SECRET" "$sourced"
+HSHIMS="$WORK/agent-shims/.agent-shims"; HSTUBS="$WORK/hstubs"; mkdir -p "$HSHIMS" "$HSTUBS"
 write_agent_shim "$HSHIMS/claude" claude
 cat > "$HSTUBS/claude" <<'MOCK'
 #!/bin/bash
@@ -498,9 +605,9 @@ env -i HOME="$HK" PATH="$HSTUBS:$HSHIMS:/usr/bin:/bin" STUB_ENV_OUT="$WORK/env-h
     bash "$HSHIMS/claude" >/dev/null 2>&1
 assert_eq "real shim: GH_TOKEN keeps its exact value" "hank-token-value" \
     "$(grep '^GH_TOKEN=' "$WORK/env-hank" | cut -d= -f2-)"
-assert_eq "real shim: the plugin slot keeps its exact value (separate line)" "hank-obsidian-key" \
+assert_eq "real shim: the plugin slot keeps its exact value (separate line)" "$HANK_SECRET" \
     "$(grep '^OBSIDIAN_ANNOTATED_KEY=' "$WORK/env-hank" | cut -d= -f2-)"
-unset GH_TOKEN_hank OBSIDIAN_KEY_claude
+unset GH_TOKEN_hank OBSIDIAN_KEY_claude HANK_SECRET
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git-credential-org.sh ──"
