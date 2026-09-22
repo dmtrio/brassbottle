@@ -524,6 +524,51 @@ class StatusModelTests(unittest.TestCase):
                               running=running_for(receipt))
         self.assertIn("the receipt does not match the candidate", str(ctx.exception))
 
+    def test_component_outside_the_candidate_is_never_built_or_running(self):
+        # Code review finding: a receipt hashing to a candidate for OTHER
+        # components must not turn agent.claude into built/running —
+        # component-specific evidence is required.
+        candidate = make_candidate(self.catalog)          # agent.aider only
+        receipt = make_receipt(candidate)                 # observes agent.aider
+        claude = self.catalog.components["agent.claude"]
+        self.assertEqual(v.component_state(claude, candidate, receipt),
+                         v.State.REQUESTED)
+        with self.assertRaises(v.VersionContractError) as ctx:
+            v.component_state(claude, candidate, receipt, running_for(receipt))
+        self.assertIn("the candidate never requested it", str(ctx.exception))
+
+    def test_receipt_observing_a_component_its_candidate_never_requested_rejected(
+            self):
+        candidate = make_candidate(self.catalog)          # agent.aider only
+        receipt = make_receipt(candidate, observations={
+            "agent.aider": {"version": "1.9.4"},
+            "agent.claude": {"version": "2.1.0"},
+        })
+        claude = self.catalog.components["agent.claude"]
+        with self.assertRaises(v.VersionContractError) as ctx:
+            v.component_state(claude, candidate, receipt)
+        self.assertIn(
+            "the receipt observes it but the candidate never requested it",
+            str(ctx.exception))
+
+    def test_running_without_a_receipt_observation_rejected(self):
+        # agent.claude is requested by this candidate, but the receipt
+        # carries no observation for it — omitted evidence is not running.
+        requested = {"agent.aider": {"policy": "latest"},
+                     "agent.claude": {"policy": "release-line",
+                                      "constraint": "2.x"}}
+        resolved = {"agent.aider": {"version": "1.9.4"},
+                    "agent.claude": {"version": "2.1.0"}}
+        candidate = make_candidate(self.catalog, requested=requested,
+                                   resolved=resolved)
+        receipt = make_receipt(candidate)                 # observes agent.aider
+        claude = self.catalog.components["agent.claude"]
+        self.assertEqual(v.component_state(claude, candidate, receipt),
+                         v.State.BUILT)
+        with self.assertRaises(v.VersionContractError) as ctx:
+            v.component_state(claude, candidate, receipt, running_for(receipt))
+        self.assertIn("records no component observation for it", str(ctx.exception))
+
     def test_full_chain_presents_running(self):
         candidate = make_candidate(self.catalog)
         receipt = make_receipt(candidate)
