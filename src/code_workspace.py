@@ -46,6 +46,20 @@ DEFAULT_PROFILE = "bash"
 # inside the profile regardless of what the manifest says.
 HERDR_PROFILE = "herdr"
 HERDR_PROFILE_VALUE = {"path": "herdr", "env": {"REMOTE_SHELL": "bash"}}
+# Mouse settings for the herdr profile. herdr turns on full mouse tracking
+# (xterm modes 1000/1002/1003/1006), so VS Code's terminal forwards clicks and
+# drags to it — except where VS Code's own handlers run first:
+# - rightClickBehavior defaults to selectWord on macOS and opens VS Code's
+#   context menu over herdr's pane menu. "nothing" lets the click through;
+#   shift+right-click still opens VS Code's menu.
+# - With mouse tracking on, VS Code disables its own drag selection, so
+#   multi-line copy needs option+drag, which only works when
+#   macOptionClickForcesSelection is on (default false).
+# Both are plain scalars, add-if-missing like everything else here.
+RIGHT_CLICK_KEY = "terminal.integrated.rightClickBehavior"
+RIGHT_CLICK = "nothing"
+OPTION_SELECT_KEY = "terminal.integrated.macOptionClickForcesSelection"
+OPTION_SELECT = True
 
 
 def _dump_json(obj):
@@ -101,6 +115,11 @@ def merge_settings(settings):
     if DEFAULT_PROFILE_KEY not in settings:
         settings[DEFAULT_PROFILE_KEY] = DEFAULT_PROFILE
         added.append(DEFAULT_PROFILE_KEY)
+
+    for key, value in ((RIGHT_CLICK_KEY, RIGHT_CLICK), (OPTION_SELECT_KEY, OPTION_SELECT)):
+        if key not in settings:
+            settings[key] = value
+            added.append(key)
 
     return settings, added
 

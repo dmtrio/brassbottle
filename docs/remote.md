@@ -171,6 +171,17 @@ sidebar toggle and swallows it in terminals; add
 to your user settings there (on macOS the toggle is `cmd+b`, so `ctrl+b`
 already reaches herdr and tmux).
 
+Two more managed settings make the mouse usable inside herdr from VS Code.
+herdr captures the mouse, so VS Code forwards clicks and drags to it, but
+VS Code's own handlers run first: `terminal.integrated.rightClickBehavior`
+is set to `nothing` so a right-click opens herdr's pane menu instead of
+VS Code's (shift+right-click still opens VS Code's), and
+`terminal.integrated.macOptionClickForcesSelection` is `true` so
+**option+drag** gives VS Code's native multi-line selection and Cmd+C. Both
+apply to every terminal in the workspace window, including plain bash ones,
+and both are add-if-missing: set your own value in the workspace file and
+`djinn up` keeps it.
+
 Landing-session GC runs on login and on tmux detach/session-switch hooks:
 an unattached `login-*` session is removed only when it is still an idle bare
 shell in one window/one pane, so sessions with real work are left untouched.
