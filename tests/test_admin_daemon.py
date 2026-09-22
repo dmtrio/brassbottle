@@ -402,10 +402,11 @@ class AdminDaemonTests(unittest.TestCase):
                 self.assertIn("startsWith(\"/api/\")", text)
                 self.assertIn('"/app.js"', text)
                 self.assertIn('"/vendor/htm-preact-standalone.module.js"', text)
-                # "/" is excluded from the shell cache: without a session
-                # cookie it is the pointer page, and a cached pointer page
+                # "/" is excluded from the shell cache (the array must open
+                # with /app.js, not with a "/" entry): without a session
+                # cookie / is the pointer page, and a cached pointer page
                 # would masquerade as the app shell after a session expires.
-                self.assertNotIn('"/"', text)
+                self.assertIn('const SHELL_PATHS = [\n  "/app.js",', text)
                 self.assertIn("url.pathname === \"/\"", text)
             finally:
                 server.shutdown()
