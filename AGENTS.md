@@ -2,10 +2,10 @@
 
 Firewalled Docker workspaces for AI coding agents: `./djinn up` turns a bottle
 manifest into one project container with cloned repos, agent CLIs, MCP config,
-secret shims, artifacts, and an egress allowlist. This file records what agents
-entering this repo need: where things live, what to run, how to verify. The
-global container rules (worktrees, PRs, review discipline) apply separately and
-are not repeated here.
+secret shims, artifacts, and an egress allowlist. This file records
+repository-specific facts — where things live, what to run, how to verify —
+supplementing, not restating, the global agent rules (worktrees, PRs, review
+discipline) that the harness supplies separately.
 
 ## Stack
 
