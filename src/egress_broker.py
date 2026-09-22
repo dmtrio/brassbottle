@@ -3,8 +3,9 @@
 
 Accepts TCP connections redirected by iptables REDIRECT (B3), recovers the
 intended destination via SO_ORIGINAL_DST, and either fast-paths allowed traffic
-through the ipset or files an approval request with the host daemon and holds
-the client until allow/deny/timeout. Stdlib only; runs as djinnbroker.
+through the ipset or files an approval request with the host daemon and polls
+for the decision — up to the client's own hold deadline — before relaying or
+failing the client. Stdlib only; runs as djinnbroker.
 """
 
 from __future__ import annotations
@@ -55,6 +56,10 @@ TLS_SNI_HOST_NAME = 0x00
 
 DEFAULT_PEEK_TIMEOUT = 5.0
 DEFAULT_MAX_PEEK_BYTES = 16_384
+
+# How often the filing worker re-reads GET /egress/<request_id> while the
+# row is still open.
+POLL_INTERVAL_SECONDS = 1.0
 
 def generate_request_id() -> str:
     """Mint a short correlation id before filing with the host daemon."""
@@ -442,7 +447,7 @@ def ipset_allowed(
     return result.returncode == 0
 
 
-def file_egress_with_hold(
+def file_egress(
     *,
     url: str,
     token: str,
@@ -456,7 +461,15 @@ def file_egress_with_hold(
     reason: str | None = None,
     opener: Callable[..., Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """POST /egress and return (json_body, error_reason)."""
+    """POST /egress and return (json_body, error_reason).
+
+    The broker answers at once — with the `pending` body for a new or
+    re-hit open row, or the per-request decision body when the denylist or
+    an existing decision short-circuits it — so no client thread waits on
+    an operator here. `hold_seconds` is recorded on the row and does not
+    change this call's duration; polling for the decision is
+    poll_decision()'s job.
+    """
     if not token:
         return None, "missing_broker_token"
 
@@ -484,7 +497,9 @@ def file_egress_with_hold(
         method="POST",
     )
     open_fn = opener or urllib.request.urlopen
-    wait = timeout if timeout is not None else float(hold_seconds) + 5.0
+    # The broker answers within a second by contract; a small margin on
+    # top covers a slow host.
+    wait = timeout if timeout is not None else 5.0
     try:
         with open_fn(request, timeout=wait) as response:
             raw = response.read()
@@ -502,6 +517,81 @@ def file_egress_with_hold(
     if not isinstance(parsed, dict):
         return None, "invalid_json"
     return parsed, None
+
+
+def poll_decision(
+    *,
+    url: str,
+    token: str,
+    request_id: str,
+    baseline_attempt: int,
+    deadline: float,
+    now_fn: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    poll_interval: float = POLL_INTERVAL_SECONDS,
+    opener: Callable[..., Any] | None = None,
+) -> dict[str, Any] | None:
+    """GET /egress/<request_id> until the row answers the client.
+
+    `baseline_attempt` is the `attempt` the client's own filing returned:
+    only an apply error from a LATER completed attempt is this client's
+    business — a failure recorded before it filed is the previous client's
+    news, and this client keeps waiting for the next decision.
+
+    Returns the per-request decision body once the row is decided; an
+    {"decision": "error", "reason": ...} body when an apply failed after
+    the baseline; or None when the deadline passed with the row still open
+    (the caller takes its pending path — no close is sent, the row stays
+    open for a late allow).
+    """
+    if not token:
+        return {"decision": "error", "reason": "missing_broker_token"}
+    endpoint = url.rstrip("/") + f"/egress/{request_id}"
+    open_fn = opener or urllib.request.urlopen
+    while now_fn() < deadline:
+        request = urllib.request.Request(
+            endpoint,
+            headers={"Authorization": f"Bearer {token}"},
+            method="GET",
+        )
+        try:
+            with open_fn(request, timeout=5.0) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            # 401/403/404 are permanent for this id; anything else is
+            # still a server refusal this client cannot poll past.
+            return {"decision": "error", "reason": f"http_{exc.code}"}
+        except (urllib.error.URLError, TimeoutError, OSError):
+            # The daemon is momentarily unreachable (a restart, a blip):
+            # keep polling until the client's own deadline.
+            pass
+        else:
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return {"decision": "error", "reason": "invalid_json"}
+            if not isinstance(parsed, dict):
+                return {"decision": "error", "reason": "invalid_json"}
+            if parsed.get("status") != "open":
+                decision_body = parsed.get("decision_body")
+                if isinstance(decision_body, dict):
+                    return decision_body
+                return {"decision": "error", "reason": "invalid_status"}
+            last_error = parsed.get("last_error")
+            if isinstance(last_error, dict):
+                attempt = last_error.get("attempt")
+                if (
+                    isinstance(attempt, int)
+                    and not isinstance(attempt, bool)
+                    and attempt > baseline_attempt
+                ):
+                    return {
+                        "decision": "error",
+                        "reason": str(last_error.get("reason") or "apply_failed"),
+                    }
+        remaining = deadline - now_fn()
+        sleep_fn(min(poll_interval, max(0.0, remaining)))
+    return None
 
 
 def peek_initial_bytes(
@@ -604,7 +694,6 @@ def wait_for_filing_or_client_abort(
     client.setblocking(False)
     sel = selectors.DefaultSelector()
     sel.register(client, selectors.EVENT_READ)
-    outcome = "pending"
     try:
         while now_fn() < deadline:
             if not filing_thread.is_alive():
@@ -645,7 +734,7 @@ def handle_intercepted_connection(
     *,
     config: BrokerConfig,
     ipset_check: IpsetCheckFn = ipset_allowed,
-    file_fn: FileFn = file_egress_with_hold,
+    file_fn: FileFn = file_egress,
     connect_fn: ConnectFn | None = None,
     reverse_dns_fn: Callable[[str], str | None] = reverse_dns,
     now_fn: NowFn = time.monotonic,
@@ -761,6 +850,15 @@ def handle_intercepted_connection(
     filing_error: dict[str, str | None] = {"value": None}
 
     def _file_worker() -> None:
+        """File, then poll the row until it answers this client.
+
+        The broker answers the filing at once; this worker polls
+        GET /egress/<request_id> every POLL_INTERVAL_SECONDS until the row
+        is decided, an apply error newer than this filing's baseline
+        arrives, or the client's own hold deadline passes (the row stays
+        open in that case — a late allow still installs the rule).
+        """
+        poll_deadline = file_started + config.hold_seconds
         body, err = file_fn(
             url=config.broker_url,
             token=config.broker_token,
@@ -771,8 +869,33 @@ def handle_intercepted_connection(
             host_is_ip=host_is_ip,
             hold_seconds=config.hold_seconds,
         )
-        filing_result["value"] = body
-        filing_error["value"] = err
+        if err is not None:
+            filing_error["value"] = err
+            return
+        if not isinstance(body, dict) or body.get("decision") != "pending":
+            # An immediate decision (denylist short-circuit, a decided row)
+            # or a fault body — nothing to poll.
+            filing_result["value"] = body
+            return
+        attempt = body.get("attempt")
+        baseline = (
+            attempt
+            if isinstance(attempt, int) and not isinstance(attempt, bool)
+            else 0
+        )
+        final = poll_decision(
+            url=config.broker_url,
+            token=config.broker_token,
+            request_id=request_id,
+            baseline_attempt=baseline,
+            deadline=poll_deadline,
+            now_fn=now_fn,
+            poll_interval=POLL_INTERVAL_SECONDS,
+        )
+        if final is not None:
+            filing_result["value"] = final
+        # else: still open at the deadline — the pending body stands, the
+        # pending path runs, and no close is sent.
 
     filing_thread = threading.Thread(target=_file_worker, name=f"egress-file-{conn_id}", daemon=True)
     file_started = now_fn()
@@ -937,7 +1060,7 @@ class EgressBrokerServer:
         config: BrokerConfig,
         *,
         ipset_check: IpsetCheckFn = ipset_allowed,
-        file_fn: FileFn = file_egress_with_hold,
+        file_fn: FileFn = file_egress,
         connect_fn: ConnectFn | None = None,
         max_workers: int = 32,
     ) -> None:

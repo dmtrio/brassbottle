@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import http.server
+import json
 import socket
 import struct
 import sys
@@ -564,6 +566,298 @@ class IpsetHelperTests(unittest.TestCase):
 
         self.assertTrue(broker.ipset_allowed("1.2.3.4", runner=runner))
         self.assertEqual(calls, [["ipset", "test", broker.IPSET_NAME, "1.2.3.4"]])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+# ── the poll client against a stub host daemon ─────────────────────────────
+
+
+class _StubBrokerHandler(http.server.BaseHTTPRequestHandler):
+    """Stand-in for the host broker: POST /egress answers at once with a
+    pending body; GET /egress/<id> serves the stub's scripted state."""
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _json(self, payload: dict, status: int = 200) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        stub = self.server.stub
+        with stub.lock:
+            stub.posts.append(payload)
+        request_id = payload.get("request_id", "abcd1234")
+        self._json(
+            {
+                "decision": "pending",
+                "request_id": request_id,
+                "status": "open",
+                "poll": f"/egress/{request_id}",
+                "attempt": stub.baseline_attempt,
+            }
+        )
+
+    def do_GET(self):
+        stub = self.server.stub
+        with stub.lock:
+            stub.gets.append(self.path)
+            decided = stub.decision_body is not None
+            body = {
+                "request_id": "abcd1234",
+                "status": "allowed" if decided else "open",
+                "attempt": stub.baseline_attempt,
+            }
+            if decided:
+                body["decision_body"] = stub.decision_body
+            elif stub.last_error is not None:
+                body["last_error"] = stub.last_error
+        self._json(body)
+
+
+class _StubBrokerDaemon:
+    """Scripted state for _StubBrokerHandler (thread-safe)."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.posts: list[dict] = []
+        self.gets: list[str] = []
+        self.baseline_attempt = 0
+        self.decision_body: dict | None = None
+        self.last_error: dict | None = None
+        self._server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), _StubBrokerHandler
+        )
+        self._server.stub = self
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+class InterceptedPollTests(unittest.TestCase):
+    """The filing worker files, then polls the row: decision, error, deadline."""
+
+    _config = staticmethod(InterceptedConnectionTests._config)
+    _mock_client = InterceptedConnectionTests._mock_client
+
+    def setUp(self) -> None:
+        # Keep the poll cadence fast; the real default is 1 s.
+        patcher = mock.patch.object(broker, "POLL_INTERVAL_SECONDS", 0.02)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_decision_outcome_pending_maps_to_pending(self):
+        """PIN — mixed-version: the pre-change worker is gone, but the
+        pending body a bottle built before this step receives must still
+        map to the pending outcome through the unmodified parser."""
+        self.assertEqual(
+            broker._decision_outcome(
+                {
+                    "decision": "pending",
+                    "request_id": "abcd1234",
+                    "status": "open",
+                    "poll": "/egress/abcd1234",
+                    "attempt": 0,
+                }
+            ),
+            "pending",
+        )
+
+    def test_pending_body_immediately_runs_pending_path_without_close(self):
+        """file_fn answering the pending body at once (mixed-version client
+        against the new server) still takes the pending path: HTTP 503 on
+        hold expiry, and no close request reaches the broker."""
+        stub = _StubBrokerDaemon()
+        self.addCleanup(stub.stop)
+        file_calls: list[dict] = []
+
+        def file_fn(**kwargs):
+            file_calls.append(kwargs)
+            return {
+                "decision": "pending",
+                "request_id": "abcd1234",
+                "status": "open",
+                "poll": "/egress/abcd1234",
+                "attempt": 0,
+            }, None
+
+        config = broker.BrokerConfig(
+            container="coding-brassbottle",
+            broker_url=stub.url,
+            broker_token="tok",
+            hold_seconds=1,
+            peek_timeout=1.0,
+        )
+        client, feed = self._mock_client(
+            dst_ip="93.184.216.34",
+            dst_port=80,
+            initial=_http_request("pending.example.com"),
+        )
+        self.addCleanup(client.close)
+        self.addCleanup(feed.close)
+        outcome = broker.handle_intercepted_connection(
+            client,
+            config=config,
+            ipset_check=lambda _ip: False,
+            file_fn=file_fn,
+        )
+        self.assertEqual(outcome.action, "pending")
+        self.assertEqual(len(file_calls), 1, "exactly one filing, no close POST")
+        self.assertEqual(stub.posts, [])
+
+    def test_poll_to_decision_relays_upstream(self):
+        stub = _StubBrokerDaemon()
+        self.addCleanup(stub.stop)
+        config = broker.BrokerConfig(
+            container="coding-brassbottle",
+            broker_url=stub.url,
+            broker_token="tok",
+            hold_seconds=5,
+            peek_timeout=1.0,
+        )
+        client, feed = self._mock_client(
+            dst_ip="93.184.216.34",
+            dst_port=80,
+            initial=_http_request("allow.example.com"),
+        )
+        upstream_client, upstream = socket.socketpair()
+        self.addCleanup(upstream_client.close)
+        self.addCleanup(upstream.close)
+        # The decision lands after a couple of polls.
+        threading.Timer(0.2, lambda: setattr(stub, "decision_body", {"decision": "allow", "scope": "live"})).start()
+
+        def connect_fn(addr, timeout):
+            self.assertEqual(addr, ("93.184.216.34", 80))
+            return upstream
+
+        with mock.patch.object(broker, "relay_sockets"):
+            outcome = broker.handle_intercepted_connection(
+                client,
+                config=config,
+                ipset_check=lambda _ip: False,
+                connect_fn=connect_fn,
+            )
+        self.assertEqual(outcome.action, "allow")
+        self.assertEqual(
+            outcome.request_id,
+            stub.posts[0]["request_id"],
+            "the worker polls the row it filed",
+        )
+        self.assertGreaterEqual(len(stub.gets), 1, "the worker polled the row")
+
+    def test_poll_reports_error_newer_than_baseline(self):
+        """An apply failure whose attempt exceeds the filing's baseline
+        reaches this client as an error on its next poll."""
+        stub = _StubBrokerDaemon()
+        self.addCleanup(stub.stop)
+        config = broker.BrokerConfig(
+            container="coding-brassbottle",
+            broker_url=stub.url,
+            broker_token="tok",
+            hold_seconds=5,
+            peek_timeout=1.0,
+        )
+        client, feed = self._mock_client(
+            dst_ip="93.184.216.34",
+            dst_port=80,
+            initial=_http_request("error.example.com"),
+        )
+        self.addCleanup(client.close)
+        self.addCleanup(feed.close)
+        stub.last_error = {"reason": "apply_failed", "attempt": 1, "at": "x"}
+        threading.Timer(0.1, lambda: setattr(stub, "baseline_attempt", 1)).start()
+        outcome = broker.handle_intercepted_connection(
+            client,
+            config=config,
+            ipset_check=lambda _ip: False,
+        )
+        self.assertEqual(outcome.action, "daemon_error")
+        response = feed.recv(4096)
+        self.assertIn(b"HTTP/1.1 502", response)
+
+    def test_poll_deadline_takes_pending_path(self):
+        """The row still open at the client's deadline: HTTP 503 (HTTP) /
+        TLS alert (HTTPS), no close, and the stub saw only filing + polls."""
+        stub = _StubBrokerDaemon()
+        self.addCleanup(stub.stop)
+        config = broker.BrokerConfig(
+            container="coding-brassbottle",
+            broker_url=stub.url,
+            broker_token="tok",
+            hold_seconds=1,
+            peek_timeout=1.0,
+        )
+        client, feed = self._mock_client(
+            dst_ip="93.184.216.34",
+            dst_port=80,
+            initial=_http_request("deadline.example.com"),
+        )
+        self.addCleanup(client.close)
+        self.addCleanup(feed.close)
+        outcome = broker.handle_intercepted_connection(
+            client,
+            config=config,
+            ipset_check=lambda _ip: False,
+        )
+        self.assertEqual(outcome.action, "pending")
+        response = bytearray()
+        feed.settimeout(0.5)
+        try:
+            while True:
+                chunk = feed.recv(4096)
+                if not chunk:
+                    break
+                response.extend(chunk)
+        except TimeoutError:
+            pass
+        text = response.decode("latin-1")
+        self.assertIn("HTTP/1.1 503 Egress pending approval", text)
+        self.assertEqual(len(stub.posts), 1, "only the filing; no close request")
+
+    def test_poll_deadline_https_takes_tls_alert_path(self):
+        stub = _StubBrokerDaemon()
+        self.addCleanup(stub.stop)
+        config = broker.BrokerConfig(
+            container="coding-brassbottle",
+            broker_url=stub.url,
+            broker_token="tok",
+            hold_seconds=1,
+            peek_timeout=1.0,
+        )
+        client, feed = self._mock_client(
+            dst_ip="93.184.216.34",
+            dst_port=443,
+            initial=_build_client_hello("tls.example.com"),
+        )
+        self.addCleanup(client.close)
+        self.addCleanup(feed.close)
+        outcome = broker.handle_intercepted_connection(
+            client,
+            config=config,
+            ipset_check=lambda _ip: False,
+        )
+        self.assertEqual(outcome.action, "pending")
+        response = feed.recv(4096)
+        self.assertEqual(response, broker.TLS_ACCESS_DENIED_ALERT)
 
 
 if __name__ == "__main__":
