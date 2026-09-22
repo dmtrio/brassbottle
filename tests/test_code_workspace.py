@@ -278,6 +278,42 @@ class ManagedSettingsTests(unittest.TestCase):
             self._settings()[code_workspace.DEFAULT_PROFILE_KEY], "bash"
         )
 
+    def test_fresh_file_lets_right_click_reach_herdr(self):
+        # VS Code's own context menu otherwise opens over herdr's pane menu.
+        _run(self.path, "app")
+        self.assertEqual(self._settings()[code_workspace.RIGHT_CLICK_KEY], "nothing")
+
+    def test_fresh_file_enables_option_drag_selection(self):
+        # herdr owns the mouse, so option+drag is the only multi-line copy path.
+        _run(self.path, "app")
+        self.assertIs(self._settings()[code_workspace.OPTION_SELECT_KEY], True)
+
+    def test_existing_settings_gain_mouse_keys_and_report_them(self):
+        self.path.write_text(json.dumps({
+            "folders": [],
+            "settings": {code_workspace.PROFILES_KEY: {"bash": {"path": "bash"}}},
+        }))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            _run(self.path, "app")
+        self.assertIn(code_workspace.RIGHT_CLICK_KEY, out.getvalue())
+        self.assertIn(code_workspace.OPTION_SELECT_KEY, out.getvalue())
+        self.assertEqual(self._settings()[code_workspace.RIGHT_CLICK_KEY], "nothing")
+        self.assertIs(self._settings()[code_workspace.OPTION_SELECT_KEY], True)
+
+    def test_never_overwrites_chosen_mouse_settings(self):
+        # An operator who wants VS Code's menu back keeps it across `djinn up`.
+        self.path.write_text(json.dumps({
+            "folders": [],
+            "settings": {
+                code_workspace.RIGHT_CLICK_KEY: "copyPaste",
+                code_workspace.OPTION_SELECT_KEY: False,
+            },
+        }))
+        _run(self.path, "app")
+        self.assertEqual(self._settings()[code_workspace.RIGHT_CLICK_KEY], "copyPaste")
+        self.assertIs(self._settings()[code_workspace.OPTION_SELECT_KEY], False)
+
     def test_is_idempotent(self):
         _run(self.path, "app")
         first = self.path.read_text(encoding="utf-8")
