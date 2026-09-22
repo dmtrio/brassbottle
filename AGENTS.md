@@ -23,22 +23,22 @@ are not repeated here.
 ## Layout
 
 - `bottles/*.yml` — one manifest per project container ("bottle").
-  `bottles/TEMPLATE.yml` is the smoke-test manifest and is *derived*, not
-  hand-maintained (see tests below).
+  `bottles/TEMPLATE.yml` is the hand-maintained smoke-test manifest; it is
+  *validated* through `src/manifest.py --derive` by the test suite, not
+  generated.
 - `agents/<name>/` — one directory per agent CLI (descriptor `agent.yml`,
   tests, docs). Ownership rule from `agents/README.md`: everything that knows
   about one agent lives in that directory, and nothing in `tests/` names a
   specific agent.
 - `plugins/<name>/` — MCP capabilities (`plugin.yml` + optional tests);
   agents use plugins, agents and plugins never cross-reference.
-- `rules/` — bundled rule fragments composed into agent rules files by
-  `src/compose_rules.py`.
-- `src/` — implementation modules; `manifest.py` is the single validator for
-  bottle and plugin descriptors (`--derive` on stdin) — do not write mirrored
-  copies of its rules elsewhere.
+- `src/`, `rules/` — implementation modules and bundled rule fragments
+  (`compose_rules.py` composes them into agent rules files);
+  `manifest.py` is the single validator for bottle and plugin descriptors
+  (`--derive` on stdin) — do not write mirrored copies of its rules elsewhere.
 - `compose/`, `bin/`, `jump/`, `backup/`, `ci-staged/` — compose overlays,
-  host-side `djinn` subcommands, singleton jump/backup images, and the staged
-  CI workflow (see Conventions).
+  host-side `djinn` subcommands, singleton jump/backup images, and the
+  staging copy of the CI workflow (see Conventions).
 - `docs/` — deep guides (`script.md` explains every shell script by
   lifecycle); `docs/workspace.CONTRACT.md` is the workspace contract copied
   into containers.
@@ -49,7 +49,7 @@ are not repeated here.
   (needs Docker, `yq`, `python3`).
 - `tests/plugins.test.sh` — the main aggregate suite and CI entry point:
   validates every shipped `plugins/*/plugin.yml` through the real
-  `src/manifest.py`, derives `bottles/TEMPLATE.yml`, runs
+  `src/manifest.py`, validates `bottles/TEMPLATE.yml`, runs
   `python3 -m unittest discover -s tests`, and runs `tests/bash.test.sh`.
 - `python3 -m unittest tests.test_<module>` — focused Python run (e.g.
   `tests.test_manifest`, `tests.test_compose_rules`).
@@ -58,10 +58,10 @@ are not repeated here.
   or baked assets changed (`backup/Dockerfile`, `jump/Dockerfile` likewise).
 - `bash -n <script>` — shell syntax check before committing bash changes.
 - `python3 src/manifest.py --derive` — validate a bottle the way `up.sh` does:
-  stdin is a yq-JSON manifest, then one `"<name>\t<json>"` line per enabled
-  plugin, a `---agents---` sentinel, then the agent lines (format documented
-  in the `manifest.py` docstring; the real chain is what
-  `tests/plugins.test.sh` drives).
+  stdin is a yq-JSON manifest, then one `"<name>\t<json>"` line per shipped
+  `plugins/*/plugin.yml` (enabled or not), a `---agents---` sentinel, then the
+  agent lines (format documented in the `manifest.py` docstring; the real
+  chain is what `tests/plugins.test.sh` drives).
 
 ## Tests — what to expect
 
@@ -78,13 +78,14 @@ are not repeated here.
 
 ## Conventions
 
-- Commit messages: `<area>: <imperative summary>` (e.g.
-  `manifest: reject reserved plugin names`).
-- **CI workflow files are never edited directly** — the agent token lacks
-  `workflow` scope. Stage the full file as a copy under top-level `ci-staged/`
-  for a human to move into `.github/workflows/`.
-- `ci-staged/ci.yml` mirrors `.github/workflows/ci.yml`; when you change one,
-  change both in the same commit.
+- Commit messages follow `<area>: <imperative summary>` in recent history
+  (e.g. `manifest: reject reserved plugin names`); older commits vary.
+- CI workflow files under `.github/workflows/` are changed by staging a full
+  copy under top-level `ci-staged/` for a human to move into place — the
+  agent token lacks `workflow` scope (process described in the header of
+  `ci.yml`). `ci-staged/ci.yml` may run a superset of the live workflow's
+  checks (currently the jump-picker unit tests); update whichever copy your
+  change targets and keep the two consistent.
 - Manifest/plugin/agent schema questions are answered by `src/manifest.py`,
   `agents/README.md`, and `plugins/README.md` — the schema has no summary doc
   that is safe to trust over the validator.
