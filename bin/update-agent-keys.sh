@@ -85,6 +85,17 @@ if [ -z "$VAR" ]; then
     exit 1
 fi
 
+# The routing variables are manifest-owned, never edited here: a token
+# variable used by a host must be named by that host's row in the manifest's
+# git: section. Refuse the two a hand-edit would corrupt — GIT_HOST_TOKENS
+# is the routing table itself, GH_TOKEN is the CLI host's plain export that
+# the per-identity composition writes (or deliberately does not).
+case "$VAR" in
+    GIT_HOST_TOKENS|GH_TOKEN)
+        echo "Error: $VAR is routing, not a credential value — it is composed per identity from the git: section; edit git.hosts in the manifest and rerun ./up.sh" >&2
+        exit 1 ;;
+esac
+
 if [ -z "$VALUE" ]; then
     printf "Value for %s (%s/%s, input hidden): " "$VAR" "$CONTAINER" "$AGENT"
     read -s VALUE
@@ -92,12 +103,15 @@ if [ -z "$VALUE" ]; then
 fi
 
 # Set VAR=VALUE (or remove VAR when VALUE is empty) in one agent's env file,
-# idempotently (drop any existing line first, mode 600 throughout).
+# idempotently (drop any existing line first, mode 600 throughout). The value
+# is shell-quoted (%q), like the composed key files these lines are sourced
+# into — a value with spaces, quotes or $ must round-trip byte-identically
+# (an unquoted append runs the value's words as commands).
 set_var_in() {
     local file="$1" tmp="$1.tmp.$$"
     touch "$file"; chmod 600 "$file"
     grep -v "^$VAR=" "$file" > "$tmp" || true
-    [ -n "$VALUE" ] && echo "$VAR=$VALUE" >> "$tmp"
+    [ -n "$VALUE" ] && printf '%s=%q\n' "$VAR" "$VALUE" >> "$tmp"
     mv "$tmp" "$file"; chmod 600 "$file"
 }
 

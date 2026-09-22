@@ -478,6 +478,7 @@ RUN chmod +x /usr/local/bin/tmux-notify.sh
 # .bashrc (rules-compose, freshness, tmux-landing — the last one execs tmux
 # and never returns, so anything after it would never run).
 COPY --chown=$USERNAME:$USERNAME src/user-keys-landing.bashrc /usr/local/share/user-keys-landing.bashrc
+COPY --chown=$USERNAME:$USERNAME src/clear-git-identity.sh /usr/local/share/clear-git-identity.sh
 RUN echo '' >> /home/$USERNAME/.bashrc \
     && echo '# Per-identity git tokens: the user identity loads ~/.agent-keys/user.env (interactive shells only)' >> /home/$USERNAME/.bashrc \
     && echo '. /usr/local/share/user-keys-landing.bashrc' >> /home/$USERNAME/.bashrc

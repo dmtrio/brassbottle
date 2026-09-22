@@ -10,6 +10,15 @@
 # Only interactive shells ever reach this: Ubuntu's own non-interactive
 # guard at the top of .bashrc (`case $- in *i*)... return`) returns long
 # before the appended pieces, so `bash -c` sources nothing.
+#
+# Sourcing only SETS what user.env says — it never clears. An interactive
+# shell that descends from an agent's process (a tmux server the agent
+# started, with a person attaching later) inherits that agent's GH_TOKEN
+# and token variables. Clear the inherited git-credential lane BEFORE
+# sourcing user.env, so the shell ends as exactly the user identity — the
+# same block the agent shims inline (src/agent_shim.sh, byte-pinned by
+# tests/bash.test.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/clear-git-identity.sh"
 if [ -f "$HOME/.agent-keys/user.env" ]; then
     set -a
     . "$HOME/.agent-keys/user.env"

@@ -21,7 +21,13 @@ overrides inherited env before exec'ing the real binary. Two consequences:
 
 - `cat <agent>.env` is the full audit of exactly what that agent sees.
 - Delegation is safe: when claude spawns `cursor-agent -p`, the child's shim
-  loads *its* identity — the invoker's credentials never leak.
+  loads *its* identity — the invoker's credentials never leak. The shim
+  also CLEARS the inherited git-credential lane (GH_TOKEN, GIT_HOST_TOKENS
+  and every variable the inherited table names) before loading its own
+  file, so a parent's or the user shell's identity cannot come through.
+  The shim is the boundary, not a sandbox: a child started by the real
+  binary's absolute path (bypassing the shim), or an enabled agent with no
+  shim (not MCP-capable), inherits its parent's identity as-is.
 
 GitHub rides the same path: an agent whose github.com row exists acts as
 that entry's identity (its token, written as `GH_TOKEN` in its own

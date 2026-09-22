@@ -471,6 +471,78 @@ assert_contains "nested: pi's own token variable" "$(cat "$WORK/uc-pi")" "GITEA_
 assert_absent "nested: pi sees none of claude's GH_TOKEN" "$(cat "$WORK/uc-pi")" "GH_TOKEN="
 assert_absent "nested: pi sees none of claude's token variable" "$(cat "$WORK/uc-pi")" "GH_TOKEN_fry_a"
 assert_absent "nested: pi sees none of claude's token value" "$(cat "$WORK/uc-pi")" "fry-a-val"
+
+# (d) THE MIRROR DIRECTION: an interactive shell descending from an agent's
+# process (a tmux server the agent started — the workspace contract's
+# fallback landing — with a person attaching later) inherits the agent's
+# GH_TOKEN and token variables, and the user's landing piece only SETS what
+# user.env says. The shell must end as EXACTLY the user identity: no
+# GH_TOKEN, no agent variable, its own table — the person's gh acts as
+# nobody and git routes as the user.
+IDB3_HOME="$WORK/idb3home"; IDB3_KEYS="$IDB3_HOME/.agent-keys"; mkdir -p "$IDB3_KEYS"
+# gitea simple row (simple form = everyone, the user lane included) plus a
+# github.com list naming CLAUDE ONLY — user NOT named on github.com.
+IDB3_GITHUB='[{"token":"GH_TOKEN_fry_a","identities":["claude"]}]'
+eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude","pi","codex","cursor"],"git":{"hosts":{"git.example.org":{"token":"GITEA_TOKEN_example"},"github.com":%s}}}\n---agents---\n%s\n' \
+    "$IDB3_GITHUB" "$(id_agents_json)" \
+    | PRESENT_SECRET_VARS="GITEA_TOKEN_example GH_TOKEN_fry_a" \
+      SECRETS_FILE=/sec/secrets.env GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" \
+      NTFY_URL="" NTFY_TOPIC="" python3 "$REPO/src/manifest.py" --derive)"
+GH_TOKEN_fry_a=fry-a-val GITEA_TOKEN_example=gitea-val
+write_keyfiles "$IDB3_KEYS" "claude pi codex cursor-agent" "" "" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+assert_eq "setup d: user.env carries the gitea row only (user NOT named on github.com)" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\nGITEA_TOKEN_example=gitea-val' \
+    "$(cat "$IDB3_KEYS/user.env")"
+assert_contains "setup d: claude.env carries the github row and its GH_TOKEN" \
+    "$(cat "$IDB3_KEYS/claude.env")" "GH_TOKEN=fry-a-val"
+# claude's stub runs an INTERACTIVE shell that sources the REAL landing
+# piece — the person attaching to a tmux server claude started. Both pieces
+# live in one dir mirroring the image's /usr/local/share (the landing piece
+# resolves the clearing file via its own location), with the rcfile sourcing
+# it exactly the way the image's .bashrc does.
+IDB3_SHARE="$WORK/share"; mkdir -p "$IDB3_SHARE"
+cp "$REPO/src/user-keys-landing.bashrc" "$REPO/src/clear-git-identity.sh" "$IDB3_SHARE/"
+IDB3_RC="$WORK/idb3-rc"
+{ printf 'case $- in *i*) ;; *) return;; esac\n'
+  printf '. %s/user-keys-landing.bashrc\n' "$IDB3_SHARE"; } > "$IDB3_RC"
+cat > "$IDB_STUBS/claude" <<MOCK
+#!/bin/bash
+bash --rcfile "$IDB3_RC" -ic 'env | LC_ALL=C sort' > "\${STUB_ENV_OUT:?}" 2>/dev/null
+MOCK
+chmod +x "$IDB_STUBS/claude"
+US_HOME="$IDB3_HOME"
+STUB_ENV_OUT="$WORK/ud-dump" user_shell bash "$IDSHIMS/claude" >/dev/null 2>&1
+assert_contains "shell-chain: the shell carries exactly the user's own table" \
+    "$(cat "$WORK/ud-dump")" "GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example"
+assert_absent "shell-chain: no GH_TOKEN (the person's gh acts as nobody)" \
+    "$(cat "$WORK/ud-dump")" "GH_TOKEN="
+assert_absent "shell-chain: no claude token variable survives into the shell" \
+    "$(cat "$WORK/ud-dump")" "GH_TOKEN_fry_a"
+assert_absent "shell-chain: no agent token value survives into the shell" \
+    "$(cat "$WORK/ud-dump")" "fry-a-val"
+unset GH_TOKEN_fry_a GITEA_TOKEN_example
+
+# Drift pin: the shim's clearing block is byte-identical to the marked block
+# in src/clear-git-identity.sh. The shim runs BEFORE anything is sourced, so
+# it cannot source the file — the block is inlined — and this pin keeps the
+# two from drifting.
+CLEAR_FILE="$REPO/src/clear-git-identity.sh"
+sed -n '/djinn: clear inherited git identity (BEGIN)/,/djinn: clear inherited git identity (END)/p' \
+    "$CLEAR_FILE" > "$WORK/clear-file.txt"
+. "$REPO/src/agent_shim.sh"
+write_agent_shim "$IDSHIMS/claude" claude
+sed -n '/djinn: clear inherited git identity (BEGIN)/,/djinn: clear inherited git identity (END)/p' \
+    "$IDSHIMS/claude" > "$WORK/clear-shim.txt"
+assert_eq "the shim's clearing block is byte-identical with src/clear-git-identity.sh" \
+    "$(cat "$WORK/clear-file.txt")" "$(cat "$WORK/clear-shim.txt")"
+grep -q 'COPY.*src/clear-git-identity.sh /usr/local/share/clear-git-identity.sh' "$REPO/Dockerfile" \
+    && pass "Dockerfile bakes src/clear-git-identity.sh beside the landing pieces" \
+    || fail "Dockerfile no longer copies clear-git-identity.sh (the user landing piece would fail at boot)"
+grep -qF 'clear-git-identity.sh' "$REPO/src/user-keys-landing.bashrc" \
+    && pass "the user landing piece sources the clearing block" \
+    || fail "user-keys-landing.bashrc no longer sources the clearing block"
+
 unset GH_TOKEN_fry_a GH_TOKEN_fry_b GITEA_TOKEN_example
 
 # ── the helper answers per identity: git-credential-org run with each
@@ -1808,6 +1880,22 @@ assert_eq "user target writes user.env" \
 uak userfile common FOO cval >/dev/null
 assert_eq "common does not touch user.env (its FOO stays the user target's value)" \
     "FOO=uval" "$(grep '^FOO=' "$UKP/user.env")"
+
+# The routing variables are manifest-owned: set_var_in must refuse them with
+# a message naming git.hosts — editing a VALUE here must never edit ROUTING.
+out=$(uak userfile claude GIT_HOST_TOKENS x 2>&1); rc=$?
+assert_rc "set_var_in refuses GIT_HOST_TOKENS" 1 "$rc"
+assert_contains "…the message names git.hosts" "$out" "git.hosts"
+out=$(uak userfile claude GH_TOKEN x 2>&1); rc=$?
+assert_rc "set_var_in refuses GH_TOKEN" 1 "$rc"
+assert_contains "…the message names git.hosts" "$out" "git.hosts"
+# set_var_in quotes the value (%q, like the composed key files): a value
+# with a space and a $ must round-trip byte-identically when sourced.
+UAK_SECRET='uak secret $x and spaces'
+uak userfile claude OBSIDIAN_ANNOTATED_KEY "$UAK_SECRET" >/dev/null
+sourced=$(env -i bash -c 'set -a; . "$1"; printf "%s" "$OBSIDIAN_ANNOTATED_KEY"' _ "$UKP/claude.env")
+assert_eq "set_var_in quotes a value with a space and a \$ (round-trips)" \
+    "$UAK_SECRET" "$sourced"
 allhave=1; for a in claude pi; do grep -q '^FOO=cval$' "$UKP/$a.env" || allhave=0; done
 assert_eq "common still fans out to every agent" "1" "$allhave"
 
