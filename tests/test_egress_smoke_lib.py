@@ -15,8 +15,8 @@ TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS_DIR))
 sys.path.insert(0, str(TESTS_DIR.parent / "src"))
 
-import egress_log as el  # noqa: E402
 import egress_smoke_lib as smoke  # noqa: E402
+import egress_store as store  # noqa: E402
 
 NOW = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -34,10 +34,38 @@ class EgressSmokeLibTests(unittest.TestCase):
             "djinn-coding-demo",
         )
 
+    def _row(self, request_id, host, port, *, hit_count=1):
+        return store.RequestRow(
+            request_id=request_id,
+            container="demo",
+            host=host,
+            port=port,
+            host_is_ip=False,
+            uid=None,
+            comm=None,
+            reason=None,
+            hold_seconds=None,
+            opened_at=NOW,
+            last_hit_at=NOW,
+            hit_count=hit_count,
+            status="open",
+            scope=None,
+            decided_at=None,
+            decided_by=None,
+            deny_reason=None,
+            apply_status=None,
+            apply_attempts=0,
+            last_error=None,
+            persist_status=None,
+            denylist_zone=None,
+            denylist_scope=None,
+            decision_body=None,
+        )
+
     def test_find_open_request_filters_host_and_port(self):
         requests = {
-            "a": el.OpenRequest("a", "requested", host="docs.stripe.com", port=443),
-            "b": el.OpenRequest("b", "requested", host="192.0.2.55", port=5432),
+            "a": self._row("a", "docs.stripe.com", 443),
+            "b": self._row("b", "192.0.2.55", 5432),
         }
         found = smoke.find_open_request(requests, host="docs.stripe.com", port=443)
         self.assertIsNotNone(found)
@@ -49,61 +77,139 @@ class EgressSmokeLibTests(unittest.TestCase):
             base_path = Path(tmp)
             egress_root = base_path / "run" / "egress"
             egress_root.mkdir(parents=True)
-            log = el.EgressLog(egress_root)
-            log.append(
-                "requested",
-                "req-1",
-                ts=NOW,
+            db = store.EgressStore(egress_root)
+            db.open_or_hit(
+                request_id="req-1",
+                container="demo",
                 host="docs.stripe.com",
                 port=443,
-                container="demo",
+                host_is_ip=False,
+                uid=None,
+                comm=None,
+                reason=None,
+                hold_seconds=None,
+                now=NOW,
             )
-            log.append("hit", "req-1", ts=NOW, count=4)
-            log.append(
-                "requested",
-                "req-2",
-                ts=NOW,
+            db.open_or_hit(
+                request_id="req-1",
+                container="demo",
+                host="docs.stripe.com",
+                port=443,
+                host_is_ip=False,
+                uid=None,
+                comm=None,
+                reason=None,
+                hold_seconds=None,
+                now=NOW,
+            )
+            db.open_or_hit(
+                request_id="req-2",
+                container="demo",
                 host="www.example.com",
                 port=443,
-                container="demo",
+                host_is_ip=False,
+                uid=None,
+                comm=None,
+                reason=None,
+                hold_seconds=None,
+                now=NOW,
             )
+            db.shutdown()
+
             self.assertEqual(
                 smoke.count_events(
                     base_path,
                     kind="requested",
                     host="docs.stripe.com",
                     port=443,
-                    when=NOW,
                 ),
                 1,
             )
+            self.assertEqual(smoke.count_events(base_path, kind="hit"), 1)
             self.assertEqual(
-                smoke.count_events(base_path, kind="hit", when=NOW), 1
+                smoke.count_hits_for_request(base_path, "req-1"), 2
             )
 
-    def test_count_events_reads_the_month_it_is_asked_for(self):
-        # Regression. NOW is a fixed date, so the default (real now) reads a
-        # DIFFERENT month file than the fixture wrote and silently returns 0 —
-        # a pass that expires. This first failed when UTC rolled into
-        # September 2026, having passed every day of August.
+    def test_count_events_by_request_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             base_path = Path(tmp)
-            (base_path / "run" / "egress").mkdir(parents=True)
-            el.EgressLog(base_path / "run" / "egress").append(
-                "requested",
-                "req-1",
-                ts=NOW,
+            egress_root = base_path / "run" / "egress"
+            egress_root.mkdir(parents=True)
+            db = store.EgressStore(egress_root)
+            db.open_or_hit(
+                request_id="req-1",
+                container="demo",
                 host="docs.stripe.com",
                 port=443,
+                host_is_ip=False,
+                uid=None,
+                comm=None,
+                reason=None,
+                hold_seconds=None,
+                now=NOW,
+            )
+            db.mark_notified("req-1", NOW)
+            db.close(
+                request_id="req-1",
+                status="denied",
+                now=NOW,
+                decided_by="cli",
+                decision_body={"decision": "deny"},
+            )
+            db.shutdown()
+
+            self.assertEqual(
+                smoke.count_events(base_path, kind="denied", request_id="req-1"), 1
+            )
+            self.assertEqual(
+                smoke.count_events(base_path, kind="requested", request_id="req-1"), 1
+            )
+
+    def test_fold_open_requests_reads_store_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_path = Path(tmp)
+            egress_root = base_path / "run" / "egress"
+            egress_root.mkdir(parents=True)
+            db = store.EgressStore(egress_root)
+            db.open_or_hit(
+                request_id="req-1",
                 container="demo",
+                host="docs.stripe.com",
+                port=443,
+                host_is_ip=False,
+                uid=None,
+                comm=None,
+                reason=None,
+                hold_seconds=None,
+                now=NOW,
             )
-            self.assertEqual(
-                smoke.count_events(base_path, kind="requested", when=NOW), 1
+            db.close(
+                request_id="req-1",
+                status="denied",
+                now=NOW,
+                decided_by="cli",
+                decision_body={"decision": "deny"},
             )
-            other_month = NOW.replace(month=NOW.month - 1)
-            self.assertEqual(
-                smoke.count_events(base_path, kind="requested", when=other_month), 0
+            db.open_or_hit(
+                request_id="req-2",
+                container="demo",
+                host="www.example.com",
+                port=443,
+                host_is_ip=False,
+                uid=None,
+                comm=None,
+                reason=None,
+                hold_seconds=None,
+                now=NOW,
             )
+            db.shutdown()
+
+            open_rows = smoke.fold_open_requests(base_path)
+            self.assertEqual(set(open_rows), {"req-2"})
+            found = smoke.find_open_request(
+                open_rows, host="www.example.com", port=443
+            )
+            self.assertEqual(found.request_id, "req-2")
 
     def test_queue_mount_violations_detects_run_path(self):
         with tempfile.TemporaryDirectory() as tmp:

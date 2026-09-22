@@ -14,21 +14,20 @@ import re
 import socket
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from typing import Callable, Literal
+from urllib.error import URLError
+from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import egress_broker_host as broker  # noqa: E402
-import egress_log as el  # noqa: E402
+import egress_store as store  # noqa: E402
 
 Status = Literal["pass", "fail", "skip"]
 DEFAULT_HTTPS_HOST = "docs.stripe.com"
@@ -121,37 +120,23 @@ def resolve_base_path() -> Path:
 
 
 def egress_log_root(base_path: Path) -> Path:
+    """The egress root (the name predates the store; it is the same root
+    the legacy log lived under, and the store's database lives there)."""
     return broker.resolve_egress_root(base_path)
 
 
-def fold_open_requests(base_path: Path) -> dict[str, el.OpenRequest]:
-    log = el.EgressLog(egress_log_root(base_path))
-    return dict(log.fold_queue().open_requests)
+def open_store(base_path: Path) -> store.EgressStore:
+    return store.EgressStore(egress_log_root(base_path))
 
 
-def month_records(base_path: Path, when: datetime | None = None) -> list[dict[str, Any]]:
-    """Records from the log file for `when`'s month (default: now).
-
-    Reads a SINGLE month file, so a caller that wrote records with an explicit
-    ts must pass the same `when` back. The live smoke path leaves it None on
-    purpose: it writes with the real clock, so "now" is the right file — with
-    the known edge that a run straddling midnight UTC on the 1st can write to
-    the previous month and read the next. Rare enough to leave; noted so the
-    next person does not rediscover it as a flake.
-    """
-    when = when or datetime.now(timezone.utc)
-    log = el.EgressLog(egress_log_root(base_path))
-    path = el._log_path(log.root, el._month_filename(when))
-    if not path.is_file():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line:
-            continue
-        parsed = json.loads(line)
-        if isinstance(parsed, dict):
-            records.append(parsed)
-    return records
+def fold_open_requests(base_path: Path) -> dict[str, store.RequestRow]:
+    """Open rows keyed by request_id (the store is the queue)."""
+    db = open_store(base_path)
+    try:
+        rows = db.list_open()
+    finally:
+        db.shutdown()
+    return {row.request_id: row for row in rows}
 
 
 def count_events(
@@ -160,54 +145,60 @@ def count_events(
     kind: str,
     host: str | None = None,
     port: int | None = None,
+    request_id: str | None = None,
     when: datetime | None = None,
 ) -> int:
-    """Count matching records in ONE month's log file.
+    """Count events of one kind, optionally narrowed by host/port (from the
+    event's JSON fields) or by request id.
 
-    `when` selects which month, defaulting to now — pass it whenever the
-    records were written with an explicit ts, or the count silently reads a
-    different file than the one that was written and returns 0.
+    `when` is accepted for call-site compatibility and ignored: the events
+    table has no months.
     """
+    del when
+    db = open_store(base_path)
+    try:
+        if request_id is not None:
+            events = db.events_for(request_id)
+        else:
+            events = db.events(kind=kind)
+    finally:
+        db.shutdown()
     total = 0
-    for record in month_records(base_path, when):
-        if record.get("kind") != kind:
+    for event in events:
+        if event.kind != kind:
             continue
-        if host is not None and record.get("host") != host:
+        fields = event.fields or {}
+        if host is not None and fields.get("host") != host:
             continue
-        if port is not None and record.get("port") != port:
+        if port is not None and fields.get("port") != port:
             continue
         total += 1
     return total
 
 
-def count_hits_for_request(
-    base_path: Path, request_id: str, when: datetime | None = None
-) -> int:
-    """Hits for one request in ONE month's log. See count_events on `when`."""
-    hits = 0
-    for record in month_records(base_path, when):
-        if record.get("request_id") != request_id:
-            continue
-        if record.get("kind") != "hit":
-            continue
-        count = record.get("count", 1)
-        if isinstance(count, int) and count > 0:
-            hits += count
-    return hits
+def count_hits_for_request(base_path: Path, request_id: str, when: datetime | None = None) -> int:
+    """Hits recorded for one request — the row's own hit_count."""
+    del when
+    db = open_store(base_path)
+    try:
+        row = db.get(request_id)
+    finally:
+        db.shutdown()
+    return row.hit_count if row is not None else 0
 
 
 def find_open_request(
-    open_requests: dict[str, el.OpenRequest],
+    open_requests: dict[str, store.RequestRow],
     *,
     host: str | None = None,
     port: int | None = None,
-) -> el.OpenRequest | None:
-    for req in open_requests.values():
-        if port is not None and req.port != port:
+) -> store.RequestRow | None:
+    for row in open_requests.values():
+        if port is not None and row.port != port:
             continue
-        if host is not None and req.host != host:
+        if host is not None and row.host != host:
             continue
-        return req
+        return row
     return None
 
 
@@ -218,7 +209,7 @@ def wait_for_open_request(
     port: int | None = None,
     timeout: float = REQUEST_WAIT_SECONDS,
     poll: float = POLL_INTERVAL_SECONDS,
-) -> el.OpenRequest | None:
+) -> store.RequestRow | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         req = find_open_request(fold_open_requests(base_path), host=host, port=port)
@@ -338,16 +329,32 @@ def append_spoof_allowed_line(
     host: str,
     container: str,
 ) -> None:
-    """Hand-write an allowed audit line that must not grant egress."""
-    log = el.EgressLog(egress_log_root(base_path))
-    request_id = f"smoke-spoof-{uuid.uuid4().hex[:12]}"
-    log.append(
-        "allowed",
-        request_id,
-        scope="live",
-        host=host,
-        container=container,
-    )
+    """Forge an allowed row directly in the database; it must not grant
+    egress (the store is the audit trail, never an allow predicate)."""
+    import sqlite3
+
+    db_path = egress_log_root(base_path) / store.DB_FILENAME
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO requests"
+                " (request_id, container, host, port, host_is_ip, opened_at,"
+                "  last_hit_at, hit_count, status, scope, decided_at, decided_by,"
+                "  decision_body)"
+                " VALUES (?, ?, ?, ?, 0, ?, ?, 1, 'allowed', 'live', ?, 'cli', ?)",
+                (
+                    f"smoke-spoof-{uuid.uuid4().hex[:12]}",
+                    container,
+                    host,
+                    443,
+                    store._iso_ts(None),
+                    store._iso_ts(None),
+                    '{"decision":"allow","scope":"live"}',
+                ),
+            )
+    finally:
+        conn.close()
 
 
 
@@ -738,23 +745,19 @@ def run_smoke(
         host=coalesce_norm,
         port=443,
     )
-    request_id = open_coalesce.request_id if open_coalesce else None
-    hit_events = 0
-    if request_id:
-        hit_events = sum(
-            1
-            for record in month_records(base_path)
-            if record.get("request_id") == request_id and record.get("kind") == "hit"
-        )
-    if new_requests == 1 and hit_events <= 3:
+    hit_count = open_coalesce.hit_count if open_coalesce else 0
+    # One filing opens the row; the retry loop coalesces onto it — the
+    # retries are counted on the row (hit_count), not as new requests.
+    if new_requests == 1 and hit_count >= 2:
         summary.pass_(
             "coalescing",
-            f"requested +{new_requests}, hit events={hit_events}",
+            f"requested +{new_requests}, row hit_count={hit_count}",
         )
     else:
         summary.fail(
             "coalescing",
-            f"requested +{new_requests}, hit events={hit_events} (want 1 request, few hits)",
+            f"requested +{new_requests}, row hit_count={hit_count}"
+            " (want 1 request, retries counted on the row)",
         )
 
     # ── 8. Kill switch ───────────────────────────────────────────────────────
