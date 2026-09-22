@@ -268,8 +268,10 @@ RUN set -e; \
 # The shim template itself lives in src/agent_shim.sh (write_agent_shim,
 # sourced below) so tests/bash.test.sh drives the SAME code production runs —
 # never a copy — and the printf format exists in exactly one place.
+# This section builds as $USERNAME (USER above): COPY lands the file root-owned,
+# so the mode is set with sudo, as the agents-index.tsv below is.
 COPY src/agent_shim.sh /usr/local/lib/djinn/agent_shim.sh
-RUN chmod 644 /usr/local/lib/djinn/agent_shim.sh
+RUN sudo chmod 644 /usr/local/lib/djinn/agent_shim.sh
 RUN set -e; \
     mkdir -p /home/$USERNAME/.agent-shims; \
     sudo mkdir -p /usr/local/lib/djinn; \
