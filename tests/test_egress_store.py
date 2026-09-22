@@ -97,6 +97,65 @@ class EgressStoreTests(unittest.TestCase):
             finally:
                 probe.close()
 
+    def test_schema_pragma_pins_literal_columns_constraints_and_fk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(Path(tmp))
+            self.addCleanup(store.shutdown)
+
+            self.assertEqual(
+                [
+                    (row[1], row[2], row[3], row[5])
+                    for row in store._conn.execute("PRAGMA table_info(requests)")
+                ],
+                [
+                    ("request_id", "TEXT", 0, 1),
+                    ("container", "TEXT", 1, 0),
+                    ("host", "TEXT", 1, 0),
+                    ("port", "INTEGER", 1, 0),
+                    ("host_is_ip", "INTEGER", 1, 0),
+                    ("uid", "INTEGER", 0, 0),
+                    ("comm", "TEXT", 0, 0),
+                    ("reason", "TEXT", 0, 0),
+                    ("hold_seconds", "INTEGER", 0, 0),
+                    ("opened_at", "TEXT", 1, 0),
+                    ("last_hit_at", "TEXT", 1, 0),
+                    ("hit_count", "INTEGER", 1, 0),
+                    ("status", "TEXT", 1, 0),
+                    ("scope", "TEXT", 0, 0),
+                    ("decided_at", "TEXT", 0, 0),
+                    ("decided_by", "TEXT", 0, 0),
+                    ("deny_reason", "TEXT", 0, 0),
+                    ("apply_status", "TEXT", 0, 0),
+                    ("apply_attempts", "INTEGER", 1, 0),
+                    ("last_error", "TEXT", 0, 0),
+                    ("persist_status", "TEXT", 0, 0),
+                    ("denylist_zone", "TEXT", 0, 0),
+                    ("denylist_scope", "TEXT", 0, 0),
+                    ("decision_body", "TEXT", 0, 0),
+                ],
+            )
+            self.assertEqual(
+                [
+                    (row[1], row[2], row[3], row[5])
+                    for row in store._conn.execute("PRAGMA table_info(events)")
+                ],
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("request_id", "TEXT", 1, 0),
+                    ("kind", "TEXT", 1, 0),
+                    ("ts", "TEXT", 1, 0),
+                    ("fields", "TEXT", 0, 0),
+                ],
+            )
+            self.assertEqual(
+                [
+                    (row[2], row[3], row[4])
+                    for row in store._conn.execute("PRAGMA foreign_key_list(events)")
+                ],
+                [("requests", "request_id", None)],
+            )
+            self.assertEqual(store._conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+
     def test_reopening_does_not_recreate_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -489,32 +548,68 @@ class EgressStoreTests(unittest.TestCase):
 
     # -- 5. mark_persist -----------------------------------------------------
 
-    def test_mark_persist_both_outcomes_set_status_without_events(self):
+    def test_mark_persist_persisted_sets_status_and_appends_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
-            store.open_or_hit(
-                **_open_kwargs(
-                    request_id="req-p",
-                    host="docs.stripe.com",
-                )
-            )
-            store.open_or_hit(
-                **_open_kwargs(
-                    request_id="req-q",
-                    host="api.github.com",
-                )
- )
+            store.open_or_hit(**_open_kwargs(request_id="req-p"))
+            events_before = store.count_events(request_id="req-p")
 
-            row = store.mark_persist(request_id="req-p", outcome="persisted", now=NOW_PLUS_1)
+            row = store.mark_persist(
+                request_id="req-p", outcome="persisted", now=NOW_PLUS_1
+            )
+
             self.assertEqual(row.persist_status, "persisted")
+            self.assertEqual(store.count_events(request_id="req-p"), events_before + 1)
+            self.assertEqual(
+                [(event.kind, event.fields) for event in store.events_for("req-p")],
+                [
+                    ("requested", _open_kwargs_fields()),
+                    ("persisted", {"outcome": "persisted"}),
+                ],
+            )
+
+    def test_mark_persist_persist_failed_sets_status_and_appends_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(Path(tmp))
+            self.addCleanup(store.shutdown)
+            store.open_or_hit(**_open_kwargs(request_id="req-q"))
+            events_before = store.count_events(request_id="req-q")
+
             row = store.mark_persist(
                 request_id="req-q", outcome="persist_failed", now=NOW_PLUS_1
             )
-            self.assertEqual(row.persist_status, "persist_failed")
 
-            self.assertEqual(store.count_events(request_id="req-p"), 1)
-            self.assertEqual(store.count_events(request_id="req-q"), 1)
+            self.assertEqual(row.persist_status, "persist_failed")
+            self.assertEqual(store.count_events(request_id="req-q"), events_before + 1)
+            self.assertEqual(
+                [(event.kind, event.fields) for event in store.events_for("req-q")],
+                [
+                    ("requested", _open_kwargs_fields()),
+                    ("persist_failed", {"outcome": "persist_failed"}),
+                ],
+            )
+
+    def test_mark_persist_event_failure_rolls_back_status_and_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(Path(tmp))
+            self.addCleanup(store.shutdown)
+            store.open_or_hit(**_open_kwargs())
+            row_before = store.get("req-1")
+            real_conn = self._fail_event_inserts(store)
+            try:
+                with self.assertRaises(RuntimeError):
+                    store.mark_persist(
+                        request_id="req-1", outcome="persisted", now=NOW_PLUS_1
+                    )
+            finally:
+                store._conn = real_conn
+
+            row = store.get("req-1")
+            self.assertEqual(row, row_before)
+            self.assertIsNone(row.persist_status)
+            self.assertEqual(store.count_events(kind="persisted"), 0)
+            self.assertEqual(store.count_events(kind="persist_failed"), 0)
 
     def test_mark_persist_invalid_outcome_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -625,6 +720,26 @@ class EgressStoreTests(unittest.TestCase):
 
     # -- 7. atomicity ----------------------------------------------------------
 
+    def _fail_event_inserts(self, store: egress_store.EgressStore):
+        """Patch the store's connection so any event insert raises; returns
+        the real connection for the caller's finally block."""
+        real_conn = store._conn
+
+        class _FailingConn:
+            def execute(self, sql, parameters=()):
+                if "INSERT INTO events" in sql:
+                    raise RuntimeError("injected event-write failure")
+                return real_conn.execute(sql, parameters)
+
+            def commit(self):
+                real_conn.commit()
+
+            def rollback(self):
+                real_conn.rollback()
+
+        store._conn = _FailingConn()
+        return real_conn
+
     def test_failed_event_write_rolls_back_row_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(Path(tmp))
@@ -632,21 +747,7 @@ class EgressStoreTests(unittest.TestCase):
             store.open_or_hit(**_open_kwargs())
             row_before = store.get("req-1")
 
-            real_conn = store._conn
-
-            class _FailingConn:
-                def execute(self, sql, parameters=()):
-                    if "INSERT INTO events" in sql:
-                        raise RuntimeError("injected event-write failure")
-                    return real_conn.execute(sql, parameters)
-
-                def commit(self):
-                    real_conn.commit()
-
-                def rollback(self):
-                    real_conn.rollback()
-
-            store._conn = _FailingConn()
+            real_conn = self._fail_event_inserts(store)
             try:
                 with self.assertRaises(RuntimeError):
                     store.mark_apply(request_id="req-1", outcome="applied", now=NOW_PLUS_1)
@@ -656,6 +757,50 @@ class EgressStoreTests(unittest.TestCase):
             self.assertEqual(store.get("req-1"), row_before)
             self.assertEqual(store.count_events(kind="applied"), 0)
 
+    def test_open_or_hit_new_request_event_failure_rolls_back_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(Path(tmp))
+            self.addCleanup(store.shutdown)
+
+            real_conn = self._fail_event_inserts(store)
+            try:
+                with self.assertRaises(RuntimeError):
+                    store.open_or_hit(**_open_kwargs())
+            finally:
+                store._conn = real_conn
+
+            self.assertIsNone(store.get("req-1"))
+            self.assertEqual(store.list_open(), [])
+            self.assertEqual(store.count_events(), 0)
+
+    def test_close_event_failure_rolls_back_terminal_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(Path(tmp))
+            self.addCleanup(store.shutdown)
+            store.open_or_hit(**_open_kwargs())
+            row_before = store.get("req-1")
+
+            real_conn = self._fail_event_inserts(store)
+            try:
+                with self.assertRaises(RuntimeError):
+                    store.close(
+                        request_id="req-1",
+                        status="allowed",
+                        now=NOW_PLUS_1,
+                        decided_by="admin",
+                        scope="live",
+                        decision_body={"decision": "allow", "scope": "live"},
+                    )
+            finally:
+                store._conn = real_conn
+
+            row = store.get("req-1")
+            self.assertEqual(row, row_before)
+            self.assertEqual(row.status, "open")
+            self.assertIsNone(row.decision_body)
+            self.assertIsNone(row.decided_at)
+            self.assertEqual(store.count_events(kind="allowed"), 0)
+
     # -- 8. concurrency ---------------------------------------------------------
 
     def test_concurrent_open_or_hit_on_one_key(self):
@@ -663,23 +808,34 @@ class EgressStoreTests(unittest.TestCase):
             store = self._store(Path(tmp))
             self.addCleanup(store.shutdown)
             barrier = threading.Barrier(2, timeout=30)
+            errors = []
 
-            def worker():
-                barrier.wait()
-                for index in range(50):
-                    store.open_or_hit(
-                        **_open_kwargs(request_id="concurrent1", now=NOW_PLUS_1)
-                    )
+            def worker(request_id):
+                try:
+                    barrier.wait()
+                    for index in range(50):
+                        store.open_or_hit(
+                            **_open_kwargs(request_id=request_id, now=NOW_PLUS_1)
+                        )
+                except BaseException as exc:  # collected, asserted below
+                    errors.append(exc)
 
-            threads = [threading.Thread(target=worker) for _ in range(2)]
+            threads = [
+                threading.Thread(target=worker, args=(request_id,))
+                for request_id in ("concurrent-1", "concurrent-2")
+            ]
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join(timeout=30)
 
-            row = store.get("concurrent1")
-            self.assertIsNotNone(row)
-            self.assertEqual(row.hit_count, 100)
+            self.assertFalse(any(thread.is_alive() for thread in threads),
+                             "both threads must finish")
+            self.assertEqual(errors, [])
+
+            open_rows = store.list_open()
+            self.assertEqual(len(open_rows), 1)
+            self.assertEqual(open_rows[0].hit_count, 100)
             self.assertEqual(store.count_events(kind="requested"), 1)
             self.assertEqual(store.count_events(kind="hit"), 99)
             self.assertEqual(store.count_events(), 100)
