@@ -194,6 +194,30 @@ class TestComposeInvocation(unittest.TestCase):
             "the raw manifest-derived default must not be passed to compose",
         )
 
+    def test_egress_broker_host_is_defined_on_the_disabled_path(self):
+        """With the broker disabled nothing derives EGRESS_BROKER_HOST, yet the
+        compose hand-off expands it unconditionally. up.sh must define it on
+        every path: the resolver block is extracted verbatim and run under
+        `bash -u` with ENABLE_EGRESS_BROKER=false, which fails on an unbound
+        variable the moment the initialisation line goes missing."""
+        import subprocess
+        text = UP_SH.read_text()
+        start = text.index("# \u2500\u2500 Egress broker host resolution")
+        end = text.index("\nfi\n", start) + len("\nfi\n")
+        block = text[start:end]
+        self.assertIn("egress_service.py\" ip", block)
+        self.assertIn('EGRESS_BROKER_HOST="${EGRESS_BROKER_HOST:-}"', block)
+        script = (
+            "set -eu\n"
+            "ENABLE_EGRESS_BROKER=false\n"
+            "unset EGRESS_BROKER_HOST\n"
+            + block
+            + '\nprintf "host=[%s]" "$EGRESS_BROKER_HOST"\n'
+        )
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "host=[]")
+
     def test_compose_agents_enabled_default_is_fail_closed(self):
         compose_text = COMPOSE_LOCAL.read_text()
         self.assertIn(

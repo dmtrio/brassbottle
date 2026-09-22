@@ -312,6 +312,9 @@ fi
 # prefix, the same quiet-degradation contract as JUMP_IP. common.sh sources
 # ./.env WITHOUT exporting, so DJINN_SUBNET/DJINN_EGRESS_IP must be forwarded
 # explicitly here, same as the JUMP_IP resolution does.
+# Defined on every path: manifest derive emits it only when the broker is
+# enabled, and the compose hand-off below expands it unconditionally.
+EGRESS_BROKER_HOST="${EGRESS_BROKER_HOST:-}"
 if [ "$ENABLE_EGRESS_BROKER" = "true" ]; then
     EGRESS_BROKER_HOST_MANIFEST="${EGRESS_BROKER_HOST:-}"
     EGRESS_HOST_ERR="$(mktemp 2>/dev/null || echo /dev/null)"
