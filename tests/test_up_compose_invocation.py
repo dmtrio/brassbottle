@@ -121,6 +121,79 @@ class TestComposeInvocation(unittest.TestCase):
             "remote_access.py appends the jump key in published mode too",
         )
 
+    def test_jump_ip_is_resolved_after_ensure_net_before_compose(self):
+        """Mirror of the jump-key ordering pin: up.sh resolves DJINN_JUMP_IP
+        with `jump_host.py ip` (live-bridge derivation), which needs the
+        bridge ensure_net created/verified."""
+        text = UP_SH.read_text()
+        marker = 'jump_host.py" ip 2>"$JUMP_IP_ERR"'
+        self.assertIn(
+            marker,
+            text,
+            "up.sh must resolve the jump address via jump_host.py ip",
+        )
+        ensure_idx = text.find('src/ensure_net.py" "$DESIRED_SUBNET"')
+        ip_idx = text.find(marker)
+        compose_idx = text.find("docker compose")
+        self.assertLess(ensure_idx, ip_idx, "ensure_net must run before the jump IP resolution")
+        self.assertLess(ip_idx, compose_idx, "the jump IP resolution must run before docker compose")
+        self.assertIn(
+            'if JUMP_IP="$(',
+            text,
+            "jump IP resolution must use the non-fatal `if VAR=$(...)` shape so set -e cannot abort",
+        )
+
+    def test_egress_broker_host_is_resolved_after_ensure_net_before_compose(self):
+        """The bottle's firewall grant and EGRESS_BROKER_HOST env must name the
+        address the broker is ACTUALLY on: egress start derives it from the
+        LIVE djinn-net bridge when that has drifted from DJINN_SUBNET, so up.sh
+        must resolve it with the same `egress_service.py ip` resolver (after
+        ensure_net created/read the bridge), not the manifest-derived
+        desired-subnet value."""
+        text = UP_SH.read_text()
+        marker = 'egress_service.py" ip 2>"$EGRESS_HOST_ERR"'
+        self.assertIn(
+            marker,
+            text,
+            "up.sh must resolve the egress broker address via egress_service.py ip",
+        )
+        ensure_idx = text.find('src/ensure_net.py" "$DESIRED_SUBNET"')
+        ip_idx = text.find(marker)
+        compose_idx = text.find("docker compose")
+        self.assertLess(ensure_idx, ip_idx, "ensure_net must run before the egress broker host resolution")
+        self.assertLess(ip_idx, compose_idx, "the egress broker host resolution must run before docker compose")
+        self.assertIn(
+            'if EGRESS_BROKER_HOST="$(',
+            text,
+            "broker host resolution must use the non-fatal `if VAR=$(...)` shape so set -e cannot abort",
+        )
+        # Non-fatal on resolver failure: the manifest-derived desired-subnet
+        # value is kept as the fallback, and the resolver's stderr is surfaced.
+        self.assertIn(
+            'EGRESS_BROKER_HOST="$EGRESS_BROKER_HOST_MANIFEST"',
+            text,
+            "on resolver failure the manifest-derived fallback must be kept",
+        )
+        self.assertIn(
+            '⚠ egress: $line',
+            text,
+            "resolver stderr must be surfaced with an `⚠ egress:` prefix",
+        )
+
+    def test_compose_env_passes_the_resolved_egress_broker_host(self):
+        """The compose invocation must carry the RESOLVED variable, not a
+        re-derivation from the desired subnet."""
+        self.assertIn(
+            'EGRESS_BROKER_HOST="$EGRESS_BROKER_HOST"',
+            self.invocation,
+            "compose must receive the resolved EGRESS_BROKER_HOST variable",
+        )
+        self.assertNotIn(
+            'EGRESS_BROKER_HOST="${EGRESS_BROKER_HOST:-}"',
+            self.invocation,
+            "the raw manifest-derived default must not be passed to compose",
+        )
+
     def test_compose_agents_enabled_default_is_fail_closed(self):
         compose_text = COMPOSE_LOCAL.read_text()
         self.assertIn(

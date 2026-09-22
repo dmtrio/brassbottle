@@ -51,6 +51,18 @@ bottle created before the service existed files at its old address and needs
 its next `./djinn up`. `up.sh` prints one warning when the service is down;
 bring it up with `./djinn egress start`.
 
+### Subnet drift
+
+If `djinn-net` already exists with a subnet different from `DJINN_SUBNET`
+(`ensure_net` only warns and keeps the bridge), both the broker and the
+bottles follow the **live bridge**: `egress start` renders the compose file
+with the live address, and `up.sh` re-resolves `EGRESS_BROKER_HOST` after
+`ensure_net` with the same live-bridge resolver instead of passing the
+desired-subnet derivation. Verify after a drift with `./djinn egress ip` and
+the `⚠ egress:` line in `./djinn up` output — both should name the same
+subnet, and a bottle brought up after that files (and is firewall-granted)
+at that live address.
+
 ## Operator surface (primary: `djinn admin`)
 
 `./djinn egress start` is the primary decision surface for open egress

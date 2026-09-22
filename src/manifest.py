@@ -1895,6 +1895,12 @@ def derive(manifest, plugin_files, agent_files, env):
     # the broker is the docker compose singleton (./djinn egress start) and
     # bottles reach it at its static djinn-net address, so the firewall grant
     # moves to EGRESS_BROKER_HOST below.
+    # This derive value is the DESIRED-subnet fallback: up.sh overrides it
+    # after ensure_net with the live-bridge value from egress_service.py's
+    # `ip` command (same resolver cmd_start uses), so a pre-existing djinn-net
+    # on a different subnet still grants and configures bottles for the
+    # address the broker is actually on. Goldens pin this fallback — it must
+    # not change.
     if enable_egress_broker == "true":
         env_subnet = {k: v for k, v in env.items() if k == "DJINN_SUBNET"}
         env_egress_ip = {k: v for k, v in env.items() if k == "DJINN_EGRESS_IP"}

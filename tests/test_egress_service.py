@@ -305,6 +305,49 @@ class StartFlowTests(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
 
+class IpTests(unittest.TestCase):
+    """cmd_ip — the resolver up.sh (host-side, after ensure_net) reads stdout
+    from as a bare value. Same drift contract as cmd_start: prefer the LIVE
+    djinn-net bridge when readable, fall back to the desired DJINN_SUBNET
+    otherwise; any warning goes to stderr so stdout stays exactly one line."""
+
+    def _run(self, env, live_subnet):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            svc.ensure_net, "network_subnet", return_value=live_subnet
+        ):
+            with mock.patch.dict(os.environ, env, clear=False):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = svc.cmd_ip(dict(env))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_drifted_live_bridge_wins_and_warns_on_stderr(self):
+        rc, out, err = self._run(
+            {"DJINN_SUBNET": "172.30.0.0/24"}, "172.31.0.0/24"
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "172.31.0.252\n")
+        self.assertIn("subnet-drift", err)
+        self.assertIn("live=172.31.0.0/24", err)
+        self.assertIn("desired=172.30.0.0/24", err)
+
+    def test_no_live_bridge_falls_back_to_the_desired_subnet(self):
+        rc, out, err = self._run(
+            {"DJINN_SUBNET": "172.30.0.0/24"}, None
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "172.30.0.252\n")
+        self.assertNotIn("subnet-drift", err)
+
+    def test_live_bridge_matching_desired_prints_one_line_no_warning(self):
+        rc, out, err = self._run(
+            {"DJINN_SUBNET": "172.30.0.0/24"}, "172.30.0.0/24"
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "172.30.0.252\n")
+        self.assertNotIn("subnet-drift", err)
+
+
 class UrlTests(unittest.TestCase):
     def test_url_prints_exactly_the_session_url(self):
         with tempfile.TemporaryDirectory() as tmp:
