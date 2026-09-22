@@ -19,11 +19,11 @@
 # djinn: clear inherited git identity (BEGIN) — byte-identical in the shim template
 _clear_saved_flags=$-
 _clear_prev_table=$GIT_HOST_TOKENS
-unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GIT_HOST_TOKENS
+unset -v GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GIT_HOST_TOKENS
 set -f
 for _clear_pair in ${_clear_prev_table:-}; do
-    case $_clear_pair in *=*) unset "${_clear_pair#*=}" ;; esac
+    case $_clear_pair in *=*) unset -v "${_clear_pair#*=}" ;; esac
 done
 case $_clear_saved_flags in *f*) ;; *) set +f ;; esac
-unset _clear_pair _clear_prev_table _clear_saved_flags
+unset -v _clear_pair _clear_prev_table _clear_saved_flags
 # djinn: clear inherited git identity (END)

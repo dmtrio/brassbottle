@@ -536,6 +536,11 @@ sed -n '/djinn: clear inherited git identity (BEGIN)/,/djinn: clear inherited gi
     "$IDSHIMS/claude" > "$WORK/clear-shim.txt"
 assert_eq "the shim's clearing block is byte-identical with src/clear-git-identity.sh" \
     "$(cat "$WORK/clear-file.txt")" "$(cat "$WORK/clear-shim.txt")"
+assert_contains "the drift pin compared a real block, not two empty ranges" \
+    "$(cat "$WORK/clear-file.txt")" "unset -v GH_TOKEN"
+# unset -v: a table pair naming a shell FUNCTION must not delete it.
+out=$(myfn() { echo fn; }; export GIT_HOST_TOKENS='h=myfn'; . "$CLEAR_FILE"; type myfn >/dev/null 2>&1 && echo kept || echo deleted)
+assert_eq "clearing unsets variables only, never a function of the same name" "kept" "$out"
 grep -q 'COPY.*src/clear-git-identity.sh /usr/local/share/clear-git-identity.sh' "$REPO/Dockerfile" \
     && pass "Dockerfile bakes src/clear-git-identity.sh beside the landing pieces" \
     || fail "Dockerfile no longer copies clear-git-identity.sh (the user landing piece would fail at boot)"
