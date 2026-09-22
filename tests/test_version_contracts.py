@@ -616,6 +616,17 @@ class StatusModelTests(unittest.TestCase):
         self.assertIn("reports '1.9.5' live but the receipt observed '1.9.4'",
                       str(ctx.exception))
 
+    def test_running_without_a_version_observation_rejected(self):
+        # An observation identified only by commit/digest has no live label
+        # to compare against (the running labels carry component versions).
+        candidate = make_candidate(self.catalog)
+        receipt = make_receipt(candidate,
+                               observations={"agent.aider": {"commit": "c" * 40}})
+        with self.assertRaises(v.VersionContractError) as ctx:
+            v.component_state(self.component, candidate, receipt,
+                              running_for(receipt))
+        self.assertIn("without a version", str(ctx.exception))
+
     def test_external_and_deferred_are_their_own_states(self):
         self.assertEqual(
             v.component_state(self.catalog.components["plugin.browser"]),
