@@ -1,8 +1,9 @@
 #!/bin/bash
 # tests/egress.smoke.sh — operator-run Phase A+B egress end-to-end smoke test.
-# Needs a Mac host with Docker Desktop, a running bottle, and the host broker
-# listening on 8816 (e.g. ./djinn allow --watch). Cannot run in CI or inside
-# a container — the Python driver skips with a clear message in those cases.
+# Needs a Mac host with Docker Desktop, a running bottle, and the egress broker
+# compose singleton reachable on 8816 (start the broker: ./djinn egress start).
+# Cannot run in CI or inside a container — the Python driver skips with a
+# clear message in those cases.
 
 # SC2015 (`A && pass || fail` is not if-else): N/A — this file delegates to Python.
 # shellcheck disable=SC2148

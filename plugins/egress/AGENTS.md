@@ -26,7 +26,8 @@ errors to discover the hostname.
 
 ### Operator action
 
-Approval is always host-side: `./djinn allow <bottle> <zone>` or
-`./djinn allow --watch` on the Mac. The operator may also answer from an ntfy
+Approval is always host-side: `./djinn allow <bottle> <zone>`, or the admin
+page reached via `./djinn egress url` (start the service first: `./djinn egress
+start`). The operator may also answer from an ntfy
 push notification when `NTFY_URL` is configured. Retries after approval should go direct
 without filing again.

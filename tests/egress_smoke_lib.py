@@ -505,7 +505,7 @@ def run_preflight(
     else:
         summary.fail(
             "broker reachable on 8816",
-            "start the host broker (e.g. ./djinn allow --watch) and retry",
+            "start the broker: ./djinn egress start, then retry",
         )
         return None
 
