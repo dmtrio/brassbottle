@@ -72,12 +72,15 @@ services:
       - EXTRA_ALLOWED_DOMAINS=${EXTRA_ALLOWED_DOMAINS:-}
       # CIDR escape hatch (comma-separated), e.g. LAN subnets.
       - ALLOWED_CIDRS=${ALLOWED_CIDRS:-}
-      # Egress broker: NFLOG reader files blocked destinations with the host
-      # daemon. Token is injected by up.sh (host-side read); visible here so
-      # processes can file — approval remains host-side; per-bottle tokens
-      # limit blast radius to this container only.
+      # Egress broker: NFLOG reader files blocked destinations with the
+      # compose singleton (./djinn egress start). Token is injected by up.sh
+      # (host-side read); visible here so processes can file — approval stays
+      # on the host/admin plane; per-bottle tokens limit blast radius to this
+      # container only. The broker's static djinn-net address (offset 3,
+      # derived by manifest.py) is what init-firewall.sh opens on 8816.
       - ENABLE_EGRESS_BROKER=${ENABLE_EGRESS_BROKER:-true}
       - EGRESS_BROKER_TOKEN=${EGRESS_BROKER_TOKEN:-}
+      - EGRESS_BROKER_HOST=${EGRESS_BROKER_HOST:-}
       # MCP credentials are NOT container env — they load per agent at
       # process start from the mounted ~/.agent-keys dir (see volumes).
 

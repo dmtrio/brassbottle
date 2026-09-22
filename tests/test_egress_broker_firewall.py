@@ -96,6 +96,32 @@ class FirewallScriptTests(unittest.TestCase):
         self.assertLess(broker_pos, nflog_pos, "broker ACCEPT must be installed before NFLOG")
         self.assertLess(nflog_pos, reject_pos, "NFLOG must precede the final REJECT")
 
+    def test_egress_broker_host_grant_is_scoped_to_the_singleton_address(self):
+        # 8816 is the compose singleton's filing port, not a host.docker.internal
+        # port: the ACCEPT rule is scoped to EGRESS_BROKER_HOST (the broker's
+        # static djinn-net address) and only installed when both the broker is
+        # enabled and an address was derived.
+        text = INIT_FIREWALL.read_text(encoding="utf-8")
+        mcp_pos = text.index('if [ -n "${HOST_MCP_PORTS:-}" ]; then')
+        mcp_end = text.index("\nfi\n", mcp_pos)
+        egress_marker = (
+            'if [ "${ENABLE_EGRESS_BROKER:-true}" = "true" ] '
+            '&& [ -n "${EGRESS_BROKER_HOST:-}" ]; then'
+        )
+        self.assertIn(egress_marker, text)
+        egress_pos = text.index(egress_marker)
+        egress_end = text.index("\nfi\n", egress_pos)
+        grant = text[egress_pos:egress_end]
+        self.assertIn(
+            'iptables -A OUTPUT -d "$EGRESS_BROKER_HOST" -p tcp --dport 8816 -j ACCEPT',
+            grant,
+        )
+        # after the HOST_MCP_PORTS block, before the NFLOG block
+        self.assertGreater(egress_pos, mcp_end)
+        self.assertLess(egress_pos, text.index("egress_broker_firewall.sh add"))
+        # and the host-gateway MCP list no longer carries the broker port
+        self.assertNotIn("8816", text[mcp_pos:mcp_end])
+
     def test_remove_deletes_the_exact_rule_dry_run_adds(self):
         # An -A/-D mismatch leaves the REDIRECT installed after `remove`, so
         # the nat rule the script deletes must match the one it adds argument

@@ -4,11 +4,59 @@ Outbound traffic from djinn containers is firewall allowlisted. When a process
 hits a destination that is not yet allowed, the egress broker holds the request
 until an operator approves or denies it.
 
+## Service
+
+The broker and the admin page run as a docker compose singleton — no terminal
+has to stay open:
+
+```
+./djinn egress start   # build + start both containers, print the session URL
+./djinn egress stop
+./djinn egress status
+./djinn egress logs [-f]
+./djinn egress url     # the admin session URL (one page-load signs you in)
+./djinn egress ip      # the broker's static djinn-net address
+```
+
+`start` renders `$DJINN_HOME/egress/docker-compose.yml` and drives
+`docker compose -p djinn-egress`. Two services from one image
+(`egress/Dockerfile`), both `restart: unless-stopped`:
+
+- `broker` — `egress_broker_host.py` on `djinn-net` at a static address
+  (`EGRESS_BROKER_HOST`, offset 3 of the bridge subnet; `./djinn egress ip`
+  prints it) and published on `127.0.0.1:8816`. It applies allows by
+  exec'ing `bin/allow-egress.sh` through the **docker socket mounted at
+  `/var/run/docker.sock`**: the host-side `docker`/`yq`/python3 the script
+  needs live inside the image, and the socket is what lets it exec into
+  bottles and edit manifests without any terminal on the host. `DOCKER_HOST`
+  selects the socket (`unix://<path>`), anything else is refused.
+- `admin` — `admin_daemon.py` on the compose-private `egress-backend`
+  network only (no bottle has a route to it), published on `127.0.0.1:8817`.
+
+Open the admin page from the URL `./djinn egress url` prints
+(`http://127.0.0.1:8817/session?key=…`): that one page-load sets the session
+cookie. The bare page address serves a pointer page and sets nothing, and a
+bottle gets no session over the host gateway either way. The session key and
+the operator token live under `$DJINN_HOME/run/egress/`, created host-side
+before the containers start.
+
+`EGRESS_ACTIONS_URL` (environment or `secrets.env`) points ntfy action
+buttons at an address a phone can reach (the broker's container bind is
+`0.0.0.0`, which no phone can dial) — unset means no action buttons.
+
+`EGRESS_BROKER_HOST` reaches bottles through `./djinn up` (derived by
+`src/manifest.py` from `DJINN_SUBNET`/`DJINN_EGRESS_IP`; `init-firewall.sh`
+opens `EGRESS_BROKER_HOST:8816` the way it opens `HOST_MCP_PORTS`), so a
+bottle created before the service existed files at its old address and needs
+its next `./djinn up`. `up.sh` prints one warning when the service is down;
+bring it up with `./djinn egress start`.
+
 ## Operator surface (primary: `djinn admin`)
 
-`./djinn admin` is the primary decision surface for open egress requests. It
-starts a loopback-only HTTP daemon (`http://127.0.0.1:8817` by default) that
-serves a browser UI and proxies decision calls to the egress broker daemon.
+`./djinn egress start` is the primary decision surface for open egress
+requests: it runs the admin page as a service (above). `./djinn admin` still
+runs the same UI as a host-side loopback daemon (`http://127.0.0.1:8817` by
+default) when you want it outside docker.
 
 The browser session gate on `POST /api/egress/decide` is intentionally narrow:
 it defends against hostile web pages (CSRF and DNS-rebinding style requests)
