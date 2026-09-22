@@ -126,7 +126,7 @@ class DenyList:
         self._lock_path = path.with_name(DENYLIST_LOCK_FILENAME)
         # Guards every read/write of self._entries/_mtime (and the diagnosis
         # fields derived from them) against concurrent THREADS in the same
-        # process — e.g. egress_watch's main thread (via
+        # process — e.g. an operator-facing caller's main thread (via
         # format_denylist_status -> load()) and a broker HTTP handler thread
         # (matches(), persist_deny -> add()+load()) sharing this one
         # instance (finding #1). This is independent of _file_lock's fcntl
@@ -863,7 +863,7 @@ def main(argv: list[str] | None = None) -> int:
     # bin/allow-egress.sh's --check probe) and `./djinn deny`/`undeny` used
     # to print every LOG.info line (route loads, add/remove/save
     # bookkeeping) to the terminal for no operator-relevant reason. Mirrors
-    # egress_watch's own -v/-vv convention.
+    # the daemon's own -v/-vv convention.
     level = (
         logging.DEBUG
         if verbosity > 1
