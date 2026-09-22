@@ -1045,10 +1045,15 @@ def component_state(component, candidate=None, receipt=None, running=None):
     """Derive one component's state from the evidence actually supplied —
     the ONLY place states are derived, so status output cannot drift:
       - external/deferred catalog components are their classification;
-      - running evidence requires a matching receipt, which requires a
-        matching candidate (the PLN's presentation rules);
-      - a matching receipt means built; a candidate means resolved; without
-        any evidence the component is merely requested."""
+      - built evidence is a receipt whose candidate_hash matches a candidate
+        that REQUESTED this component (a receipt for an unrelated candidate,
+        or a component the candidate never covered, is not build evidence);
+      - running evidence additionally requires a receipt observation for this
+        component and a running observation whose image id, candidate_hash
+        label, and component versions match the receipt — an omitted
+        observation is absence of evidence, never running evidence;
+      - a matching candidate means resolved; without any evidence the
+        component is merely requested."""
     if component.policy not in MANAGED_POLICIES:
         return State.from_policy(component.policy)
     if running is not None:
@@ -1060,6 +1065,16 @@ def component_state(component, candidate=None, receipt=None, running=None):
             raise VersionContractError(
                 f"cannot present {component.id} as running: the receipt does "
                 "not match the candidate")
+        if component.id not in candidate.requested:
+            raise VersionContractError(
+                f"cannot present {component.id} as running: the candidate "
+                "never requested it (components outside the candidate have "
+                "no resolution or build evidence)")
+        if component.id not in receipt.observations:
+            raise VersionContractError(
+                f"cannot present {component.id} as running: the receipt "
+                "records no component observation for it (an omitted "
+                "observation is absence of evidence, not running evidence)")
         confirm_running(receipt, running)
         return State.RUNNING
     if receipt is not None:
@@ -1067,6 +1082,15 @@ def component_state(component, candidate=None, receipt=None, running=None):
             raise VersionContractError(
                 f"cannot present {component.id} as built: the receipt's "
                 f"candidate_hash does not match the candidate")
+        if component.id not in candidate.requested:
+            # The receipt pins a candidate that never covered this component:
+            # no build evidence for it. A receipt that nevertheless observes
+            # it contradicts its own candidate — refuse that too.
+            if component.id in receipt.observations:
+                raise VersionContractError(
+                    f"cannot present {component.id} as built: the receipt "
+                    "observes it but the candidate never requested it")
+            return State.REQUESTED
         return State.BUILT
     if candidate is not None and component.id in candidate.requested:
         return State.RESOLVED
