@@ -11,3 +11,10 @@ onboarding = false
 # Dockerfile; bumping it is a rebuild, never `herdr update`.
 version_check = false
 manifest_check = false
+
+[ui]
+# Keep a mouse selection on screen until ctrl+c (or cmd+c when the host
+# forwards it) copies it. The default copies on mouse-up and clears the
+# highlight, and under VS Code's terminal that copy rides on OSC 52, which the
+# host may drop: a drag then looks like it selected nothing.
+copy_on_select = false
