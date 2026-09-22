@@ -435,10 +435,72 @@ unset GITEA_TOKEN_example GH_TOKEN_fry_a GH_TOKEN_fry_b
 
 # ── git_host_notices honours per-identity rows ──
 . "$REPO/src/git_notices.sh"   # defines git_host_notices, no side effects
-out=$(git_host_notices $'a\thttps://h.test/a/x.git\n' '' $'claude\th.test=SRC_A\n')
-assert_eq "a host covered only by a per-identity row gets no notice" "" "$out"
+# Three cases, one note each at most:
+out=$(git_host_notices $'a\thttps://h.test/a/x.git\n' 'h.test=SRC_A' $'claude\th.test=SRC_A\n')
+assert_eq "catch-all row: silent" "" "$out"
+out=$(git_host_notices $'a\thttps://h.test/a/x.git\n' '' $'claude\th.test=SRC_A\npi\th.test=SRC_B\n')
+assert_eq "named-only host: exactly ONE distinct note naming the identities" \
+    "  note: h.test: no catch-all token — served only by named identities (claude pi); the bootstrap clone runs anonymously — add a catch-all entry (an entry without identities:) if a private clone at up is needed" \
+    "$out"
 out=$(git_host_notices $'a\thttps://h2.test/a/x.git\n' '' $'claude\th.test=SRC_A\n')
-assert_contains "a host with no row anywhere still gets the notice" "$out" "h2.test: no git.hosts.h2.test.token"
+assert_contains "a host with no row anywhere still gets the existing note" "$out" "h2.test: no git.hosts.h2.test.token"
+out=$(git_host_notices $'a\thttps://h.test/a/x.git\nb\thttps://h.test/b/y.git\n' '' $'claude\th.test=SRC_A\n')
+assert_eq "named-only host: one note, not one per repo" \
+    "1" "$(printf '%s\n' "$out" | grep -c '^  note:')"
+
+# General shape guard for every key file produced above: a trailing newline
+# (a fused last line corrupts the preceding var when sourced) and every line
+# a valid assignment.
+env_shape_ok() {  # <dir> — prints "" when every *.env ends with a newline
+                  # and every line is VAR=<value>
+    local f bad=""
+    for f in "$1"/*.env; do
+        [ -f "$f" ] || continue
+        [ "$(tail -c 1 "$f" | wc -l)" -eq 1 ] || bad="$bad $(basename "$f") (no trailing newline)"
+        if grep -qvE '^[A-Za-z_][A-Za-z0-9_]*=' "$f"; then
+            bad="$bad $(basename "$f") (non-assignment line: $(grep -vE '^[A-Za-z_][A-Za-z0-9_]*=' "$f" | head -1))"
+        fi
+    done
+    printf '%s' "$bad"
+}
+for kd in "$d" "$IDKEYS" "$IDCATCH" "$UHOME/.agent-keys"; do
+    [ -d "$kd" ] || continue
+    bad=$(env_shape_ok "$kd")
+    assert_eq "every produced .env ends with a newline and has only VAR= lines ($(basename "$(dirname "$kd")"))" "" "$bad"
+done
+
+# ── coding-hank's shape end to end through the real shim: a NON-EMPTY git
+# table (git.token spelling) AND a resolved agent_secrets row for the SAME
+# agent. The git block and the appended plugin slot must land on SEPARATE
+# lines (a lost trailing newline would fuse them: GH_TOKEN=<tok>KEY=<val>),
+# and sourcing the file through the real generated shim must set BOTH.
+echo "── key file shape: git table + agent secrets in one file, through the real shim ──"
+HK="$WORK/hank"; HK_KEYS="$HK/.agent-keys"; mkdir -p "$HK_KEYS"; chmod 700 "$HK_KEYS"
+eval "$(printf '{"repos":["https://github.com/x/y.git"],"agents":["claude"],"plugins":["obsidian-annotated"],"git":{"token":"GH_TOKEN_hank"},"agent_secrets":[{"agent":"claude","slot":"OBSIDIAN_ANNOTATED_KEY","secret":"OBSIDIAN_KEY_claude"}]}\nobsidian-annotated\t{"secrets":{"OBSIDIAN_ANNOTATED_KEY":{}}}\n---agents---\nclaude\t{"binary":"claude","install":"x","mcp":{"config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove"}}\n' \
+    | PRESENT_SECRET_VARS="GH_TOKEN_hank OBSIDIAN_KEY_claude" SECRETS_FILE=/sec/secrets.env \
+      GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" NTFY_URL="" NTFY_TOPIC="" \
+      python3 "$REPO/src/manifest.py" --derive)"
+GH_TOKEN_hank=hank-token-value OBSIDIAN_KEY_claude=hank-obsidian-key
+write_keyfiles "$HK_KEYS" "claude" "" \
+    "$(printf 'claude\tOBSIDIAN_ANNOTATED_KEY\tOBSIDIAN_KEY_claude\n')" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" \
+    "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+bad=$(env_shape_ok "$HK_KEYS")
+assert_eq "coding-hank shape: file ends with a newline, every line is VAR=..." "" "$bad"
+HSHIMS="$WORK/hshims"; HSTUBS="$WORK/hstubs"; mkdir -p "$HSHIMS" "$HSTUBS"
+write_agent_shim "$HSHIMS/claude" claude
+cat > "$HSTUBS/claude" <<'MOCK'
+#!/bin/bash
+env | LC_ALL=C sort > "${STUB_ENV_OUT:?}"
+MOCK
+chmod +x "$HSTUBS/claude"
+env -i HOME="$HK" PATH="$HSTUBS:$HSHIMS:/usr/bin:/bin" STUB_ENV_OUT="$WORK/env-hank" \
+    bash "$HSHIMS/claude" >/dev/null 2>&1
+assert_eq "real shim: GH_TOKEN keeps its exact value" "hank-token-value" \
+    "$(grep '^GH_TOKEN=' "$WORK/env-hank" | cut -d= -f2-)"
+assert_eq "real shim: the plugin slot keeps its exact value (separate line)" "hank-obsidian-key" \
+    "$(grep '^OBSIDIAN_ANNOTATED_KEY=' "$WORK/env-hank" | cut -d= -f2-)"
+unset GH_TOKEN_hank OBSIDIAN_KEY_claude
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git-credential-org.sh ──"

@@ -83,13 +83,6 @@ REF_RE = re.compile(r"^[A-Za-z0-9_]+\Z")
 # digits (e.g. 1TOKEN) are legal in the ref charset above but can never name
 # an env var, so the git token sources are validated against this instead.
 TOKEN_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
-# An identity in a git.hosts list-form entry: an enabled agent's BINARY name
-# (the shim the launcher runs, e.g. claude, pi — the same name agent_secrets'
-# `agent:` field validates against, and the name an enabled agent is known by
-# everywhere downstream of derive()) or the literal `user`, the human's
-# interactive shell (sourced by the image's .bashrc from user.env). Not the
-# agents/<dir> directory name: the shim binary is what carries the identity.
-GIT_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 # Placeholder a plugin uses for its own host port — in a remote url, or in a
 # local bridge's command/args when the bridge dials the host (rhinomcp) — so
 # the port lives once in plugin.yml (host_port:) and a manifest plugin_ports:

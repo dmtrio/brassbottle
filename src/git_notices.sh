@@ -43,7 +43,7 @@ git_url_split() {
 # per repo.
 git_host_notices() {
     local repos="$1" git_host_tokens="$2" git_identity_host_tokens="${3:-}"
-    local _seen="" _rname _rurl _rscheme _rhost _pair _rowhost _has _ident _ihost _ipairs
+    local _seen="" _rname _rurl _rscheme _rhost _pair _rowhost _has _named _ident _ihost _ipairs
     _seen=""
     while IFS=$'\t' read -r _rname _rurl; do
         [ -n "$_rname" ] || continue
@@ -57,6 +57,7 @@ git_host_notices() {
         case " $_seen " in *" $_rhost "*) continue ;; esac
         _seen="$_seen $_rhost"
         _has=""
+        _named=""
         for _pair in $git_host_tokens; do
             case "$_pair" in *=*) ;; *) continue ;; esac
             _rowhost=${_pair%%=*}
@@ -65,8 +66,10 @@ git_host_notices() {
             [ "$_rowhost" = "$_rhost" ] && { _has=1; break; }
         done
         if [ -z "$_has" ]; then
-            # Per-identity rows cover the host too: any identity with a row
-            # for it authenticates there.
+            # Per-identity rows cover the host for the identities that name
+            # it — but the bootstrap clone runs as no identity, so a host
+            # covered ONLY by named rows still clones anonymously. Track who
+            # covers it, for the named-only note below.
             while IFS=$'\t' read -r _ident _ihost; do
                 [ -n "$_ident" ] || continue
                 for _pair in $_ihost; do
@@ -74,15 +77,22 @@ git_host_notices() {
                     _rowhost=${_pair%%=*}
                     _rowhost=$(printf '%s' "$_rowhost" | tr '[:upper:]' '[:lower:]')
                     _rowhost=${_rowhost%:443}
-                    [ "$_rowhost" = "$_rhost" ] && { _has=1; break; }
+                    if [ "$_rowhost" = "$_rhost" ]; then
+                        _has=1
+                        case " $_named " in *" $_ident "*) ;; *) _named="$_named $_ident" ;; esac
+                    fi
                 done
-                [ -n "$_has" ] && break
             done <<EOF
 $git_identity_host_tokens
 EOF
         fi
         if [ -z "$_has" ]; then
             echo "  note: $_rhost: no git.hosts.$_rhost.token — clones of its repos run anonymously (public repos only); a push needs git.hosts.$_rhost.token in the manifest (no fall-back to human credentials; see docs/secrets.md)"
+        elif [ -n "$_named" ]; then
+            # Covered, but ONLY by named identities: agents on that list
+            # authenticate, the bootstrap clone (catch-all rows only) does
+            # not. Exactly one note per host (the _seen dedupe above).
+            echo "  note: $_rhost: no catch-all token — served only by named identities ($(printf '%s' "$_named" | sed 's/^ //')); the bootstrap clone runs anonymously — add a catch-all entry (an entry without identities:) if a private clone at up is needed"
         fi
     done <<EOF
 $repos
