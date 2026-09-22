@@ -1032,9 +1032,18 @@ def confirm_running(receipt, running):
             f"candidate_hash label is {label_hash} but the receipt was built "
             f"from {receipt.candidate_hash}")
     for component_id, obs in sorted(receipt.observations.items()):
-        live = running["labels"].get(component_id)
         expected = obs.get("version")
-        if expected is not None and live != expected:
+        if expected is None:
+            # The running labels carry component versions (PLN §2); an
+            # observation identified only by commit/digest has no live label
+            # to compare against, so it can never confirm running.
+            raise VersionContractError(
+                f"cannot present a built image as running: the receipt "
+                f"observed {component_id} without a version — the running "
+                "labels carry component versions, so a version observation "
+                "is required to confirm it")
+        live = running["labels"].get(component_id)
+        if live != expected:
             raise VersionContractError(
                 f"cannot present a built image as running: {component_id} "
                 f"reports {live!r} live but the receipt observed {expected!r}")
