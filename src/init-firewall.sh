@@ -19,6 +19,9 @@
 #   HOST_MCP_PORTS         comma/space-separated TCP ports on
 #                          host.docker.internal to open (MCP servers on the
 #                          host). Unset = host unreachable.
+#   EGRESS_BROKER_HOST     the egress broker singleton's static djinn-net
+#                          address; 8816 is opened to it (and only it) when
+#                          ENABLE_EGRESS_BROKER is true.
 #   ENABLE_EGRESS_BROKER   when true (default), redirect blocked :80/:443 to
 #                          the in-container broker, log via NFLOG group 32,
 #                          and start the transparent broker (entrypoint).
@@ -292,6 +295,15 @@ if [ -n "${HOST_MCP_PORTS:-}" ]; then
         echo "Allowing host MCP port $HOST_GW_IP:$port"
         iptables -A OUTPUT -d "$HOST_GW_IP" -p tcp --dport "$port" -j ACCEPT
     done
+fi
+
+# Egress broker opt-in: open ONLY the broker's static djinn-net address on
+# its filing port — 8816 is not on host.docker.internal (the broker is the
+# ./djinn egress compose singleton), so this scopes the grant to one address
+# the way HOST_MCP_PORTS scopes the host-gateway ports.
+if [ "${ENABLE_EGRESS_BROKER:-true}" = "true" ] && [ -n "${EGRESS_BROKER_HOST:-}" ]; then
+    echo "Allowing egress broker $EGRESS_BROKER_HOST:8816"
+    iptables -A OUTPUT -d "$EGRESS_BROKER_HOST" -p tcp --dport 8816 -j ACCEPT
 fi
 
 # Transparent egress broker (B3): REDIRECT blocked :80/:443 to the local

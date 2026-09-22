@@ -22,11 +22,10 @@ NOW = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
 
 
 class EgressSmokeLibTests(unittest.TestCase):
-    def test_host_mcp_ports_include_broker(self):
-        self.assertTrue(smoke.host_mcp_ports_include_broker("8811,8816"))
-        self.assertTrue(smoke.host_mcp_ports_include_broker("8816"))
-        self.assertFalse(smoke.host_mcp_ports_include_broker("8811"))
-        self.assertFalse(smoke.host_mcp_ports_include_broker(""))
+    def test_broker_host_env_set(self):
+        self.assertTrue(smoke.broker_host_env_set("172.30.0.252"))
+        self.assertFalse(smoke.broker_host_env_set(""))
+        self.assertFalse(smoke.broker_host_env_set("   "))
 
     def test_container_name_for_bottle(self):
         self.assertEqual(smoke.container_name_for_bottle("coding-demo"), "djinn-coding-demo")
@@ -131,7 +130,7 @@ class EgressSmokeLibTests(unittest.TestCase):
         ok, derived, message = smoke.derive_kill_switch_ports(TESTS_DIR.parent)
         self.assertTrue(ok, message)
         self.assertEqual(derived.get("ENABLE_EGRESS_BROKER"), "false")
-        self.assertFalse(smoke.host_mcp_ports_include_broker(derived.get("HOST_MCP_PORTS", "")))
+        self.assertEqual(derived.get("EGRESS_BROKER_HOST", ""), "")
 
     def test_format_summary_counts(self):
         summary = smoke.SmokeSummary()

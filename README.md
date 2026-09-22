@@ -91,6 +91,7 @@ Prefer the IDE? Attach with VS Code or Cursor:
 ./djinn keys <name> ...           inspect or temporarily edit agent keys
 ./djinn jump <cmd>                singleton mosh jump container (docs/remote.md)
 ./djinn tunnel <cmd>              singleton VPN/tunnel connector (docs/remote.md)
+./djinn egress <cmd>              singleton egress broker + admin page (docs/egress.md)
 ./djinn backup <cmd>              singleton artifact backup
 ./djinn admin [--port N]          admin plane UI daemon
 ```

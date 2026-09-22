@@ -228,9 +228,13 @@ def wait_for_open_request(
     return None
 
 
-def host_mcp_ports_include_broker(env_value: str, port: int = BROKER_PORT) -> bool:
-    tokens = re.split(r"[, \t]+", env_value.strip())
-    return str(port) in [token for token in tokens if token]
+def broker_host_env_set(env_value: str) -> bool:
+    """The bottle knows the compose singleton's static djinn-net address —
+    what init-firewall.sh scopes the 8816 ACCEPT to, and what the NFLOG
+    reader and request-egress dial. 8816 left HOST_MCP_PORTS when the broker
+    became the ./djinn egress service.
+    """
+    return bool((env_value or "").strip())
 
 
 def container_name_for_bottle(bottle: str, prefix: str = "djinn-") -> str:
@@ -512,11 +516,14 @@ def run_preflight(
         summary.fail("EGRESS_BROKER_TOKEN set", f"missing on {container}")
         return None
 
-    host_ports = docker_inspect_env(container, "HOST_MCP_PORTS") or ""
-    if host_mcp_ports_include_broker(host_ports):
-        summary.pass_("HOST_MCP_PORTS includes 8816", host_ports)
+    broker_host = docker_inspect_env(container, "EGRESS_BROKER_HOST") or ""
+    if broker_host_env_set(broker_host):
+        summary.pass_("EGRESS_BROKER_HOST set (djinn-net broker address)", broker_host)
     else:
-        summary.fail("HOST_MCP_PORTS includes 8816", f"got {host_ports!r}")
+        summary.fail(
+            "EGRESS_BROKER_HOST set",
+            f"got {broker_host!r} — re-run ./djinn up with the egress service derived",
+        )
         return None
 
     return container
@@ -752,17 +759,17 @@ def run_smoke(
 
     # ── 8. Kill switch ───────────────────────────────────────────────────────
     ok, derived, message = derive_kill_switch_ports(repo_root)
-    host_ports = derived.get("HOST_MCP_PORTS", "")
+    broker_host = derived.get("EGRESS_BROKER_HOST", "")
     enable_broker = derived.get("ENABLE_EGRESS_BROKER", "")
-    if ok and enable_broker == "false" and not host_mcp_ports_include_broker(host_ports):
+    if ok and enable_broker == "false" and not broker_host:
         summary.pass_(
-            "kill switch: manifest omits 8816",
-            f"HOST_MCP_PORTS={host_ports!r} ENABLE_EGRESS_BROKER={enable_broker!r}",
+            "kill switch: manifest derives no broker address",
+            f"EGRESS_BROKER_HOST={broker_host!r} ENABLE_EGRESS_BROKER={enable_broker!r}",
         )
     else:
         summary.fail(
-            "kill switch: manifest omits 8816",
-            message if not ok else f"HOST_MCP_PORTS={host_ports!r} ENABLE_EGRESS_BROKER={enable_broker!r}",
+            "kill switch: manifest derives no broker address",
+            message if not ok else f"EGRESS_BROKER_HOST={broker_host!r} ENABLE_EGRESS_BROKER={enable_broker!r}",
         )
 
     if kill_switch_container:
@@ -776,14 +783,14 @@ def run_smoke(
                 "kill switch: no NFLOG rule",
                 f"{kill_switch_container} OUTPUT has no NFLOG",
             )
-        ports = docker_inspect_env(kill_switch_container, "HOST_MCP_PORTS") or ""
-        if host_mcp_ports_include_broker(ports):
-            summary.fail("kill switch: no 8816 grant", ports)
+        ports = docker_inspect_env(kill_switch_container, "EGRESS_BROKER_HOST") or ""
+        if ports:
+            summary.fail("kill switch: no broker-address grant", ports)
         else:
-            summary.pass_("kill switch: no 8816 grant", ports or "(empty)")
+            summary.pass_("kill switch: no broker-address grant", "(empty)")
     else:
         summary.skip(
-            "kill switch: live NFLOG/8816 on disabled bottle",
+            "kill switch: live broker-address/NFLOG on disabled bottle",
             "set EGRESS_SMOKE_KILL_BOTTLE to a running bottle with "
             "capabilities.egress_broker: false",
         )

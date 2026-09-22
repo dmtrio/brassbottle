@@ -595,7 +595,7 @@ class TestYqSemanticsPins(unittest.TestCase):
                    plugin_files=files)
         self.assertEqual(d["PLUGINS"], "browser")          # only browser: true
         self.assertEqual(d["PLUGINS_ENABLED"], "browser")
-        self.assertEqual(d["HOST_MCP_PORTS"], "8814,8816")      # browser's host_port + broker
+        self.assertEqual(d["HOST_MCP_PORTS"], "8814")      # browser's host_port
         # the retired CAP_* variables are gone from the derived set
         self.assertNotIn("CAP_GATEWAY", d)
         self.assertNotIn("CAP_BROWSER", d)
@@ -1625,16 +1625,32 @@ class TestDerivedValues(unittest.TestCase):
         # HOST_MCP_PORTS folds every enabled plugin's host_port, numerically
         # sorted so the firewall grant is independent of plugin list order.
         d = derive({"plugins": ["browser", "gateway"]})
-        self.assertEqual(d["HOST_MCP_PORTS"], "8811,8814,8816")
+        self.assertEqual(d["HOST_MCP_PORTS"], "8811,8814")
         self.assertEqual(d["ENABLE_EGRESS_BROKER"], "true")
-        self.assertEqual(derive({"plugins": ["serena"]})["HOST_MCP_PORTS"], "8816")
+        # 8816 is no longer a host port: the broker is the docker compose
+        # singleton, and bottles file at its static djinn-net address.
+        d_broker = derive({"plugins": ["serena"]})
+        self.assertEqual(d_broker["HOST_MCP_PORTS"], "")
+        self.assertEqual(d_broker["EGRESS_BROKER_HOST"], "172.30.0.252")
 
     def test_host_mcp_ports_omit_broker_when_disabled(self):
         d = derive({"capabilities": {"egress_broker": False}})
         self.assertEqual(d["ENABLE_EGRESS_BROKER"], "false")
         self.assertEqual(d["HOST_MCP_PORTS"], "")
+        # no broker to file at: no address, no firewall grant
+        self.assertNotIn("EGRESS_BROKER_HOST", d)
         d2 = derive({"plugins": ["browser"], "capabilities": {"egress_broker": False}})
         self.assertEqual(d2["HOST_MCP_PORTS"], "8814")
+        self.assertNotIn("EGRESS_BROKER_HOST", d2)
+
+    def test_egress_broker_host_tracks_the_subnet_and_refuses_a_bad_override(self):
+        d = derive({"capabilities": {"egress_broker": True}},
+                   env=dict(ENV, DJINN_SUBNET="10.9.0.0/24"))
+        self.assertEqual(d["EGRESS_BROKER_HOST"], "10.9.0.252")
+        with self.assertRaises(m.ManifestError) as cm:
+            derive({"capabilities": {"egress_broker": True}},
+                   env=dict(ENV, DJINN_EGRESS_IP="172.30.0.1"))
+        self.assertIn("gateway", str(cm.exception))
 
     def test_obsidian_identity_sugar_folds_egress_and_binds(self):
         # identities: sugar enables the obsidian-annotated plugin (whose egress
@@ -2210,7 +2226,7 @@ class TestHybridSchemaRules(unittest.TestCase):
                     files={"p": {"install": "x", "host_port": 1999,
                                  "mcp": {"s": {"command": "bash",
                                                "args": ["-c", "P=${HOST_PORT} exec b"]}}}})
-        self.assertEqual(d["HOST_MCP_PORTS"], "1999,8816")
+        self.assertEqual(d["HOST_MCP_PORTS"], "1999")
         # ...a local server that never references the port would leave the
         # firewall grant pointing at a port nothing dials (and a plugin_ports:
         # override would move the grant but not the dial target)
@@ -2400,11 +2416,11 @@ class TestPluginPorts(unittest.TestCase):
 
     def test_override_applied(self):
         d = derive({"plugins": ["browser"], "plugin_ports": {"browser": 8815}})
-        self.assertEqual(d["HOST_MCP_PORTS"], "8815,8816")
+        self.assertEqual(d["HOST_MCP_PORTS"], "8815")
 
     def test_default_preserved(self):
         d = derive({"plugins": ["browser"]})
-        self.assertEqual(d["HOST_MCP_PORTS"], "8814,8816")
+        self.assertEqual(d["HOST_MCP_PORTS"], "8814")
 
     # The browser server declares requires:, so it is only configured when its
     # slot resolves — bind it and mark the source present to see substituted args.
@@ -2451,7 +2467,7 @@ class TestPluginPorts(unittest.TestCase):
                    plugin_files=self.LOCAL_BRIDGE)
         entry = json.loads(d["PLUGIN_MCP_ENTRIES"].strip())
         self.assertEqual(entry["s"]["args"], ["-c", "PORT=2999 exec bridge"])
-        self.assertEqual(d["HOST_MCP_PORTS"], "2999,8816")
+        self.assertEqual(d["HOST_MCP_PORTS"], "2999")
         # the caller's plugin doc must not have absorbed a substitution
         self.assertIn("${HOST_PORT}", self.LOCAL_BRIDGE["p"]["mcp"]["s"]["args"][1])
 

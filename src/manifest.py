@@ -69,6 +69,12 @@ import re
 import shlex
 import sys
 
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+import djinn_net_addr  # noqa: E402
+
 # wire_plugins.py used to export the reserved-server-name set; as of Plugins v2
 # Phase 2 every MCP server comes from a plugin file (obsidian-annotated included),
 # so there are no reserved names and nothing is imported from it. Host ports and
@@ -1885,9 +1891,18 @@ def derive(manifest, plugin_files, agent_files, env):
     out["PLUGIN_SETUP"] = "".join(
         f"{p}\t{plugin_setup[p]}\n" for p in sorted(plugin_setup)
     )
-    # Core egress broker (not plugin-gated): host port for filing blocked egress.
+    # Core egress broker (not plugin-gated): 8816 is no longer a host port —
+    # the broker is the docker compose singleton (./djinn egress start) and
+    # bottles reach it at its static djinn-net address, so the firewall grant
+    # moves to EGRESS_BROKER_HOST below.
     if enable_egress_broker == "true":
-        host_ports.append(8816)
+        env_subnet = {k: v for k, v in env.items() if k == "DJINN_SUBNET"}
+        env_egress_ip = {k: v for k, v in env.items() if k == "DJINN_EGRESS_IP"}
+        broker_env = {**env_subnet, **env_egress_ip}
+        try:
+            out["EGRESS_BROKER_HOST"] = djinn_net_addr.resolve_egress_ip(env=broker_env)
+        except ValueError as exc:
+            raise ManifestError(str(exc)) from exc
     # Sorted + deduped so the firewall grant string is order-independent of the
     # plugin list and two plugins sharing a port don't double up the grant.
     out["HOST_MCP_PORTS"] = ",".join(str(p) for p in sorted(set(host_ports)))

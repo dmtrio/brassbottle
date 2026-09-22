@@ -121,6 +121,8 @@ DERIVED=$(
         GIT_NAME_DEFAULT="$(git config --global user.name 2>/dev/null || true)" \
         GIT_EMAIL_DEFAULT="$(git config --global user.email 2>/dev/null || true)" \
         NTFY_URL="${NTFY_URL:-}" NTFY_TOPIC="${NTFY_TOPIC:-}" \
+        DJINN_SUBNET="${DJINN_SUBNET:-}" \
+        DJINN_EGRESS_IP="${DJINN_EGRESS_IP:-}" \
         "$PYTHON3" "$SCRIPT_DIR/src/manifest.py" --derive
 )
 eval "$DERIVED"
@@ -133,6 +135,14 @@ EGRESS_BROKER_TOKEN=""
 if [ "$ENABLE_EGRESS_BROKER" = "true" ]; then
     EGRESS_BROKER_TOKEN="$("$PYTHON3" "$SCRIPT_DIR/src/egress_broker_host.py" \
         --base-path "$BASE_PATH" --ensure-bottle-token "$NAME")"
+    # The compose singleton is a service, not this script's process: when it
+    # is not running, a bottle with the egress firewall on files into nothing
+    # (connection refused) until it is. One warning line, never fatal — the
+    # bottle still comes up, exactly as the jump-IP preflight degrades.
+    if ! curl -fsS --connect-timeout 1 --max-time 1 \
+            "http://127.0.0.1:${EGRESS_BROKER_PORT:-8816}/health" >/dev/null 2>&1; then
+        echo "WARNING: egress service not running — ./djinn egress start (blocked egress will be refused until then)"
+    fi
 fi
 
 # The CLI host's token never rides the up.sh environment (secrets.env may
@@ -367,7 +377,7 @@ AGENTS_ENABLED="$AGENTS_ENABLED" \
 PLUGINS_ENABLED="$PLUGINS_ENABLED" \
 HOST_MCP_PORTS="$HOST_MCP_PORTS" EXTRA_ALLOWED_DOMAINS="$EGRESS" \
 ALLOWED_CIDRS="$EGRESS_CIDRS" \
-ENABLE_EGRESS_BROKER="$ENABLE_EGRESS_BROKER" EGRESS_BROKER_TOKEN="$EGRESS_BROKER_TOKEN" \
+ENABLE_EGRESS_BROKER="$ENABLE_EGRESS_BROKER" EGRESS_BROKER_TOKEN="$EGRESS_BROKER_TOKEN" EGRESS_BROKER_HOST="${EGRESS_BROKER_HOST:-}" \
 KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWSER_TMP_PATH" MEM_LIMIT="$MEM_LIMIT" \
 SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
   JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" \
