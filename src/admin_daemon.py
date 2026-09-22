@@ -25,7 +25,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,6 +49,42 @@ REASON_MAX_CHARS = 200
 TOKEN_RACE_SLEEP_SECONDS = 0.2
 TOKEN_REJECTED_ERROR = "operator token rejected by daemon; restart djinn admin"
 UNREACHABLE_ERROR = "egress daemon unreachable"
+CONTAINER_MARKER_ENV = "DJINN_CONTAINER"
+
+# Per-run session secret, created host-side by `djinn egress start` (never in
+# secrets.env, never mounted into a bottle). GET /session?key=<secret> is the
+# only thing that mints the session cookie, so a page that never learned the
+# key — a bottle reaching the published port over the host gateway, or a
+# hostile web page — gets the pointer page and no cookie.
+ADMIN_KEY_FILENAME = "admin.key"
+ADMIN_KEY_ENV = "EGRESS_ADMIN_KEY"
+
+POINTER_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#1b3a4b">
+  <title>Egress queue - Djinn admin</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 2rem; }
+    main { max-width: 40rem; margin: 0 auto; }
+    code { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Egress admin</h1>
+    <p>This page must be opened from the session URL the egress service
+    prints. On the djinn host run:</p>
+    <p><code>./djinn egress url</code></p>
+    <p>and open the URL it prints (it carries the one-time session key this
+    page is guarded by). Opening the bare page address sets nothing.</p>
+  </main>
+</body>
+</html>
+"""
 
 _ICON_192 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAABMElEQVR4nO3SQQkAIADAQDW50a3gXiLcJRibYw8urdcB"
@@ -155,9 +190,8 @@ MANIFEST = {
     ],
 }
 
-SW_JS = """const CACHE_VERSION = "djinn-admin-shell-v2";
+SW_JS = """const CACHE_VERSION = "djinn-admin-shell-v3";
 const SHELL_PATHS = [
-  "/",
   "/app.js",
   "/vendor/htm-preact-standalone.module.js",
   "/manifest.webmanifest",
@@ -186,14 +220,11 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) return;
   const isShellPath = SHELL_PATHS.includes(url.pathname);
 
+  // "/" is NEVER cached: without a session cookie it is the pointer page, and
+  // a cached pointer page would masquerade as the app shell after a session
+  // expires. Only the asset routes below are cached.
   if (url.pathname === "/") {
-    event.respondWith(
-      fetch(req).then((resp) => {
-        const copy = resp.clone();
-        caches.open(CACHE_VERSION).then((cache) => cache.put(req, copy)).catch(() => {});
-        return resp;
-      }).catch(() => caches.match(req))
-    );
+    event.respondWith(fetch(req));
     return;
   }
 
@@ -268,6 +299,69 @@ def _ensure_admin_operator_token(egress_root: Path) -> str:
     raise RuntimeError("operator token unavailable (empty token)")
 
 
+def ensure_admin_key(egress_root: Path) -> str:
+    """Create or return the per-run session key (run/egress/admin.key).
+
+    Same create-race tolerance as the operator token: O_EXCL so a racing
+    admin daemon cannot clobber the file, and a loser of the race re-reads
+    the winner's value. Created host-side by `djinn egress start` BEFORE the
+    containers come up, so the file stays operator-owned on the host and the
+    host-side `djinn egress url` can read it without root-in-container
+    ownership getting in the way.
+    """
+    key_path = egress_root / ADMIN_KEY_FILENAME
+    if key_path.is_file():
+        try:
+            key = key_path.read_text(encoding="utf-8").strip()
+            if key:
+                return key
+        except OSError:
+            pass
+    key = secrets.token_urlsafe(32)
+    try:
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        time.sleep(TOKEN_RACE_SLEEP_SECONDS)
+        try:
+            key = key_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            key = ""
+        if key:
+            return key
+        raise RuntimeError(f"admin session key unavailable ({key_path})") from None
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(key + "\n")
+    LOG.info("admin session key created path=%s", key_path.name)
+    return key
+
+
+def read_admin_key(egress_root: Path) -> str:
+    """Read the existing session key; RuntimeError (naming `start`) when the
+    file is missing or empty. Never creates one — `djinn egress url` must not
+    mint a key the running admin daemon has not loaded."""
+    key_path = egress_root / ADMIN_KEY_FILENAME
+    try:
+        key = key_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"no admin session key at {key_path} — run: ./djinn egress start"
+        ) from None
+    except OSError as exc:
+        raise RuntimeError(f"cannot read {key_path}: {exc}") from exc
+    if not key:
+        raise RuntimeError(
+            f"admin session key file is empty at {key_path} — restart: ./djinn egress start"
+        )
+    return key
+
+
+def session_url(key: str, port: int = DEFAULT_PORT) -> str:
+    """The URL `djinn egress start`/`url` print: one page-load that mints the
+    session cookie and lands on the app. The key is token_urlsafe, so it is
+    already URL-safe without quoting."""
+    return f"http://127.0.0.1:{port}/session?key={key}"
+
+
 def _upstream_json(
     *,
     base_url: str,
@@ -319,11 +413,13 @@ class AdminHTTPServer(ThreadingHTTPServer):
         egress_root: Path,
         session_secret: str,
         operator_token: str,
+        admin_key: str,
     ):
         self.address_family = address_family_for_host(server_address[0])
         self.egress_root = egress_root
         self.session_secret = session_secret
         self.operator_token = operator_token
+        self.admin_key = admin_key
         self.app_js = _APP_JS_BYTES
         self.vendor_js = _VENDOR_JS_BYTES
         super().__init__(server_address, AdminRequestHandler)
@@ -342,6 +438,13 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     server: AdminHTTPServer  # type: ignore[assignment]
 
     def log_message(self, format: str, *args: Any) -> None:
+        # The request line carries the full request target — a
+        # `GET /session?key=…` would otherwise drop the session key into the
+        # log. Redact at this single choke point: the first argument of the
+        # standard log_request format is the request line, so strip its query
+        # string before rendering. Any other format passes through untouched.
+        if args and format.startswith('"%s"') and isinstance(args[0], str):
+            args = (args[0].split("?", 1)[0],) + tuple(args[1:])
         LOG.info("admin http %s - %s", self.address_string(), format % args)
 
     def do_GET(self) -> None:
@@ -354,6 +457,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         routes: dict[tuple[str, str], Callable[[], None]] = {
             ("GET", "/"): self._handle_root,
+            ("GET", "/session"): self._handle_session_get,
             ("GET", "/app.js"): self._handle_app_js,
             ("GET", "/vendor/htm-preact-standalone.module.js"): self._handle_vendor_js,
             ("GET", "/manifest.webmanifest"): self._handle_manifest,
@@ -414,13 +518,47 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         return body, length
 
     def _handle_root(self) -> None:
-        headers = {
-            "Set-Cookie": (
-                f"{SESSION_COOKIE_NAME}={self.server.session_secret}; "
-                "SameSite=Strict; Path=/; HttpOnly"
+        # No cookie is ever set here: a browser (or a bottle over the host
+        # gateway) landing on the bare page address gets either the app (a
+        # session it already holds) or the pointer page — never a session.
+        if self._cookie_matches():
+            self._send_bytes(
+                HTTPStatus.OK,
+                APP_HTML.encode("utf-8"),
+                content_type="text/html; charset=utf-8",
             )
-        }
-        self._send_bytes(HTTPStatus.OK, APP_HTML.encode("utf-8"), content_type="text/html; charset=utf-8", headers=headers)
+            return
+        self._send_bytes(
+            HTTPStatus.OK,
+            POINTER_HTML.encode("utf-8"),
+            content_type="text/html; charset=utf-8",
+        )
+
+    def _handle_session_get(self) -> None:
+        # `djinn egress url` prints this route with the per-run key: one
+        # page-load that mints the session cookie and lands on the app. The
+        # key never appears in a log line (log_message strips the query) and
+        # a wrong or missing key gets 403 with no cookie.
+        provided = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(self.path).query
+        ).get("key", [""])[0]
+        if provided and hmac.compare_digest(provided, self.server.admin_key):
+            self._send_bytes(
+                HTTPStatus.FOUND,
+                b"",
+                content_type="text/html; charset=utf-8",
+                headers={
+                    "Location": "/",
+                    "Set-Cookie": (
+                        f"{SESSION_COOKIE_NAME}={self.server.session_secret}; "
+                        "SameSite=Strict; Path=/; HttpOnly"
+                    ),
+                },
+            )
+            LOG.info("admin session granted path=/session")
+            return
+        LOG.info("admin session refused path=/session reason=%s", "missing" if not provided else "mismatch")
+        self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
 
     def _handle_manifest(self) -> None:
         body = json.dumps(MANIFEST, separators=(",", ":")).encode("utf-8")
@@ -456,6 +594,18 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_egress_queue_get(self) -> None:
         LOG.info("admin request enter method=GET path=/api/egress/queue bytes=0")
+        # The queue read needs the session too: without this a bottle that can
+        # reach the published port over the host gateway (Docker Desktop) reads
+        # every open request with a forged nothing. The page's own fetch is
+        # same-origin and sends the cookie. POST-only checks (content type,
+        # X-Admin-UI, origin/host) stay POST-only — a GET carries no body.
+        if not self._cookie_matches():
+            LOG.info(
+                "admin session gate failed check=%s",
+                "cookie_missing" if not self._read_session_cookie() else "cookie_mismatch",
+            )
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+            return
         try:
             status, upstream, _bytes = _upstream_json(
                 base_url=self._daemon_base_url(),
@@ -490,6 +640,13 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         morsel = parsed.get(SESSION_COOKIE_NAME)
         return morsel.value if morsel is not None else ""
 
+    def _cookie_matches(self) -> bool:
+        """Cookie present and equal to this run's secret (constant time)."""
+        cookie = self._read_session_cookie()
+        if not cookie:
+            return False
+        return hmac.compare_digest(cookie, self.server.session_secret)
+
     def _json_content_type_ok(self) -> bool:
         raw = self.headers.get("Content-Type", "")
         if not raw:
@@ -518,13 +675,11 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         return _is_loopback_value(value)
 
     def _session_gate_ok(self) -> bool:
-        cookie = self._read_session_cookie()
-        if not cookie:
-            LOG.info("admin session gate failed check=cookie_missing")
-            self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
-            return False
-        if not hmac.compare_digest(cookie, self.server.session_secret):
-            LOG.info("admin session gate failed check=cookie_mismatch")
+        if not self._cookie_matches():
+            if not self._read_session_cookie():
+                LOG.info("admin session gate failed check=cookie_missing")
+            else:
+                LOG.info("admin session gate failed check=cookie_mismatch")
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
             return False
         if not self._json_content_type_ok():
@@ -668,12 +823,14 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
 def run_daemon(*, host: str, port: int, egress_root: Path) -> None:
     operator_token = _ensure_admin_operator_token(egress_root)
+    admin_key = ensure_admin_key(egress_root)
     session_secret = secrets.token_urlsafe(32)
     server = AdminHTTPServer(
         (host, port),
         egress_root=egress_root,
         session_secret=session_secret,
         operator_token=operator_token,
+        admin_key=admin_key,
     )
     LOG.info(
         "admin daemon listen host=%s port=%d family=%s",
@@ -688,11 +845,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="djinn admin daemon")
     parser.add_argument("--host", default=DEFAULT_HOST, help="bind address (loopback only)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="bind port")
+    parser.add_argument(
+        "--bind-any",
+        action="store_true",
+        help=(
+            "bind 0.0.0.0 instead of loopback — refused unless DJINN_CONTAINER=1 "
+            "is set (the docker service binds all interfaces inside the container "
+            "and publishes 127.0.0.1 on the host)"
+        ),
+    )
     return parser
 
 
-def _egress_root_from_env() -> Path:
-    home = os.environ.get("DJINN_HOME", "").strip()
+def _egress_root_from_env(env: dict[str, str] | None = None) -> Path:
+    env = os.environ if env is None else env
+    home = env.get("DJINN_HOME", "").strip()
     if not home:
         raise RuntimeError("DJINN_HOME is required")
     return Path(home).expanduser() / "run" / "egress"
@@ -702,23 +869,34 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not _is_loopback_value(args.host):
-        print(f"Error: --host must be loopback (got {args.host!r})", file=sys.stderr)
-        return 1
+    if args.bind_any:
+        if os.environ.get(CONTAINER_MARKER_ENV) != "1":
+            print(
+                "Error: --bind-any refused: it is only valid inside the egress "
+                "admin container (DJINN_CONTAINER=1) — run ./djinn egress start",
+                file=sys.stderr,
+            )
+            return 1
+        host = "0.0.0.0"
+    else:
+        host = args.host
+        if not _is_loopback_value(host):
+            print(f"Error: --host must be loopback (got {host!r})", file=sys.stderr)
+            return 1
     try:
         egress_root = _egress_root_from_env()
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     try:
-        run_daemon(host=args.host, port=args.port, egress_root=egress_root)
+        run_daemon(host=host, port=args.port, egress_root=egress_root)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
             print(
-                f"Error: cannot bind {args.host}:{args.port} (is djinn admin already running?)",
+                f"Error: cannot bind {host}:{args.port} (is djinn admin already running?)",
                 file=sys.stderr,
             )
             return 1

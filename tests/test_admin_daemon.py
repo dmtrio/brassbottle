@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -136,6 +137,7 @@ class AdminDaemonTests(unittest.TestCase):
         env: dict[str, str] | None = None,
         session_secret: str = "session-secret",
         operator_token: str = "operator-test-token",
+        admin_key: str = "admin-test-key",
     ) -> tuple[admin.AdminHTTPServer, threading.Thread]:
         egress_root = home / "run" / "egress"
         egress_root.mkdir(parents=True, exist_ok=True)
@@ -146,6 +148,7 @@ class AdminDaemonTests(unittest.TestCase):
             egress_root=egress_root,
             session_secret=session_secret,
             operator_token=operator_token,
+            admin_key=admin_key,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         env_map = {"DJINN_HOME": str(home)}
@@ -247,6 +250,7 @@ class AdminDaemonTests(unittest.TestCase):
                 egress_root=egress_root,
                 session_secret="s",
                 operator_token="tok",
+                admin_key="k",
             )
             try:
                 with self.assertLogs(admin.LOG, level="INFO") as captured:
@@ -269,6 +273,7 @@ class AdminDaemonTests(unittest.TestCase):
                 egress_root=egress_root,
                 session_secret="s",
                 operator_token="tok",
+                admin_key="k",
             )
             try:
                 with mock.patch.object(ThreadingHTTPServer, "handle_error") as mocked_super:
@@ -280,7 +285,7 @@ class AdminDaemonTests(unittest.TestCase):
             finally:
                 server.server_close()
 
-    def test_get_shell_has_no_token_and_module_app_ref(self):
+    def test_root_without_cookie_serves_pointer_page_and_sets_no_cookie(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             token = "never-leak-this-token"
@@ -290,8 +295,39 @@ class AdminDaemonTests(unittest.TestCase):
             server, thread = self._start_admin(home)
             host, port = server.server_address
             try:
-                status, _payload, _headers, raw = self._request(host, port, "GET", "/")
+                status, _payload, headers, raw = self._request(host, port, "GET", "/")
                 self.assertEqual(status, HTTPStatus.OK)
+                self.assertNotIn("Set-Cookie", headers)
+                text = raw.decode("utf-8")
+                # the pointer page, not the app shell
+                self.assertIn("./djinn egress url", text)
+                self.assertNotIn("appMount", text)
+                self.assertNotIn('<script type="module" src="/app.js">', text)
+                self.assertNotIn(token, text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_get_shell_with_valid_cookie_serves_app_and_sets_no_cookie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            token = "never-leak-this-token"
+            token_path = home / "run" / "egress" / admin.OPERATOR_TOKEN_FILENAME
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.write_text(token + "\n", encoding="utf-8")
+            server, thread = self._start_admin(home)
+            host, port = server.server_address
+            try:
+                status, _payload, headers, raw = self._request(
+                    host,
+                    port,
+                    "GET",
+                    "/",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertNotIn("Set-Cookie", headers)
                 text = raw.decode("utf-8")
                 self.assertNotIn(token, text)
                 self.assertIn("manifest.webmanifest", text)
@@ -366,6 +402,11 @@ class AdminDaemonTests(unittest.TestCase):
                 self.assertIn("startsWith(\"/api/\")", text)
                 self.assertIn('"/app.js"', text)
                 self.assertIn('"/vendor/htm-preact-standalone.module.js"', text)
+                # "/" is excluded from the shell cache: without a session
+                # cookie it is the pointer page, and a cached pointer page
+                # would masquerade as the app shell after a session expires.
+                self.assertNotIn('"/"', text)
+                self.assertIn("url.pathname === \"/\"", text)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -385,6 +426,56 @@ class AdminDaemonTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
+
+    def test_get_queue_requires_session_cookie(self):
+        # Inverts the pre-session-queue test: /api/egress/queue proxies only
+        # for a caller that holds the session cookie a bottle never gets.
+        state = _StubBrokerState()
+        stub, stub_thread = self._start_stub(state)
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(
+                Path(tmp),
+                env={"EGRESS_BROKER_URL": f"http://127.0.0.1:{stub.server_address[1]}"},
+            )
+            host, port = server.server_address
+            try:
+                # no cookie → 403, upstream not called
+                state.reset_calls()
+                status, payload, _hdrs, _raw = self._request(host, port, "GET", "/api/egress/queue")
+                self.assertEqual(status, HTTPStatus.FORBIDDEN)
+                self.assertEqual(payload["error"], "forbidden")
+                self.assertEqual(state.snapshot_calls(), [])
+
+                # forged (wrong-value) cookie → 403, upstream not called
+                state.reset_calls()
+                status, payload, _hdrs, _raw = self._request(
+                    host,
+                    port,
+                    "GET",
+                    "/api/egress/queue",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=forged"},
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN)
+                self.assertEqual(payload["error"], "forbidden")
+                self.assertEqual(state.snapshot_calls(), [])
+
+                # the real cookie → proxies
+                status, payload, _hdrs, _raw = self._request(
+                    host,
+                    port,
+                    "GET",
+                    "/api/egress/queue",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload, state.queue_body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+        stub.shutdown()
+        stub.server_close()
+        join_thread_or_fail(stub_thread, label="stub")
 
     def test_session_gate_matrix_blocks_without_proxying(self):
         state = _StubBrokerState()
@@ -477,19 +568,78 @@ class AdminDaemonTests(unittest.TestCase):
         stub.server_close()
         join_thread_or_fail(stub_thread, label="stub")
 
-    def test_get_queue_requires_no_cookie(self):
+    def test_session_mints_cookie_on_right_key_and_refuses_otherwise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(Path(tmp))
+            host, port = server.server_address
+            try:
+                # right key → 302 to / with the session cookie
+                status, _payload, headers, _raw = self._request(
+                    host, port, "GET", "/session?key=admin-test-key"
+                )
+                self.assertEqual(status, HTTPStatus.FOUND)
+                cookie_raw = headers.get("Set-Cookie", "")
+                parsed = SimpleCookie()
+                parsed.load(cookie_raw)
+                morsel = parsed.get(admin.SESSION_COOKIE_NAME)
+                self.assertIsNotNone(morsel)
+                self.assertEqual(morsel.value, "session-secret")
+                self.assertEqual(headers.get("Location"), "/")
+
+                # wrong key → 403, no cookie
+                status, payload, headers, _raw = self._request(
+                    host, port, "GET", "/session?key=wrong"
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN)
+                self.assertNotIn("Set-Cookie", headers)
+                self.assertEqual(payload["error"], "forbidden")
+
+                # no key → 403, no cookie
+                status, payload, headers, _raw = self._request(
+                    host, port, "GET", "/session"
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN)
+                self.assertNotIn("Set-Cookie", headers)
+                self.assertEqual(payload["error"], "forbidden")
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_session_key_never_appears_in_logs_or_page_bodies(self):
         state = _StubBrokerState()
         stub, stub_thread = self._start_stub(state)
         with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
             server, thread = self._start_admin(
-                Path(tmp),
+                home,
                 env={"EGRESS_BROKER_URL": f"http://127.0.0.1:{stub.server_address[1]}"},
+                session_secret="secret-value",
+                admin_key="key-value-42",
             )
             host, port = server.server_address
             try:
-                status, payload, _hdrs, _raw = self._request(host, port, "GET", "/api/egress/queue")
-                self.assertEqual(status, HTTPStatus.OK)
-                self.assertEqual(payload, state.queue_body)
+                with self.assertLogs(admin.LOG, level="INFO") as captured:
+                    self._request(host, port, "GET", "/session?key=key-value-42")
+                    self._request(host, port, "GET", "/session?key=wrong")
+                    self._request(host, port, "GET", "/")
+                    self._request(
+                        host,
+                        port,
+                        "GET",
+                        "/api/egress/queue",
+                        headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=secret-value"},
+                    )
+                joined = "\n".join(captured.output)
+                self.assertNotIn("key-value-42", joined)
+                self.assertNotIn("?key=", joined)
+                for path in ("/", "/session?key=key-value-42"):
+                    conn = HTTPConnection(host, port, timeout=5)
+                    conn.request("GET", path)
+                    resp = conn.getresponse()
+                    raw = resp.read()
+                    conn.close()
+                    self.assertNotIn(b"key-value-42", raw)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -497,6 +647,31 @@ class AdminDaemonTests(unittest.TestCase):
         stub.shutdown()
         stub.server_close()
         join_thread_or_fail(stub_thread, label="stub")
+
+    def test_bind_any_guard(self):
+        err = io.StringIO()
+        env = {k: v for k, v in os.environ.items() if k != "DJINN_CONTAINER"}
+        with mock.patch.dict(os.environ, {**env, "DJINN_HOME": ""}, clear=True):
+            with mock.patch("sys.stderr", err):
+                rc = admin.main(["--bind-any"])
+        self.assertEqual(rc, 1)
+        self.assertIn("--bind-any refused", err.getvalue())
+
+        home = Path(tempfile.mkdtemp())
+        try:
+            (home / "run" / "egress").mkdir(parents=True)
+            # accepted: the marker set, run_daemon actually called with the
+            # all-interfaces bind (mocked away, we are proving only the guard).
+            with mock.patch.dict(
+                os.environ,
+                {**env, "DJINN_CONTAINER": "1", "DJINN_HOME": str(home)},
+                clear=True,
+            ), mock.patch.object(admin, "run_daemon") as run_mock:
+                rc = admin.main(["--bind-any"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(run_mock.call_args.kwargs["host"], "0.0.0.0")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
     def test_action_mapping_to_upstream_body(self):
         state = _StubBrokerState()
@@ -836,8 +1011,11 @@ class AdminDaemonTests(unittest.TestCase):
             )
             host, port = server.server_address
             try:
+                headers = {"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"}
                 with self.assertLogs(admin.LOG, level="WARNING") as captured:
-                    status, payload, _h, _r = self._request(host, port, "GET", "/api/egress/queue")
+                    status, payload, _h, _r = self._request(
+                        host, port, "GET", "/api/egress/queue", headers=headers
+                    )
                 self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
                 self.assertEqual(payload["error"], admin.TOKEN_REJECTED_ERROR)
                 self.assertTrue(any("auth rejected" in line for line in captured.output))
@@ -861,7 +1039,13 @@ class AdminDaemonTests(unittest.TestCase):
             )
             host, port = server.server_address
             try:
-                status, payload, _h, _r = self._request(host, port, "GET", "/api/egress/queue")
+                status, payload, _h, _r = self._request(
+                    host,
+                    port,
+                    "GET",
+                    "/api/egress/queue",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
                 self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
                 self.assertEqual(payload["error"], admin.UNREACHABLE_ERROR)
             finally:
@@ -876,7 +1060,13 @@ class AdminDaemonTests(unittest.TestCase):
             server2, thread2 = self._start_admin(Path(tmp2), env={"EGRESS_BROKER_URL": "http://127.0.0.1:9"})
             host2, port2 = server2.server_address
             try:
-                status, payload, _h, _r = self._request(host2, port2, "GET", "/api/egress/queue")
+                status, payload, _h, _r = self._request(
+                    host2,
+                    port2,
+                    "GET",
+                    "/api/egress/queue",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
                 self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
                 self.assertEqual(payload["error"], admin.UNREACHABLE_ERROR)
             finally:
@@ -905,7 +1095,10 @@ class AdminDaemonTests(unittest.TestCase):
                     port,
                     "GET",
                     "/api/egress/queue",
-                    headers={"Authorization": "Bearer client-supplied"},
+                    headers={
+                        "Authorization": "Bearer client-supplied",
+                        "Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret",
+                    },
                 )
                 self.assertEqual(status, HTTPStatus.OK)
                 calls = state.snapshot_calls()
