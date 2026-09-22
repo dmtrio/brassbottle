@@ -27,20 +27,23 @@ git_url_split() {
     _h=$(printf '%s' "$_h" | tr '[:upper:]' '[:lower:]')   # hostnames are case-insensitive (tr, not ${_h,,}: macOS bash 3.2)
 }
 
-# git_host_notices <REPOS> <GIT_HOST_TOKENS>
+# git_host_notices <REPOS> <GIT_HOST_TOKENS> [<GIT_IDENTITY_HOST_TOKENS>]
 # Up-time notice: an https:// repos: host with NO row in the git.hosts table
 # has no credential at all — clones of its repos run anonymously (public
 # repos only), and a push needs git.hosts.<host>.token in the manifest (the
 # table holds only rows the manifest states; there is no implicit default,
-# docs/secrets.md). This fires for ANY https:// repo host, the CLI host
-# included: no host carries a token it was not declared. Warn now, not
-# at the first failed clone. bash-3.2 compatible: while-read over heredocs, no
+# docs/secrets.md). A host counts as covered when ANY identity carries a row
+# for it: the catch-all/simple-form table (arg 2) or a per-identity
+# GIT_IDENTITY_HOST_TOKENS record (arg 3, optional — simple-form-only
+# manifests omit it). This fires for ANY https:// repo host, the CLI host
+# included: no host carries a token it was not declared. Warn now, not at
+# the first failed clone. bash-3.2 compatible: while-read over heredocs, no
 # process substitution, no associative arrays. _seen tracks hosts already
-# reported, so a host with several repos: entries gets one notice, not one per
-# repo.
+# reported, so a host with several repos: entries gets one notice, not one
+# per repo.
 git_host_notices() {
-    local repos="$1" git_host_tokens="$2"
-    local _seen="" _rname _rurl _rscheme _rhost _pair _rowhost _has
+    local repos="$1" git_host_tokens="$2" git_identity_host_tokens="${3:-}"
+    local _seen="" _rname _rurl _rscheme _rhost _pair _rowhost _has _ident _ihost _ipairs
     _seen=""
     while IFS=$'\t' read -r _rname _rurl; do
         [ -n "$_rname" ] || continue
@@ -61,6 +64,23 @@ git_host_notices() {
             _rowhost=${_rowhost%:443}
             [ "$_rowhost" = "$_rhost" ] && { _has=1; break; }
         done
+        if [ -z "$_has" ]; then
+            # Per-identity rows cover the host too: any identity with a row
+            # for it authenticates there.
+            while IFS=$'\t' read -r _ident _ihost; do
+                [ -n "$_ident" ] || continue
+                for _pair in $_ihost; do
+                    case "$_pair" in *=*) ;; *) continue ;; esac
+                    _rowhost=${_pair%%=*}
+                    _rowhost=$(printf '%s' "$_rowhost" | tr '[:upper:]' '[:lower:]')
+                    _rowhost=${_rowhost%:443}
+                    [ "$_rowhost" = "$_rhost" ] && { _has=1; break; }
+                done
+                [ -n "$_has" ] && break
+            done <<EOF
+$git_identity_host_tokens
+EOF
+        fi
         if [ -z "$_has" ]; then
             echo "  note: $_rhost: no git.hosts.$_rhost.token — clones of its repos run anonymously (public repos only); a push needs git.hosts.$_rhost.token in the manifest (no fall-back to human credentials; see docs/secrets.md)"
         fi

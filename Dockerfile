@@ -253,6 +253,10 @@ RUN set -e; \
 # still sources common.env when present — a one-release transitional guard so an
 # older keys dir keeps working; a later release drops that line. The `set -a`
 # order (common first, then <agent>) means a fresh per-agent file wins.
+# As of the per-identity git tokens step, <agent>.env also carries the git
+# routing rows that serve THAT identity (its own GIT_HOST_TOKENS + token
+# variables + GH_TOKEN when its github.com row exists) — never another
+# identity's token.
 # This same loop also renders /usr/local/lib/djinn/agents-index.tsv: stdlib
 # runtime consumers (compose_rules.py) cannot parse YAML, so build flattens the
 # enabled agent descriptors to TSV once.
@@ -261,6 +265,11 @@ RUN set -e; \
 # the shim's "X is not installed in this container" (that branch still guards
 # the enabled-but-install-failed case). The manifest's tools: list is the
 # pointer for what exists here.
+# The shim template itself lives in src/agent_shim.sh (write_agent_shim,
+# sourced below) so tests/bash.test.sh drives the SAME code production runs —
+# never a copy — and the printf format exists in exactly one place.
+COPY src/agent_shim.sh /usr/local/lib/djinn/agent_shim.sh
+RUN chmod 644 /usr/local/lib/djinn/agent_shim.sh
 RUN set -e; \
     mkdir -p /home/$USERNAME/.agent-shims; \
     sudo mkdir -p /usr/local/lib/djinn; \
@@ -276,8 +285,7 @@ RUN set -e; \
         rules_file="$(yq -r '.rules_file // ""' "$f")"; \
         if yq -e '.mcp' "$f" >/dev/null 2>&1; then \
             mcp_flag=true; \
-            printf '#!/bin/bash\nAGENT=%s\nKEYS="$HOME/.agent-keys"\nset -a\n[ -f "$KEYS/common.env" ] && . "$KEYS/common.env"\n[ -f "$KEYS/$AGENT.env" ] && . "$KEYS/$AGENT.env"\nset +a\nREAL=$(type -aP %s | grep -v ".agent-shims" | head -1)\n[ -n "$REAL" ] || { echo "%s is not installed in this container" >&2; exit 127; }\nexec "$REAL" "$@"\n' "$binary" "$binary" "$binary" > "/home/$USERNAME/.agent-shims/$binary"; \
-            chmod +x "/home/$USERNAME/.agent-shims/$binary"; \
+            . /usr/local/lib/djinn/agent_shim.sh && write_agent_shim "/home/$USERNAME/.agent-shims/$binary" "$binary"; \
         else \
             mcp_flag=false; \
         fi; \
@@ -457,6 +465,22 @@ RUN chmod 644 /usr/local/lib/djinn/herdr_notify.py
 # present in the environment and remote.shell is tmux (remote.notify: ntfy).
 COPY src/tmux-notify.sh /usr/local/bin/tmux-notify.sh
 RUN chmod +x /usr/local/bin/tmux-notify.sh
+
+# ── Per-identity git tokens: the human's interactive shell ───────────────
+# up.sh writes ~/.agent-keys/user.env — the `user` identity's own git token
+# table — beside the agents' key files (the keys dir is mounted read-only,
+# mode 600). Sourced here so an interactive shell (VS Code terminal, ssh
+# login, herdr/tmux pane) carries the user identity's routing and GH_TOKEN;
+# non-interactive `bash -c` returns at Ubuntu's own interactive guard long
+# before this line, so it sources nothing. The piece lives in a sourced
+# file (lintable, unit-tested by tests/bash.test.sh — same precedent as
+# freshness-landing.bashrc) and must sit BEFORE the landing hooks that end
+# .bashrc (rules-compose, freshness, tmux-landing — the last one execs tmux
+# and never returns, so anything after it would never run).
+COPY --chown=$USERNAME:$USERNAME src/user-keys-landing.bashrc /usr/local/share/user-keys-landing.bashrc
+RUN echo '' >> /home/$USERNAME/.bashrc \
+    && echo '# Per-identity git tokens: the user identity loads ~/.agent-keys/user.env (interactive shells only)' >> /home/$USERNAME/.bashrc \
+    && echo '. /usr/local/share/user-keys-landing.bashrc' >> /home/$USERNAME/.bashrc
 
 # Recompose agent global rules (base + enabled-plugin fragments) on each
 # interactive shell. Sourced BEFORE the tmux-landing hook, which execs tmux and

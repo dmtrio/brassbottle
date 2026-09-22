@@ -21,31 +21,56 @@ forge: github                      # github | gitea (informational — the git
 git:
   name: ""                         # blank = your host git config
   email: ""
-  # hosts: (optional) the git credential table — one token per host, keyed by
-  # hostname (lowercased; a trailing :443 is stripped). Each token: names the
-  # secrets.env VARIABLE holding that host's token, exactly as written. A repo
-  # on <host> authenticates with that variable's value and no other host ever
-  # sees it. The table holds ONLY rows the manifest states — nothing is
-  # implicit. Without a row for a repo's host, clones of its repos run
-  # anonymously (public repos only); a push needs git.hosts.<host>.token.
+  # hosts: (optional) the git credential table. Each token: names the
+  # secrets.env VARIABLE holding that host's token, exactly as written. The
+  # table holds ONLY rows the manifest states — nothing is implicit. Without
+  # a row for a repo's host, clones of its repos run anonymously (public
+  # repos only); a push needs git.hosts.<host>.token.
+  #
+  # Simple form: one entry serves EVERY identity in the container — every
+  # agent and your interactive shell:
   #   hosts:
   #     git.example.org:
   #       token: GH_TOKEN_example          # secrets.env var NAME
   #     github.com:
   #       token: GH_TOKEN_fry              # secrets.env var NAME
-  # The old spellings feed the same table (git.token is the github.com row;
-  # each git.orgs entry is a row for the host its owner's repos resolve to).
-  # git.hosts never mixes with git.token/git.orgs in one manifest.
   #
-  # Optional per-host author: a host entry may carry name/email beside
-  # token: — repos cloned from that host are stamped repo-local
-  # user.name/user.email so commits carry that author instead of the bottle
-  # default (git.name/git.email above), matched by the URL's host for
-  # https://, ssh:// and scp-style remotes (an ssh:// URL with an explicit
-  # port does not match a host entry). Either may be given alone; a tab,
-  # newline or carriage return is rejected. token: stays required on every
-  # entry; one naming a variable that isn't set in secrets.env hard-fails
-  # the apply.
+  # List form: per-identity tokens for one host. Each entry names the
+  # identities its token serves — an agent name (the binary the shim runs,
+  # e.g. claude, pi, cursor-agent) or 'user', your interactive shell. At
+  # most one entry per host may omit identities: — it is the catch-all for
+  # everyone else (and for the bootstrap clone, which runs as no identity).
+  # An identity named by no entry, with no catch-all, gets NO token for that
+  # host. Within a host an identity may appear once; an empty identities:
+  # list is an error; so is a list with zero entries. name/email are per
+  # HOST, so they are rejected inside an entry — a host with an author uses
+  # the simple form.
+  #   hosts:
+  #     git.example.org:
+  #       token: GITEA_TOKEN_example       # everyone: simple form
+  #     github.com:                        # list form: per-identity entries
+  #       - token: GH_TOKEN_fry_a
+  #         identities: [claude, user]
+  #       - token: GH_TOKEN_fry_b
+  #         identities: [pi, codex]
+  #       - token: GH_TOKEN_fry_c           # catch-all: omits identities:
+  #
+  # A row for a host OTHER than github.com must not name GH_TOKEN: gh reads
+  # that variable from its environment and sends it to github.com.
+  # The old spellings feed the same catch-all table (git.token is the
+  # github.com row; each git.orgs entry is a row for the host its owner's
+  # repos resolve to) and are still accepted, meaning "everyone". git.hosts
+  # never mixes with git.token/git.orgs in one manifest.
+  #
+  # Optional per-host author (SIMPLE FORM only): a host entry may carry
+  # name/email beside token: — repos cloned from that host are stamped
+  # repo-local user.name/user.email so commits carry that author instead of
+  # the bottle default (git.name/git.email above), matched by the URL's host
+  # for https://, ssh:// and scp-style remotes (an ssh:// URL with an
+  # explicit port does not match a host entry). Either may be given alone; a
+  # tab, newline or carriage return is rejected. token: stays required on
+  # every entry; one naming a variable that isn't set in secrets.env
+  # hard-fails the apply.
   #     git.example.org:
   #       token: GH_TOKEN_example          # secrets.env var NAME
   #       name:  "Leela Bot"               # optional per-host author

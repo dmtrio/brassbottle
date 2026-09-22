@@ -137,17 +137,17 @@ fi
 
 # The CLI host's token never rides the up.sh environment (secrets.env may
 # define GH_TOKEN, but nothing here consumes or forwards it): keyfiles.sh
-# resolves the plain GH_TOKEN from GIT_TOKEN_SOURCE — the CLI host's table
-# row variable (CLI_TOKEN_VARS, in manifest.py — the one place that names
-# the CLI host for routing) — and the bootstrap clone env carries that row
-# variable via git_host_token_pairs. GIT_TOKEN_SOURCE empty = the CLI host
-# has NO row: no GH_TOKEN line is written anywhere.
+# resolves the plain GH_TOKEN per identity from the identity's own CLI-host
+# row (GIT_IDENTITY_TOKEN_SOURCES) or the catch-all's (GIT_TOKEN_SOURCE —
+# CLI_TOKEN_VARS, in manifest.py, is the one place that names the CLI host
+# for routing). GIT_TOKEN_SOURCE empty = the catch-all has NO CLI row: no
+# GH_TOKEN line for unnamed identities.
 
 # Up-time notices (a repo host with no git.hosts row; a bound git host missing
 # from capabilities.egress) — the real logic lives in src/git_notices.sh (sourced
 # here, unit-tested by tests/bash.test.sh), the same precedent as keyfiles.sh.
 . "$SCRIPT_DIR/src/git_notices.sh"
-git_host_notices "$REPOS" "$GIT_HOST_TOKENS"
+git_host_notices "$REPOS" "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS"
 git_orgs_host_notice "$REPOS" "$GIT_HOST_TOKENS" "$GIT_ORG_ROUTED_HOSTS"
 git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"
 
@@ -193,15 +193,20 @@ KEYS_PATH="$BASE_PATH/keys/$NAME"
 mkdir -p "$KEYS_PATH"; chmod 700 "$KEYS_PATH"
 rm -f "$KEYS_PATH"/*.env
 
-# One COMPLETE env file per shim agent (Plugins v2 Phase 3 — common.env retired).
-# Each shim (baked into the image; SHIM_AGENTS must match the Dockerfile loop)
-# sources only its own <agent>.env, so that file carries everything the agent
-# sees. The composition logic lives in src/keyfiles.sh (sourced here, and
-# unit-tested by tests/bash.test.sh) so the real code is exercised in tests, not
-# mirrored; up.sh only routes the derived vars (NAMES) into it — the ${!source}
+# One COMPLETE env file per shim agent (Plugins v2 Phase 3 — common.env retired)
+# plus user.env for the `user` identity (the human's interactive shell; the
+# image's .bashrc sources it). Git routing is per identity: each file carries
+# only the rows that serve that identity — the catch-all/simple-form table
+# (GIT_HOST_TOKENS) plus the identity's own rows (GIT_IDENTITY_HOST_TOKENS),
+# and GH_TOKEN only when the identity's github.com row exists — so one
+# agent's env file never contains another entry's token. The composition
+# logic lives in src/keyfiles.sh (sourced here, and unit-tested by
+# tests/bash.test.sh) so the real code is exercised in tests, not mirrored;
+# up.sh only routes the derived vars (NAMES) into it — the ${!source}
 # value lookups happen against the secrets.env this shell already sourced.
 . "$SCRIPT_DIR/src/keyfiles.sh"
-write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE"
+write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES"
 
 # ── Host paths + platform ─────────────────────────────────────────────────────
 ARTIFACTS_PATH="$BASE_PATH/artifacts/$NAME"
@@ -448,18 +453,23 @@ if docker exec -u coder "$CNAME" bash -c '[ -e /workspace/main ]'; then
 fi
 
 if [ -n "$REPOS" ]; then
-    # The bootstrap exec isn't shim-launched, so hand it the git credentials
-    # explicitly for private-repo clones over HTTPS: GIT_HOST_TOKENS (the
-    # manifest's host→variable routing table, derived by manifest.py) plus
+    # The bootstrap exec isn't shim-launched and runs as NO agent and NO
+    # identity, so it takes the catch-all/simple-form rows ONLY:
+    # GIT_HOST_TOKENS (manifest.py's catch-all table — simple-form git.hosts
+    # entries, git.token, git.orgs, and a list-form host's catch-all entry;
+    # rows that serve named identities only are deliberately NOT here) plus
     # every variable it names — git-credential-org resolves the clone's host
-    # through the table and reads each value by indirect expansion. The NAMES
-    # are manifest-validated (env-var names, boring host charset); the VALUES
-    # are secrets and can be anything, so nothing is claimed about them —
-    # git_host_token_pairs (src/keyfiles.sh, unit-tested) emits one VAR=VALUE
-    # per line (a value must not contain a newline, or the line pairing
-    # breaks) and the array keeps each pair a single docker-exec argv word (a
-    # plain string would word-split the space-separated pairs into separate -e
-    # arguments and mangle the table).
+    # through the table and reads each value by indirect expansion. A
+    # manifest serving a host through named identities only clones it
+    # anonymously; that is the stated rule, and the failed-clone warning
+    # below says what to add. The NAMES are manifest-validated (env-var
+    # names, boring host charset); the VALUES are secrets and can be
+    # anything, so nothing is claimed about them — git_host_token_pairs
+    # (src/keyfiles.sh, unit-tested) emits one VAR=VALUE per line (a value
+    # must not contain a newline, or the line pairing breaks) and the array
+    # keeps each pair a single docker-exec argv word (a plain string would
+    # word-split the space-separated pairs into separate -e arguments and
+    # mangle the table).
     CLONE_ENV=()
     while IFS= read -r _pair; do
         [ -n "$_pair" ] || continue

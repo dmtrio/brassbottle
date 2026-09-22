@@ -16,17 +16,23 @@
 #   ./bin/update-agent-keys.sh mysite claude OBSIDIAN_ANNOTATED_KEY   # prompts
 #   ./bin/update-agent-keys.sh mysite pi OBSIDIAN_ANNOTATED_KEY      # pi's own key
 #   ./bin/update-agent-keys.sh mysite common MCP_GATEWAY_TOKEN       # all agents
+#   ./bin/update-agent-keys.sh mysite user GIT_TOKEN_OVERRIDE val    # the human's shell
 #
 # Agents: any shim agent enabled in that container (the <agent>.env files
 # up.sh wrote under keys/<container>/ are the authoritative list — descriptor-
 # driven, so it needs no update when agents/ gains a new agent), or 'common'
 # to set the var in EVERY agent's file at once — common.env was retired in
-# Phase 3, so each agent now carries one complete env file.
+# Phase 3, so each agent now carries one complete env file. 'user' (the
+# human's user.env, the `user` git identity sourced by the image's .bashrc)
+# is also a valid target — but 'common' never touches it: user.env carries
+# git routing, not agent credentials, and the human's shell never received
+# plugin tokens before per-identity key files existed.
 #
-# A token variable used by a host must be named by that host's row in the
-# manifest's git.hosts table (up.sh writes GIT_HOST_TOKENS and each named
-# variable into every agent env file). Add hosts there, in the manifest —
-# this script only edits the values, never the routing table.
+# Git routing (GIT_HOST_TOKENS and friends) is composed per identity by
+# up.sh and is never edited here: a token variable used by a host must be
+# named by that host's row in the manifest's git: section. Add hosts/entries
+# there, in the manifest — this script only edits the values, never the
+# routing.
 
 set -e
 
@@ -98,9 +104,16 @@ set_var_in() {
 # common.env is retired (Plugins v2 Phase 3): each agent has one complete env
 # file, so 'common' now means "every shim agent this container enables" — a
 # per-agent override of a shared token, applied across all of them at once.
+# user.env is NOT in the fan-out: it is the human's git identity (routing
+# rows + GH_TOKEN), not an agent credential set — the human's shell never
+# carried plugin tokens before per-identity key files, and 'user' stays
+# targetable individually below.
 if [ "$AGENT" = common ]; then
     [ -n "$KNOWN_AGENTS" ] || { echo "Error: no agent env files under $KEYS_PATH"; exit 1; }
-    for a in $KNOWN_AGENTS; do set_var_in "$KEYS_PATH/$a.env"; done
+    for a in $KNOWN_AGENTS; do
+        [ "$a" = user ] && continue
+        set_var_in "$KEYS_PATH/$a.env"
+    done
     TARGET="all agents"
 else
     set_var_in "$KEYS_PATH/$AGENT.env"

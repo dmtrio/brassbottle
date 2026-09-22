@@ -121,13 +121,14 @@ assert_eq "codex.env = shared only (no binding, no GH_TOKEN)" \
     $'MCP_GATEWAY_TOKEN=gwval' "$(cat "$d/codex.env")"
 assert_eq "pi.env carries its watch key" \
     $'MCP_GATEWAY_TOKEN=gwval\nANNOTATED_WATCH_KEY=pkey' "$(cat "$d/pi.env")"
-EXPECTED_ENV_BASENAMES=$(printf '%s\n' $SHIM | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+EXPECTED_ENV_BASENAMES=$(printf '%s\n' $SHIM user | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
 PRODUCED_ENV_BASENAMES=$(for f in "$d"/*.env; do
     basename "${f%.env}"
 done | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
-assert_eq "produced .env basename set matches SHIM" "$EXPECTED_ENV_BASENAMES" "$PRODUCED_ENV_BASENAMES"
+assert_eq "produced .env basename set matches SHIM + user" "$EXPECTED_ENV_BASENAMES" "$PRODUCED_ENV_BASENAMES"
 assert_absent "no common.env written" "$(ls "$d")" "common.env"
 assert_eq "files are mode 600" "600" "$(mode_of "$d/claude.env")"
+assert_eq "user.env is mode 600 (the keys dir mounts read-only mode 600)" "600" "$(mode_of "$d/user.env")"
 unset MCP_GATEWAY_TOKEN GH_TOKEN SRC_C SRC_P
 
 # missing source var → warn, and the slot is NOT written
@@ -160,9 +161,9 @@ TABLE="github.com=GH_TOKEN git.example.test=GH_TOKEN_fry"
 # the table walk already carries the plain GH_TOKEN line (exactly once).
 write_keyfiles "$d" "$SHIM" "" "" "$TABLE" "GH_TOKEN" >/dev/null
 assert_eq "table + named variables land beside the CLI host's GH_TOKEN (github row)" \
-    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/codex.env")"
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN\\ git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/codex.env")"
 assert_eq "table fan-out reaches every shim agent" \
-    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/cursor-agent.env")"
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN\\ git.example.test=GH_TOKEN_fry\nGH_TOKEN=defval\nGH_TOKEN_fry=frytok' "$(cat "$d/cursor-agent.env")"
 unset GH_TOKEN GH_TOKEN_fry
 
 # one variable serving several hosts collapses to one line (git_host_token_pairs
@@ -172,7 +173,7 @@ GH_TOKEN=defval SRC_SHARED=stok
 TABLE="github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED"
 write_keyfiles "$d" "codex" "" "" "$TABLE" "GH_TOKEN" >/dev/null
 assert_eq "one shared variable written once, not per host" \
-    $'GIT_HOST_TOKENS=github.com=GH_TOKEN git.example.test=SRC_SHARED h2.test=SRC_SHARED\nGH_TOKEN=defval\nSRC_SHARED=stok' "$(cat "$d/codex.env")"
+    $'GIT_HOST_TOKENS=github.com=GH_TOKEN\\ git.example.test=SRC_SHARED\\ h2.test=SRC_SHARED\nGH_TOKEN=defval\nSRC_SHARED=stok' "$(cat "$d/codex.env")"
 unset GH_TOKEN SRC_SHARED
 
 # OLD SPELLING, end to end at the key-file level: the git.token spelling is
@@ -250,6 +251,194 @@ out=$(git_host_token_pairs "$GIT_HOST_TOKENS")
 assert_eq "git.hosts.github.com.token: the clone env carries the row variable" \
     $'GIT_HOST_TOKENS=github.com=GH_TOKEN_fry\nGH_TOKEN_fry=fryval' "$out"
 unset GH_TOKEN_fry
+
+# ────────────────────────────────────────────────────────────────────────────
+echo "── per-identity git key files (real derive → write_keyfiles → real shims) ──"
+# The brief's manifest, driven end to end: the real src/manifest.py --derive,
+# then the real write_keyfiles, then the REAL generated launcher shims (the
+# same function the Dockerfile runs — src/agent_shim.sh), pointing at stub
+# binaries that print their environment. An identity named by an entry gets
+# that entry's token; an identity named by no entry (with no catch-all) gets
+# no github.com row and no GH_TOKEN; every identity still sees the simple
+# (everyone) gitea row.
+ID_AGENTS=$'claude\t{"binary":"claude","install":"x","mcp":{"config_path":".mcp.json","format":"json","dialect":"mcpServers","env_refs":true,"strategy":"claude_preapprove"}}\n'
+ID_AGENTS="${ID_AGENTS}"$'pi\t{"binary":"pi","install":"x","mcp":{"config_path":".pi/agent/mcp.json","format":"json","dialect":"type-http","env_refs":false}}\n'
+ID_AGENTS="${ID_AGENTS}"$'codex\t{"binary":"codex","install":"x","mcp":{"config_path":".codex/config.toml","format":"toml","env_refs":"bearer_token_env_var","strategy":"codex_managed_block"}}\n'
+ID_AGENTS="${ID_AGENTS}"$'cursor\t{"binary":"cursor-agent","install":"x","mcp":{"config_path":".cursor/mcp.json","format":"json","dialect":"type-http","env_refs":false}}\n'
+id_agents_json() { for name in claude pi codex cursor; do grep "^$name	" <<EOF
+$ID_AGENTS
+EOF
+done; }
+derive_id_manifest() {  # $1 = the github.com entries JSON array
+    printf '{"repos":["https://github.com/x/y.git","https://git.example.org/o/r.git"],"agents":["claude","pi","codex","cursor"],"git":{"hosts":{"git.example.org":{"token":"GITEA_TOKEN_example"},"github.com":%s}}}\n---agents---\n%s\n' \
+        "$1" "$(id_agents_json)" \
+    | PRESENT_SECRET_VARS="GITEA_TOKEN_example GH_TOKEN_fry_a GH_TOKEN_fry_b GH_TOKEN_fry_c" \
+      SECRETS_FILE=/sec/secrets.env GIT_NAME_DEFAULT="" GIT_EMAIL_DEFAULT="" \
+      NTFY_URL="" NTFY_TOPIC="" python3 "$REPO/src/manifest.py" --derive
+}
+# NO catch-all on github.com: the bootstrap clone and any identity no entry
+# names get no github token at all.
+eval "$(derive_id_manifest '[{"token":"GH_TOKEN_fry_a","identities":["claude","user"]},{"token":"GH_TOKEN_fry_b","identities":["pi","codex"]}]')"
+assert_eq "list form: the catch-all table carries only the simple-form host" \
+    "git.example.org=GITEA_TOKEN_example" "$GIT_HOST_TOKENS"
+assert_eq "list form: no catch-all CLI row, GIT_TOKEN_SOURCE empty" "" "$GIT_TOKEN_SOURCE"
+assert_eq "list form: per-identity tables (full table per named identity)" \
+    $'claude\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\ncodex\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_b\npi\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_b\nuser\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\n' \
+    "$GIT_IDENTITY_HOST_TOKENS"
+assert_eq "list form: per-identity CLI sources" \
+    $'claude\tGH_TOKEN_fry_a\ncodex\tGH_TOKEN_fry_b\npi\tGH_TOKEN_fry_b\nuser\tGH_TOKEN_fry_a\n' \
+    "$GIT_IDENTITY_TOKEN_SOURCES"
+# Bootstrap-clone rule: the clone runs as NO identity, so its env is built
+# from GIT_HOST_TOKENS (the catch-all/simple rows) ONLY — a per-identity
+# token must never reach it.
+GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
+out=$(git_host_token_pairs "$GIT_HOST_TOKENS")
+assert_eq "the bootstrap clone env carries the catch-all rows only" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\nGITEA_TOKEN_example=gitea-val' "$out"
+assert_absent "the bootstrap clone env carries no per-identity token" "$out" "fry-a-val"
+unset GITEA_TOKEN_example GH_TOKEN_fry_a GH_TOKEN_fry_b
+
+IDHOME="$WORK/idhome"; IDKEYS="$IDHOME/.agent-keys"; mkdir -p "$IDKEYS"; chmod 700 "$IDKEYS"
+GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
+write_keyfiles "$IDKEYS" "claude pi codex cursor-agent" "" "" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+
+assert_eq "claude.env: its own table (gitea everyone-row + its github row) and GH_TOKEN=<a>" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\\ github.com=GH_TOKEN_fry_a\nGITEA_TOKEN_example=gitea-val\nGH_TOKEN_fry_a=fry-a-val\nGH_TOKEN=fry-a-val' \
+    "$(cat "$IDKEYS/claude.env")"
+assert_eq "pi.env: b's github row, not a's" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\\ github.com=GH_TOKEN_fry_b\nGITEA_TOKEN_example=gitea-val\nGH_TOKEN_fry_b=fry-b-val\nGH_TOKEN=fry-b-val' \
+    "$(cat "$IDKEYS/pi.env")"
+assert_eq "codex.env: named with pi by the same entry — b's token too" \
+    "$(cat "$IDKEYS/pi.env")" "$(cat "$IDKEYS/codex.env")"
+assert_eq "cursor-agent.env: named by no entry, no catch-all: no github row, no GH_TOKEN, gitea row only" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\nGITEA_TOKEN_example=gitea-val' \
+    "$(cat "$IDKEYS/cursor-agent.env")"
+assert_eq "user.env: the user identity's own rows + GH_TOKEN" \
+    "$(cat "$IDKEYS/claude.env")" "$(cat "$IDKEYS/user.env")"
+# Guard: one agent's env file never contains another entry's token.
+grep -q "fry-b-val" "$IDKEYS/claude.env" && fail "claude.env leaked entry b's token" \
+    || pass "claude.env never contains another entry's token"
+grep -q "fry-a-val" "$IDKEYS/pi.env" && fail "pi.env leaked entry a's token" \
+    || pass "pi.env never contains another entry's token"
+assert_eq "user.env is mode 600 (the keys dir mounts read-only mode 600)" "600" "$(mode_of "$IDKEYS/user.env")"
+
+# The helper tests below run against these NO-catch-all key files; the
+# catch-all variant afterwards writes into its own dir so it cannot
+# overwrite the files they read.
+
+# ── the real generated launchers (src/agent_shim.sh — the SAME function the
+# Dockerfile runs) with the key files above ──
+. "$REPO/src/agent_shim.sh"
+IDSHIMS="$WORK/idshims"; IDSTUBS="$WORK/idstubs"; mkdir -p "$IDSHIMS" "$IDSTUBS"
+for b in claude pi codex cursor-agent; do
+    write_agent_shim "$IDSHIMS/$b" "$b"
+    cat > "$IDSTUBS/$b" <<MOCK
+#!/bin/bash
+env | LC_ALL=C sort > "\${STUB_ENV_OUT:?}"
+MOCK
+    chmod +x "$IDSTUBS/$b"
+done
+run_shim() {  # <binary> <env-out-file> [ambient GH_TOKEN]
+    # env -i: the shim runs the way a launched agent does — the ONLY env it
+    # starts from is the container's (here: minimal), and its key file must
+    # supply everything git needs. The stub dump is therefore exactly what
+    # the real binary would see.
+    if [ -n "${3-}" ]; then
+        env -i HOME="$IDHOME" \
+            PATH="$IDSTUBS:$IDSHIMS:/usr/bin:/bin" \
+            STUB_ENV_OUT="$2" GH_TOKEN="$3" bash "$IDSHIMS/$1" >/dev/null 2>&1
+    else
+        env -i HOME="$IDHOME" \
+            PATH="$IDSTUBS:$IDSHIMS:/usr/bin:/bin" \
+            STUB_ENV_OUT="$2" bash "$IDSHIMS/$1" >/dev/null 2>&1
+    fi
+}
+run_shim claude "$WORK/env-claude" ambient-must-not-survive
+assert_contains "shim claude: its own table reaches the binary env" \
+    "$(cat "$WORK/env-claude")" "GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a"
+assert_contains "shim claude: GH_TOKEN=<a>" "$(cat "$WORK/env-claude")" "GH_TOKEN=fry-a-val"
+assert_contains "shim claude: the row variable itself" "$(cat "$WORK/env-claude")" "GH_TOKEN_fry_a=fry-a-val"
+assert_contains "shim claude: the gitea (everyone) row" "$(cat "$WORK/env-claude")" "GITEA_TOKEN_example=gitea-val"
+assert_absent "shim claude: another entry's token never reaches it" "$(cat "$WORK/env-claude")" "fry-b-val"
+assert_absent "shim claude: inherited GH_TOKEN is overridden, not leaked" "$(cat "$WORK/env-claude")" "ambient-must-not-survive"
+run_shim pi "$WORK/env-pi"
+assert_contains "shim pi: GH_TOKEN=<b>" "$(cat "$WORK/env-pi")" "GH_TOKEN=fry-b-val"
+assert_absent "shim pi: no entry-a token" "$(cat "$WORK/env-pi")" "fry-a-val"
+run_shim cursor-agent "$WORK/env-cursor"
+assert_contains "shim cursor-agent: the gitea row still reaches an unnamed agent" \
+    "$(cat "$WORK/env-cursor")" "GITEA_TOKEN_example=gitea-val"
+assert_absent "shim cursor-agent: no github.com row" "$(cat "$WORK/env-cursor")" "github.com="
+assert_absent "shim cursor-agent: no GH_TOKEN" "$(cat "$WORK/env-cursor")" "GH_TOKEN="
+
+# ── the helper answers per identity: git-credential-org run with each
+# identity's own environment (env sourced exactly the way the shim exports
+# it — set -a; . file; set +a), the same way git invokes it in the container ──
+ID_GHCONF="$WORK/id-ghconf"; mkdir -p "$ID_GHCONF" "$WORK/id-ghhome"
+id_gcred() {  # <agent-env-file> <host>
+    printf 'protocol=https\nhost=%s\npath=o/r.git\n' "$2" \
+    | env -i PATH="$IDSTUBS:$PATH" HOME="$WORK/id-ghhome" GH_CONFIG_DIR="$ID_GHCONF" \
+        XDG_STATE_HOME="$WORK/id-ghhome/.local/state" \
+        bash -c 'set -a; . "$1"; exec bash "$2" get' _ "$1" "$REPO/src/git-credential-org.sh"
+}
+out=$(id_gcred "$IDKEYS/claude.env" github.com 2>"$WORK/id-err")
+assert_contains "helper with claude's env: a's value for github.com" "$out" "password=fry-a-val"
+assert_absent "…never b's token" "$out" "password=fry-b-val"
+out=$(id_gcred "$IDKEYS/pi.env" github.com 2>"$WORK/id-err")
+assert_contains "helper with pi's env: b's value for github.com" "$out" "password=fry-b-val"
+assert_absent "…never a's token" "$out" "password=fry-a-val"
+out=$(id_gcred "$IDKEYS/cursor-agent.env" github.com 2>"$WORK/id-err"); rc=$?
+assert_rc "helper with the unnamed agent's env: clean exit" 0 "$rc"
+assert_eq "…quit=1 (no row for that identity, no gh login)" "quit=1" "$out"
+assert_contains "…stderr names the key to add" "$(cat "$WORK/id-err")" "git.hosts.github.com.token"
+out=$(id_gcred "$IDKEYS/claude.env" git.example.org 2>"$WORK/id-err")
+assert_contains "helper with claude's env: the gitea row still answers" "$out" "password=gitea-val"
+
+# ── with a catch-all entry on github.com, an identity no entry names takes
+# the catch-all row (and its GH_TOKEN); named identities still get their own ──
+eval "$(derive_id_manifest '[{"token":"GH_TOKEN_fry_a","identities":["claude","user"]},{"token":"GH_TOKEN_fry_b","identities":["pi","codex"]},{"token":"GH_TOKEN_fry_c"}]')"
+assert_eq "catch-all: the catch-all table carries the simple host + the catch-all row" \
+    "git.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_c" "$GIT_HOST_TOKENS"
+assert_eq "catch-all: GIT_TOKEN_SOURCE names the catch-all row" "GH_TOKEN_fry_c" "$GIT_TOKEN_SOURCE"
+IDCATCH="$WORK/idcatch"; mkdir -p "$IDCATCH"; chmod 700 "$IDCATCH"
+GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val GH_TOKEN_fry_c=fry-c-val
+write_keyfiles "$IDCATCH" "claude pi codex cursor-agent" "" "" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+assert_eq "catch-all: an unnamed identity takes the catch-all row + GH_TOKEN" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\\ github.com=GH_TOKEN_fry_c\nGITEA_TOKEN_example=gitea-val\nGH_TOKEN_fry_c=fry-c-val\nGH_TOKEN=fry-c-val' \
+    "$(cat "$IDCATCH/cursor-agent.env")"
+assert_eq "catch-all: a named identity still gets its OWN row, never the catch-all's" \
+    $'GIT_HOST_TOKENS=git.example.org=GITEA_TOKEN_example\\ github.com=GH_TOKEN_fry_a\nGITEA_TOKEN_example=gitea-val\nGH_TOKEN_fry_a=fry-a-val\nGH_TOKEN=fry-a-val' \
+    "$(cat "$IDCATCH/claude.env")"
+unset GITEA_TOKEN_example GH_TOKEN_fry_a GH_TOKEN_fry_b GH_TOKEN_fry_c
+
+# ── the human's interactive shell: the exact .bashrc piece the Dockerfile
+# appends, around a minimal .bashrc. bash -ic gets the user entry's token;
+# non-interactive bash -c sources nothing. (The built-image .bashrc is
+# assembled from pieces, so the host-side test rebuilds it from the real
+# piece file; a run against a built image is still owed — see the report.)
+echo "── user.env: the human's interactive shell ──"
+UHOME="$WORK/uhome"; mkdir -p "$UHOME/.agent-keys"
+GITEA_TOKEN_example=gitea-val GH_TOKEN_fry_a=fry-a-val GH_TOKEN_fry_b=fry-b-val
+eval "$(derive_id_manifest '[{"token":"GH_TOKEN_fry_a","identities":["claude","user"]},{"token":"GH_TOKEN_fry_b","identities":["pi","codex"]}]')"
+write_keyfiles "$UHOME/.agent-keys" "claude" "" "" \
+    "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES" >/dev/null
+{ printf 'case $- in *i*) ;; *) return;; esac\n'; cat "$REPO/src/user-keys-landing.bashrc"; } > "$UHOME/.bashrc"
+out=$(env -i HOME="$UHOME" PATH="$PATH" TERM=dumb bash -ic 'printf "GH_TOKEN=%s\n" "${GH_TOKEN-UNSET}"' 2>/dev/null)
+assert_contains "bash -ic: the user identity's GH_TOKEN is set" "$out" "GH_TOKEN=fry-a-val"
+out=$(env -i HOME="$UHOME" PATH="$PATH" bash -c 'printf "GH_TOKEN=%s\n" "${GH_TOKEN-UNSET}"')
+assert_eq "bash -c sources nothing: no GH_TOKEN" "GH_TOKEN=UNSET" "$out"
+out=$(env -i HOME="$UHOME" PATH="$PATH" TERM=dumb bash -ic 'printf "GHT=%s\n" "${GIT_HOST_TOKENS-UNSET}"' 2>/dev/null)
+assert_contains "bash -ic: the user identity's routing table is exported" "$out" \
+    "GHT=git.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a"
+unset GITEA_TOKEN_example GH_TOKEN_fry_a GH_TOKEN_fry_b
+
+# ── git_host_notices honours per-identity rows ──
+. "$REPO/src/git_notices.sh"   # defines git_host_notices, no side effects
+out=$(git_host_notices $'a\thttps://h.test/a/x.git\n' '' $'claude\th.test=SRC_A\n')
+assert_eq "a host covered only by a per-identity row gets no notice" "" "$out"
+out=$(git_host_notices $'a\thttps://h2.test/a/x.git\n' '' $'claude\th.test=SRC_A\n')
+assert_contains "a host with no row anywhere still gets the notice" "$out" "h2.test: no git.hosts.h2.test.token"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── src/git-credential-org.sh ──"
@@ -542,6 +731,7 @@ assert_eq "…the desktop bridge was never invoked" "" "$(cat "$BRIDGE_LOG")"
 # runner explicitly.
 seed_home
 su() { [ "$1" = -c ] || { echo "su stub: unexpected args: $*" >&2; return 64; }; \
+    [ "$3" = coder ] || { echo "su stub: expected target user coder, got '$3'" >&2; return 65; }; \
     HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" bash -c "$2"; }
 install_credential_router "$GIT_CREDENTIAL_HOSTS"; rc=$?
 assert_rc "DEFAULT path (no runner argument): clean exit" 0 "$rc"
@@ -558,6 +748,7 @@ unset -f su
 # runs the real router exactly as the container would.
 seed_home
 su() { [ "$1" = -c ] || { echo "su stub: unexpected args: $*" >&2; return 64; }; \
+    [ "$3" = coder ] || { echo "su stub: expected target user coder, got '$3'" >&2; return 65; }; \
     HOME="$EH" GIT_CONFIG_SYSTEM="$SYSCFG" \
     bash -c "${2//\/usr\/local\/bin\/git-credential-org/$REPO/src/git-credential-org.sh}"; }
 : > "$BRIDGE_LOG"
@@ -633,6 +824,30 @@ assert_contains "entrypoint fails the boot when the router install fails" \
     "$EP" 'FATAL: git credential router install failed'
 assert_contains "entrypoint's router-install failure exits (boot refused)" \
     "$EP" 'exit 1'
+# An empty GIT_CREDENTIAL_HOSTS (a broken up.sh→compose handoff) must not
+# silently skip the router — git would fall back to the desktop bridge.
+assert_contains "entrypoint warns when GIT_CREDENTIAL_HOSTS is empty" \
+    "$EP" 'WARNING: GIT_CREDENTIAL_HOSTS is empty'
+# The shim template lives in src/agent_shim.sh (one printf format, driven by
+# the Dockerfile loop AND tests/bash.test.sh) — a reverted inline printf is
+# the drift this pin catches.
+assert_contains "Dockerfile copies + sources the agent-shim template" \
+    "$(cat "$REPO/Dockerfile")" 'COPY src/agent_shim.sh /usr/local/lib/djinn/agent_shim.sh'
+assert_contains "Dockerfile shim loop calls write_agent_shim" \
+    "$(cat "$REPO/Dockerfile")" '. /usr/local/lib/djinn/agent_shim.sh && write_agent_shim'
+shim_printf=$(grep -c 'printf.*#!/bin/bash.*AGENT=%s' "$REPO/Dockerfile" || true)
+assert_eq "the shim printf template no longer lives inline in the Dockerfile" "0" "$shim_printf"
+# The human's interactive shell sources user.env via the appended piece.
+assert_contains "Dockerfile appends the user-keys landing piece to .bashrc" \
+    "$(cat "$REPO/Dockerfile")" '. /usr/local/share/user-keys-landing.bashrc'
+grep -q 'COPY.*src/user-keys-landing.bashrc' "$REPO/Dockerfile" \
+    && pass "Dockerfile bakes src/user-keys-landing.bashrc into the image" \
+    || fail "Dockerfile no longer copies user-keys-landing.bashrc (the .bashrc line would fail at boot)"
+# up.sh composes user.env through the same write_keyfiles call the tests
+# drive (the fan-out adds the user identity host-side).
+grep -qF 'user.env' "$REPO/src/keyfiles.sh" \
+    && pass "keyfiles.sh writes user.env (the user identity)" \
+    || fail "keyfiles.sh no longer writes user.env"
 grep -q 'COPY src/credential_router_install.sh' "$REPO/Dockerfile" \
     && pass "Dockerfile bakes src/credential_router_install.sh into the image" \
     || fail "Dockerfile no longer copies credential_router_install.sh (entrypoint sourcing it would fail at boot)"
@@ -658,9 +873,10 @@ grep -qF 'case "$_h" in github.com|github.com:443)' "$REPO/up.sh" \
 grep -qF 'git_url_split "$repo_url"' "$REPO/src/git_identity.sh" \
     && pass "git_identity.sh splits the repo URL fresh in apply_repo_identity" \
     || fail "git_identity.sh no longer splits the repo URL fresh in apply_repo_identity"
-grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" "$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE"' "$REPO/up.sh" \
-    && pass "up.sh passes GIT_HOST_TOKENS + GIT_TOKEN_SOURCE to write_keyfiles" \
-    || fail "up.sh no longer passes GIT_HOST_TOKENS/GIT_TOKEN_SOURCE to write_keyfiles"
+grep -qF 'write_keyfiles "$KEYS_PATH" "$SHIM_AGENTS" "$PLUGIN_ENV_SECRETS" "$AGENT_SECRETS" \' "$REPO/up.sh" \
+    && grep -qF '"$GIT_HOST_TOKENS" "$GIT_TOKEN_SOURCE" "$GIT_IDENTITY_HOST_TOKENS" "$GIT_IDENTITY_TOKEN_SOURCES"' "$REPO/up.sh" \
+    && pass "up.sh passes GIT_HOST_TOKENS + GIT_TOKEN_SOURCE + identity tables to write_keyfiles" \
+    || fail "up.sh no longer passes the git tables to write_keyfiles"
 # GH_TOKEN never rides the up.sh environment: the CLI host's row variable is
 # resolved directly by keyfiles.sh (its 6th argument) and the clone env —
 # nothing in up.sh consumes or forwards a GH_TOKEN value.
@@ -802,9 +1018,9 @@ assert_contains "git_egress_notices: DNS-named host note mentions egress_cidrs" 
 grep -qF '. "$SCRIPT_DIR/src/git_notices.sh"' "$REPO/up.sh" \
     && pass "up.sh sources src/git_notices.sh" \
     || fail "up.sh no longer sources src/git_notices.sh"
-grep -qF 'git_host_notices "$REPOS" "$GIT_HOST_TOKENS"' "$REPO/up.sh" \
-    && pass "up.sh calls git_host_notices" \
-    || fail "up.sh no longer calls git_host_notices"
+grep -qF 'git_host_notices "$REPOS" "$GIT_HOST_TOKENS" "$GIT_IDENTITY_HOST_TOKENS"' "$REPO/up.sh" \
+    && pass "up.sh calls git_host_notices (catch-all + per-identity rows)" \
+    || fail "up.sh no longer calls git_host_notices with the per-identity tables"
 grep -qF 'git_egress_notices "$GIT_EGRESS_NOTICE_HOSTS" "$EGRESS" "$EGRESS_CIDRS"' "$REPO/up.sh" \
     && pass "up.sh calls git_egress_notices with the notice-host list" \
     || fail "up.sh no longer calls git_egress_notices"
@@ -1408,6 +1624,23 @@ out=$(printf '\n' | uak removal common FOO 2>&1); rc=$?
 assert_rc "common removal across every agent file exits 0" 0 "$rc"
 allclear=1; for a in one two three; do grep -q '^FOO=' "$RKP/$a.env" && allclear=0; done
 assert_eq "common removal clears the var from every agent file" "1" "$allclear"
+
+# user.env (the `user` identity's routing file, written beside the agents')
+# is a valid target; 'common' never fans out into it — user.env carries git
+# routing, not agent credentials, and the human's shell never received
+# plugin tokens before per-identity key files existed.
+UKP="$DAH/keys/userfile"; mkdir -p "$UKP"
+for a in claude pi; do printf 'FOO=bar\n' > "$UKP/$a.env"; chmod 600 "$UKP/$a.env"; done
+printf 'GIT_HOST_TOKENS=h.test=SRC_A\n' > "$UKP/user.env"; chmod 600 "$UKP/user.env"
+out=$(uak userfile user FOO uval 2>&1); rc=$?
+assert_rc "user is a valid target" 0 "$rc"
+assert_eq "user target writes user.env" \
+    $'GIT_HOST_TOKENS=h.test=SRC_A\nFOO=uval' "$(cat "$UKP/user.env")"
+uak userfile common FOO cval >/dev/null
+assert_eq "common does not touch user.env (its FOO stays the user target's value)" \
+    "FOO=uval" "$(grep '^FOO=' "$UKP/user.env")"
+allhave=1; for a in claude pi; do grep -q '^FOO=cval$' "$UKP/$a.env" || allhave=0; done
+assert_eq "common still fans out to every agent" "1" "$allhave"
 
 # ────────────────────────────────────────────────────────────────────────────
 echo "── run-*.sh token generation ──"

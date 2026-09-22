@@ -1463,17 +1463,22 @@ class TestGitHosts(unittest.TestCase):
             "'git.hosts.git.example.test' — drop one of the two entries")
 
     def test_list_host_value_hard_fails(self):
+        # A host's value may now be a list of per-identity entries, but each
+        # entry must be a map with token: — a list of strings is still
+        # rejected, per entry.
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"hosts": {"git.example.test": ["a", "b"]}})
         self.assertEqual(
             str(cm.exception),
             "manifest git identity failed validation:\n"
-            "  git.hosts.git.example.test: must be a map with token: (got a list)")
+            "  git.hosts.git.example.test[0]: must be a map with token: (got a string)\n"
+            "  git.hosts.git.example.test[1]: must be a map with token: (got a string)")
 
     def test_hosts_section_itself_as_a_list_hard_fails(self):
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"hosts": ["git.example.test"]})
-        self.assertIn("git.hosts: must be a map of <host>: {token} (got a list)",
+        self.assertIn("git.hosts: must be a map of <host>: {token} or "
+                      "<host>: [entries] (got a list)",
                       str(cm.exception))
 
     def test_unknown_key_under_host_entry_hard_fails(self):
@@ -1665,6 +1670,260 @@ class TestGitHosts(unittest.TestCase):
         a = derive({})
         self.assertEqual(a["GIT_HOST_TOKENS"], "")
         self.assertEqual(a["GIT_TOKEN_SOURCE"], "")
+
+
+
+class TestGitIdentities(unittest.TestCase):
+    """The git.hosts LIST form: per-identity token rows, the rules the brief
+    states (one appearance per identity per host, at most one catch-all,
+    empty identities rejected, zero-entry lists rejected, name/email per
+    HOST), and the fold-in rule rejecting a non-CLI-host row naming a
+    CLI_TOKEN_VARS variable."""
+
+    ENV = {"PRESENT_SECRET_VARS":
+           "GH_TOKEN_fry_a GH_TOKEN_fry_b GH_TOKEN_fry_c GITEA_TOKEN_example"}
+
+    def _d(self, git, repos=("https://github.com/x/y.git",), agents=None, env=None):
+        return derive({"repos": list(repos), "git": git, **({"agents": agents} if agents else {})},
+                      env=dict(env if env is not None else self.ENV))
+
+    MANIFEST = {
+        "hosts": {
+            "git.example.org": {"token": "GITEA_TOKEN_example"},
+            "github.com": [
+                {"token": "GH_TOKEN_fry_a", "identities": ["claude", "user"]},
+                {"token": "GH_TOKEN_fry_b", "identities": ["pi", "codex"]},
+                {"token": "GH_TOKEN_fry_c"},
+            ],
+        },
+    }
+
+    def test_list_form_derives_per_identity_tables(self):
+        d = self._d(self.MANIFEST)
+        # The catch-all table: the gitea simple row + github's catch-all row.
+        self.assertEqual(d["GIT_HOST_TOKENS"],
+                         "git.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_c")
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "GH_TOKEN_fry_c")
+        # Per-identity records, sorted by identity; each record carries the
+        # FULL table that identity's env file gets (named rows + catch-all
+        # rows for hosts nothing names it for), with the named github row
+        # overriding the catch-all.
+        self.assertEqual(
+            d["GIT_IDENTITY_HOST_TOKENS"],
+            "claude\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\n"
+            "codex\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_b\n"
+            "pi\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_b\n"
+            "user\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\n")
+        self.assertEqual(
+            d["GIT_IDENTITY_TOKEN_SOURCES"],
+            "claude\tGH_TOKEN_fry_a\n"
+            "codex\tGH_TOKEN_fry_b\n"
+            "pi\tGH_TOKEN_fry_b\n"
+            "user\tGH_TOKEN_fry_a\n")
+
+    def test_named_row_overrides_catchall_for_its_identity(self):
+        # The catch-all github row (fry_c) must NOT leak into the named
+        # identities' tables: the entry that names claude is github.com's
+        # token FOR CLAUDE.
+        d = self._d(self.MANIFEST)
+        self.assertNotIn("GH_TOKEN_fry_c", d["GIT_IDENTITY_HOST_TOKENS"])
+        self.assertIn("github.com=GH_TOKEN_fry_a", d["GIT_IDENTITY_HOST_TOKENS"])
+
+    def test_unnamed_identity_table_comes_from_the_catchall(self):
+        # cursor-agent is named by no entry; the catch-all covers it. It has
+        # no GIT_IDENTITY_HOST_TOKENS record (its table IS the catch-all).
+        d = self._d(self.MANIFEST, agents=["claude", "pi", "codex", "cursor"])
+        self.assertNotIn("\tcursor-agent\t", d["GIT_IDENTITY_HOST_TOKENS"])
+        self.assertNotIn("cursor-agent", d["GIT_IDENTITY_TOKEN_SOURCES"])
+
+    def test_no_catchall_unnamed_identity_gets_no_row(self):
+        git = {"hosts": {
+            "git.example.org": {"token": "GITEA_TOKEN_example"},
+            "github.com": [
+                {"token": "GH_TOKEN_fry_a", "identities": ["claude", "user"]},
+                {"token": "GH_TOKEN_fry_b", "identities": ["pi", "codex"]},
+            ],
+        }}
+        d = self._d(git, agents=["claude", "pi", "codex", "cursor"])
+        # The catch-all table has no github.com row: the bootstrap clone
+        # clones anonymously.
+        self.assertEqual(d["GIT_HOST_TOKENS"], "git.example.org=GITEA_TOKEN_example")
+        self.assertEqual(d["GIT_TOKEN_SOURCE"], "")
+        # And the named identities still get their github rows.
+        self.assertIn("claude\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\n",
+                      d["GIT_IDENTITY_HOST_TOKENS"])
+        # GIT_CREDENTIAL_HOSTS still installs the router for the CLI host
+        # and the identity-only gitea host.
+        self.assertEqual(
+            d["GIT_CREDENTIAL_HOSTS"],
+            "https://git.example.org\nhttps://github.com\n")
+
+    def test_identity_host_lands_in_credential_hosts(self):
+        # A list-form NON-CLI host: its tokens route through the router, so
+        # the origin must be installed even with no catch-all row.
+        git = {"hosts": {
+            "git.example.org": [
+                {"token": "GITEA_TOKEN_example", "identities": ["pi"]},
+            ],
+        }}
+        d = self._d(git)
+        self.assertEqual(d["GIT_HOST_TOKENS"], "")
+        self.assertIn("https://git.example.org\n", d["GIT_CREDENTIAL_HOSTS"])
+        self.assertIn("https://git.example.org\n", d["GIT_EGRESS_NOTICE_HOSTS"])
+
+    def test_simple_form_derives_empty_identity_tables(self):
+        d = self._d({"hosts": {"github.com": {"token": "GH_TOKEN_fry_a"}}})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN_fry_a")
+        self.assertEqual(d["GIT_IDENTITY_HOST_TOKENS"], "")
+        self.assertEqual(d["GIT_IDENTITY_TOKEN_SOURCES"], "")
+
+    def test_identity_validated_against_enabled_mcp_binaries(self):
+        # agent binaries of mcp-capable descriptors, exactly what
+        # agent_secrets validates its `agent:` field against.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [
+                {"token": "GH_TOKEN_fry_a", "identities": ["nope"]}]}})
+        self.assertIn("git.hosts.github.com[0].identities: unknown identity 'nope'",
+                      str(cm.exception))
+        self.assertIn("(an enabled agent of this bottle or 'user' — one of",
+                      str(cm.exception))
+        # 'user' is always valid; a dir name whose binary differs is not.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [
+                {"token": "GH_TOKEN_fry_a", "identities": ["cursor"]}]}})
+        self.assertIn("unknown identity 'cursor'", str(cm.exception))
+        d = self._d({"hosts": {"github.com": [
+            {"token": "GH_TOKEN_fry_a", "identities": ["cursor-agent"]}]}})
+        self.assertIn("cursor-agent\tgithub.com=GH_TOKEN_fry_a\n",
+                      d["GIT_IDENTITY_HOST_TOKENS"])
+
+    def test_identity_appearing_twice_per_host_rejected(self):
+        for ident_lists in (["claude", "user", ["claude"]],    # across entries
+                            [["claude", "claude"]]):           # within one entry
+            with self.subTest(ident_lists=ident_lists):
+                entries = []
+                for item in ident_lists:
+                    if isinstance(item, list):
+                        entries.append({"token": "GH_TOKEN_fry_a", "identities": item})
+                    else:
+                        entries.append({"token": "GH_TOKEN_fry_b",
+                                        "identities": [item]})
+                with self.assertRaises(m.ManifestError) as cm:
+                    self._d({"hosts": {"github.com": entries}})
+                self.assertIn(
+                    "identity 'claude' appears in more than one entry of this "
+                    "host — an identity may appear once per host",
+                    str(cm.exception))
+
+    def test_two_catchall_entries_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [
+                {"token": "GH_TOKEN_fry_a", "identities": ["claude"]},
+                {"token": "GH_TOKEN_fry_b"},
+                {"token": "GH_TOKEN_fry_c"},
+            ]}})
+        self.assertIn(
+            "git.hosts.github.com[2]: a second entry omits identities: — at most "
+            "one entry per host may omit identities: (the catch-all)",
+            str(cm.exception))
+
+    def test_empty_identities_list_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [{"token": "GH_TOKEN_fry_a",
+                                               "identities": []}]}})
+        self.assertIn(
+            "git.hosts.github.com[0].identities: empty list — name identities, "
+            "or omit identities: to make this entry the catch-all",
+            str(cm.exception))
+
+    def test_zero_entry_list_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": []}})
+        self.assertEqual(
+            str(cm.exception),
+            "manifest git identity failed validation:\n"
+            "  git.hosts.github.com: the list form needs at least one entry")
+
+    def test_name_email_inside_list_entry_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [
+                {"token": "GH_TOKEN_fry_a", "identities": ["claude"],
+                 "name": "Leela Bot", "email": "bot@planetexpress.example"}]}})
+        self.assertIn(
+            "git.hosts.github.com[0]: unsupported field(s): name,email (only "
+            "token, identities — name/email are per HOST, so a list-form "
+            "entry cannot carry an author; use the simple form for a host "
+            "with an author)",
+            str(cm.exception))
+
+    def test_identities_wrong_type_rejected(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [{"token": "GH_TOKEN_fry_a",
+                                               "identities": "claude"}]}})
+        self.assertIn(
+            "git.hosts.github.com[0].identities: must be a list of identity "
+            "names (got a string)",
+            str(cm.exception))
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [{"token": "GH_TOKEN_fry_a",
+                                               "identities": [7]}]}})
+        self.assertIn("unknown identity '7'", str(cm.exception))
+
+    def test_non_github_row_naming_gh_token_rejected(self):
+        # gh reads GH_TOKEN from its environment and sends it to github.com —
+        # a non-github row naming it would leak a github token to another
+        # forge. Every spelling: simple form, catch-all entry, named entry.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.org": {"token": "GH_TOKEN"}}},
+                    env={"PRESENT_SECRET_VARS": "GH_TOKEN"})
+        self.assertIn(
+            "git.hosts.git.example.org.token: GH_TOKEN is a CLI token variable "
+            "(gh reads it from the environment and would send it to github.com) "
+            "— a git.example.org row needs its own variable name",
+            str(cm.exception))
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"git.example.org": [{"token": "GH_TOKEN"}]}},
+                    env={"PRESENT_SECRET_VARS": "GH_TOKEN"})
+        self.assertIn(
+            "git.hosts.git.example.org[0].token: GH_TOKEN is a CLI token variable",
+            str(cm.exception))
+        # github.com rows naming GH_TOKEN stay fine (that is gh's own lane).
+        d = self._d({"hosts": {"github.com": {"token": "GH_TOKEN"}}},
+                    env={"PRESENT_SECRET_VARS": "GH_TOKEN"})
+        self.assertEqual(d["GIT_HOST_TOKENS"], "github.com=GH_TOKEN")
+        # The old spellings route through the same check.
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"orgs": {"acme": {"token": "GH_TOKEN",
+                                       "host": "git.example.test"}}},
+                    env={"PRESENT_SECRET_VARS": "GH_TOKEN"})
+        self.assertIn("is a CLI token variable", str(cm.exception))
+        self.assertNotIn("git.example.test", d["GIT_HOST_TOKENS"])
+
+    def test_list_entry_token_still_hard_fails_on_missing_var(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [
+                {"token": "GH_TOKEN_nope", "identities": ["claude"]}]}})
+        self.assertIn(
+            "git.hosts.github.com[0].token: GH_TOKEN_nope not found in secrets.env",
+            str(cm.exception))
+
+    def test_list_entry_token_and_identity_errors_aggregate(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"hosts": {"github.com": [
+                {"token": "GH_TOKEN_nope", "identities": ["nope"]}]}})
+        self.assertIn("GH_TOKEN_nope not found in secrets.env", str(cm.exception))
+        self.assertIn("unknown identity 'nope'", str(cm.exception))
+
+    def test_zero_entry_list_rejected_first_then_rest_derive(self):
+        # Two hosts, one broken: the whole apply fails (aggregated), and a
+        # fixed manifest derives.
+        with self.assertRaises(m.ManifestError):
+            self._d({"hosts": {"github.com": [], "git.example.org": {"token": "GITEA_TOKEN_example"}}})
+        d = self._d({"hosts": {"github.com": [{"token": "GH_TOKEN_fry_a",
+                                               "identities": ["claude"]}],
+                               "git.example.org": {"token": "GITEA_TOKEN_example"}}})
+        self.assertIn("claude\tgit.example.org=GITEA_TOKEN_example github.com=GH_TOKEN_fry_a\n",
+                      d["GIT_IDENTITY_HOST_TOKENS"])
 
 
 class TestDerivedValues(unittest.TestCase):

@@ -151,6 +151,14 @@ su -c "git config --global credential.useHttpPath true" coder
 # install must fail the boot (up.sh surfaces the logs) rather than bring up a
 # bottle whose git authenticates through the desktop bridge as the human.
 . /usr/local/lib/djinn/credential_router_install.sh
+# GIT_CREDENTIAL_HOSTS always carries at least the CLI host's origin
+# (manifest.py adds it unconditionally), so an empty list can only mean a
+# broken up.sh→compose handoff — and a silently skipped router would let the
+# desktop credential bridge answer with the human's login. Loud line, like
+# every other skipped security-relevant setup here.
+if [ -z "$GIT_CREDENTIAL_HOSTS" ]; then
+    echo "⚠ WARNING: GIT_CREDENTIAL_HOSTS is empty — no credential router is installed for any origin; git would fall back to the desktop credential bridge (the human's login). Check that up.sh passed the derived GIT_CREDENTIAL_HOSTS through compose."
+fi
 if ! install_credential_router "$GIT_CREDENTIAL_HOSTS"; then
     echo "FATAL: git credential router install failed — refusing to boot without it (git would fall back to the desktop credential bridge, the human's login; see the stderr line above for the failing origin)" >&2
     exit 1
