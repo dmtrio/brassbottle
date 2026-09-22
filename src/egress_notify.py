@@ -44,6 +44,7 @@ class NtfySettings:
     token: str | None = None
     broker_url: str | None = None
     operator_token: str | None = None
+    admin_url: str | None = None
 
 
 def allow_prompt_line(host: str, *, host_is_ip: bool = False) -> str:
@@ -118,8 +119,18 @@ def load_ntfy_settings(
     broker_host: str,
     broker_port: int,
     operator_token: str,
+    actions_url: str | None = None,
+    admin_url: str | None = None,
 ) -> NtfySettings | None:
-    """Load ntfy publish settings; return None when push is disabled."""
+    """Load ntfy publish settings; return None when push is disabled.
+
+    `actions_url` is the action-button override the docker service passes in
+    (an address a phone can reach, such as the host's VPN address): when set
+    it is the broker_url for the buttons regardless of the bind address;
+    when unset the bind-address rule below applies, so a 0.0.0.0 container
+    bind has actions off exactly as before. `admin_url` is carried verbatim
+    into the payload's admin line (the local admin page URL); None omits it.
+    """
     secrets_path = base_path / SECRETS_FILENAME
     from_file = read_secrets_env(secrets_path, NTFY_ENV_NAMES)
 
@@ -138,14 +149,18 @@ def load_ntfy_settings(
     topic = _value("NTFY_TOPIC") or NTFY_DEFAULT_TOPIC
     token = _value("NTFY_TOKEN") or None
 
-    broker_url: str | None = None
     op_token: str | None = None
-    unreachable = _bind_unreachable_reason(broker_host)
-    if unreachable is None:
-        broker_url = f"http://{_url_authority_host(broker_host)}:{broker_port}"
+    if actions_url:
+        broker_url = actions_url
         op_token = operator_token
     else:
-        LOG.info("egress notify actions off reason=bind_%s", unreachable)
+        unreachable = _bind_unreachable_reason(broker_host)
+        if unreachable is None:
+            broker_url = f"http://{_url_authority_host(broker_host)}:{broker_port}"
+            op_token = operator_token
+        else:
+            broker_url = None
+            LOG.info("egress notify actions off reason=bind_%s", unreachable)
 
     return NtfySettings(
         url=ntfy_url,
@@ -153,6 +168,7 @@ def load_ntfy_settings(
         token=token,
         broker_url=broker_url,
         operator_token=op_token,
+        admin_url=admin_url,
     )
 
 
@@ -207,6 +223,8 @@ def build_ntfy_payload(n: EgressNotification, s: NtfySettings) -> dict:
         comm = n.comm if n.comm is not None else "?"
         message += f"\nprocess: uid={uid} comm={comm}"
     message += f"\nreq {n.request_id}"
+    if s.admin_url:
+        message += f"\nadmin: {s.admin_url}"
 
     payload: dict[str, object] = {
         "topic": s.topic,

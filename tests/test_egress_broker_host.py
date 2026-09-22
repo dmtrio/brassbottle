@@ -17,6 +17,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -3546,6 +3547,156 @@ class DaemonEndpointFileTests(unittest.TestCase):
                     rc = broker.main(["--print-endpoint", "--base-path", str(base)])
             self.assertEqual(rc, 0)
             self.assertEqual(out.getvalue().strip(), "http://example.internal:7000")
+
+
+class ContainerBindAndManagedEndpointTests(unittest.TestCase):
+    """--bind-any / --advertise: the container-mode surface. The docker
+    service binds 0.0.0.0 inside the container (a loopback bind is
+    unreachable from the published port) and records the published host
+    address as a docker-managed daemon.json entry with no pid — liveness
+    across a pid-namespace boundary is a /health probe, nothing else."""
+
+    def test_bind_any_refused_without_container_marker(self):
+        err = io.StringIO()
+        env = {k: v for k, v in os.environ.items() if k != "DJINN_CONTAINER"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stderr", err):
+            rc = broker.main(["--bind-any"])
+        self.assertEqual(rc, 1)
+        self.assertIn("--bind-any refused", err.getvalue())
+        self.assertIn("DJINN_CONTAINER", err.getvalue())
+
+    def test_bind_any_binds_zero_zero_zero_zero_with_container_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            captured: dict[str, object] = {}
+
+            def fake_serve_forever(self) -> None:
+                captured["bind"] = self.server_address[0]
+
+            env = {k: v for k, v in os.environ.items() if k != "DJINN_CONTAINER"}
+            env["DJINN_CONTAINER"] = "1"
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                broker.EgressBrokerHTTPServer, "serve_forever", fake_serve_forever
+            ):
+                broker.run_daemon(base, host="0.0.0.0", port=0, repo_root=REPO_ROOT)
+            self.assertEqual(captured.get("bind"), "0.0.0.0")
+
+    def test_resolve_bind_flags(self):
+        args = broker.build_parser().parse_args(["--bind-any"])
+        env = {k: v for k, v in os.environ.items() if k != "DJINN_CONTAINER"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(broker.EgressBrokerHostError):
+                broker._resolve_bind(args)
+        env["DJINN_CONTAINER"] = "1"
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(broker._resolve_bind(args), ("0.0.0.0", None))
+        plain = broker.build_parser().parse_args([])
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(broker._resolve_bind(plain), ("127.0.0.1", None))
+
+    def test_advertise_writes_version2_managed_endpoint_without_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            egress_root = broker.resolve_egress_root(base)
+
+            captured: dict[str, object] = {}
+
+            # read inside serve_forever: the finally in run_daemon removes the
+            # file on shutdown, so it is gone again by the time we return.
+            with mock.patch.object(
+                broker.EgressBrokerHTTPServer,
+                "serve_forever",
+                lambda self: captured.update(
+                    payload=json.loads(
+                        (egress_root / broker.ENDPOINT_FILENAME).read_text()
+                    )
+                ),
+            ):
+                broker.run_daemon(
+                    base,
+                    host="127.0.0.1",
+                    port=0,
+                    repo_root=REPO_ROOT,
+                    advertise=("127.0.0.1", 8816),
+                )
+            payload = captured["payload"]
+            self.assertEqual(payload["version"], 2)
+            self.assertEqual(payload["host"], "127.0.0.1")
+            self.assertEqual(payload["port"], 8816)
+            self.assertEqual(payload["managed"], "docker")
+            self.assertNotIn("pid", payload)
+            self.assertIn("started_at", payload)
+
+    def test_managed_endpoint_reads_live_when_health_answers(self):
+        stub, thread = self._stub_health_server(200)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                egress_root = Path(tmp)
+                broker.write_daemon_endpoint(
+                    egress_root,
+                    "127.0.0.1",
+                    stub.server_address[1],
+                    managed=broker.MANAGED_DOCKER,
+                )
+                endpoint = broker.read_daemon_endpoint(egress_root)
+                self.assertIsNotNone(endpoint)
+                assert endpoint is not None
+                self.assertTrue(endpoint.managed)
+                self.assertIsNone(endpoint.pid)
+                self.assertEqual(endpoint.port, stub.server_address[1])
+        finally:
+            stub.shutdown()
+            stub.server_close()
+            join_thread_or_fail(thread, label="stub")
+
+    def test_managed_endpoint_dead_when_nothing_listens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            egress_root = Path(tmp)
+            broker.write_daemon_endpoint(
+                egress_root, "127.0.0.1", 8816, managed=broker.MANAGED_DOCKER
+            )
+            with self.assertLogs("egress_broker_host", level="INFO") as captured:
+                self.assertIsNone(broker.read_daemon_endpoint(egress_root))
+            self.assertTrue(
+                any("managed unreachable" in line for line in captured.output)
+            )
+
+    def test_print_endpoint_reports_unclean_managed_stop_as_fallback(self):
+        # A daemon.json left behind with nothing listening must read as "no
+        # live daemon": the exit-3 fallback (the same code a dead version-1
+        # pid produces), not a URL to a broker that is not there.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            egress_root = broker.resolve_egress_root(base)
+            broker.write_daemon_endpoint(
+                egress_root, "127.0.0.1", 8816, managed=broker.MANAGED_DOCKER
+            )
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(broker.EGRESS_BROKER_URL_ENV, None)
+                with mock.patch("sys.stdout", out):
+                    rc = broker.main(["--print-endpoint", "--base-path", str(base)])
+            self.assertEqual(rc, 3)
+            self.assertEqual(out.getvalue().strip(), f"http://127.0.0.1:{broker.DEFAULT_PORT}")
+
+    def _stub_health_server(self, status: int):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = json.dumps({"status": "ok"}).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        wait_for_tcp_listening(*server.server_address)
+        return server, thread
 
 
 if __name__ == "__main__":

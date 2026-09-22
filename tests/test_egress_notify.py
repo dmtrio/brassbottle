@@ -64,6 +64,8 @@ class LoadNtfySettingsTests(unittest.TestCase):
         broker_host: str = "10.8.0.1",
         broker_port: int = 8816,
         operator_token: str = "op-token",
+        actions_url: str | None = None,
+        admin_url: str | None = None,
     ) -> notify.NtfySettings | None:
         secrets_path = base / notify.SECRETS_FILENAME
         if secrets:
@@ -75,6 +77,8 @@ class LoadNtfySettingsTests(unittest.TestCase):
                 broker_host=broker_host,
                 broker_port=broker_port,
                 operator_token=operator_token,
+                actions_url=actions_url,
+                admin_url=admin_url,
             )
 
     def test_no_url_returns_none(self):
@@ -151,6 +155,54 @@ class LoadNtfySettingsTests(unittest.TestCase):
             self.assertEqual(settings.broker_url, "http://10.8.0.1:8816")
             self.assertEqual(settings.operator_token, SENTINEL_OP_TOKEN)
 
+    def test_actions_url_overrides_an_unreachable_bind(self):
+        # The docker service binds 0.0.0.0 (a phone can never dial that) but
+        # may set EGRESS_ACTIONS_URL to an address it can — the override wins
+        # regardless of the bind, and the operator token rides along.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(
+                base=Path(tmp),
+                env={"NTFY_URL": "https://ntfy.example"},
+                broker_host="0.0.0.0",
+                broker_port=8816,
+                operator_token=SENTINEL_OP_TOKEN,
+                actions_url="http://10.9.9.9:8816",
+            )
+            assert settings is not None
+            self.assertEqual(settings.broker_url, "http://10.9.9.9:8816")
+            self.assertEqual(settings.operator_token, SENTINEL_OP_TOKEN)
+
+    def test_actions_off_with_zero_bind_and_no_actions_url(self):
+        # Unchanged shape: without the override, 0.0.0.0 is not an address a
+        # phone can dial, so the buttons stay off.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(
+                base=Path(tmp),
+                env={"NTFY_URL": "https://ntfy.example"},
+                broker_host="0.0.0.0",
+                operator_token=SENTINEL_OP_TOKEN,
+            )
+            assert settings is not None
+            self.assertIsNone(settings.broker_url)
+            self.assertIsNone(settings.operator_token)
+
+    def test_admin_url_is_carried_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(
+                base=Path(tmp),
+                env={"NTFY_URL": "https://ntfy.example"},
+                admin_url="http://127.0.0.1:8817",
+            )
+            assert settings is not None
+            self.assertEqual(settings.admin_url, "http://127.0.0.1:8817")
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(
+                base=Path(tmp),
+                env={"NTFY_URL": "https://ntfy.example"},
+            )
+            assert settings is not None
+            self.assertIsNone(settings.admin_url)
+
 
 class BuildNtfyPayloadTests(unittest.TestCase):
     def _settings(self, *, actions: bool = True) -> notify.NtfySettings:
@@ -218,6 +270,22 @@ class BuildNtfyPayloadTests(unittest.TestCase):
             self._settings(actions=False),
         )
         self.assertNotIn("actions", payload)
+
+    def test_admin_url_line_when_set(self):
+        s = notify.NtfySettings(
+            url="https://ntfy.example",
+            topic=SENTINEL_TOPIC,
+            admin_url="http://127.0.0.1:8817",
+        )
+        message = notify.build_ntfy_payload(self._notification(), s)["message"]
+        assert isinstance(message, str)
+        self.assertIn("\nadmin: http://127.0.0.1:8817", message)
+
+    def test_admin_line_omitted_when_unset(self):
+        s = self._settings()
+        message = notify.build_ntfy_payload(self._notification(), s)["message"]
+        assert isinstance(message, str)
+        self.assertNotIn("admin:", message)
 
     def test_ip_request_warning_tag_and_deny_only(self):
         n = self._notification(host="192.0.2.55", port=5432, host_is_ip=True)
