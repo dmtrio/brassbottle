@@ -11,6 +11,7 @@ order) get dedicated pins so a future "cleanup" can't change them silently.
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 import unittest
@@ -324,6 +325,8 @@ class TestErrorTable(unittest.TestCase):
         argv. browser and proxyman declare that argv themselves (a local
         command spec, not a url: the shim renderer covers), so each must carry
         the flag; anything new of the same shape is caught here too."""
+        if shutil.which("yq") is None:
+            self.skipTest("yq not installed (test_agent_suites fails loudly for that)")
         offenders, seen = [], []
         for path in sorted((REPO / "plugins").glob("*/plugin.yml")):
             doc = json.loads(subprocess.run(
