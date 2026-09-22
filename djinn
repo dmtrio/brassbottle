@@ -50,9 +50,8 @@ case "${1:-}" in
             # The interactive terminal watcher was removed: the egress broker
             # now runs as a compose singleton (`./djinn egress start`), which
             # serves the same approval queue to the admin plane and to ntfy.
-            # Sourced late, so the usage/error paths above stay free of any
-            # ./.env dependency.
-            . "$SCRIPT_DIR/src/common.sh"
+            # Nothing is sourced here: the arm only prints the pointer, so it
+            # must not depend on ./.env or on common.sh existing.
             echo "allow --watch was removed: run ./djinn egress start, then open the URL from ./djinn egress url" >&2
             exit 2
         fi
