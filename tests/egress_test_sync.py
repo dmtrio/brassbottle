@@ -39,17 +39,19 @@ def wait_for_broker_open_request(
     timeout: float = 10.0,
     poll: float = 0.01,
 ) -> str:
-    """Poll until the broker has at least `count` open requests; return one id.
+    """Poll until the broker's store has at least `count` open rows; return one id.
 
-    Waiting on the observable state — the request actually reaching the broker's
-    map — rather than on a fixed sleep is what keeps these tests steady on a
-    loaded CI runner.
+    Waiting on the observable state — the request actually reaching the
+    store — rather than on a fixed sleep is what keeps these tests steady
+    on a loaded CI runner. (file_request is synchronous now; this helper
+    still exists for the HTTP-path tests where the filing happens on a
+    server thread.)
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with b._lock:
-            if len(b._requests) >= count:
-                return next(iter(b._requests))
+        rows = b._store.list_open()
+        if len(rows) >= count:
+            return rows[0].request_id
         time.sleep(poll)
     raise TimeoutError(f"broker had fewer than {count} open request(s) after {timeout}s")
 

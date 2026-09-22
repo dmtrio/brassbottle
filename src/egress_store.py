@@ -1190,6 +1190,15 @@ class EgressStore:
                 )
             return [self._row(raw) for raw in cursor.fetchall()]
 
+    def find_open(self, container: str, host: str, port: int) -> RequestRow | None:
+        """The OPEN row for (container, host, port), or None.
+
+        The broker's coalesce probe: a new filing lands on this row (as a
+        hit) instead of opening a second one for the same ask.
+        """
+        with self._lock:
+            return self._fetch_open_by_key(container, host, port)
+
     def list_recent(self, *, since: datetime, limit: int | None = None) -> list[RequestRow]:
         since_ts = _iso_ts(_utc_now(since))
         sql = (

@@ -21,7 +21,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from egress_broker_host import DEFAULT_PORT, HIT_COALESCE_SECONDS, normalize_host
+from egress_broker_host import DEFAULT_PORT, DENYLIST_SUPPRESS_SECONDS, normalize_host
 
 LOG = logging.getLogger(__name__)
 
@@ -194,9 +194,9 @@ def host_for_filing(dst_ip: str) -> str:
 
 
 class FilingCoalescer:
-    """Client-side rate limit matching broker HIT_COALESCE_SECONDS."""
+    """Client-side rate limit matching the broker's DENYLIST_SUPPRESS_SECONDS window."""
 
-    def __init__(self, coalesce_seconds: int = HIT_COALESCE_SECONDS) -> None:
+    def __init__(self, coalesce_seconds: int = DENYLIST_SUPPRESS_SECONDS) -> None:
         self._coalesce_seconds = coalesce_seconds
         self._last_filed: dict[tuple[str, str, int], float] = {}
 
