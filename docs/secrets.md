@@ -111,10 +111,9 @@ list of per-identity entries (see above). Its optional `name`/`email`
 fields are per-HOST author attribution and are rejected inside a list-form
 entry — a list-form host cannot carry an author; declare the author on a
 simple-form host entry. One host carries one token per identity: a host's
-row serves every repository on it (a second owner on that host gets no
-separate token), and two entries resolving to one host with different
+row serves every repository on it, and two entries resolving to one host with different
 tokens is an error. Two `git.hosts` keys that normalise to the same host
-are rejected outright. Attribution (a host entry's `name`/`email`) still
+are rejected outright. Attribution (a host entry's `name`/`email`)
 stamps a repo-local `user.name`/`user.email` at bootstrap clone — it is
 authorship only, never routing.
 

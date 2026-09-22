@@ -76,7 +76,7 @@ Then drill **only** when something implies it:
 |---|---|
 | "phone access", "from my laptop", "long-running" | `remote.shell: tmux \| herdr \| bash`; `remote: {shell, notify}` — phone access is the default (jump-reachable); allocate ports only for optional features (§4) |
 | "also reachable from my Mac" | `ssh:` + port allocation (§4) — Mac Remote-SSH only |
-| a private repository the bottle clones or pushes over `https://` | `git.hosts.<host>: {token, name, email}` — one entry per host; `token` is a `secrets.env` variable name and is required, `name`/`email` optionally set the author for repositories `up` clones from that host. github.com is an entry like any other, and **declaring `git.hosts` at all removes the implicit `github.com = GH_TOKEN` row**: list every host the bottle needs a credential on, github.com included. A host with only public repositories needs no entry. See `docs/secrets.md` |
+| a private repository the bottle clones or pushes over `https://` | `git.hosts.<host>: {token, name, email}` — one entry per host; `token` is a `secrets.env` variable name and is required, `name`/`email` optionally set the author for repositories `up` clones from that host. github.com is an entry like any other, and **no token is implicit**: list every host the container needs a credential on, github.com included whenever anything inside will push there, and these rules do (`/amend-rules`, this skill). The fleet's shared machine user is `GH_TOKEN`. A host with only public repositories needs no entry |
 | a plugin whose README names a secret slot | `common_secrets:` / `agent_secrets:` (§5) |
 | an API/service the container must reach | `capabilities.egress:` — domains only, no scheme, no path |
 | talking to something on the LAN | `capabilities.egress_cidrs:` |
@@ -188,11 +188,10 @@ the single most likely way to introduce a port clash.
   rather than falling back to the wrong identity. The checker cannot catch
   this — it declares every named secret present — so list the names for the
   user.
-- **Adding one `git.hosts` entry to a working bottle** and losing github.com.
-  A manifest with no `git.hosts` gets `github.com = GH_TOKEN` implicitly; one
-  that declares `git.hosts` gets exactly the rows it lists. Adding an entry
-  for a new host without also listing github.com leaves every private
-  github.com clone and push without a credential. The checker cannot see
+- **Leaving github.com out of `git.hosts`.** A bottle gets exactly the rows
+  it lists and nothing implicit. Without a `github.com` entry every private
+  github.com clone and push, including this skill's own PR, has no
+  credential. The checker cannot see
   which repositories are private, so it stays silent. `up` prints a note only
   for a host that is in `repos:`, so a push to a host outside `repos:` gets no
   warning at all.

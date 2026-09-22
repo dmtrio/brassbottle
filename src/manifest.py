@@ -1250,10 +1250,14 @@ def derive(manifest, plugin_files, agent_files, env):
     tools_val = manifest.get("agents")
     if _falsy(tools_val):
         tools_val = default_tools
+    if "tools" in manifest:
+        raise ManifestError(
+            "manifest tools: was renamed to agents: — update the manifest (same values)")
+    if not isinstance(tools_val, list):
+        raise ManifestError("manifest agents: must be a list")
     enabled_mcp_binaries = frozenset(
         agents[name]["binary"] for name in agent_dir_names
-        if isinstance(tools_val, list) and _tool_installed(tools_val, name)
-        and agents[name]["mcp"] is not None)
+        if _tool_installed(tools_val, name) and agents[name]["mcp"] is not None)
     git = _section(manifest, "git")
     out["GIT_USER_NAME"] = _identity_scalar(git.get("name"), "git.name") or env.get("GIT_NAME_DEFAULT", "")
     out["GIT_USER_EMAIL"] = _identity_scalar(git.get("email"), "git.email") or env.get("GIT_EMAIL_DEFAULT", "")
@@ -1302,12 +1306,7 @@ def derive(manifest, plugin_files, agent_files, env):
     out["MEM_LIMIT"] = _scalar(manifest.get("memory"), "memory") or "2g"
 
     # ── Agents (the tools: key was renamed; reject it BY NAME) ──────────
-    if "tools" in manifest:
-        raise ManifestError(
-            "manifest tools: was renamed to agents: — update the manifest (same values)")
-    tools = tools_val   # read + defaulted above, for the enabled-identity set
-    if not isinstance(tools, list):
-        raise ManifestError("manifest agents: must be a list")
+    tools = tools_val   # read, defaulted and type-checked above
     enabled_agent_dirs = sorted(name for name in agent_dir_names if _tool_installed(tools, name))
     # A name with no agents/<name>/ directory is dropped, not fatal — a manifest
     # may outlive a retired agent, and failing every container over a stale list

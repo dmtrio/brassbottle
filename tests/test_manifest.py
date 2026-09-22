@@ -1182,6 +1182,19 @@ class TestGitHosts(unittest.TestCase):
 
 
 
+class TestAgentsListErrorOrder(unittest.TestCase):
+    def test_non_list_agents_is_reported_before_identities(self):
+        # A wrong agents: type must be named as such, not surface as an
+        # unknown identity because the enabled set came out empty.
+        man = {"task": "t", "agents": "claude",
+               "git": {"hosts": {"github.com": [
+                   {"token": "GH_TOKEN", "identities": ["claude"]}]}}}
+        with self.assertRaises(m.ManifestError) as cm:
+            derive(man, env={"PRESENT_SECRET_VARS": "GH_TOKEN"})
+        self.assertIn("agents: must be a list", str(cm.exception))
+        self.assertNotIn("unknown identity", str(cm.exception))
+
+
 class TestEnabledIdentities(unittest.TestCase):
     """The git.hosts identity set is the ENABLED mcp-capable agents' binaries
     (the set SHIM_AGENTS is derived from) plus 'user' — not every shipped
