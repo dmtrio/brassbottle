@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from http import HTTPStatus
@@ -65,7 +66,18 @@ CONFIG_FILENAME = "config.json"
 OPERATOR_TOKEN_FILENAME = "operator.token"
 ENDPOINT_FILENAME = "daemon.json"
 EGRESS_BROKER_URL_ENV = "EGRESS_BROKER_URL"
+EGRESS_ADMIN_URL_ENV = "EGRESS_ADMIN_URL"
+EGRESS_ACTIONS_URL_ENV = "EGRESS_ACTIONS_URL"
+CONTAINER_MARKER_ENV = "DJINN_CONTAINER"
 DAEMON_SKIP_NOTIFY_ENV = "DJINN_EGRESS_SKIP_NOTIFY"
+
+# daemon.json version 2: an endpoint the daemon does not own as a process —
+# docker restarts it, so a pid would be wrong (and pid 1's namespace check
+# cannot see across the boundary anyway). A managed endpoint is live only
+# when its /health answers; a file left behind by an unclean stop reads as
+# dead instead of as a running daemon.
+MANAGED_DOCKER = "docker"
+MANAGED_PROBE_TIMEOUT_SECONDS = 1.0
 
 IP_APPLY_FAILED_REASON = (
     "destination is an IP address; add it to the bottle manifest "
@@ -335,30 +347,46 @@ def _load_config(config_path: Path) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class DaemonEndpoint:
-    """The daemon's actual bind address, as recorded in daemon.json."""
+    """The daemon's actual bind address, as recorded in daemon.json.
+
+    pid is the host-side (version 1) liveness handle; managed=True marks a
+    docker-managed daemon (version 2) whose liveness is its /health probe,
+    not a pid.
+    """
 
     host: str
     port: int
-    pid: int
+    pid: int | None = None
+    managed: bool = False
 
 
-def write_daemon_endpoint(egress_root: Path, host: str, port: int) -> Path:
+def write_daemon_endpoint(
+    egress_root: Path, host: str, port: int, *, managed: str | None = None
+) -> Path:
     """Persist the daemon's actual bind address after the HTTP server is
     constructed — the single source of truth every host-side CLI/script
     reads to find a daemon that bound to a non-default host/port (a VPN
     --host for ntfy, or --port 0). Atomic write (tmp + os.replace); mode
     0o644 — host/port/pid are not secrets, the operator token still guards
     the actual API.
+
+    `managed` names an external supervisor ("docker"): the payload records
+    version 2 with no pid — the container's pid namespace is unreachable
+    from the host and docker restarts the daemon anyway — and liveness is
+    answered by probing /health on the recorded address.
     """
     egress_root.mkdir(parents=True, exist_ok=True)
     path = egress_root / ENDPOINT_FILENAME
-    payload = {
-        "version": 1,
+    payload: dict[str, Any] = {
+        "version": 2 if managed else 1,
         "host": host,
         "port": port,
-        "pid": os.getpid(),
         "started_at": _iso_ts(None),
     }
+    if managed:
+        payload["managed"] = managed
+    else:
+        payload["pid"] = os.getpid()
     tmp_path = path.with_name(f".{ENDPOINT_FILENAME}.tmp-{os.getpid()}")
     text = json.dumps(payload, separators=(",", ":")) + "\n"
     try:
@@ -409,10 +437,26 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _managed_alive(host: str, port: int) -> bool:
+    """Liveness of a docker-managed daemon: GET /health on the recorded
+    address must return 200 within MANAGED_PROBE_TIMEOUT_SECONDS. Never
+    raises — an unreachable socket, a refused connection or a timeout all
+    read as "not live", because daemon.json left behind by an unclean stop
+    must not report a running daemon."""
+    try:
+        url = f"http://{_connect_host_for_bind(host)}:{port}/health"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=MANAGED_PROBE_TIMEOUT_SECONDS) as resp:
+            resp.read(1)
+            return resp.status == 200
+    except Exception:  # noqa: BLE001 — any failure is "unreachable"
+        return False
+
+
 def read_daemon_endpoint(egress_root: Path) -> DaemonEndpoint | None:
     """Read daemon.json; None (never raises) when missing, corrupt, the
-    wrong shape, or the recorded pid is no longer alive (a daemon that
-    crashed without cleaning up after itself)."""
+    wrong shape, or not live (a version-1 pid that died without cleaning
+    up, or a version-2 managed daemon whose /health does not answer)."""
     path = egress_root / ENDPOINT_FILENAME
     try:
         raw = path.read_text(encoding="utf-8")
@@ -435,7 +479,7 @@ def read_daemon_endpoint(egress_root: Path) -> DaemonEndpoint | None:
         return None
     host = payload.get("host")
     port = payload.get("port")
-    pid = payload.get("pid")
+    version = payload.get("version", 1)
     # "" is a legitimate bind-all-interfaces host (see _connect_host_for_bind),
     # not a missing value — only reject when the key is absent/non-string.
     if not isinstance(host, str):
@@ -448,6 +492,19 @@ def read_daemon_endpoint(egress_root: Path) -> DaemonEndpoint | None:
             "egress broker endpoint unreadable path=%s error=%s", path, "missing/invalid port"
         )
         return None
+    if version == 2:
+        if payload.get("managed") != MANAGED_DOCKER:
+            LOG.warning(
+                "egress broker endpoint unreadable path=%s error=%s",
+                path,
+                "unknown managed kind",
+            )
+            return None
+        if not _managed_alive(host, port):
+            LOG.info("egress broker endpoint managed unreachable host=%s port=%d", host, port)
+            return None
+        return DaemonEndpoint(host=host, port=port, pid=None, managed=True)
+    pid = payload.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
         LOG.warning(
             "egress broker endpoint unreadable path=%s error=%s", path, "missing/invalid pid"
@@ -2078,6 +2135,7 @@ def run_daemon(
     host: str = "127.0.0.1",
     port: int = DEFAULT_PORT,
     repo_root: Path | None = None,
+    advertise: tuple[str, int] | None = None,
 ) -> None:
     egress_root = resolve_egress_root(base_path)
     egress_root.mkdir(parents=True, exist_ok=True)
@@ -2100,6 +2158,8 @@ def run_daemon(
         broker_host=host,
         broker_port=port,
         operator_token=operator_token,
+        actions_url=(os.environ.get(EGRESS_ACTIONS_URL_ENV) or "").strip() or None,
+        admin_url=(os.environ.get(EGRESS_ADMIN_URL_ENV) or "").strip() or None,
     )
     notifier: Callable[[EgressNotification], object] | None = None
     if settings is not None:
@@ -2121,7 +2181,15 @@ def run_daemon(
     )
     server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
     # DaemonLock is already held above, so only one daemon ever writes this.
-    write_daemon_endpoint(egress_root, host, server.server_address[1])
+    # --advertise records the address host-side callers should use (the
+    # published loopback port) as a docker-managed endpoint with no pid: the
+    # container's pid namespace is unreachable and docker owns the lifetime.
+    if advertise is not None:
+        write_daemon_endpoint(
+            egress_root, advertise[0], advertise[1], managed=MANAGED_DOCKER
+        )
+    else:
+        write_daemon_endpoint(egress_root, host, server.server_address[1])
     stop_event = threading.Event()
     sweep_thread = threading.Thread(
         target=_stale_sweep_loop,
@@ -2151,6 +2219,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1", help="bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="bind port")
     parser.add_argument(
+        "--bind-any",
+        action="store_true",
+        help=(
+            "bind 0.0.0.0 instead of loopback — refused unless DJINN_CONTAINER=1 "
+            "is set (the docker service sets it; a published 127.0.0.1 port is "
+            "the only host-side reachability)"
+        ),
+    )
+    parser.add_argument(
+        "--advertise",
+        metavar="HOST:PORT",
+        help=(
+            "record HOST:PORT in daemon.json as a docker-managed endpoint for "
+            "host-side callers (the container binds 0.0.0.0, which they cannot "
+            "use); liveness is answered by probing /health, not a pid"
+        ),
+    )
+    parser.add_argument(
         "--ensure-bottle-token",
         metavar="BOTTLE",
         help="print (creating if needed) the per-bottle bearer token and exit",
@@ -2177,6 +2263,42 @@ def _print_endpoint(egress_root: Path) -> int:
     return 0 if live else 3
 
 
+def _resolve_bind(args: argparse.Namespace) -> tuple[str, tuple[str, int] | None]:
+    """The bind host, and the endpoint to advertise (None = version 1).
+
+    --bind-any is container-only: outside the container a 0.0.0.0 bind is a
+    network-exposed daemon with no session gate on the filing endpoint, so it
+    is refused by name rather than silently honoured.
+    """
+    if args.bind_any:
+        if os.environ.get(CONTAINER_MARKER_ENV) != "1":
+            raise EgressBrokerHostError(
+                "--bind-any refused: it is only valid inside the egress broker "
+                "container (DJINN_CONTAINER=1) — run ./djinn egress start"
+            )
+        return "0.0.0.0", None
+    return args.host, None
+
+
+def _parse_advertise(raw: str | None) -> tuple[str, int] | None:
+    if not raw:
+        return None
+    value = raw.strip()
+    if value.startswith("[") and "]" in value:
+        host_part, _, rest = value[1:].partition("]")
+        if rest.startswith(":"):
+            port_part = rest[1:]
+        else:
+            raise EgressBrokerHostError(f"invalid --advertise {raw!r} (want HOST:PORT)")
+    elif ":" in value:
+        host_part, _, port_part = value.rpartition(":")
+    else:
+        raise EgressBrokerHostError(f"invalid --advertise {raw!r} (want HOST:PORT)")
+    if not host_part or not port_part.isdigit() or not (1 <= int(port_part) <= 65535):
+        raise EgressBrokerHostError(f"invalid --advertise {raw!r} (want HOST:PORT)")
+    return host_part, int(port_part)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = build_parser()
@@ -2188,8 +2310,13 @@ def main(argv: list[str] | None = None) -> int:
         print(ensure_bottle_token(base_path, args.ensure_bottle_token))
         return 0
     try:
-        run_daemon(base_path, host=args.host, port=args.port)
+        advertise = _parse_advertise(args.advertise)
+        host, _ = _resolve_bind(args)
+        run_daemon(base_path, host=host, port=args.port, advertise=advertise)
     except DaemonAlreadyRunning as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except EgressBrokerHostError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0
