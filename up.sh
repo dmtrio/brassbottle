@@ -299,6 +299,35 @@ if [ "$JUMP_IP_FAILED" = "true" ] || [ -s "$JUMP_IP_ERR" ]; then
 fi
 [ "$JUMP_IP_ERR" = "/dev/null" ] || rm -f "$JUMP_IP_ERR"
 
+# ── Egress broker host resolution (host-side; never fatal) ───────────────────
+# Must run AFTER ensure_net, same as the JUMP_IP block above: egress_service.py's
+# `ip` command prefers the LIVE djinn-net bridge subnet (mirroring cmd_start's
+# own derivation) and needs the bridge to exist to read it. Bottles file egress
+# at this address, so the value handed to compose must be the address the
+# broker itself is actually on — the manifest-derived value (from DJINN_SUBNET,
+# via `--derive` above) is the desired-subnet fallback and is only correct when
+# the bridge has not drifted. Never fatal — on resolver failure keep the
+# manifest-derived value (fresh install, ./djinn egress start never run, a
+# broken override) and surface the resolver's stderr lines with a `⚠ egress:`
+# prefix, the same quiet-degradation contract as JUMP_IP. common.sh sources
+# ./.env WITHOUT exporting, so DJINN_SUBNET/DJINN_EGRESS_IP must be forwarded
+# explicitly here, same as the JUMP_IP resolution does.
+if [ "$ENABLE_EGRESS_BROKER" = "true" ]; then
+    EGRESS_BROKER_HOST_MANIFEST="${EGRESS_BROKER_HOST:-}"
+    EGRESS_HOST_ERR="$(mktemp 2>/dev/null || echo /dev/null)"
+    if EGRESS_BROKER_HOST="$(env DJINN_SUBNET="${DJINN_SUBNET:-}" DJINN_EGRESS_IP="${DJINN_EGRESS_IP:-}" DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/egress_service.py" ip 2>"$EGRESS_HOST_ERR")"; then
+        :
+    else
+        EGRESS_BROKER_HOST="$EGRESS_BROKER_HOST_MANIFEST"
+    fi
+    if [ -s "$EGRESS_HOST_ERR" ]; then
+        while IFS= read -r line; do
+            echo "  ⚠ egress: $line"
+        done < "$EGRESS_HOST_ERR"
+    fi
+    [ "$EGRESS_HOST_ERR" = "/dev/null" ] || rm -f "$EGRESS_HOST_ERR"
+fi
+
 # Scope the registry label to this DJINN_HOME. A shared Docker daemon may hold
 # several installations; a jump must never list another installation's bottles.
 JUMP_SCOPE_ERR="$(mktemp 2>/dev/null || echo /dev/null)"
@@ -368,6 +397,10 @@ echo "  ports='${HOST_MCP_PORTS:-none}' egress='${EGRESS:-none}' plugins='${PLUG
 # comments or blank lines inside it: a backslash-newline splices the next
 # line in, so a comment silently swallows the whole prefix chain and compose
 # runs with every one of these variables unset.
+# EGRESS_BROKER_HOST here is the resolved value from the egress_service.py
+# `ip` block above (live-bridge derivation after ensure_net), not the raw
+# manifest-derived one — bottles must file at the address the broker is
+# actually on. The chain comment above applies: this stays OUTSIDE the chain.
 CONTAINER_NAME="$NAME" \
 USER_UID="$USER_UID" USER_GID="$USER_GID" \
 RULES_PATH="$RULES_PATH" \
@@ -377,7 +410,7 @@ AGENTS_ENABLED="$AGENTS_ENABLED" \
 PLUGINS_ENABLED="$PLUGINS_ENABLED" \
 HOST_MCP_PORTS="$HOST_MCP_PORTS" EXTRA_ALLOWED_DOMAINS="$EGRESS" \
 ALLOWED_CIDRS="$EGRESS_CIDRS" \
-ENABLE_EGRESS_BROKER="$ENABLE_EGRESS_BROKER" EGRESS_BROKER_TOKEN="$EGRESS_BROKER_TOKEN" EGRESS_BROKER_HOST="${EGRESS_BROKER_HOST:-}" \
+ENABLE_EGRESS_BROKER="$ENABLE_EGRESS_BROKER" EGRESS_BROKER_TOKEN="$EGRESS_BROKER_TOKEN" EGRESS_BROKER_HOST="$EGRESS_BROKER_HOST" \
 KEYS_PATH="$KEYS_PATH" ARTIFACTS_PATH="$ARTIFACTS_PATH" BROWSER_TMP_PATH="$BROWSER_TMP_PATH" MEM_LIMIT="$MEM_LIMIT" \
 SSH_PORT="$SSH_PORT" SSH_BIND="$SSH_BIND" SSH_AUTHORIZED_KEY="${SSH_AUTHORIZED_KEY:-}" \
   JUMP_AUTHORIZED_KEY="${JUMP_AUTHORIZED_KEY:-}" \

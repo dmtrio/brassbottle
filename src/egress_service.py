@@ -645,6 +645,7 @@ def cmd_ip(env: dict[str, str] | None = None) -> int:
     else. up.sh-style consumers read stdout as a bare value, so warnings
     (subnet drift) go to stderr for this one call, like jump_host.cmd_ip."""
     env = os.environ if env is None else env
+    desired = djinn_net_addr.resolve_subnet(env)
     with contextlib.redirect_stdout(sys.stderr):
         try:
             raw = ensure_net.network_subnet(djinn_net_addr.NETWORK_NAME)
@@ -656,6 +657,16 @@ def cmd_ip(env: dict[str, str] | None = None) -> int:
                 subnet = ipaddress.IPv4Network(raw, strict=True)
             except ValueError:
                 subnet = None
+    # Same drift surface as cmd_start's own derivation (up.sh surfaces this
+    # line with a `⚠ egress:` prefix): ensure_net only WARNS on a drifted
+    # bridge and still returns 0, so the caller must be told which subnet the
+    # printed address actually came from.
+    if subnet is not None and subnet != desired:
+        print(
+            f"egress ip warn reason=subnet-drift live={subnet} "
+            f"desired={desired} — using the live bridge",
+            file=sys.stderr,
+        )
     print(djinn_net_addr.resolve_egress_ip(env=env, subnet=subnet))
     return 0
 
