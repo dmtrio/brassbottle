@@ -37,8 +37,8 @@ to the feature.
 
 `tests/egress.smoke.sh` is the Phase A end-to-end check for the egress broker,
 NFLOG reader, and host/container invariants. It needs a **Mac host** with Docker
-Desktop, a **running bottle**, and the host broker listening on **8816** (start
-it with `./djinn allow --watch` in another tmux window). It cannot run in CI or
+Desktop, a **running bottle**, and the egress broker compose singleton listening
+on **8816** (start the broker: `./djinn egress start`). It cannot run in CI or
 inside a container; in those environments it prints `SKIP` and exits zero.
 
 ```bash

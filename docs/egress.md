@@ -77,9 +77,6 @@ against local processes running as the same user. Local processes can already
 read the operator token file from disk, so loopback binding is the real trust
 boundary.
 
-`./djinn allow --watch` remains available for now and reads the same broker
-queue, but it is slated for deprecation in favor of the admin plane.
-
 ### Decision action mapping
 
 The admin UI posts one of five actions, mapped to broker `/decide`:
@@ -160,39 +157,7 @@ the process makes fails this way, and the only record is the `self_dial` log
 line. Before this was refused at the socket the same request was *filed*, and
 surfaced as an IP-literal approval prompt no operator answer could clear.
 
-### Type-ahead is discarded
-
-The input queue is flushed each time a prompt is rendered, so only keystrokes
-made **after** a question is on screen can answer it. Without that, anything
-typed while the watcher was polling is returned the instant the next prompt
-appears — silently answering a request the operator never read, and with
-`D`/`G` writing a persistent deny-list entry.
-
-If you type ahead deliberately, the keystrokes are dropped rather than queued;
-answer each request as it appears.
-
 ## Notifications
-
-### macOS banner / dialog
-
-On macOS, each new request triggers a `display dialog` prompt alongside the
-terminal UI. The dialog offers Allow and Deny; the terminal supports live
-allow, persist-to-manifest, deny, and skip.
-
-The Notification Center **banner** is fired by the poll loop as soon as a
-request appears, once per request, for every open request — not by the prompt.
-The watcher prompts one request at a time, so a banner welded to the prompt
-could not fire for anything queued behind an unanswered request. ntfy push is
-unaffected: it is dispatched daemon-side when the request is filed.
-
-### Skipping and IP-literal requests
-
-`[s]` defers a request for the rest of the session; the deferral is released
-when the queue drains. `[a]` on an **IP-literal** destination cannot install a
-rule (IP grants come from the manifest's `capabilities.egress_cidrs`), so the
-watcher prints what to edit and defers the request rather than re-prompting.
-
-### Push (ntfy)
 
 When `NTFY_URL` is set, every new egress request also publishes one ntfy push.
 Use the same values as the tmux idle notifier:
@@ -201,21 +166,20 @@ Use the same values as the tmux idle notifier:
 - `NTFY_TOPIC` — optional; defaults to `djinn-agents`
 - `NTFY_TOKEN` — optional bearer token for authenticated servers
 
-Set these in `$DJINN_HOME/secrets.env`, subscribe to the topic on each device,
-then restart `./djinn allow --watch`.
+Set these in `$DJINN_HOME/secrets.env` and subscribe to the topic on each
+device, then restart the egress service: `./djinn egress stop && ./djinn
+egress start`.
 
-Without `NTFY_URL`, notifications are terminal-only (plus the macOS dialog when
-applicable).
+Without `NTFY_URL`, no push is sent; open requests wait on the admin page
+(`./djinn egress url` from the service section).
 
 ### Action buttons
 
 ntfy action buttons appear only when the broker binds an address a device can
-dial: not loopback, and not the unspecified `0.0.0.0` / `::`. Use the concrete
-host IP the devices reach, for example:
-
-```bash
-./djinn allow --watch --host <wireguard-ip>
-```
+dial: not loopback, and not the unspecified `0.0.0.0` / `::`. Set the address
+the devices reach as `EGRESS_ACTIONS_URL` for the egress service (see the
+service section); unset, the pushes carry no buttons and the admin page is the
+decision surface.
 
 With actions enabled, each push includes HTTP buttons that call the broker
 `POST /decide` endpoint using the operator bearer token. That token is embedded
@@ -270,8 +234,8 @@ bypass with no `./djinn` front-end — it is not a `deny` flag).
 A `denied` event in the audit log (`$DJINN_HOME/run/egress/*.jsonl`) can be
 caused by a persisted deny-list entry in two ways: an already-denylisted zone
 short-circuits the request outright (no hold, no operator prompt), or a
-brand-new entry (`./djinn deny` / the watcher's D/G keys / `/decide` with
-`scope=bottle|global`) sweeps closed any request it now covers. Both cases
+brand-new entry (`./djinn deny` / the admin page's deny-always actions /
+`/decide` with `scope=bottle|global`) sweeps closed any request it now covers. Both cases
 write the same three fields to name the entry that caused the denial:
 
 - `via` — always the literal string `"denylist"`.

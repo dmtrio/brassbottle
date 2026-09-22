@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import threading
 import time
 import uuid
@@ -30,14 +29,9 @@ def load_operator_token(base_path: Path) -> str | None:
     return token or None
 
 
-def watcher_process_running() -> bool:
-    result = subprocess.run(
-        ["pgrep", "-f", "egress_watch.py"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0
+def broker_singleton_running() -> bool:
+    """Detect the compose-singleton broker on its published 8816 health port."""
+    return smoke.broker_health_ok("127.0.0.1", smoke.BROKER_PORT)
 
 
 def post_decide_allow(
@@ -271,7 +265,7 @@ def run_smoke_phase_b(
 
     summary.skip(
         ":80 deny returns 403",
-        "requires interactive ./djinn allow --watch deny (not automatable here)",
+        "requires an interactive deny on the admin page (not automatable here)",
     )
 
     # Version-sensitive strings observed on OpenSSL 3 in this image:
@@ -300,12 +294,12 @@ def run_smoke_phase_b(
     if not operator_token:
         summary.skip(
             "approve mid-hold splices",
-            "no operator token — start ./djinn allow --watch on the host",
+            "no operator token — start the broker: ./djinn egress start",
         )
-    elif not watcher_process_running():
+    elif not broker_singleton_running():
         summary.skip(
             "approve mid-hold splices",
-            "no ./djinn allow --watch process detected on host",
+            "no broker on http://127.0.0.1:8816/health — start the broker: ./djinn egress start",
         )
     else:
         hold_host = broker.normalize_host(f"smoke-hold-{uuid.uuid4().hex[:8]}.example.com")
