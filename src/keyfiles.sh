@@ -169,7 +169,7 @@ write_keyfiles() {
     local keys_dir="$1" shim_agents="$2" plugin_env_secrets="$3" agent_secrets="$4" \
         git_host_tokens="${5:-}" git_token_source="${6:-}" \
         git_identity_host_tokens="${7:-}" git_identity_token_sources="${8:-}"
-    local shared="" slot src hint agent a f line pairs cli_source block
+    local shared="" slot src hint agent a f line pairs cli_source
 
     # Shared block: legacy passthroughs. The heredoc keeps the loop in this
     # shell so the warns aren't lost to a pipe subshell.
@@ -185,14 +185,17 @@ $plugin_env_secrets
 EOF
 
     # Every shim agent's file: plugin slots + ITS OWN git block (its
-    # identity's table, GH_TOKEN from its own CLI row). chmod 600 as each
+    # identity's table, GH_TOKEN from its own CLI row). Written with a group
+    # redirect (NOT a variable round-trip: $(…) strips the block's trailing
+    # newline, and the plugin-secret append below would fuse onto the last
+    # git line, corrupting GH_TOKEN and losing the slot). chmod 600 as each
     # file is created — it already holds secret values, so don't leave it at
     # the umask default even for the window until the trailing chmod.
     for a in $shim_agents; do
         pairs=$(identity_table "$a" "$git_host_tokens" "$git_identity_host_tokens")
         cli_source=$(identity_source "$a" "$git_token_source" "$git_identity_token_sources")
-        block="$shared$(git_env_block "$pairs" "$cli_source")"
-        printf '%s' "$block" > "$keys_dir/$a.env"; chmod 600 "$keys_dir/$a.env"
+        { printf '%s' "$shared"; git_env_block "$pairs" "$cli_source"; } > "$keys_dir/$a.env"
+        chmod 600 "$keys_dir/$a.env"
     done
 
     # user.env: the `user` identity (the human's interactive shell, sourced

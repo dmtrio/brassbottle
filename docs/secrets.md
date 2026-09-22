@@ -101,19 +101,6 @@ Each identity's table still holds every host's catch-all row, so a repo
 whose token must be unreachable by other work belongs in a separate
 container.
 
-At `up`, a repo on host `<host>` authenticates with the token variable its
-table row names — resolved by the `git-credential-org` helper on every
-fetch/push, and presented to no other host. A host with no row defers only
-to a stored `gh` login for exactly that host (an exact key in gh's hosts
-file; gh's token environment variables are stripped before gh runs, so
-only the stored login can answer); otherwise the helper names the missing
-`git.hosts.<host>.token` and tells git to quit, so a private clone fails
-immediately instead of prompting. `http://` repo URLs
-are rejected outright (no credential over cleartext). This is routing +
-attribution, not isolation: every host's token sits in each agent's
-`<agent>.env`, so a repo whose token must be unreachable by other work
-belongs in a separate container.
-
 A `git.hosts` value is either a map (one row serving every identity) or a
 list of per-identity entries (see above). Its optional `name`/`email`
 fields are per-HOST author attribution and are rejected inside a list-form
