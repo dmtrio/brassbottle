@@ -17,6 +17,7 @@ Usage: ./djinn <subcommand> [args...]
   backup   <cmd> [args...]     singleton artifact backup (start/stop/status/.../browser)
   jump     <cmd> [args...]     singleton mosh jump container (start/refresh/stop/status/logs/pubkey/ip)
   tunnel   <cmd> [args...]     singleton VPN/tunnel connector (start/stop/status/logs)
+  egress   <cmd> [args...]     singleton egress broker + admin page (start/stop/status/logs/url/ip)
   admin    [--port N]               admin plane UI daemon (http://127.0.0.1:8817)
   versions audit                 read-only audit of the version-selection
                                    inventory (versions.yml + version-locations.yml)
@@ -36,6 +37,7 @@ case "${1:-}" in
     service) shift; exec "$SCRIPT_DIR/service.sh" "$@" ;;
     backup)  shift; exec "$SCRIPT_DIR/backup.sh" "$@" ;;
     jump)    shift; exec "$SCRIPT_DIR/jump.sh" "$@" ;;
+    egress)  shift; exec "$SCRIPT_DIR/egress.sh" "$@" ;;
     tunnel)  shift; exec "$SCRIPT_DIR/tunnel.sh" "$@" ;;
     admin)
         shift
