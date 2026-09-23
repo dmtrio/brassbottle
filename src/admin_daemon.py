@@ -169,6 +169,15 @@ APP_HTML = """<!doctype html>
     .small { font-size: 12px; color: var(--muted); }
     input[type=text] { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; background: var(--panel); color: var(--fg); }
     .empty { color: var(--muted); padding: 8px 0; }
+    /* Phone width: a request row stacks its four cells so the actions never
+       push the table past the viewport; the column name becomes a label. */
+    @media (max-width: 640px) {
+      table thead { display: none; }
+      table tr { display: block; border-bottom: 1px solid var(--line); padding: 6px 0; }
+      table tr.group-row { padding: 6px; }
+      table td { display: block; border-bottom: none; padding: 3px 6px; }
+      table td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: 12px; }
+    }
   </style>
 </head>
 <body>
