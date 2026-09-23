@@ -89,7 +89,8 @@ class Mock(BaseHTTPRequestHandler):
             with LOCK:
                 STATE["decides"].append({"headers": {k: v for k, v in self.headers.items() if k in ("Content-Type", "X-Admin-UI")}, "body": body})
             failures = [{"request_id": "a2", "reason": "ip_requires_cidr"}] if body.get("host") == "192.0.2.55" else []
-            return self._send(200, {"decided": ["x"], "apply_failures": failures})
+            # the admin proxy's shape: ok, a numeric decided count, apply_failures
+            return self._send(200, {"ok": True, "decided": 1, "apply_failures": failures})
         self._send(404, {"error": "not found"})
 
 
@@ -169,8 +170,8 @@ def main() -> int:
             page.locator("tbody tr").nth(4).get_by_role("button", name=name, exact=True).click()
             page.wait_for_timeout(400)
             body = STATE["decides"][-1]["body"]
-            check(body.get("action") == action and body.get("container") == "bottle-b" and body.get("host") == "x.example.com",
-                  f"{name} posts {action} with container bottle-b: {body}")
+            check(body == {"action": action, "host": "x.example.com", "container": "bottle-b"},
+                  f"{name} posts exactly {{action, host, container}} for bottle-b: {body}")
         page.locator("tbody tr").nth(2).get_by_role("button", name="Allow", exact=True).click()
         page.wait_for_timeout(500)
         check("recorded - add CIDR to manifest by hand" in page.locator("tbody tr").nth(2).inner_text(), "IP-literal allow shows the CIDR-by-hand chip")
