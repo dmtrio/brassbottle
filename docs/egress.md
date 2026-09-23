@@ -77,6 +77,39 @@ against local processes running as the same user. Local processes can already
 read the operator token file from disk, so loopback binding is the real trust
 boundary.
 
+### The open-requests table
+
+The queue panel renders open requests in one table grouped by bottle (the
+`container` field). A group header row per bottle shows the bottle name and its
+open count; bottles appear in first-seen order of `opened_at`, and each
+bottle's requests follow in `opened_at` order. Each request row has four
+columns:
+
+- **Requested** — `opened_at` rendered in the browser's local time as
+  `YYYY-MM-DD HH:MM:SS`; hovering shows the raw UTC timestamp.
+- **Destination** — `host:port`, with an `IP` badge on IP-literal hosts and the
+  hit count alongside; `uid` and `comm` are shown on hover.
+- **Reason** — the operator-visible filing reason, or an em-dash when none.
+- **Actions** — the five decision buttons: allow live, allow + manifest, deny
+  once, deny always (bottle), deny always (global), plus the optional deny
+  reason input. Denying globally requires typing the exact host in the input
+  beside the buttons (confirmed on the same row); a mismatched name is refused
+  with an inline chip. When the broker reports `attempt`/`last_error` for a
+  row, a chip on this cell shows `apply failed ×N: <reason>`.
+
+Every row keeps the honesty chips from `POST /api/egress/decide`
+(`apply_failed`, `ip_requires_cidr`, the "decision recorded" fallback) and
+disables its buttons while a decision is in flight.
+
+### Recent decisions
+
+Below the table, a second section "Recent decisions (24 h)" lists rows the
+broker decided in the last 24 hours, newest first: decided time (local, UTC on
+hover), bottle, destination, outcome (status and scope, plus the apply status
+when it is not `applied`, plus the deny reason when set) and who decided it
+(`decided_by`). A broker that does not report a `recent` list renders nothing
+for this section.
+
 ### Decision action mapping
 
 The admin UI posts one of five actions, mapped to broker `/decide`:

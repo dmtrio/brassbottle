@@ -157,7 +157,8 @@ APP_HTML = """<!doctype html>
     .banner.error { border-color: var(--error); color: var(--error); }
     table { width: 100%; border-collapse: collapse; }
     th, td { border-bottom: 1px solid var(--line); padding: 6px; text-align: left; vertical-align: top; }
-    .host-group { background: color-mix(in srgb, var(--panel) 70%, var(--line)); font-weight: 600; }
+    .group-row { background: color-mix(in srgb, var(--panel) 70%, var(--line)); font-weight: 600; }
+    .recent-heading { font-size: 14px; margin: 0 0 8px; }
     .badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-left: 6px; font-size: 12px; color: var(--muted); }
     .chip { display: inline-block; margin-top: 4px; border-radius: 999px; padding: 2px 8px; border: 1px solid var(--line); font-size: 12px; }
     .chip.error { border-color: var(--error); color: var(--error); }

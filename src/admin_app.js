@@ -10,13 +10,24 @@ import {
 const POLL_MS = 2000;
 const TITLE_BASE = "Egress queue - Djinn admin";
 
-function ageString(seconds) {
-  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
-    return "-";
-  }
-  if (seconds < 60) return Math.floor(seconds) + "s";
-  if (seconds < 3600) return Math.floor(seconds / 60) + "m";
-  return Math.floor(seconds / 3600) + "h";
+function localTimestamp(iso) {
+  if (typeof iso !== "string" || !iso) return "-";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    date.getFullYear() +
+    "-" +
+    pad(date.getMonth() + 1) +
+    "-" +
+    pad(date.getDate()) +
+    " " +
+    pad(date.getHours()) +
+    ":" +
+    pad(date.getMinutes()) +
+    ":" +
+    pad(date.getSeconds())
+  );
 }
 
 function staleMessageWithSince(errorText, sinceDate) {
@@ -52,11 +63,18 @@ function RequestRow({
   message,
 }) {
   const hostPort = String(row.host || "") + ":" + String(row.port == null ? "" : row.port);
+  const openedTitle = String(row.opened_at || "");
+  const uidComm = [];
+  if (row.uid != null) uidComm.push("uid " + String(row.uid));
+  if (row.comm) uidComm.push(String(row.comm));
+  const lastError =
+    row.last_error && typeof row.last_error === "object" && !Array.isArray(row.last_error)
+      ? row.last_error
+      : null;
   return html`
     <tr>
-      <td>${ageString(row.age_seconds)}</td>
-      <td>${String(row.container || "")}</td>
-      <td>
+      <td title=${openedTitle}>${localTimestamp(row.opened_at)}</td>
+      <td title=${uidComm.join(" - ")}>
         ${hostPort}
         ${row.host_is_ip
           ? html`<span
@@ -65,11 +83,11 @@ function RequestRow({
               >IP</span
             >`
           : null}
+        ${row.hit_count == null
+          ? null
+          : html`<span class="badge">${String(row.hit_count)} hits</span>`}
       </td>
-      <td>${String(row.uid == null ? "" : row.uid)}</td>
-      <td>${String(row.comm || "")}</td>
-      <td>${String(row.hit_count == null ? "" : row.hit_count)}</td>
-      <td>${String(row.reason || "")}</td>
+      <td>${row.reason ? String(row.reason) : "\u2014"}</td>
       <td>
         <div class="actions">
           <button type="button" disabled=${inflight} onClick=${() => onDecide(row, "allow_live", "", "")}>
@@ -123,42 +141,14 @@ function RequestRow({
           value=${globalArmValue}
           onInput=${(event) => onGlobalArmChange(row.request_id, event.currentTarget.value)}
         />
+        ${lastError
+          ? html`<div class="chip error"
+              >apply failed \u00d7${String(lastError.attempt == null ? "?" : lastError.attempt)}:
+              ${String(lastError.reason || "")}</div
+            >`
+          : null}
         ${message
           ? html`<div class=${message.type === "error" ? "chip error" : "chip"}>${message.text}</div>`
-          : null}
-      </td>
-    </tr>
-  `;
-}
-
-function HostGroup({ host, rows, armValue, onArmChange, onGlobalDeny, message }) {
-  if (rows.length <= 1) return null;
-  let totalHits = 0;
-  for (const row of rows) totalHits += Number(row.hit_count || 0);
-  return html`
-    <tr class="host-group">
-      <td colspan="8">
-        ${host + " - " + rows.length + " request(s), " + totalHits + " hits"}
-        <span> </span>
-        <input
-          type="text"
-          maxlength="200"
-          placeholder="Type host to arm global deny"
-          value=${armValue}
-          onInput=${(event) => onArmChange(host, event.currentTarget.value)}
-        />
-        <button
-          type="button"
-          class="error"
-          style="margin-left: 8px;"
-          onClick=${() => onGlobalDeny(host, rows, armValue)}
-        >
-          Deny always (global)
-        </button>
-        ${message
-          ? html`<span class=${message.type === "error" ? "chip error" : "chip"} style="margin-left: 8px;"
-              >${message.text}</span
-            >`
           : null}
       </td>
     </tr>
@@ -173,20 +163,21 @@ function QueuePanel({
   globalArmByKey,
   onReasonChange,
   onGlobalArmChange,
-  onGroupArmChange,
   onDecide,
-  onGroupGlobalDeny,
 }) {
   const openRows = Array.isArray(data.open) ? data.open.slice() : [];
   openRows.sort((a, b) => {
-    const aa = typeof a.age_seconds === "number" ? a.age_seconds : 0;
-    const bb = typeof b.age_seconds === "number" ? b.age_seconds : 0;
-    return bb - aa;
+    const aa = String(a.opened_at || "");
+    const bb = String(b.opened_at || "");
+    if (aa !== bb) return aa < bb ? -1 : 1;
+    const ia = String(a.request_id || "");
+    const ib = String(b.request_id || "");
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
   });
 
   const groups = new Map();
   for (const row of openRows) {
-    const key = String(row.host || "");
+    const key = String(row.container || "");
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
@@ -205,17 +196,13 @@ function QueuePanel({
   }
 
   const bodyRows = [];
-  for (const host of groups.keys()) {
-    const rows = groups.get(host);
-    const groupKey = "__group__:" + host;
-    bodyRows.push(html`<${HostGroup}
-      host=${host}
-      rows=${rows}
-      armValue=${globalArmByKey[groupKey] || ""}
-      onArmChange=${onGroupArmChange}
-      onGlobalDeny=${onGroupGlobalDeny}
-      message=${rowMessage[groupKey] || null}
-    />`);
+  for (const container of groups.keys()) {
+    const rows = groups.get(container);
+    bodyRows.push(html`
+      <tr class="group-row">
+        <td colspan="4">${container + " - " + rows.length + " request(s)"}</td>
+      </tr>
+    `);
     for (const row of rows) {
       const key = String(row.request_id || "");
       bodyRows.push(html`<${RequestRow}
@@ -238,18 +225,60 @@ function QueuePanel({
       <table>
         <thead>
           <tr>
-            <th>Age</th>
-            <th>Container</th>
-            <th>Host:port</th>
-            <th>UID</th>
-            <th>Comm</th>
-            <th>Hits</th>
+            <th>Requested</th>
+            <th>Destination</th>
             <th>Reason</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           ${bodyRows}
+        </tbody>
+      </table>
+    </section>
+  `;
+}
+
+function RecentRow({ row }) {
+  const hostPort = String(row.host || "") + ":" + String(row.port == null ? "" : row.port);
+  const outcomeBits = [String(row.status == null ? "" : row.status)];
+  if (row.scope != null) outcomeBits.push(String(row.scope));
+  let outcome = outcomeBits.filter(Boolean).join(" / ");
+  if (row.apply_status && row.apply_status !== "applied") {
+    outcome += " (apply: " + String(row.apply_status) + ")";
+  }
+  if (row.deny_reason) {
+    outcome += " - " + String(row.deny_reason);
+  }
+  return html`
+    <tr>
+      <td title=${String(row.decided_at || "")}>${localTimestamp(row.decided_at)}</td>
+      <td>${String(row.container || "")}</td>
+      <td>${hostPort}</td>
+      <td>${outcome}</td>
+      <td>${String(row.decided_by || "")}</td>
+    </tr>
+  `;
+}
+
+function RecentPanel({ recent }) {
+  const rows = Array.isArray(recent) ? recent : [];
+  if (rows.length === 0) return null;
+  return html`
+    <section class="panel">
+      <h2 class="recent-heading">Recent decisions (24 h)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Decided</th>
+            <th>Bottle</th>
+            <th>Destination</th>
+            <th>Outcome</th>
+            <th>By</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row, index) => html`<${RecentRow} key=${index} row=${row} />`)}
         </tbody>
       </table>
     </section>
@@ -369,11 +398,6 @@ function App() {
     setGlobalArmByKey((prev) => ({ ...prev, [requestId]: value }));
   }, []);
 
-  const onGroupArmChange = useCallback((host, value) => {
-    const key = "__group__:" + host;
-    setGlobalArmByKey((prev) => ({ ...prev, [key]: value }));
-  }, []);
-
   const onDecide = useCallback(
     (row, action, reason, requireHostText, messageKey) => {
       const key = String(messageKey || row.request_id || "");
@@ -447,21 +471,6 @@ function App() {
     [pollNow, setInflight, setRowChip]
   );
 
-  const onGroupGlobalDeny = useCallback(
-    (host, rows, armValue) => {
-      const first = rows[0];
-      if (!first) return;
-      onDecide(
-        { request_id: "__group__:" + host, host: host, container: first.container },
-        "deny_global",
-        "",
-        armValue,
-        "__group__:" + host
-      );
-    },
-    [onDecide]
-  );
-
   return html`
     <header>
       <h1>Djinn admin</h1>
@@ -482,10 +491,9 @@ function App() {
         globalArmByKey=${globalArmByKey}
         onReasonChange=${onReasonChange}
         onGlobalArmChange=${onGlobalArmChange}
-        onGroupArmChange=${onGroupArmChange}
         onDecide=${onDecide}
-        onGroupGlobalDeny=${onGroupGlobalDeny}
       />
+      <${RecentPanel} recent=${data.recent} />
     </main>
     <footer class="small">
       Shows open approval requests (decisions), not currently-permitted hosts — the ipset allowlist is the authority.
