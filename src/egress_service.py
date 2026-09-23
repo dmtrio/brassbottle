@@ -191,7 +191,13 @@ def build_compose_spec(
     return {
         "networks": {
             "djinn-net": {"name": djinn_net_addr.NETWORK_NAME, "external": True},
-            "egress-backend": {"internal": True},
+            # A plain private bridge, deliberately NOT `internal: true`: docker
+            # drops the host publish of a container whose only network is
+            # internal, which left the admin at 8817/tcp with no
+            # 127.0.0.1:8817 mapping on the first host smoke. Bottles still
+            # cannot reach it: they sit on djinn-net, and docker isolates one
+            # bridge from another.
+            "egress-backend": {"driver": "bridge"},
         },
         "services": {
             SERVICE_BROKER: {
