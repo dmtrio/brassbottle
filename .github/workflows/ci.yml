@@ -2,8 +2,8 @@
 # `workflow` scope, so a human moves this file into .github/workflows/ and a
 # follow-up commit removes this staged copy.
 #
-# This revision wires tests/remote.test.sh and the landing-GC unit tests into
-# the test job: PR #99 added ~10 contract checks there that nothing executed.
+# This revision runs the admin contract tests (tests/test_admin_contract.py,
+# tests/test_admin_contract_validator.py) added with admin/contract/.
 name: ci
 
 on:
@@ -34,6 +34,11 @@ jobs:
         run: python3 -m unittest tests.test_jump_config tests.test_jump_registry tests.test_jump_picker tests.test_jump_host -v
       - name: Landing-GC unit tests
         run: python3 -m unittest tests.test_tmux_landing_gc -v
+      - name: Admin contract tests
+        # The broker's queue_snapshot() and /decide bodies are validated against
+        # admin/contract/*.schema.json; a field added, removed or renamed on
+        # either side without updating the schema fails here.
+        run: python3 -m unittest tests.test_admin_contract tests.test_admin_contract_validator -v
       - name: Image builds
         # "If it ships, CI builds it": the shared image is the artifact
         # every container runs, so a PR that breaks the Dockerfile must fail.
