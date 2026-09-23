@@ -376,6 +376,33 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    def test_health_answers_without_session_and_without_upstream(self):
+        """`./djinn egress status` probes GET /health on the admin; it must
+        answer 200 {"status": "ok"} with no cookie, set no cookie, and never
+        touch the broker (the stub records every upstream call)."""
+        state = _StubBrokerState()
+        stub, stub_thread = self._start_stub(state)
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(
+                Path(tmp),
+                env={"EGRESS_BROKER_URL": f"http://127.0.0.1:{stub.server_address[1]}"},
+            )
+            host, port = server.server_address
+            try:
+                state.reset_calls()
+                status, payload, headers, _raw = self._request(host, port, "GET", "/health")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload, {"status": "ok"})
+                self.assertIsNone(headers.get("Set-Cookie"))
+                self.assertEqual(state.calls, [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+        stub.shutdown()
+        stub.server_close()
+        join_thread_or_fail(stub_thread, label="stub")
+
     def test_manifest_is_valid_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             server, thread = self._start_admin(Path(tmp))
