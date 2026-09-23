@@ -7,8 +7,6 @@ import socket
 import threading
 import time
 
-import egress_broker_host as broker
-
 
 def wait_for_tcp_listening(
     host: str,
@@ -30,30 +28,6 @@ def wait_for_tcp_listening(
     raise TimeoutError(
         f"TCP {host}:{port} not accepting connections after {timeout}s: {last_error}"
     )
-
-
-def wait_for_broker_open_request(
-    b: broker.EgressBroker,
-    *,
-    count: int = 1,
-    timeout: float = 10.0,
-    poll: float = 0.01,
-) -> str:
-    """Poll until the broker's store has at least `count` open rows; return one id.
-
-    Waiting on the observable state — the request actually reaching the
-    store — rather than on a fixed sleep is what keeps these tests steady
-    on a loaded CI runner. (file_request is synchronous now; this helper
-    still exists for the HTTP-path tests where the filing happens on a
-    server thread.)
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        rows = b._store.list_open()
-        if len(rows) >= count:
-            return rows[0].request_id
-        time.sleep(poll)
-    raise TimeoutError(f"broker had fewer than {count} open request(s) after {timeout}s")
 
 
 def join_thread_or_fail(
