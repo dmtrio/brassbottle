@@ -1741,6 +1741,61 @@ class EgressBrokerHostTests(unittest.TestCase):
             self.assertNotEqual(id3, id1, "a repeat after the window opens a NEW row")
             self.assertEqual(b._store.get(id3).hit_count, 1)
 
+    def test_denylist_short_circuit_log_info_gated_to_suppress_window(self):
+        """The short-circuit INFO log is gated to the suppression window the
+        same way the store event is: only the window-opening hit logs, with
+        the count of hits suppressed since the last logged one surfaced on
+        the next logged hit so nothing vanishes silently."""
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = FakeClock(NOW)
+            b = self._broker(Path(tmp), clock, hold_seconds=5)
+            b._denylist.add(zone="datadoghq.com", scope="global")
+            with self.assertLogs(broker.LOG, level="INFO") as captured:
+                for _ in range(4):
+                    b.file_request("coding-brassbottle", "datadoghq.com", 443)
+                    clock.advance(1)
+            lines = [
+                r.getMessage() for r in captured.records if "denylist short_circuit" in r.getMessage()
+            ]
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn("suppressed=0", lines[0])
+            clock.advance(broker.DENYLIST_SUPPRESS_SECONDS + 1)
+            with self.assertLogs(broker.LOG, level="INFO") as captured2:
+                for _ in range(3):
+                    b.file_request("coding-brassbottle", "datadoghq.com", 443)
+                    clock.advance(1)
+            lines2 = [
+                r.getMessage() for r in captured2.records if "denylist short_circuit" in r.getMessage()
+            ]
+            self.assertEqual(len(lines2), 1, lines2)
+            self.assertIn("suppressed=3", lines2[0])
+
+    def test_denylist_suppressed_evicted_hits_are_logged_not_dropped_silently(self):
+        """A key evicted by the prune while still carrying an unsurfaced
+        suppressed count logs one suppressed_evict INFO line naming the
+        container, the zone and the count, instead of vanishing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = FakeClock(NOW)
+            b = self._broker(Path(tmp), clock, hold_seconds=5)
+            b._denylist.add(zone="old-zone.example.com", scope="global")
+            b._denylist.add(zone="new-zone.example.com", scope="global")
+            b.file_request("coding-brassbottle", "old-zone.example.com", 443)
+            b.file_request("coding-brassbottle", "old-zone.example.com", 443)
+            self.assertEqual(
+                b._denylist_hits[("coding-brassbottle", "old-zone.example.com")].suppressed, 1
+            )
+            clock.advance(broker.DENYLIST_SUPPRESS_SECONDS + 1)
+            with self.assertLogs(broker.LOG, level="INFO") as captured:
+                b.file_request("coding-brassbottle", "new-zone.example.com", 443)
+            evict_lines = [
+                r.getMessage() for r in captured.records if "suppressed_evict" in r.getMessage()
+            ]
+            self.assertEqual(len(evict_lines), 1, evict_lines)
+            self.assertIn("container=coding-brassbottle", evict_lines[0])
+            self.assertIn("zone=old-zone.example.com", evict_lines[0])
+            self.assertIn("suppressed=1", evict_lines[0])
+            self.assertNotIn(("coding-brassbottle", "old-zone.example.com"), b._denylist_hits)
+
     def test_denylist_coalescing_keys_by_matched_zone_not_raw_host(self):
         """Distinct subdomains under the same denylisted zone coalesce
         TOGETHER (one row per zone per window), not one window per raw host."""
