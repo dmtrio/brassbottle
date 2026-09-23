@@ -73,8 +73,8 @@ function RequestRow({
       : null;
   return html`
     <tr>
-      <td title=${openedTitle}>${localTimestamp(row.opened_at)}</td>
-      <td title=${uidComm.join(" - ")}>
+      <td data-label="Requested" title=${openedTitle}>${localTimestamp(row.opened_at)}</td>
+      <td data-label="Destination" title=${uidComm.join(" - ")}>
         ${hostPort}
         ${row.host_is_ip
           ? html`<span
@@ -87,8 +87,8 @@ function RequestRow({
           ? null
           : html`<span class="badge">${String(row.hit_count)} hits</span>`}
       </td>
-      <td>${row.reason ? String(row.reason) : "\u2014"}</td>
-      <td>
+      <td data-label="Reason">${row.reason ? String(row.reason) : "\u2014"}</td>
+      <td data-label="Actions">
         <div class="actions">
           <button type="button" disabled=${inflight} onClick=${() => onDecide(row, "allow_live", "", "")}>
             Allow
@@ -252,11 +252,11 @@ function RecentRow({ row }) {
   }
   return html`
     <tr>
-      <td title=${String(row.decided_at || "")}>${localTimestamp(row.decided_at)}</td>
-      <td>${String(row.container || "")}</td>
-      <td>${hostPort}</td>
-      <td>${outcome}</td>
-      <td>${String(row.decided_by || "")}</td>
+      <td data-label="Decided" title=${String(row.decided_at || "")}>${localTimestamp(row.decided_at)}</td>
+      <td data-label="Bottle">${String(row.container || "")}</td>
+      <td data-label="Destination">${hostPort}</td>
+      <td data-label="Outcome">${outcome}</td>
+      <td data-label="By">${String(row.decided_by || "")}</td>
     </tr>
   `;
 }
