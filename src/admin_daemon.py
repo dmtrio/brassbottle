@@ -457,6 +457,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         routes: dict[tuple[str, str], Callable[[], None]] = {
             ("GET", "/"): self._handle_root,
+            ("GET", "/health"): self._handle_health,
             ("GET", "/session"): self._handle_session_get,
             ("GET", "/app.js"): self._handle_app_js,
             ("GET", "/vendor/htm-preact-standalone.module.js"): self._handle_vendor_js,
@@ -559,6 +560,13 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return
         LOG.info("admin session refused path=/session reason=%s", "missing" if not provided else "mismatch")
         self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+
+    def _handle_health(self) -> None:
+        # Liveness for `./djinn egress status` and the compose health wait:
+        # no session, no cookie, no upstream call, nothing revealed. The
+        # broker answers the same route; without this the status line read
+        # "unreachable" for a perfectly healthy admin.
+        self._send_json(HTTPStatus.OK, {"status": "ok"})
 
     def _handle_manifest(self) -> None:
         body = json.dumps(MANIFEST, separators=(",", ":")).encode("utf-8")
