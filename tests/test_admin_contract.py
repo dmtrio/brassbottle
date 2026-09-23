@@ -3,7 +3,8 @@
 
 Seeds a real EgressStore/EgressBroker (temp dir, no mocks of the broker or
 store) with every row shape the operator queue can carry, then asserts
-queue_snapshot() and a real /decide (allow, IP literal) response body
+queue_snapshot(), the three /decide success bodies (allow, deny once,
+persistent deny) and its error bodies (400 per validation branch, 401)
 validate against the JSON Schemas in admin/contract/. Adding, removing or
 renaming a broker field without updating the schema fails here.
 """
@@ -65,26 +66,27 @@ class AdminContractTests(unittest.TestCase):
 
         def stop_server() -> None:
             server.shutdown()
+            server.server_close()
             join_thread_or_fail(thread, label="broker server")
 
         self.addCleanup(stop_server)
         return host, port
 
     def _post_decide(self, host: str, port: int, payload: dict) -> tuple[int, dict]:
+        return self._post_raw(host, port, json.dumps(payload).encode("utf-8"))
+
+    def _post_raw(
+        self, host: str, port: int, body: bytes, *, authorized: bool = True
+    ) -> tuple[int, dict]:
+        headers = {"Content-Type": "application/json"}
+        if authorized:
+            headers["Authorization"] = f"Bearer {self.OPERATOR_TOKEN}"
         conn = HTTPConnection(host, port, timeout=5)
-        conn.request(
-            "POST",
-            "/decide",
-            json.dumps(payload),
-            {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.OPERATOR_TOKEN}",
-            },
-        )
+        conn.request("POST", "/decide", body, headers)
         resp = conn.getresponse()
-        body = json.loads(resp.read().decode("utf-8"))
+        parsed = json.loads(resp.read().decode("utf-8"))
         conn.close()
-        return resp.status, body
+        return resp.status, parsed
 
     def _seed(self, b: broker.EgressBroker) -> dict[str, str]:
         """File every row shape the queue can carry; return ids by role."""
@@ -313,6 +315,31 @@ class AdminContractTests(unittest.TestCase):
             open_row = snapshot["open"][0]
             self.assertEqual(open_row["request_id"], request_id)
             self.assertEqual(open_row["last_error"]["reason"], "ip_requires_cidr")
+
+    # One request per distinct error branch of _handle_decide_post, plus the
+    # operator auth gate in front of it, each through the real HTTP handler.
+    # The 500 branch needs decide() itself to fail; it builds the same
+    # {"error": ...} body and is not driven here.
+    DECIDE_ERROR_CASES = (
+        ("invalid json", b"{not json", True, HTTPStatus.BAD_REQUEST),
+        ("host missing", b'{"decision": "allow", "scope": "live", "container": "c"}', True, HTTPStatus.BAD_REQUEST),
+        ("bad decision", b'{"host": "x.example.com", "decision": "maybe"}', True, HTTPStatus.BAD_REQUEST),
+        ("reason on allow", b'{"host": "x.example.com", "decision": "allow", "scope": "live", "container": "c", "reason": "r"}', True, HTTPStatus.BAD_REQUEST),
+        ("bad scope", b'{"host": "x.example.com", "decision": "allow", "scope": "forever", "container": "c"}', True, HTTPStatus.BAD_REQUEST),
+        ("unauthorized", b'{"host": "x.example.com", "decision": "deny", "scope": "once", "container": "c"}', False, HTTPStatus.UNAUTHORIZED),
+    )
+
+    def test_decide_error_bodies_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            host, port = self._serve(root, b)
+            for label, body, authorized, status in self.DECIDE_ERROR_CASES:
+                with self.subTest(case=label):
+                    got_status, parsed = self._post_raw(host, port, body, authorized=authorized)
+                    self.assertEqual(got_status, status, parsed)
+                    self.assertEqual(validate_document(parsed, "error_response.schema.json"), [])
+                    self.assertTrue(parsed["error"])
 
 
 if __name__ == "__main__":

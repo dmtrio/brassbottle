@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ErrorResponse",
+  "description": "Body of every non-200 response from the broker's operator endpoints (/decide: 400 validation errors and invalid JSON, 401 unauthorized, 500 decide failure). One human-readable string; the admin UI shows it on the row (400) or as the stale banner (5xx).",
+  "$comment": "Emitted by _handle_decide_post and _resolve_operator_auth in src/egress_broker_host.py via self._send_json(<status>, {\"error\": ...}).",
+  "type": "object",
+  "properties": {
+    "error": {"type": "string"}
+  },
+  "required": ["error"],
+  "additionalProperties": false
+}
