@@ -76,11 +76,15 @@ class AdminContractTests(unittest.TestCase):
         return self._post_raw(host, port, json.dumps(payload).encode("utf-8"))
 
     def _post_raw(
-        self, host: str, port: int, body: bytes, *, authorized: bool = True
+        self, host: str, port: int, body: bytes, *, authorization: str | None = "operator"
     ) -> tuple[int, dict]:
+        """POST /decide. authorization: "operator" sends the real token, None
+        omits the header, any other string is sent verbatim."""
         headers = {"Content-Type": "application/json"}
-        if authorized:
+        if authorization == "operator":
             headers["Authorization"] = f"Bearer {self.OPERATOR_TOKEN}"
+        elif authorization is not None:
+            headers["Authorization"] = authorization
         conn = HTTPConnection(host, port, timeout=5)
         conn.request("POST", "/decide", body, headers)
         resp = conn.getresponse()
@@ -318,15 +322,23 @@ class AdminContractTests(unittest.TestCase):
 
     # One request per distinct error branch of _handle_decide_post, plus the
     # operator auth gate in front of it, each through the real HTTP handler.
-    # The 500 branch needs decide() itself to fail; it builds the same
-    # {"error": ...} body and is not driven here.
+    # The two branches that need broker state (EgressBrokerHostError -> 400,
+    # persist failure -> 500) have their own tests below.
     DECIDE_ERROR_CASES = (
-        ("invalid json", b"{not json", True, HTTPStatus.BAD_REQUEST),
-        ("host missing", b'{"decision": "allow", "scope": "live", "container": "c"}', True, HTTPStatus.BAD_REQUEST),
-        ("bad decision", b'{"host": "x.example.com", "decision": "maybe"}', True, HTTPStatus.BAD_REQUEST),
-        ("reason on allow", b'{"host": "x.example.com", "decision": "allow", "scope": "live", "container": "c", "reason": "r"}', True, HTTPStatus.BAD_REQUEST),
-        ("bad scope", b'{"host": "x.example.com", "decision": "allow", "scope": "forever", "container": "c"}', True, HTTPStatus.BAD_REQUEST),
-        ("unauthorized", b'{"host": "x.example.com", "decision": "deny", "scope": "once", "container": "c"}', False, HTTPStatus.UNAUTHORIZED),
+        ("invalid json", b"{not json", "operator", HTTPStatus.BAD_REQUEST, "invalid json"),
+        ("host missing", b'{"decision": "allow", "scope": "live", "container": "c"}', "operator", HTTPStatus.BAD_REQUEST, "host is required"),
+        ("bad decision", b'{"host": "x.example.com", "decision": "maybe"}', "operator", HTTPStatus.BAD_REQUEST, "decision must be allow or deny"),
+        ("reason on allow", b'{"host": "x.example.com", "decision": "allow", "scope": "live", "container": "c", "reason": "r"}', "operator", HTTPStatus.BAD_REQUEST, "reason only applies to deny"),
+        ("bad scope", b'{"host": "x.example.com", "decision": "allow", "scope": "forever", "container": "c"}', "operator", HTTPStatus.BAD_REQUEST, "invalid scope"),
+        ("json not an object", b'[1]', "operator", HTTPStatus.BAD_REQUEST, "invalid json"),
+        ("deny bad scope", b'{"host": "x.example.com", "decision": "deny", "scope": "forever", "container": "c"}', "operator", HTTPStatus.BAD_REQUEST, "invalid scope"),
+        ("reason too long", ('{"host": "x.example.com", "decision": "deny", "scope": "once", "container": "c", "reason": "%s"}' % ("r" * 201)).encode(), "operator", HTTPStatus.BAD_REQUEST, "reason must be a string of at most 200 characters"),
+        ("container missing", b'{"host": "x.example.com", "decision": "allow", "scope": "live"}', "operator", HTTPStatus.BAD_REQUEST, "container is required"),
+        ("container not a string", b'{"host": "x.example.com", "decision": "deny", "scope": "global", "container": 5}', "operator", HTTPStatus.BAD_REQUEST, "container must be a string"),
+        ("invalid host", b'{"host": "bad host!", "decision": "deny", "scope": "once", "container": "c"}', "operator", HTTPStatus.BAD_REQUEST, "invalid host"),
+        ("no bearer header", b'{"host": "x.example.com", "decision": "deny", "scope": "once", "container": "c"}', None, HTTPStatus.UNAUTHORIZED, "unauthorized"),
+        ("empty bearer token", b'{"host": "x.example.com", "decision": "deny", "scope": "once", "container": "c"}', "Bearer ", HTTPStatus.UNAUTHORIZED, "unauthorized"),
+        ("wrong bearer token", b'{"host": "x.example.com", "decision": "deny", "scope": "once", "container": "c"}', "Bearer not-the-token", HTTPStatus.UNAUTHORIZED, "unauthorized"),
     )
 
     def test_decide_error_bodies_validate(self):
@@ -334,12 +346,49 @@ class AdminContractTests(unittest.TestCase):
             root = Path(tmp)
             b = self._broker(root)
             host, port = self._serve(root, b)
-            for label, body, authorized, status in self.DECIDE_ERROR_CASES:
+            for label, body, authorization, status, error in self.DECIDE_ERROR_CASES:
                 with self.subTest(case=label):
-                    got_status, parsed = self._post_raw(host, port, body, authorized=authorized)
+                    got_status, parsed = self._post_raw(host, port, body, authorization=authorization)
                     self.assertEqual(got_status, status, parsed)
                     self.assertEqual(validate_document(parsed, "error_response.schema.json"), [])
-                    self.assertTrue(parsed["error"])
+                    # The exact text proves the intended branch answered.
+                    self.assertEqual(parsed["error"], error)
+
+    def test_decide_broker_error_body_validates(self):
+        # A bottle-scoped deny for a bottle with no token file: persist_deny's
+        # validate_bottle_scope raises, the handler's `except
+        # EgressBrokerHostError` answers 400.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            host, port = self._serve(root, b)
+            status, parsed = self._post_decide(
+                host,
+                port,
+                {"host": "x.example.com", "decision": "deny", "scope": "bottle", "container": "no-such-bottle"},
+            )
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST, parsed)
+            self.assertEqual(validate_document(parsed, "error_response.schema.json"), [])
+            self.assertTrue(parsed["error"])
+
+    def test_decide_persist_failure_body_validates(self):
+        # A directory where the denylist file belongs makes DenyList.add fail
+        # with OSError; persist_deny returns an error and the handler
+        # answers 500 with result.error.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            host, port = self._serve(root, b)
+            (root / broker.DENYLIST_FILENAME).mkdir()
+            status, parsed = self._post_decide(
+                host,
+                port,
+                {"host": "x.example.com", "decision": "deny", "scope": "global"},
+            )
+            self.assertEqual(status, HTTPStatus.INTERNAL_SERVER_ERROR, parsed)
+            self.assertEqual(validate_document(parsed, "error_response.schema.json"), [])
+            self.assertEqual(parsed["error"], broker.DENYLIST_PERSIST_FAILED_REASON)
+
 
 
 if __name__ == "__main__":
