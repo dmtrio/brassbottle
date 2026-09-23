@@ -5,7 +5,7 @@ Owns $DJINN_HOME/run/egress/denylist.json: the set of zones the operator has
 decided to stop being asked about, scoped per-bottle or globally. This is a
 SHORT-CIRCUIT ahead of the broker's approval queue, not a firewall — the
 firewall's allowed-domains ipset stays the sole authority on whether traffic
-passes (src/egress_log.py's invariant). The denylist only decides whether to
+passes (src/egress_store.py's invariant). The denylist only decides whether to
 ask; egress_broker_host.EgressBroker consults it before filing a new request.
 
 Also the entry point for `./djinn deny` / `./djinn deny --list` / `./djinn
@@ -125,10 +125,9 @@ class DenyList:
         self._lock_path = path.with_name(DENYLIST_LOCK_FILENAME)
         # Guards every read/write of self._entries/_mtime (and the diagnosis
         # fields derived from them) against concurrent THREADS in the same
-        # process — e.g. an operator-facing caller's main thread (via
-        # format_denylist_status -> load()) and a broker HTTP handler thread
-        # (matches(), persist_deny -> add()+load()) sharing this one
-        # instance (finding #1). This is independent of _file_lock's fcntl
+        # process — e.g. two broker HTTP handler threads (matches(),
+        # persist_deny -> add()+load()) sharing this one instance
+        # (finding #1). This is independent of _file_lock's fcntl
         # flock below: flock is associated with the OPEN FILE DESCRIPTION,
         # so two threads in the SAME process each os.open()-ing the lock
         # file get two independent descriptions and do NOT exclude each
@@ -862,7 +861,7 @@ def main(argv: list[str] | None = None) -> int:
     # bin/allow-egress.sh's --check probe) and `./djinn deny`/`undeny` used
     # to print every LOG.info line (route loads, add/remove/save
     # bookkeeping) to the terminal for no operator-relevant reason. Mirrors
-    # the daemon's own -v/-vv convention.
+    # the CLI's own -v/-vv convention.
     level = (
         logging.DEBUG
         if verbosity > 1
