@@ -270,6 +270,9 @@ grep -qF 'manifest_check = false' src/herdr-config.toml \
 grep -qF 'onboarding = false' src/herdr-config.toml \
     && pass "herdr-config.toml skips the first-run onboarding wizard" \
     || fail "herdr-config.toml lost onboarding = false"
+grep -qF 'copy_on_select = false' src/herdr-config.toml \
+    && pass "herdr-config.toml keeps mouse selections until an explicit copy" \
+    || fail "herdr-config.toml lost copy_on_select = false"
 grep -qF '/usr/local/bin/tmux-notify.sh' src/tmux.conf \
     && pass "tmux.conf silence hook points at tmux-notify.sh" \
     || fail "tmux.conf hook target drifted"
