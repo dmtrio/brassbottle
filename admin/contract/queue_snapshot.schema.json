@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QueueSnapshot",
+  "description": "Exact shape of EgressBroker.queue_snapshot() in src/egress_broker_host.py — the operator decision queue.",
+  "type": "object",
+  "properties": {
+    "open": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" },
+          "container": { "type": "string" },
+          "host": { "type": "string" },
+          "port": { "type": "integer" },
+          "host_is_ip": { "type": "boolean" },
+          "opened_at": { "type": "string" },
+          "age_seconds": { "type": "integer" },
+          "hit_count": { "type": "integer" },
+          "uid": { "type": ["integer", "null"] },
+          "comm": { "type": ["string", "null"] },
+          "reason": { "type": ["string", "null"] },
+          "attempt": { "type": "integer" },
+          "last_error": {
+            "type": ["object", "null"],
+            "properties": {
+              "reason": {
+                "enum": ["apply_failed", "ip_requires_cidr"],
+                "$comment": "Store.mark_apply failure outcomes (APPLY_OUTCOMES minus 'applied'), src/egress_store.py."
+              },
+              "attempt": { "type": "integer" },
+              "at": { "type": "string" }
+            },
+            "required": ["reason", "attempt", "at"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "request_id", "container", "host", "port", "host_is_ip",
+          "opened_at", "age_seconds", "hit_count", "uid", "comm",
+          "reason", "attempt", "last_error"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "count": { "type": "integer" },
+    "recent": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" },
+          "container": { "type": "string" },
+          "host": { "type": "string" },
+          "port": { "type": "integer" },
+          "status": {
+            "enum": ["allowed", "denied", "stale"],
+            "$comment": "CLOSE_STATUSES in src/egress_store.py; list_recent() only returns decided (closed) rows."
+          },
+          "scope": {
+            "type": ["string", "null"],
+            "enum": ["live", "manifest", "once", "bottle", "global", null],
+            "$comment": "Allow scopes ('live','manifest') in _close_request plus VALID_DECIDE_SCOPES ('once','bottle','global') in src/egress_denylist.py; null when never set."
+          },
+          "decided_at": { "type": "string" },
+          "decided_by": {
+            "enum": ["operator", "ntfy", "sweep", "denylist"],
+            "$comment": "decided_by values written in src/egress_broker_host.py: /decide handler ('operator'/'ntfy'), sweep_stale ('sweep'), _denylist_short_circuit ('denylist')."
+          },
+          "apply_status": {
+            "type": ["string", "null"],
+            "enum": ["applied", "apply_failed", "ip_requires_cidr", null],
+            "$comment": "APPLY_OUTCOMES in src/egress_store.py; null when no allow was attempted."
+          },
+          "deny_reason": { "type": ["string", "null"] }
+        },
+        "required": [
+          "request_id", "container", "host", "port", "status", "scope",
+          "decided_at", "decided_by", "apply_status", "deny_reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "generated_at": { "type": "string" }
+  },
+  "required": ["open", "count", "recent", "generated_at"],
+  "additionalProperties": false
+}
