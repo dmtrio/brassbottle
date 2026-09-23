@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecentPage",
+  "description": "Planned shape for a future recent-history paging endpoint: one page of recent rows (same row shape as queue_snapshot().recent) plus a next-page cursor. No endpoint exists yet; schema only, enforced by tests/test_admin_contract.py once the endpoint lands.",
+  "type": "object",
+  "properties": {
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" },
+          "container": { "type": "string" },
+          "host": { "type": "string" },
+          "port": { "type": "integer" },
+          "status": {
+            "enum": ["allowed", "denied", "stale"],
+            "$comment": "CLOSE_STATUSES in src/egress_store.py; recent rows are decided (closed) rows."
+          },
+          "scope": {
+            "type": ["string", "null"],
+            "enum": ["live", "manifest", "once", "bottle", "global", null],
+            "$comment": "Allow scopes ('live','manifest') in _close_request plus VALID_DECIDE_SCOPES ('once','bottle','global') in src/egress_denylist.py; null when never set."
+          },
+          "decided_at": { "type": "string" },
+          "decided_by": {
+            "enum": ["operator", "ntfy", "sweep", "denylist"],
+            "$comment": "decided_by values written in src/egress_broker_host.py: /decide handler ('operator'/'ntfy'), sweep_stale ('sweep'), _denylist_short_circuit ('denylist')."
+          },
+          "apply_status": {
+            "type": ["string", "null"],
+            "enum": ["applied", "apply_failed", "ip_requires_cidr", null],
+            "$comment": "APPLY_OUTCOMES in src/egress_store.py; null when no allow was attempted."
+          },
+          "deny_reason": { "type": ["string", "null"] }
+        },
+        "required": [
+          "request_id", "container", "host", "port", "status", "scope",
+          "decided_at", "decided_by", "apply_status", "deny_reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "next": { "type": ["string", "null"] }
+  },
+  "required": ["rows", "next"],
+  "additionalProperties": false
+}

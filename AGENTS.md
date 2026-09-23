@@ -39,6 +39,10 @@ discipline) that the harness supplies separately.
 - `compose/`, `bin/`, `jump/`, `backup/`, `ci-staged/` — compose overlays,
   host-side `djinn` subcommands, singleton jump/backup images, and the
   staging copy of the CI workflow (see Conventions).
+- `admin/` — the admin plane's browser side: `admin/contract/` holds the JSON
+  Schemas of the broker-to-admin bodies (`queue_snapshot`, `/decide`, and
+  the planned recent page and SSE event), enforced by
+  `tests/test_admin_contract.py` against the real broker.
 - `docs/` — deep guides (`script.md` explains every shell script by
   lifecycle); `docs/workspace.CONTRACT.md` is the workspace contract copied
   into containers.

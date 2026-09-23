@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SseQueueEvent",
+  "description": "Planned shape for the queue SSE stream event: event name plus the full queue_snapshot() payload as data. No stream exists yet; schema only.",
+  "type": "object",
+  "properties": {
+    "event": {
+      "const": "queue",
+      "$comment": "The stream carries queue_snapshot() updates only."
+    },
+    "data": { "$ref": "queue_snapshot.schema.json" }
+  },
+  "required": ["event", "data"],
+  "additionalProperties": false
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DecideResponse",
+  "description": "Exact shapes of every successful POST /decide response body from _handle_decide_post in src/egress_broker_host.py: one anyOf branch per decision path.",
+  "anyOf": [
+    {
+      "title": "AllowResponse",
+      "description": "decision=allow: request ids whose allow was applied, plus the allows that produced no rule.",
+      "type": "object",
+      "properties": {
+        "decided": {
+          "type": "array",
+          "items": { "type": "string" },
+          "$comment": "Request ids whose allow was applied."
+        },
+        "apply_failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "request_id": { "type": "string" },
+              "reason": {
+                "enum": ["ip_requires_cidr", "apply_failed"],
+                "$comment": "Allow-path error reasons returned by _close_request in src/egress_broker_host.py (IP_REQUIRES_CIDR_REASON, APPLY_FAILED_REASON); APPLY_IN_PROGRESS_REASON is skipped, never listed."
+              }
+            },
+            "required": ["request_id", "reason"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["decided", "apply_failures"],
+      "additionalProperties": false
+    },
+    {
+      "title": "DenyOnceResponse",
+      "description": "decision=deny scope=once: the open request ids the one-shot deny closed.",
+      "type": "object",
+      "properties": {
+        "decided": {
+          "type": "array",
+          "items": { "type": "string" },
+          "$comment": "Request ids decided, from decide_deny_for_zone()."
+        }
+      },
+      "required": ["decided"],
+      "additionalProperties": false
+    },
+    {
+      "title": "PersistentDenyResponse",
+      "description": "decision=deny scope=bottle|global: the swept request ids plus the denylist entry that was written.",
+      "type": "object",
+      "properties": {
+        "decided": {
+          "type": "array",
+          "items": { "type": "string" },
+          "$comment": "Request ids swept closed by persist_deny()."
+        },
+        "persisted": {
+          "type": "object",
+          "properties": {
+            "zone": { "type": "string" },
+            "scope": {
+              "type": "string",
+              "$comment": "NOT a closed enum: persist_deny in src/egress_broker_host.py accepts scope bottle|global, and the response records write_scope — the bottle's own name for scope=bottle (validated by validate_bottle_scope in src/egress_denylist.py) or the literal \"global\" for scope=global."
+            }
+          },
+          "required": ["zone", "scope"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["decided", "persisted"],
+      "additionalProperties": false
+    }
+  ]
+}
