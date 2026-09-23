@@ -701,6 +701,118 @@ class AdminDaemonTests(unittest.TestCase):
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
+    def test_queue_proxies_recent_list_untouched(self):
+        """A broker-side `recent` array passes through the admin proxy with
+        every key and value byte-for-byte: the daemon only proxies."""
+        state = _StubBrokerState()
+        state.queue_body = {
+            "open": [],
+            "count": 0,
+            "generated_at": "2026-09-01T00:05:00Z",
+            "recent": [
+                {
+                    "request_id": "req-1",
+                    "container": "coding-brassbottle",
+                    "host": "api.example.com",
+                    "port": 443,
+                    "status": "denied",
+                    "scope": "bottle",
+                    "decided_at": "2026-08-31T12:05:00Z",
+                    "decided_by": "admin",
+                    "apply_status": None,
+                    "deny_reason": "not needed",
+                },
+                {
+                    "request_id": "req-2",
+                    "container": "research-brassbottle",
+                    "host": "192.0.2.55",
+                    "port": 5432,
+                    "status": "allowed",
+                    "scope": "live",
+                    "decided_at": "2026-08-31T12:01:00Z",
+                    "decided_by": "ntfy",
+                    "apply_status": "ip_requires_cidr",
+                    "deny_reason": None,
+                },
+            ],
+        }
+        stub, stub_thread = self._start_stub(state)
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(
+                Path(tmp),
+                env={"EGRESS_BROKER_URL": f"http://127.0.0.1:{stub.server_address[1]}"},
+            )
+            host, port = server.server_address
+            try:
+                status, payload, _hdrs, _raw = self._request(host, port, "GET", "/api/egress/queue")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload, state.queue_body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+        stub.shutdown()
+        stub.server_close()
+        join_thread_or_fail(stub_thread, label="stub")
+
+    def test_queue_proxies_attempt_and_last_error_untouched(self):
+        """Per-row `attempt` and `last_error` from the broker pass through the
+        admin proxy unmodified: the daemon adds and drops nothing."""
+        state = _StubBrokerState()
+        state.queue_body = {
+            "open": [
+                {
+                    "request_id": "req-1",
+                    "container": "coding-brassbottle",
+                    "host": "api.example.com",
+                    "port": 443,
+                    "host_is_ip": False,
+                    "opened_at": "2026-08-31T12:00:00Z",
+                    "age_seconds": 120,
+                    "hit_count": 3,
+                    "uid": 1000,
+                    "comm": "python",
+                    "reason": "build",
+                    "attempt": 2,
+                    "last_error": {"reason": "apply_failed", "attempt": 2, "at": "2026-08-31T12:01:00Z"},
+                },
+                {
+                    "request_id": "req-2",
+                    "container": "research-brassbottle",
+                    "host": "192.0.2.55",
+                    "port": 5432,
+                    "host_is_ip": True,
+                    "opened_at": "2026-08-31T12:02:00Z",
+                    "age_seconds": 30,
+                    "hit_count": 1,
+                    "uid": None,
+                    "comm": None,
+                    "reason": None,
+                    "attempt": 0,
+                },
+            ],
+            "count": 2,
+            "generated_at": "2026-08-31T12:02:30Z",
+        }
+        stub, stub_thread = self._start_stub(state)
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(
+                Path(tmp),
+                env={"EGRESS_BROKER_URL": f"http://127.0.0.1:{stub.server_address[1]}"},
+            )
+            host, port = server.server_address
+            try:
+                status, payload, _hdrs, _raw = self._request(host, port, "GET", "/api/egress/queue")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload, state.queue_body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+        stub.shutdown()
+        stub.server_close()
+        join_thread_or_fail(stub_thread, label="stub")
+
     def test_action_mapping_to_upstream_body(self):
         state = _StubBrokerState()
         stub, stub_thread = self._start_stub(state)
@@ -1208,6 +1320,21 @@ class AdminDaemonTests(unittest.TestCase):
         stub.server_close()
         join_thread_or_fail(stub_thread, label="stub")
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_app_js_structural_grouping_and_recent_markers(self):
+        """Structural checks only: the admin UI is client-side and there is no
+        browser in this suite, so the browser rig supplies the behavioural
+        Evidence for grouping, the recent move and the local-time render.
+        These assertions pin the source shape those steps depend on."""
+        text = (REPO_ROOT / "src" / "admin_app.js").read_text(encoding="utf-8")
+        # The typed-host arm moved to the request row; no host-group remains.
+        self.assertNotIn("HostGroup", text)
+        self.assertNotIn("host-group", text)
+        # Open rows group by container (the bottle), not by host.
+        self.assertIn("String(row.container || \"\")", text)
+        # The recent-decisions section is rendered below the table.
+        self.assertIn("Recent decisions (24 h)", text)
+        # Request and decision dates render through the local-time formatter.
+        self.assertIn("localTimestamp(row.opened_at)", text)
+        self.assertIn("localTimestamp(row.decided_at)", text)
+        # Apply failures surface as the attempt-counted chip.
+        self.assertIn("apply failed \\u00d7", text)
