@@ -300,11 +300,11 @@ class DenyListCoreTests(unittest.TestCase):
 
     def test_reload_and_add_are_serialized_by_instance_lock(self):
         """finding #1: DenyList had no lock guarding self._entries/_mtime —
-        _reload() used to set self._mtime BEFORE self._entries, so a watcher
-        thread's matches()->_reload() could interleave with a handler
+        _reload() used to set self._mtime BEFORE self._entries, so one
+        thread's matches()->_reload() could interleave with another
         thread's add()->_reload()+_persist() on the SAME instance (exactly
-        the shape an operator-facing caller's main thread and a broker HTTP
-        handler thread share). A stale read winning that race gets cached under the
+        the shape a broker HTTP handler thread shares with any other
+        reader in-process). A stale read winning that race gets cached under the
         NEWER mtime, so the entry the handler thread just persisted is not
         enforced again until the file next changes.
 
@@ -774,7 +774,7 @@ class DenyListCliTests(unittest.TestCase):
 
     def test_extract_verbosity_counts_v_and_verbose_and_strips_them(self):
         """finding #6: main() gets -v/--verbose -> INFO, default WARNING
-        (mirrors the daemon's own -v/-vv convention), extracted BEFORE either
+        (mirrors the CLI's -v/-vv convention), extracted BEFORE either
         dispatch path (the bare --check bypass or build_parser()'s
         subcommands) so it works regardless of where the flag appears and
         the log level is set before the first DenyList() construction."""

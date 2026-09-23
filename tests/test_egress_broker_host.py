@@ -952,6 +952,13 @@ class EgressBrokerHostTests(unittest.TestCase):
                     target=b.decide, args=(request_id, "allow"), kwargs={"scope": "live"}
                 )
                 first.start()
+                # Wait for the first apply to actually be in flight —
+                # otherwise, under load, the second decide can win the race
+                # and both apply.
+                deadline = time.monotonic() + 10.0
+                while request_id not in b._applying and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertIn(request_id, b._applying)
                 # Second decide while the first apply is in flight is a
                 # documented no-op, not a second apply.
                 self.assertEqual(
