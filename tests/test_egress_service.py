@@ -67,7 +67,7 @@ class ComposeSpecTests(unittest.TestCase):
                 {
                     "networks": {
                         "djinn-net": {"name": "djinn-net", "external": True},
-                        "egress-backend": {"internal": True},
+                        "egress-backend": {"driver": "bridge"},
                     },
                     "services": {
                         "broker": {
@@ -204,11 +204,24 @@ class RenderTests(unittest.TestCase):
             leftovers = [p.name for p in target.parent.iterdir() if p.name != target.name]
             self.assertEqual(leftovers, [])
 
-    def test_yaml_carries_internal_backend_and_addresses(self):
+    def test_backend_network_is_not_internal_so_the_admin_publish_works(self):
+        """docker drops the host publish of a container whose only network is
+        `internal: true`; the admin's only network is egress-backend, so the
+        backend must be a plain bridge or 127.0.0.1:8817 never appears."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            spec = self._spec(base)
+            self.assertEqual(spec["networks"]["egress-backend"], {"driver": "bridge"})
+            self.assertEqual(list(spec["services"]["admin"]["networks"]), ["egress-backend"])
+            self.assertEqual(spec["services"]["admin"]["ports"], ["127.0.0.1:8817:8817"])
+            text = svc.render_compose_yaml(spec)
+            self.assertNotIn("internal: true", text)
+            self.assertIn("driver: bridge", text)
+
+    def test_yaml_carries_backend_and_addresses(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             text = svc.render_compose_yaml(self._spec(base))
-            self.assertIn("internal: true", text)
             self.assertIn("external: true", text)
             self.assertIn("ipv4_address: 172.30.0.252", text)
             self.assertIn("restart: unless-stopped", text)
