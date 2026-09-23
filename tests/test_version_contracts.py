@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Unit tests for src/version_contracts.py (PLN - Managed Versions, Step 1).
+"""Unit tests for src/version_contracts.py (typed version-selection contracts).
 
 Pins the Dark contract layer: catalog schema, manifest `versions:` override
 validation, candidate/build-receipt records, canonical hashing, and the
 status model that keeps requested/resolved/built/running/external/deferred
 distinct. Nothing here touches up.sh or manifest.py — the Dark pin at the
-bottom fails if either ever references this module before Step 7 wires it.
+bottom fails if either ever references this module before the
+integration phase wires it.
 """
 
 import sys
@@ -41,7 +42,7 @@ def catalog_doc():
             "base-images": {
                 "name": "Base images", "kind": "group",
                 "enabled_when": "always", "policy": "deferred",
-                "deferral_reason": "inventoried, existing behavior (out of PLN scope)",
+                "deferral_reason": "inventoried, existing behavior (out of managed scope)",
             },
         },
     }
@@ -712,8 +713,9 @@ class PersistableRecordTests(unittest.TestCase):
 
 
 class DarkPinTests(unittest.TestCase):
-    """Step 1 is Dark: nothing outside this module and its tests may reference
-    it. manifest.py and up.sh are the surfaces Step 7 must touch on purpose —
+    """Dark pin: nothing outside this module and its tests may reference
+    it. manifest.py and up.sh are the surfaces the integration phase must
+    touch on purpose —
     a stray import or call there changes `up` behavior ahead of the plan."""
 
     def test_up_and_manifest_do_not_reference_version_contracts(self):
@@ -722,8 +724,8 @@ class DarkPinTests(unittest.TestCase):
                      "compose/docker-compose.local.yml"):
             text = (repo / name).read_text(encoding="utf-8")
             self.assertNotIn("version_contracts", text,
-                             f"{name} references version_contracts — Step 1 "
-                             "is Dark; wire it only in Step 7")
+                             f"{name} references version_contracts while the phase is "
+                             "is Dark; wire it only in the integration phase")
 
     def test_module_is_stdlib_only(self):
         source = (Path(__file__).parent.parent / "src" / "version_contracts.py"

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Typed version-selection contracts (PLN - Managed Versions on Bottle Up,
-Step 1 — Dark).
+"""Typed version-selection contracts (contract layer, landed Dark).
 
-This module holds the catalog schema, the candidate/build-receipt models, the
-canonical hash, the manifest `versions:` override validator, and the status
-model for the version-management PLN. It is deliberately DARK: nothing in
-up.sh, manifest.py, the Dockerfile, or compose reads it yet. Step 1 delivers
-the contracts and their tests; Step 2 builds the `versions.yml` inventory and
-audit on them; Step 7 wires them into `djinn up`. The Dark pin in
-tests/test_version_contracts.py fails if manifest.py or up.sh ever references
-this module before the integration step says so.
+This module holds the version-selection catalog schema, the
+candidate/build-receipt models, the canonical hash, the manifest `versions:`
+override validator, and the status model for the managed-versions work. It is
+deliberately DARK: nothing in up.sh, manifest.py, the Dockerfile, or compose
+reads it yet. The contract layer delivers these types and their tests; the
+inventory/audit layer builds the `versions.yml` catalog and the read-only
+audit on them; a later integration step wires them into `djinn up`. The Dark
+pin in tests/test_version_contracts.py fails if manifest.py or up.sh ever
+references this module before the integration phase says so.
 
-Records and their states (PLN §2, §4):
+Records and their states:
 
   requested  a policy was asked for — catalog policy as possibly overridden
              by the bottle manifest's schema-validated `versions:` section
@@ -29,14 +29,14 @@ Records and their states (PLN §2, §4):
 external and deferred are terminal classifications, never lifecycle steps: a
 catalog component with an external/deferred policy never enters a candidate.
 
-The two presentation rules the PLN's minimum safety contract requires — a
+The two presentation rules the version-selection safety contract requires — a
 candidate is never called built without a matching receipt, and a built image
 is never called running without a matching running observation — are enforced
 in exactly one place, component_state(), so status output cannot drift from
 the stored evidence. transition() guards the raw state machine for callers
 that move a component through its lifecycle step by step.
 
-Canonical hashing (PLN §8): canonical_hash() encodes a record as JSON with
+Canonical hashing: canonical_hash() encodes a record as JSON with
 sorted keys, no insignificant whitespace, and non-ASCII kept as UTF-8 — the
 same input always produces the same hash regardless of dict insertion order
 or how the record was built. Timestamps and other volatile fields are
@@ -65,26 +65,27 @@ class VersionContractError(Exception):
 
 # ── Shared value vocabularies ────────────────────────────────────────────
 
-# The five policies from PLN §4. The first three are MANAGED: brassbottle
+# The five selection policies. The first three are MANAGED: brassbottle
 # resolves and installs them. external/deferred are inventory classifications.
 POLICIES = ("latest", "release-line", "exact", "external", "deferred")
 MANAGED_POLICIES = ("latest", "release-line", "exact")
 
 KINDS = ("agent", "plugin", "group")
 
-# Resolver adapters (PLN §5). Versioned and fixture-tested there; the schema
+# Resolver adapters. Versioned and fixture-tested in the adapters' own
+# phase; the schema
 # only fixes the vocabulary so a typo'd adapter name cannot enter a catalog.
 SOURCE_TYPES = ("npm", "pypi", "github-release", "git", "release-asset",
                 "runtime-line", "none")
 
-# Resolver adapters (PLN §5) a managed component may name. The set mirrors the
+# Resolver adapters a managed component may name. The set mirrors the
 # source types minus "none" — a managed component resolves through a real
 # adapter, and a typo'd adapter name must fail at catalog load, not at
 # resolution time.
 RESOLVERS = ("npm", "pypi", "github-release", "git", "release-asset",
              "runtime-line")
 
-# Closure modes (PLN §4): a reviewed lockfile, a reviewed compatibility
+# Closure modes: a reviewed lockfile, a reviewed compatibility
 # bundle, or no closure (the record, not the claim, carries what a component
 # has). external/deferred components are always "none".
 CLOSURES = ("lock", "bundle", "none")
@@ -134,7 +135,7 @@ def canonical_json(record):
 
 def canonical_hash(record):
     """SHA-256 over canonical_json(). Bare lowercase hex — the same shape the
-    PLN's candidates/<sha256>.json filename and image labels use."""
+    the version candidates' <sha256>.json filenames and image labels use."""
     return hashlib.sha256(canonical_json(record).encode("utf-8")).hexdigest()
 
 
@@ -153,7 +154,7 @@ _SECRET_FIELD_RE = re.compile(
 def assert_persistable(record, context="record"):
     """Reject records that must never be written to disk with a secret-shaped
     field anywhere inside them. Candidates and build receipts are the
-    persisted records (PLN §2); everything reachable from them passes through
+    persisted records; everything reachable from them passes through
     here, so a resolution result that leaked e.g. an auth_token fails at
     construction rather than landing in $DJINN_HOME/versions/."""
     _assert_persistable_walk(record, "", context)
@@ -177,7 +178,7 @@ def _assert_persistable_walk(node, path, context):
             _assert_persistable_walk(value, f"{path}[{i}]", context)
 
 
-# ── Catalog schema (root versions.yml, PLN §4) ───────────────────────────
+# ── Catalog schema (root versions.yml) ───────────────────────────────────
 
 _COMPONENT_FIELDS = frozenset({
     "name", "kind", "source", "owner", "enabled_when", "policy", "constraint",
@@ -383,7 +384,7 @@ class State(enum.Enum):
         return self.value
 
 
-# Allowed lifecycle moves (PLN §3): resolution precedes build evidence, build
+# Allowed lifecycle moves: resolution precedes build evidence, build
 # evidence precedes running evidence. RUNNING→REQUESTED starts the next
 # candidate cycle on a subsequent up; external/deferred never transition.
 ALLOWED_TRANSITIONS = {
@@ -448,7 +449,7 @@ class Component:
 
 
 class Catalog:
-    """The validated in-memory root versions.yml (PLN §4)."""
+    """The validated in-memory root versions.yml."""
 
     def __init__(self, schema, components):
         self.schema = schema
@@ -504,7 +505,7 @@ class Catalog:
         return cls(schema, components)
 
 
-# ── Manifest `versions:` overrides (PLN §4) ──────────────────────────────
+# ── Manifest `versions:` overrides ───────────────────────────────────────
 
 OVERRIDE_FIELDS = frozenset({"policy", "constraint"})
 
@@ -551,9 +552,9 @@ class ManifestVersions:
 def validate_manifest_versions(versions_val, catalog):
     """Validate a manifest's `versions:` value against an in-memory Catalog.
 
-    Dark per Step 1: this takes the parsed objects themselves — no manifest.py
+    Dark here: this takes the parsed objects themselves — no manifest.py
     wiring, no stdin format. Unknown component IDs and unsupported policy
-    fields are hard errors (PLN §4: they fail before resolution); a policy
+    fields are hard errors (they fail before resolution); a policy
     switch to release-line/exact must bring its constraint; external and
     deferred components cannot be overridden at all."""
     if versions_val is None:
@@ -632,7 +633,7 @@ def validate_manifest_versions(versions_val, catalog):
     return ManifestVersions(overrides)
 
 
-# ── Candidate record (PLN §2: candidates/<sha256>.json) ──────────────────
+# ── Candidate record (candidates/<sha256>.json) ──────────────────────────
 
 CANDIDATE_FIELDS = frozenset({
     "requested", "resolved", "enabled", "platform", "catalog_digest", "created_at",
@@ -812,7 +813,7 @@ def build_candidate(requested, resolved, enabled, platform, catalog_digest,
 
 
 class Candidate:
-    """A resolved, persistable candidate record (PLN §2). Hash-except-
+    """A resolved, persistable candidate record. Hash-except-
     volatile: the candidate hash excludes created_at so re-resolving the same
     versions yields the same candidate hash."""
 
@@ -856,7 +857,7 @@ class Candidate:
         return isinstance(other, Candidate) and self.record == other.record
 
 
-# ── Build receipt (PLN §2: builds/<image-id>.json) ───────────────────────
+# ── Build receipt (builds/<image-id>.json) ───────────────────────────────
 
 RECEIPT_FIELDS = frozenset({"candidate_hash", "image", "observations", "built_at"})
 _IMAGE_FIELDS = frozenset({"id", "tag"})
@@ -973,7 +974,7 @@ class BuildReceipt:
         return isinstance(other, BuildReceipt) and self.record == other.record
 
 
-# ── Running observation (live inspection, PLN §2) ────────────────────────
+# ── Running observation (live inspection) ────────────────────────────────
 
 RUNNING_FIELDS = frozenset({"image_id", "labels", "observed_at"})
 
@@ -1034,7 +1035,7 @@ def confirm_running(receipt, running):
     for component_id, obs in sorted(receipt.observations.items()):
         expected = obs.get("version")
         if expected is None:
-            # The running labels carry component versions (PLN §2); an
+            # The running labels carry component versions; an
             # observation identified only by commit/digest has no live label
             # to compare against, so it can never confirm running.
             raise VersionContractError(

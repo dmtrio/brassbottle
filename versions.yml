@@ -1,0 +1,369 @@
+# versions.yml — the version-selection catalog (schema 1).
+#
+# One entry per component this repository selects, installs, or deliberately
+# leaves alone, validated by src/version_contracts.py (Catalog.from_dict).
+# This file is the classification layer: WHAT each component is and the
+# policy brassbottle applies to it. The concrete repo paths that carry the
+# selectors live beside it in version-locations.yml, which the read-only
+# `djinn versions audit` (src/version_audit.py) checks against the real tree.
+#
+# Policies (src/version_contracts.POLICIES):
+#   latest        newest eligible stable version on each online up (floating)
+#   release-line  newest eligible version in a declared line (floating)
+#   exact         exact version, commit, or digest (pinned)
+#   external      brassbottle does not select or install it
+#   deferred      inventoried, intentionally left with existing behavior
+#
+# The inventory phase is Dark and read-only: nothing here is resolved
+# or wired into
+# `up` yet; latest/exact entries describe the selection the later steps
+# implement, and every deferral states its reason below.
+schema: 1
+components:
+
+  # ── Agents (agents/<name>/agent.yml — the descriptor registry) ────────────
+
+  agent.aider:
+    name: Aider
+    kind: agent
+    owner: agents/aider/agent.yml
+    enabled_when: "manifest agents: lists aider"
+    policy: latest
+    resolver: pypi
+    platform: "linux/amd64+arm64"
+    source: {type: pypi, location: "pypi.org/aider-chat"}
+
+  agent.antigravity-cli:
+    name: Antigravity CLI
+    kind: agent
+    owner: agents/antigravity-cli/agent.yml
+    enabled_when: "manifest agents: lists antigravity-cli"
+    policy: deferred
+    deferral_reason: >-
+      opaque live vendor installer (curl https://antigravity.google/cli/install.sh
+      resolves a version at build time); needs an immutable reference and a
+      locked local install before it can be managed
+
+  agent.claude:
+    name: Claude Code
+    kind: agent
+    owner: agents/claude/agent.yml
+    enabled_when: "manifest agents: lists claude"
+    policy: latest
+    resolver: npm
+    platform: "linux/amd64+arm64"
+    source: {type: npm, location: "registry.npmjs.org/@anthropic-ai/claude-code"}
+
+  agent.codex:
+    name: Codex CLI
+    kind: agent
+    owner: agents/codex/agent.yml
+    enabled_when: "manifest agents: lists codex"
+    policy: latest
+    resolver: npm
+    platform: "linux/amd64+arm64"
+    source: {type: npm, location: "registry.npmjs.org/@openai/codex"}
+
+  agent.cursor:
+    name: Cursor CLI agent
+    kind: agent
+    owner: agents/cursor/agent.yml
+    enabled_when: "manifest agents: lists cursor"
+    policy: deferred
+    deferral_reason: >-
+      opaque live vendor installer (curl https://cursor.com/install resolves a
+      version at build time); needs an immutable reference and a locked local
+      install before it can be managed
+
+  agent.kimi:
+    name: Kimi Code CLI
+    kind: agent
+    owner: agents/kimi/agent.yml
+    enabled_when: "manifest agents: lists kimi"
+    policy: deferred
+    deferral_reason: >-
+      opaque live vendor installer (curl https://code.kimi.com/kimi-code/install.sh
+      resolves a version at build time); needs an immutable reference and a
+      locked local install before it can be managed
+
+  agent.pi:
+    name: pi coding agent
+    kind: agent
+    owner: agents/pi/agent.yml
+    enabled_when: "manifest agents: lists pi"
+    policy: latest
+    resolver: npm
+    platform: "linux/amd64+arm64"
+    source: {type: npm, location: "registry.npmjs.org/@earendil-works/pi-coding-agent"}
+
+  # Not its own descriptor: a pinned npm package inside agent pi's installer
+  # (pi skips pinned specs on `pi update`, so the build decides the version).
+  agent.pi-mcp-adapter:
+    name: pi MCP adapter
+    kind: agent
+    owner: agents/pi/agent.yml
+    enabled_when: "manifest agents: lists pi"
+    policy: exact
+    constraint: "2.32.1"
+    resolver: npm
+    platform: "linux"
+    source: {type: npm, location: "registry.npmjs.org/pi-mcp-adapter"}
+
+  # ── Plugins (plugins/<name>/plugin.yml — the descriptor registry) ─────────
+
+  plugin.annotated-watch:
+    name: Annotated Watch
+    kind: plugin
+    owner: plugins/annotated-watch/plugin.yml
+    enabled_when: "manifest plugins: lists annotated-watch"
+    policy: external
+    # env-only: delivers a secret slot; selects and installs no version.
+
+  plugin.archex:
+    name: Archex
+    kind: plugin
+    owner: plugins/archex/plugin.yml
+    enabled_when: "manifest plugins: lists archex"
+    policy: latest
+    resolver: pypi
+    platform: "linux"
+    source: {type: pypi, location: "pypi.org/archex"}
+
+  plugin.axiom:
+    name: Axiom MCP
+    kind: plugin
+    owner: plugins/axiom/plugin.yml
+    enabled_when: "manifest plugins: lists axiom"
+    policy: external
+    # remote HTTP service on the host; the container wires config only.
+
+  plugin.browser:
+    name: Browser bridge
+    kind: plugin
+    owner: plugins/browser/plugin.yml
+    enabled_when: "manifest plugins: lists browser"
+    policy: external
+    # host-side browser + bridge; the container-side stdio bridge is the
+    # base tool mcp-remote, inventoried under base-tools.
+
+  plugin.codebase-memory:
+    name: Codebase Memory
+    kind: plugin
+    owner: plugins/codebase-memory/plugin.yml
+    enabled_when: "manifest plugins: lists codebase-memory"
+    policy: exact
+    constraint: "v0.10.1"
+    resolver: release-asset
+    platform: "linux/amd64+arm64"
+    source: {type: github-release, location: "github.com/DeusData/codebase-memory-mcp"}
+
+  plugin.cordyceps:
+    name: Cordyceps Grasshopper MCP
+    kind: plugin
+    owner: plugins/cordyceps/plugin.yml
+    enabled_when: "manifest plugins: lists cordyceps"
+    policy: external
+    # served by the Rhino-side component on the Mac; container config only.
+
+  plugin.egress:
+    name: Egress filing tools
+    kind: plugin
+    owner: plugins/egress/plugin.yml
+    enabled_when: "manifest plugins: lists egress"
+    policy: external
+    # repo-owned stdlib server baked from this checkout; selects no version.
+
+  plugin.gateway:
+    name: Playwright MCP gateway
+    kind: plugin
+    owner: plugins/gateway/plugin.yml
+    enabled_when: "manifest plugins: lists gateway"
+    policy: external
+    # host-side service (Docker Desktop MCP gateway); container config only.
+
+  plugin.gear360:
+    name: Gear 360 toolchain
+    kind: plugin
+    owner: plugins/gear360/plugin.yml
+    enabled_when: "manifest plugins: lists gear360"
+    policy: deferred
+    deferral_reason: >-
+      installs by cloning three upstream stitching repositories at their
+      default branch heads (plus an unversioned pip fallback); no immutable
+      reference exists yet, so it keeps its build-time behavior
+
+  plugin.herdr-auto-title:
+    name: herdr Auto Title
+    kind: plugin
+    owner: plugins/herdr-auto-title/plugin.yml
+    enabled_when: "manifest plugins: lists herdr-auto-title"
+    policy: exact
+    constraint: "4d4554fb9706a29032cb2082be32f2061b96f2c6"
+    resolver: git
+    platform: "linux/amd64+arm64"
+    source: {type: git, location: "github.com/kryptamine/herdr-auto-title"}
+
+  plugin.ngrok:
+    name: ngrok
+    kind: plugin
+    owner: plugins/ngrok/plugin.yml
+    enabled_when: "manifest plugins: lists ngrok"
+    policy: deferred
+    deferral_reason: >-
+      downloads the vendor's moving v3-stable channel from a non-GitHub
+      release host; no immutable asset reference is declared yet
+
+  plugin.obsidian-annotated:
+    name: Annotated Obsidian MCP
+    kind: plugin
+    owner: plugins/obsidian-annotated/plugin.yml
+    enabled_when: "manifest plugins: lists obsidian-annotated"
+    policy: external
+    # remote HTTP service; the container wires config only.
+
+  plugin.opencode:
+    name: OpenCode key delivery
+    kind: plugin
+    owner: plugins/opencode/plugin.yml
+    enabled_when: "manifest plugins: lists opencode"
+    policy: external
+    # env-only: delivers an API key slot; selects and installs no version.
+
+  plugin.openrouter:
+    name: OpenRouter key delivery
+    kind: plugin
+    owner: plugins/openrouter/plugin.yml
+    enabled_when: "manifest plugins: lists openrouter"
+    policy: external
+    # env-only: delivers an API key slot; selects and installs no version.
+
+  plugin.proxyman:
+    name: Proxyman bridge
+    kind: plugin
+    owner: plugins/proxyman/plugin.yml
+    enabled_when: "manifest plugins: lists proxyman"
+    policy: external
+    # host-side Proxyman + bridge; the container-side stdio bridge is the
+    # base tool mcp-remote, inventoried under base-tools.
+
+  plugin.rhinomcp:
+    name: RhinoMCP community bridge
+    kind: plugin
+    owner: plugins/rhinomcp/plugin.yml
+    enabled_when: "manifest plugins: lists rhinomcp"
+    policy: latest
+    resolver: pypi
+    platform: "linux"
+    source: {type: pypi, location: "pypi.org/rhinomcp"}
+
+  plugin.rhinomcp-official:
+    name: Rhino MCP Platform (official)
+    kind: plugin
+    owner: plugins/rhinomcp-official/plugin.yml
+    enabled_when: "manifest plugins: lists rhinomcp-official"
+    policy: external
+    # served by the in-Rhino Kestrel server on the Mac; container config only.
+
+  plugin.serena:
+    name: Serena
+    kind: plugin
+    owner: plugins/serena/plugin.yml
+    enabled_when: "manifest plugins: lists serena"
+    policy: latest
+    resolver: pypi
+    platform: "linux"
+    source: {type: pypi, location: "pypi.org/serena-agent"}
+
+  plugin.tinfoil:
+    name: Tinfoil pi provider
+    kind: plugin
+    owner: plugins/tinfoil/plugin.yml
+    enabled_when: "manifest plugins: lists tinfoil"
+    policy: exact
+    constraint: "0.1.2"
+    resolver: npm
+    platform: "linux"
+    closure: lock
+    source: {type: npm, location: "registry.npmjs.org/@tinfoilsh/pi-provider"}
+
+  # ── Inventoried groups (no installer owner; existing behavior stands) ─────
+
+  base-images:
+    name: Base images
+    kind: group
+    enabled_when: "every docker build"
+    policy: deferred
+    deferral_reason: >-
+      container base-image tags (ubuntu:24.04, python:3.12-alpine,
+      debian:bookworm-slim) keep their existing policies; image selection is
+      out of this release's managed scope
+
+  distro-packages:
+    name: Distro packages
+    kind: group
+    enabled_when: "every image build"
+    policy: deferred
+    deferral_reason: >-
+      unversioned apt/apk package sets are distro selections observed at
+      build time; out of managed scope
+
+  base-tools:
+    name: Shared-image toolchain
+    kind: group
+    enabled_when: "every image build"
+    policy: deferred
+    deferral_reason: >-
+      the Dockerfile's toolchain layer (gh via its stable apt line, tea,
+      yq, herdr with sha256, mcp-remote caret range, fnm and uv live
+      installers, Node LTS, pip tooling) keeps existing behavior; several
+      members are exact today, but the group is managed as one only if a
+      later release adopts it
+
+  service-images:
+    name: Service images
+    kind: group
+    enabled_when: "backup/tunnel service start"
+    policy: deferred
+    deferral_reason: >-
+      Backrest (ghcr.io/garethgeorge/backrest:v1.14.1) and Newt
+      (fosrl/newt:1.16.0) service-image pins keep existing behavior;
+      service upgrade is out of managed scope
+
+  host-bridges:
+    name: Host-side service launchers
+    kind: group
+    enabled_when: "./service.sh starts a host service"
+    policy: deferred
+    deferral_reason: >-
+      the host-side run.sh/launch.py launchers (browser, gateway, proxyman,
+      including floating npx launchers) run on the Mac, outside container
+      selection; out of managed scope
+
+  host-applications:
+    name: Host applications
+    kind: group
+    enabled_when: "never (not installed by this repository)"
+    policy: external
+    # Proxyman.app, the desktop browsers, Docker Desktop and its MCP
+    # gateway: brassbottle does not select or install any of them, and no
+    # repo path carries a selector — hence no location records.
+
+  ci-selectors:
+    name: CI runner and action selectors
+    kind: group
+    enabled_when: "GitHub Actions runs"
+    policy: deferred
+    deferral_reason: >-
+      the workflow's runner image (ubuntu-latest) and action tags
+      (actions/checkout@v4) keep existing behavior; CI administration is
+      out of managed scope
+
+  user-repositories:
+    name: User repositories
+    kind: group
+    enabled_when: "manifest repos: lists a repository"
+    policy: deferred
+    deferral_reason: >-
+      manifests clone each repository's remote default branch once and up
+      never touches the working tree afterwards; the user, not brassbottle,
+      selects what runs there
