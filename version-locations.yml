@@ -1,0 +1,455 @@
+# version-locations.yml — the explicit selector-location inventory (schema 1).
+#
+# The companion to versions.yml. Consumed only by src/version_audit.py, the
+# read-only `djinn versions audit` — nothing in up.sh, manifest.py, or the
+# image reads this file. versions.yml classifies components; this file binds
+# each component's selectors to concrete repo paths and anchors.
+#
+# Location fields (closed set):
+#   path       repo-relative file that carries the selector (must exist;
+#              deletion, or a symlink resolving outside the repository,
+#              fails the audit)
+#   component  the versions.yml component this selector belongs to
+#   find       literal substring that must still appear in the file — the
+#               mutation anchor for the pinned/exact version or commit, and
+#               (for discovery) one consumable allowance: each record
+#               accounts for exactly ONE scanned hit line of its file (the
+#               line must contain the anchor), so repeated identical
+#               selector lines need one record each — several records may
+#               share the same find — and a new selector line has no unused
+#               record and fails. Matching is deterministic: longest anchor
+#               first, then record id.
+#   note       free-form annotation; carries no audit weight
+#
+# Labels derive from the catalog policy (exact→pinned, latest/release-line→
+# floating, external, deferred) in src/version_audit.py — the only place the
+# mapping lives — so a location can never drift from its component's
+# classification.
+schema: 1
+locations:
+
+  # ── Agents ────────────────────────────────────────────────────────────────
+  agent.aider:
+    path: agents/aider/agent.yml
+    component: agent.aider
+    find: "pip3 install aider-chat"
+
+  agent.antigravity-cli:
+    path: agents/antigravity-cli/agent.yml
+    component: agent.antigravity-cli
+    find: "https://antigravity.google/cli/install.sh | bash"
+
+  agent.claude:
+    path: agents/claude/agent.yml
+    component: agent.claude
+    find: "npm install -g @anthropic-ai/claude-code"
+
+  agent.codex:
+    path: agents/codex/agent.yml
+    component: agent.codex
+    find: "npm install -g @openai/codex"
+
+  agent.cursor:
+    path: agents/cursor/agent.yml
+    component: agent.cursor
+    find: "https://cursor.com/install | bash"
+
+  agent.kimi:
+    path: agents/kimi/agent.yml
+    component: agent.kimi
+    find: "https://code.kimi.com/kimi-code/install.sh | bash"
+
+  agent.pi:
+    path: agents/pi/agent.yml
+    component: agent.pi
+    find: "npm install -g @earendil-works/pi-coding-agent"
+
+  agent.pi-mcp-adapter:
+    path: agents/pi/agent.yml
+    component: agent.pi-mcp-adapter
+    find: "pi-mcp-adapter@2.32.1"
+
+  # ── Plugins ───────────────────────────────────────────────────────────────
+  plugin.annotated-watch:
+    path: plugins/annotated-watch/plugin.yml
+    component: plugin.annotated-watch
+
+  plugin.archex:
+    path: plugins/archex/plugin.yml
+    component: plugin.archex
+    find: 'uv tool install -p 3.13 "archex[vector-fast]"'
+
+  plugin.axiom:
+    path: plugins/axiom/plugin.yml
+    component: plugin.axiom
+
+  plugin.browser:
+    path: plugins/browser/plugin.yml
+    component: plugin.browser
+
+  # The pinned release spec, and the release URL that dereferences it.
+  plugin.codebase-memory:
+    path: plugins/codebase-memory/plugin.yml
+    component: plugin.codebase-memory
+    find: "CBM_VERSION=v0.10.1"
+  plugin.codebase-memory.download:
+    path: plugins/codebase-memory/plugin.yml
+    component: plugin.codebase-memory
+    find: "releases/download/${CBM_VERSION}"
+
+  plugin.cordyceps:
+    path: plugins/cordyceps/plugin.yml
+    component: plugin.cordyceps
+
+  plugin.egress:
+    path: plugins/egress/plugin.yml
+    component: plugin.egress
+
+  plugin.gateway:
+    path: plugins/gateway/plugin.yml
+    component: plugin.gateway
+
+  plugin.gear360:
+    path: plugins/gear360/plugin.yml
+    component: plugin.gear360
+    find: "bash /opt/plugins/gear360/install.sh"
+
+  # The installer's own selectors: the pip fallback, the pinned-upstream
+  # spatial-media clone, and the three-source loop. Deferred behavior,
+  # inventoried so new selector lines in the installer still fail.
+  plugin.gear360.spatialmedia:
+    path: plugins/gear360/install.sh
+    component: plugin.gear360
+    find: "pip3 install --break-system-packages spatialmedia"
+  plugin.gear360.spatial-media:
+    path: plugins/gear360/install.sh
+    component: plugin.gear360
+    find: "git clone --depth 1 https://github.com/google/spatial-media.git"
+  plugin.gear360.sources:
+    path: plugins/gear360/install.sh
+    component: plugin.gear360
+    find: 'git clone --depth 1 "https://github.com/$repo.git"'
+
+  plugin.herdr-auto-title:
+    path: plugins/herdr-auto-title/plugin.yml
+    component: plugin.herdr-auto-title
+    find: "checkout --detach 4d4554fb9706a29032cb2082be32f2061b96f2c6"
+
+  plugin.herdr-auto-title.clone:
+    path: plugins/herdr-auto-title/plugin.yml
+    component: plugin.herdr-auto-title
+    find: "git clone https://github.com/kryptamine/herdr-auto-title"
+
+  plugin.ngrok:
+    path: plugins/ngrok/plugin.yml
+    component: plugin.ngrok
+    find: "ngrok-v3-stable-linux-amd64.tgz"
+
+  plugin.obsidian-annotated:
+    path: plugins/obsidian-annotated/plugin.yml
+    component: plugin.obsidian-annotated
+
+  plugin.opencode:
+    path: plugins/opencode/plugin.yml
+    component: plugin.opencode
+
+  plugin.openrouter:
+    path: plugins/openrouter/plugin.yml
+    component: plugin.openrouter
+
+  plugin.proxyman:
+    path: plugins/proxyman/plugin.yml
+    component: plugin.proxyman
+
+  plugin.rhinomcp:
+    path: plugins/rhinomcp/plugin.yml
+    component: plugin.rhinomcp
+    find: "uv tool install -p 3.13 rhinomcp"
+
+  plugin.rhinomcp-official:
+    path: plugins/rhinomcp-official/plugin.yml
+    component: plugin.rhinomcp-official
+
+  plugin.serena:
+    path: plugins/serena/plugin.yml
+    component: plugin.serena
+    find: "uv tool install -p 3.13 serena-agent"
+
+  # Prose file owned by the plugin (a comment mentions serena's own install
+  # location); declared so pattern discovery reads it as reviewed.
+  plugin.serena.context:
+    path: plugins/serena/derive_context.py
+    component: plugin.serena
+    note: prose mention of the upstream venv location, not a selector
+
+  # The package pin, the npm ci that consumes the reviewed lock, and the
+  # three runtime dependency pins (set in the install block, verified by the
+  # for-loop, and pinned again in the committed lock).
+  plugin.tinfoil:
+    path: plugins/tinfoil/plugin.yml
+    component: plugin.tinfoil
+    find: "@tinfoilsh/pi-provider@0.1.2"
+  plugin.tinfoil.ci:
+    path: plugins/tinfoil/plugin.yml
+    component: plugin.tinfoil
+    find: "npm ci --omit=dev"
+  plugin.tinfoil.deps:
+    path: plugins/tinfoil/plugin.yml
+    component: plugin.tinfoil
+    find: "dependencies.tinfoil=1.2.1 dependencies.zod=4.6.3"
+  plugin.tinfoil.depverify:
+    path: plugins/tinfoil/plugin.yml
+    component: plugin.tinfoil
+    find: "ehbp:0.3.2"
+  plugin.tinfoil.deplock:
+    path: plugins/tinfoil/package-lock.json
+    component: plugin.tinfoil
+    find: '"resolved": "https://registry.npmjs.org/tinfoil/-/tinfoil-1.2.1.tgz"'
+  plugin.tinfoil.zod-lock:
+    path: plugins/tinfoil/package-lock.json
+    component: plugin.tinfoil
+    find: '"resolved": "https://registry.npmjs.org/zod/-/zod-4.6.3.tgz"'
+  plugin.tinfoil.ehbp-lock:
+    path: plugins/tinfoil/package-lock.json
+    component: plugin.tinfoil
+    find: '"resolved": "https://registry.npmjs.org/ehbp/-/ehbp-0.3.2.tgz"'
+
+  # ── Groups (no installer owner; existing behavior stands) ─────────────────
+  base-images.main:
+    path: Dockerfile
+    component: base-images
+    find: "FROM ubuntu:24.04"
+  base-images.backup:
+    path: backup/Dockerfile
+    component: base-images
+    find: "FROM python:3.12-alpine"
+  base-images.jump:
+    path: jump/Dockerfile
+    component: base-images
+    find: "FROM debian:bookworm-slim"
+
+  # Three separate records for three identical apt-update install lines —
+  # one-to-one accounting: each record allows exactly one hit line, so a
+  # fourth identical apt RUN fails the audit until it is declared.
+  distro-packages.core:
+    path: Dockerfile
+    component: distro-packages
+    find: 'apt-get update && apt-get install -y \'
+  distro-packages.firewall:
+    path: Dockerfile
+    component: distro-packages
+    find: 'apt-get update && apt-get install -y \'
+    note: the iptables/ipset/iproute2 install RUN
+  distro-packages.remote-run:
+    path: Dockerfile
+    component: distro-packages
+    find: 'apt-get update && apt-get install -y \'
+    note: the tmux/locales install RUN
+  distro-packages.ssh:
+    path: Dockerfile
+    component: distro-packages
+    find: "apt-get install -y openssh-server"
+  distro-packages.remote:
+    path: Dockerfile
+    component: distro-packages
+    find: "tmux locales"
+    note: the tmux/locales packages themselves
+  distro-packages.backup:
+    path: backup/Dockerfile
+    component: distro-packages
+    find: "apk add --no-cache restic"
+  distro-packages.jump:
+    path: jump/Dockerfile
+    component: distro-packages
+    find: "apt-get install -y --no-install-recommends"
+  distro-packages.gear360:
+    path: plugins/gear360/install.sh
+    component: distro-packages
+    find: "apt-get install -y --no-install-recommends"
+  distro-packages.herdr-auto-title:
+    path: plugins/herdr-auto-title/plugin.yml
+    component: distro-packages
+    find: "golang-1.24-go"
+
+  base-tools.python-tools:
+    path: Dockerfile
+    component: base-tools
+    find: "pip3 install pipenv playwright"
+  base-tools.gh:
+    path: Dockerfile
+    component: base-tools
+    find: "githubcli-archive-keyring.gpg"
+  base-tools.gh-apt:
+    path: Dockerfile
+    component: base-tools
+    find: "install -y gh"
+  base-tools.tea:
+    path: Dockerfile
+    component: base-tools
+    find: "dl.gitea.com/tea/0.9.2"
+  base-tools.fnm:
+    path: Dockerfile
+    component: base-tools
+    find: "fnm.vercel.app/install"
+  base-tools.node-lts:
+    path: Dockerfile
+    component: base-tools
+    find: "fnm install --lts"
+  base-tools.uv:
+    path: Dockerfile
+    component: base-tools
+    find: "astral.sh/uv/install.sh"
+  base-tools.yq:
+    path: Dockerfile
+    component: base-tools
+    find: "YQ_VERSION=v4.44.3"
+  base-tools.yq-download:
+    path: Dockerfile
+    component: base-tools
+    find: "yq/releases/download/"
+  base-tools.mcp-remote:
+    path: Dockerfile
+    component: base-tools
+    find: "MCP_REMOTE_VERSION=^0.1.38"
+  base-tools.mcp-remote-install:
+    path: Dockerfile
+    component: base-tools
+    find: 'npm install -g "mcp-remote@'
+  base-tools.herdr:
+    path: Dockerfile
+    component: base-tools
+    find: "HERDR_VERSION=0.8.2"
+  base-tools.herdr-download:
+    path: Dockerfile
+    component: base-tools
+    find: "herdr/releases/download/v"
+
+  service-images.backrest:
+    path: src/backup_config.py
+    component: service-images
+    find: "ghcr.io/garethgeorge/backrest:v1.14.1"
+  service-images.newt:
+    path: src/tunnel_config.py
+    component: service-images
+    find: "fosrl/newt:1.16.0"
+
+  # The CI smoke pulls of the same two service images — current selectors in
+  # the workflow files, anchored per line (one record per line).
+  service-images.backrest-ci:
+    path: .github/workflows/ci.yml
+    component: service-images
+    find: "docker pull ghcr.io/garethgeorge/backrest:v1.14.1"
+  service-images.newt-ci:
+    path: .github/workflows/ci.yml
+    component: service-images
+    find: "docker pull fosrl/newt:1.16.0"
+  service-images.backrest-staged:
+    path: ci-staged/ci.yml
+    component: service-images
+    find: "docker pull ghcr.io/garethgeorge/backrest:v1.14.1"
+  service-images.newt-staged:
+    path: ci-staged/ci.yml
+    component: service-images
+    find: "docker pull fosrl/newt:1.16.0"
+
+  # Host-side launchers (run on the Mac via ./service.sh, never baked into a
+  # container). Anchored per line, including the prose line that mentions
+  # npx, so the floating-launcher ban stays scoped to container installers
+  # while these lines stay explicitly reviewed.
+  host-bridges.browser:
+    path: plugins/browser/launch.py
+    component: host-bridges
+    find: '"npx", "-y", "mcp-proxy"'
+  host-bridges.browser.devtools:
+    path: plugins/browser/launch.py
+    component: host-bridges
+    find: '"npx", "-y", "chrome-devtools-mcp"'
+  host-bridges.browser.doc:
+    path: plugins/browser/launch.py
+    component: host-bridges
+    find: "npx are all host prerequisites"
+    note: docstring prose line, not a selector
+  host-bridges.gateway:
+    path: plugins/gateway/run.sh
+    component: host-bridges
+    find: "docker mcp gateway run"
+  host-bridges.proxyman:
+    path: plugins/proxyman/run.sh
+    component: host-bridges
+    find: "exec npx -y mcp-proxy"
+
+  ci-selectors.workflow:
+    path: .github/workflows/ci.yml
+    component: ci-selectors
+    find: "actions/checkout@v4"
+  ci-selectors.runner:
+    path: .github/workflows/ci.yml
+    component: ci-selectors
+    find: "runs-on: ubuntu-latest"
+  ci-selectors.staged:
+    path: ci-staged/ci.yml
+    component: ci-selectors
+    find: "actions/checkout@v4"
+  ci-selectors.staged-runner:
+    path: ci-staged/ci.yml
+    component: ci-selectors
+    find: "runs-on: ubuntu-latest"
+
+  user-repositories.template:
+    path: bottles/TEMPLATE.yml
+    component: user-repositories
+    find: "repos:"
+
+# Explicitly NOT selectors — excluded from pattern discovery as whole files.
+# Each states why it cannot hide a selector.
+exclusions:
+  - path: src/admin_vendor
+    reason: vendored upstream file (htm/preact standalone), committed at a
+      pinned version in its filename; no live selector executes here
+  - path: tests
+    reason: test fixtures, goldens and suites — never installer surfaces
+  - path: docs
+    reason: human documentation, not installer surfaces
+
+# Scoped pattern discovery (the backstop): files scanned for selector
+# syntax, and the patterns themselves. Scope is the installer surface —
+# descriptor directories plus the build/service/bottle/CI files — not the
+# whole repository: src/ library code talks ABOUT installers in prose, and
+# the audit is intentionally not a general parser for every possible
+# selector syntax. Coverage is per anchor: a scanned hit line is accepted
+# only when the line itself contains a declared find anchor for its path
+# (or the file is excluded below) — a location's path alone covers nothing,
+# so a new selector line inside an already-declared file is a finding until
+# this inventory gains its anchor.
+discovery:
+  scope:
+    - agents
+    - plugins
+    - bottles
+    - compose
+    - backup
+    - jump
+    - bin
+    - ci-staged
+    - .github
+    - Dockerfile
+  skip-names: [package-lock.json]
+  patterns:
+    - '\bnpm\s+(install|ci)\b'
+    - '\bpip3?\s+install\b'
+    - '\buv\s+(tool|pip)\s+install\b'
+    - '\b(npx|uvx)\b'
+    - '\bapt-get\s+install\b'
+    - '\bapk\s+add\b'
+    - '\bgit\s+clone\b'
+    - '\bfnm\s+install\b'
+    - 'releases/download/'
+    - 'dl\.gitea\.com'
+    - '-stable-'
+    - '\buses:\s*\S+@'
+    - '\bruns-on:'
+    - '\binstall\.sh\s*\|\s*(ba)?sh'
+    - '\bcurl[^|]*\|\s*(ba)?sh'
+    - '\bdocker\s+pull\s+\S+'
+    - '(?m)^FROM\s+\S+'
+    - '(?m)^ARG\s+\w*VERSION'

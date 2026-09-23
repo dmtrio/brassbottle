@@ -18,6 +18,8 @@ Usage: ./djinn <subcommand> [args...]
   jump     <cmd> [args...]     singleton mosh jump container (start/refresh/stop/status/logs/pubkey/ip)
   tunnel   <cmd> [args...]     singleton VPN/tunnel connector (start/stop/status/logs)
   admin    [--port N]               admin plane UI daemon (http://127.0.0.1:8817)
+  versions audit                 read-only audit of the version-selection
+                                   inventory (versions.yml + version-locations.yml)
   allow    --watch                  interactive egress approval watcher
   allow    <container> <domain...>  add domains to a running container's egress allowlist
   deny     <zone> (--bottle <name> | --global) [--reason "..."]   persist a deny entry
@@ -79,6 +81,16 @@ case "${1:-}" in
         exec env DJINN_HOME="$BASE_PATH" "$PYTHON3" "$SCRIPT_DIR/src/egress_denylist.py" remove "$@"
         ;;
     keys)    shift; exec "$SCRIPT_DIR/bin/update-agent-keys.sh" "$@" ;;
+    versions)
+        shift
+        # Read-only inventory surface (Dark read-only phase): `djinn versions
+        # audit` never mutates anything and never touches up/compose — the
+        # version-management runtime integration is a later step. Follows
+        # the same late common.sh + $PYTHON3 resolution as `admin`/`deny`.
+        . "$SCRIPT_DIR/src/common.sh"
+        require_python3 || exit 1
+        exec "$PYTHON3" "$SCRIPT_DIR/src/version_audit.py" "$@"
+        ;;
     help|-h|--help) usage; exit 0 ;;
     "")      usage >&2; exit 1 ;;
     *)       echo "Error: unknown subcommand '$1'" >&2; usage >&2; exit 1 ;;
