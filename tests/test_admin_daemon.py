@@ -744,7 +744,10 @@ class AdminDaemonTests(unittest.TestCase):
             )
             host, port = server.server_address
             try:
-                status, payload, _hdrs, _raw = self._request(host, port, "GET", "/api/egress/queue")
+                status, payload, _hdrs, _raw = self._request(
+                    host, port, "GET", "/api/egress/queue",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
                 self.assertEqual(status, HTTPStatus.OK)
                 self.assertEqual(payload, state.queue_body)
             finally:
@@ -802,7 +805,10 @@ class AdminDaemonTests(unittest.TestCase):
             )
             host, port = server.server_address
             try:
-                status, payload, _hdrs, _raw = self._request(host, port, "GET", "/api/egress/queue")
+                status, payload, _hdrs, _raw = self._request(
+                    host, port, "GET", "/api/egress/queue",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
                 self.assertEqual(status, HTTPStatus.OK)
                 self.assertEqual(payload, state.queue_body)
             finally:
