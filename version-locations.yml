@@ -334,21 +334,13 @@ locations:
     find: "fosrl/newt:1.16.0"
 
   # The CI smoke pulls of the same two service images — current selectors in
-  # the workflow files, anchored per line (one record per line).
+  # the workflow file, anchored per line (one record per line).
   service-images.backrest-ci:
     path: .github/workflows/ci.yml
     component: service-images
     find: "docker pull ghcr.io/garethgeorge/backrest:v1.14.1"
   service-images.newt-ci:
     path: .github/workflows/ci.yml
-    component: service-images
-    find: "docker pull fosrl/newt:1.16.0"
-  service-images.backrest-staged:
-    path: ci-staged/ci.yml
-    component: service-images
-    find: "docker pull ghcr.io/garethgeorge/backrest:v1.14.1"
-  service-images.newt-staged:
-    path: ci-staged/ci.yml
     component: service-images
     find: "docker pull fosrl/newt:1.16.0"
 
@@ -384,14 +376,6 @@ locations:
     find: "actions/checkout@v4"
   ci-selectors.runner:
     path: .github/workflows/ci.yml
-    component: ci-selectors
-    find: "runs-on: ubuntu-latest"
-  ci-selectors.staged:
-    path: ci-staged/ci.yml
-    component: ci-selectors
-    find: "actions/checkout@v4"
-  ci-selectors.staged-runner:
-    path: ci-staged/ci.yml
     component: ci-selectors
     find: "runs-on: ubuntu-latest"
 
@@ -430,7 +414,6 @@ discovery:
     - backup
     - jump
     - bin
-    - ci-staged
     - .github
     - Dockerfile
   skip-names: [package-lock.json]

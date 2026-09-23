@@ -64,6 +64,6 @@ The driver logic lives in `tests/egress_smoke_lib.py` (unit-tested by
 
 ## CI Staging
 
-This branch includes `ci-staged/ci.yml` as the proposed GitHub Actions workflow.
-It is staged outside `.github/workflows/` so a human with workflow permission can
-move it into place.
+CI runs `.github/workflows/ci.yml`. The agent token lacks `workflow` scope, so a
+workflow change is staged as a full copy at `ci-staged/ci.yml` for a human with
+workflow permission to move into place; a follow-up commit removes the copy.

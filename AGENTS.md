@@ -84,9 +84,8 @@ discipline) that the harness supplies separately.
 - CI workflow files under `.github/workflows/` are changed by staging a full
   copy under top-level `ci-staged/` for a human to move into place — the
   agent token lacks `workflow` scope (process described in the header of
-  `ci.yml`). `ci-staged/ci.yml` may run a superset of the live workflow's
-  checks (currently the jump-picker unit tests); update whichever copy your
-  change targets and keep the two consistent.
+  `ci.yml`). `ci-staged/` exists only while such a change is pending; a
+  follow-up commit removes it once the workflow is applied.
 - Manifest/plugin/agent schema questions are answered by `src/manifest.py`,
   `agents/README.md`, and `plugins/README.md` — the schema has no summary doc
   that is safe to trust over the validator.
