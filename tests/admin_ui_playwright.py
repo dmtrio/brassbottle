@@ -82,34 +82,57 @@ def log(message: str) -> None:
 
 
 # Everything `npm run build` reads to produce dist/, relative to the repo root.
+# A plain entry is a file, or a directory watched with everything under it; a
+# trailing "/" watches the directory node only (a file added to or deleted from it);
+# an entry with a wildcard is the files it matches.
 BUILD_INPUTS = (
     "admin/ui/src",
     "admin/ui/public",
+    "admin/ui/scripts",
     "admin/ui/index.html",
     "admin/ui/vite.config.ts",
+    "admin/ui/package.json",
     "admin/ui/package-lock.json",
-    "admin/contract",
+    "admin/ui/tsconfig*.json",
+    "admin/contract/",
+    "admin/contract/*.schema.json",
 )
 BUNDLE = "admin/ui/dist/index.html"
+
+
+def is_build_noise(name: str) -> bool:
+    """A file name the build never reads: dotfiles, editor swap and backup files, READMEs."""
+    return (name.startswith(".") or name.endswith("~") or name == "4913"
+            or (name.startswith("#") and name.endswith("#"))
+            or name.endswith((".swp", ".swo", ".swx")) or name == "README.md")
+
+
+def build_input_paths(root: Path, entry: str) -> list[Path]:
+    """The existing paths one BUILD_INPUTS entry stands for, noise left out."""
+    if "*" in entry:
+        return [path for path in root.glob(entry) if not is_build_noise(path.name)]
+    path = root / entry.rstrip("/")
+    if not path.exists():
+        return []
+    if entry.endswith("/") or not path.is_dir():
+        return [path]
+    return [path, *(found for found in path.rglob("*")
+                    if not any(is_build_noise(part) for part in found.relative_to(path).parts))]
 
 
 def build_inputs_newer_than_bundle(root: Path, bundle: Path) -> list[Path]:
     """Build inputs modified after `bundle`: the built dist/ cannot reflect them.
 
     Directories count too, so a file deleted from src/ (which bumps its
-    directory's mtime) is caught. A build that FAILS is caught as well, without
+    directory's mtime) is caught; that also means a swap file created in a
+    watched directory trips the guard through the directory, though the swap
+    file itself is ignored. A build that FAILS is caught as well, without
     any help from this list: `prebuild` (gen:types) rewrites src/contract.ts
     before vue-tsc and vite run, so a failed build always leaves a source newer
     than the old bundle.
     """
     built = bundle.stat().st_mtime_ns
-    newer: list[Path] = []
-    for rel in BUILD_INPUTS:
-        path = root / rel
-        if not path.exists():
-            continue
-        candidates = [path, *path.rglob("*")] if path.is_dir() else [path]
-        newer.extend(c for c in candidates if c.stat().st_mtime_ns > built)
+    newer = {c for entry in BUILD_INPUTS for c in build_input_paths(root, entry) if c.stat().st_mtime_ns > built}
     return sorted(newer)
 
 
