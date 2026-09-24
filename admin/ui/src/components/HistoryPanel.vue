@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, type Ref } from 'vue'
 import { AlertTriangle, Box, CalendarDays, ChevronLeft, ChevronRight } from '@lucide/vue'
-import { useMediaQuery } from '@vueuse/core'
+import { useIntervalFn, useMediaQuery } from '@vueuse/core'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { RangeCalendar } from '@/components/ui/range-calendar'
@@ -19,6 +19,11 @@ import SearchField from './SearchField.vue'
 type StatusFilter = 'all' | 'allowed' | 'denied'
 
 const phone = useMediaQuery('(max-width: 639px)')
+
+// History does not poll, so the relative times ("10m ago") read this clock and
+// refresh once a minute on an open page.
+const now = ref(Date.now())
+useIntervalFn(() => { now.value = Date.now() }, 60_000)
 
 // Search and the status toggle filter the loaded page only. The bottle and the
 // date range are broker filters: changing one starts the walk again from the
@@ -194,7 +199,7 @@ function clearRange(): void {
           <span
             class="row-caption flex-none"
             data-testid="history-row-when"
-          ><span class="sm:hidden">{{ decidedDay(r.decided_at) }}</span><span class="hidden sm:inline">{{ decidedAt(r.decided_at) }} · {{ relTime(r.decided_at) }}</span></span>
+          ><span class="sm:hidden">{{ decidedDay(r.decided_at) }}</span><span class="hidden sm:inline">{{ decidedAt(r.decided_at) }} · {{ relTime(r.decided_at, now) }}</span></span>
         </div>
         <div class="overflow-hidden">
           <div class="meta-flow row-meta">
