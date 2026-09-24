@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -70,6 +71,10 @@ DENYLIST_SUPPRESS_SECONDS = 60
 STALE_SWEEP_INTERVAL_SECONDS = 300
 DECIDE_REASON_MAX_CHARS = 200
 RECENT_WINDOW_HOURS = 24
+RECENT_PAGE_DEFAULT = 50
+RECENT_PAGE_MAX = 200
+_CURSOR_TS_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+_CURSOR_ID_RE = re.compile(r"[0-9A-Za-z_-]{1,64}")
 
 TOKENS_DIRNAME = "tokens"
 LOCK_FILENAME = "daemon.lock"
@@ -580,6 +585,69 @@ def daemon_base_url(egress_root: Path) -> str:
     if endpoint is not None:
         return f"http://{_connect_host_for_bind(endpoint.host)}:{endpoint.port}"
     return f"http://127.0.0.1:{DEFAULT_PORT}"
+
+
+class RecentQueryError(ValueError):
+    """A malformed /recent parameter; the message is the 400 body's `error`."""
+
+
+def decided_row_json(row: RequestRow) -> dict[str, Any]:
+    """One decided row as operator UIs see it.
+
+    The single shaper for `queue_snapshot()["recent"]` and `/recent` pages, so
+    the two shapes cannot drift (admin/contract/recent_page.schema.json).
+    """
+    return {
+        "request_id": row.request_id,
+        "container": row.container,
+        "host": row.host,
+        "port": row.port,
+        "status": row.status,
+        "scope": row.scope,
+        "decided_at": _iso_ts(row.decided_at) if row.decided_at else None,
+        "decided_by": row.decided_by,
+        "apply_status": row.apply_status,
+        "deny_reason": row.deny_reason,
+    }
+
+
+def parse_recent_cursor(raw: str) -> tuple[str, str]:
+    """`<decided_at>,<request_id>` -> the store's keyset cursor."""
+    ts, sep, request_id = raw.partition(",")
+    if not sep or not _CURSOR_TS_RE.fullmatch(ts) or not _CURSOR_ID_RE.fullmatch(request_id):
+        raise RecentQueryError("invalid before cursor: want <decided_at>,<request_id>")
+    return ts, request_id
+
+
+def _parse_recent_bound(name: str, raw: str) -> datetime:
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise RecentQueryError(f"invalid {name}: want an ISO 8601 timestamp") from None
+
+
+def parse_recent_query(query: str) -> dict[str, Any]:
+    """Validate a /recent query string into `EgressBroker.recent_page` kwargs.
+
+    Unknown parameters are ignored. Raises RecentQueryError on a malformed
+    `before`, `since`, `until` or `limit`; `limit` is clamped to
+    1..RECENT_PAGE_MAX, and a blank parameter counts as absent.
+    """
+    params = {k: v[0] for k, v in urllib.parse.parse_qs(query).items() if v and v[0] != ""}
+    limit = RECENT_PAGE_DEFAULT
+    if "limit" in params:
+        try:
+            limit = int(params["limit"])
+        except ValueError:
+            raise RecentQueryError("invalid limit: want an integer") from None
+        limit = max(1, min(RECENT_PAGE_MAX, limit))
+    return {
+        "before": parse_recent_cursor(params["before"]) if "before" in params else None,
+        "limit": limit,
+        "container": params.get("container"),
+        "since": _parse_recent_bound("since", params["since"]) if "since" in params else None,
+        "until": _parse_recent_bound("until", params["until"]) if "until" in params else None,
+    }
 
 
 class EgressBroker:
@@ -1557,20 +1625,6 @@ class EgressBroker:
         hours, newest first.
         """
 
-        def _recent_row(row: RequestRow) -> dict[str, Any]:
-            return {
-                "request_id": row.request_id,
-                "container": row.container,
-                "host": row.host,
-                "port": row.port,
-                "status": row.status,
-                "scope": row.scope,
-                "decided_at": _iso_ts(row.decided_at) if row.decided_at else None,
-                "decided_by": row.decided_by,
-                "apply_status": row.apply_status,
-                "deny_reason": row.deny_reason,
-            }
-
         with self._lock:
             now = self.now()
             open_rows: list[dict[str, Any]] = []
@@ -1593,7 +1647,7 @@ class EgressBroker:
                     }
                 )
             recent_rows = [
-                _recent_row(row)
+                decided_row_json(row)
                 for row in self._store.list_recent(
                     since=now - timedelta(hours=RECENT_WINDOW_HOURS)
                 )
@@ -1606,6 +1660,39 @@ class EgressBroker:
             }
         LOG.info("egress broker queue snapshot open=%d", snapshot["count"])
         return snapshot
+
+    def recent_page(
+        self,
+        *,
+        before: tuple[str, str] | None = None,
+        limit: int = RECENT_PAGE_DEFAULT,
+        container: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, Any]:
+        """One keyset page of decided rows, newest first, for the History tab.
+
+        `next` is the cursor of the last row when the page is full and null
+        when fewer than `limit` rows remained, so a null `next` always means
+        the end. A page that ends exactly on the last row still carries a
+        cursor; the page after it is empty with `next` null.
+        """
+        started = time.monotonic()
+        rows = self._store.list_recent(
+            since=since, until=until, container=container, before=before, limit=limit
+        )
+        last = rows[-1] if rows else None
+        next_cursor = None
+        if last is not None and len(rows) >= limit:
+            next_cursor = f"{_iso_ts(last.decided_at)},{last.request_id}"
+        LOG.info(
+            "egress broker recent page rows=%d limit=%d has_next=%s duration_ms=%.1f",
+            len(rows),
+            limit,
+            next_cursor is not None,
+            (time.monotonic() - started) * 1000.0,
+        )
+        return {"rows": [decided_row_json(r) for r in rows], "next": next_cursor}
 
     def request_view(self, request_id: str, container: str) -> dict[str, Any] | None:
         """The public fields of one row, for GET /egress/<request_id>.
@@ -1750,7 +1837,29 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(HTTPStatus.OK, self.server.broker.queue_snapshot())
             return
+        recent_path, _, recent_query = self.path.partition("?")
+        if recent_path == "/recent":
+            self._handle_recent_get(recent_query)
+            return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def _handle_recent_get(self, query: str) -> None:
+        LOG.info("egress broker request enter path=/recent query_bytes=%d", len(query))
+        if not self._resolve_operator_auth():
+            return
+        try:
+            kwargs = parse_recent_query(query)
+        except RecentQueryError as exc:
+            LOG.info("egress broker request rejected path=/recent error=%s", exc)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        page = self.server.broker.recent_page(**kwargs)
+        LOG.info(
+            "egress broker request exit path=/recent rows=%d has_next=%s",
+            len(page["rows"]),
+            page["next"] is not None,
+        )
+        self._send_json(HTTPStatus.OK, page)
 
     def do_POST(self) -> None:
         if self.path == "/decide":

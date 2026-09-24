@@ -6,6 +6,7 @@ import copy
 import json
 import sys
 import unittest
+from datetime import datetime
 from http.client import HTTPConnection
 from pathlib import Path
 
@@ -121,6 +122,73 @@ class StubBrokerTests(unittest.TestCase):
             self.assertIn("extra", broker.violations[0])
         finally:
             broker.stop()
+
+
+class StubHistoryTests(unittest.TestCase):
+    """`GET /recent` is real keyset paging over a fixture with a tie block."""
+
+    def _walk(self, rows, query=""):
+        pages, seen, cursor = [], [], None
+        while True:
+            q = "&".join(part for part in (query, f"before={cursor}" if cursor else "") if part)
+            status, page = stub.recent_reply(rows, q)
+            self.assertEqual(status, 200)
+            self.assertEqual(validate_document(page, stub.RECENT_SCHEMA), [])
+            pages.append(page["rows"])
+            seen.extend(row["request_id"] for row in page["rows"])
+            cursor = page["next"]
+            if cursor is None:
+                return pages, seen
+
+    def test_paging_returns_every_row_once_in_keyset_order(self):
+        rows = stub.StubBroker().history_rows()
+        pages, seen = self._walk(rows)
+        self.assertEqual(len(seen), len(rows))
+        self.assertEqual(len(set(seen)), len(rows))
+        ordered = sorted(rows, key=lambda r: (r["decided_at"], r["request_id"]), reverse=True)
+        self.assertEqual(seen, [r["request_id"] for r in ordered])
+        self.assertEqual([len(p) for p in pages], [50, 50, 50, 50, 47])
+
+    def test_a_tie_block_straddles_the_first_page_boundary(self):
+        pages, _seen = self._walk(stub.StubBroker().history_rows())
+        last_first, first_second = pages[0][-1], pages[1][0]
+        self.assertEqual(last_first["decided_at"], first_second["decided_at"])
+        self.assertGreater(last_first["request_id"], first_second["request_id"])
+
+    def test_row_decided_thirty_days_ago_is_in_the_last_pages(self):
+        broker = stub.StubBroker()
+        _pages, seen = self._walk(broker.history_rows())
+        archive = next(r for r in broker.history if r["host"] == stub.ARCHIVE_HOST)
+        self.assertIn(archive["request_id"], seen[-3:])
+        clock = datetime.strptime(broker.queue["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
+        decided = datetime.strptime(archive["decided_at"], "%Y-%m-%dT%H:%M:%SZ")
+        self.assertAlmostEqual((clock - decided).total_seconds(), 30 * 86400, delta=60)
+
+    def test_filters_limit_clamp_and_bad_query(self):
+        rows = stub.StubBroker().history_rows()
+        _s, only = stub.recent_reply(rows, "container=mid&limit=1000")
+        self.assertTrue(only["rows"] and all(r["container"] == "mid" for r in only["rows"]))
+        self.assertEqual(len(stub.recent_reply(rows, "limit=0")[1]["rows"]), 1)
+        self.assertEqual(len(stub.recent_reply(rows, "limit=999")[1]["rows"]), 200)
+        for bad in ("before=nope", "since=yesterday", "limit=x"):
+            self.assertEqual(stub.recent_reply(rows, bad), (400, {"error": "invalid query"}), bad)
+
+    def test_a_row_decided_during_a_run_tops_history(self):
+        broker = stub.StubBroker()
+        payload = {"decision": "deny", "scope": "once", "host": "a1.example.com", "container": "alpha"}
+        _status, _reply = stub.decide_reply(broker.queue, payload)
+        self.assertEqual(broker.history_rows()[0]["request_id"], "a1")
+        _s, page = stub.recent_reply(broker.history_rows(), "")
+        self.assertEqual(page["rows"][0]["request_id"], "a1")
+
+    def test_preflight_refuses_a_history_reply_with_a_bad_cursor(self):
+        broker = stub.StubBroker()
+        broker.preflight()
+        original = stub.recent_reply
+        stub.recent_reply = lambda rows, q: (200, {**original(rows, q)[1], "next": "not a cursor"})
+        self.addCleanup(setattr, stub, "recent_reply", original)
+        with self.assertRaises(stub.ContractViolation):
+            broker.preflight()
 
 
 if __name__ == "__main__":

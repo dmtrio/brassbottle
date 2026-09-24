@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "RecentPage",
-  "description": "Planned shape for a future recent-history paging endpoint: one page of recent rows (same row shape as queue_snapshot().recent) plus a next-page cursor. No endpoint exists yet; schema only, enforced by tests/test_admin_contract.py once the endpoint lands.",
+  "description": "GET /recent on the broker, proxied unchanged by the admin as GET /api/egress/recent: one keyset page of decided rows, newest first (decided_at DESC, request_id DESC), each in the same shape as queue_snapshot().recent, plus the cursor of the next page. next is the last row's decided_at and request_id joined by a comma, passed back as ?before=; it is null when fewer than limit rows remained. Errors are error_response.",
+  "$comment": "Built by EgressBroker.recent_page and decided_row_json in src/egress_broker_host.py.",
   "type": "object",
   "properties": {
     "rows": {
@@ -22,7 +23,7 @@
             "enum": ["live", "manifest", "once", "bottle", "global", null],
             "$comment": "Allow scopes ('live','manifest') in _close_request plus VALID_DECIDE_SCOPES ('once','bottle','global') in src/egress_denylist.py; null when never set."
           },
-          "decided_at": { "type": "string" },
+          "decided_at": { "type": "string", "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$" },
           "decided_by": {
             "enum": ["operator", "ntfy", "sweep", "denylist"],
             "$comment": "decided_by values written in src/egress_broker_host.py: /decide handler ('operator'/'ntfy'), sweep_stale ('sweep'), _denylist_short_circuit ('denylist')."
@@ -41,7 +42,10 @@
         "additionalProperties": false
       }
     },
-    "next": { "type": ["string", "null"] }
+    "next": {
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ,[0-9A-Za-z_-]{1,64}$"
+    }
   },
   "required": ["rows", "next"],
   "additionalProperties": false

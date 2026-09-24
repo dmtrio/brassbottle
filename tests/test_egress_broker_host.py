@@ -2022,6 +2022,118 @@ class EgressBrokerHostTests(unittest.TestCase):
             self.assertEqual(snapshot["count"], 0)
             self.assertEqual(len(snapshot["recent"]), 1)
 
+    # ── /recent (keyset-paged history) ─────────────────────────────────────
+
+    def _seed_decided(self, b: broker.EgressBroker, count: int, *, container: str = "c") -> None:
+        """`count` decided rows, one minute apart, newest last; ids req-0000.."""
+        for i in range(count):
+            when = NOW - timedelta(days=30) + timedelta(minutes=i)
+            b._store.open_or_hit(
+                request_id=f"req-{i:04d}", container=container, host=f"h{i}.example.com",
+                port=443, host_is_ip=False, uid=None, comm=None, reason=None,
+                hold_seconds=None, now=when,
+            )
+            b._store.close(
+                request_id=f"req-{i:04d}", status="allowed", now=when, decided_by="operator",
+                scope="live", decision_body={"decision": "allow"},
+            )
+
+    def _get_recent(self, host, port, query="", token=None):
+        token = self.OPERATOR_TOKEN if token is None else token
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        conn = HTTPConnection(host, port, timeout=5)
+        conn.request("GET", "/recent" + query, headers=headers)
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode("utf-8"))
+        conn.close()
+        return resp.status, body
+
+    def _serve_recent(self, tmp: str, count: int):
+        egress_root = Path(tmp)
+        b = self._broker(egress_root, FakeClock(NOW), hold_seconds=1)
+        self._seed_decided(b, count)
+        return b, self._serve(egress_root, b, egress_root / broker.TOKENS_DIRNAME)
+
+    def test_get_recent_requires_operator_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, (host, port) = self._serve_recent(tmp, 3)
+            self.assertEqual(self._get_recent(host, port, token="")[0], HTTPStatus.UNAUTHORIZED)
+            status, body = self._get_recent(host, port, token="wrong")
+            self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+            self.assertEqual(body, {"error": "unauthorized"})
+            # Auth is checked before the query, so a bad cursor cannot probe it.
+            self.assertEqual(
+                self._get_recent(host, port, "?before=junk", token="wrong")[0],
+                HTTPStatus.UNAUTHORIZED,
+            )
+
+    def test_get_recent_pages_by_cursor_and_ends_with_null_next(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, (host, port) = self._serve_recent(tmp, 7)
+            status, first = self._get_recent(host, port, "?limit=3")
+            self.assertEqual(status, HTTPStatus.OK)
+            self.assertEqual([r["request_id"] for r in first["rows"]], ["req-0006", "req-0005", "req-0004"])
+            self.assertEqual(first["next"], f"{first['rows'][-1]['decided_at']},req-0004")
+            _, second = self._get_recent(host, port, f"?limit=3&before={first['next']}")
+            self.assertEqual([r["request_id"] for r in second["rows"]], ["req-0003", "req-0002", "req-0001"])
+            _, third = self._get_recent(host, port, f"?limit=3&before={second['next']}")
+            self.assertEqual([r["request_id"] for r in third["rows"]], ["req-0000"])
+            self.assertIsNone(third["next"])
+
+    def test_get_recent_row_shape_is_the_queue_snapshot_recent_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = self._broker(Path(tmp), FakeClock(NOW), hold_seconds=1)
+            _, request_id = b.file_request("c", "docs.stripe.com", 443, hold_seconds=0)
+            b.decide(request_id, "deny")
+            self.assertEqual(b.recent_page()["rows"], b.queue_snapshot()["recent"])
+
+    def test_get_recent_limit_defaults_to_50_and_clamps_to_1_200(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, (host, port) = self._serve_recent(tmp, 230)
+            self.assertEqual(len(self._get_recent(host, port)[1]["rows"]), 50)
+            self.assertEqual(len(self._get_recent(host, port, "?limit=500")[1]["rows"]), 200)
+            self.assertEqual(len(self._get_recent(host, port, "?limit=0")[1]["rows"]), 1)
+            self.assertEqual(len(self._get_recent(host, port, "?limit=-9")[1]["rows"]), 1)
+
+    def test_get_recent_filters_since_until_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b, (host, port) = self._serve_recent(tmp, 10)
+            b._store.open_or_hit(
+                request_id="other-1", container="other", host="o.example.com", port=443,
+                host_is_ip=False, uid=None, comm=None, reason=None, hold_seconds=None,
+                now=NOW - timedelta(days=30, minutes=-3),
+            )
+            b._store.close(
+                request_id="other-1", status="denied", now=NOW - timedelta(days=30, minutes=-3),
+                decided_by="operator", decision_body={"decision": "deny"},
+            )
+            base = NOW - timedelta(days=30)
+            iso = lambda m: (base + timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            _, only_c = self._get_recent(host, port, "?container=c&limit=200")
+            self.assertEqual(len(only_c["rows"]), 10)
+            _, window = self._get_recent(host, port, f"?since={iso(2)}&until={iso(4)}&container=c")
+            self.assertEqual([r["request_id"] for r in window["rows"]], ["req-0004", "req-0003", "req-0002"])
+            _, blank = self._get_recent(host, port, "?container=&limit=200")
+            self.assertEqual(len(blank["rows"]), 11)
+
+    def test_get_recent_malformed_query_is_400_with_error_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, (host, port) = self._serve_recent(tmp, 3)
+            for query in (
+                "?before=nocomma",
+                "?before=2026-08-01T00:00:00Z,",
+                "?before=yesterday,req-0001",
+                "?before=2026-08-01T00:00:00Z,bad%20id!",
+                "?since=last-tuesday",
+                "?until=2026-13-45",
+                "?limit=abc",
+            ):
+                with self.subTest(query=query):
+                    status, body = self._get_recent(host, port, query)
+                    self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(set(body), {"error"})
+                    self.assertIsInstance(body["error"], str)
+
     # ── misc endpoints ─────────────────────────────────────────────────────
 
     def test_health_endpoint(self):

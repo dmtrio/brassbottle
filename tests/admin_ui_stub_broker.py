@@ -16,6 +16,12 @@ Scripted outcomes (by host):
                                 stays healthy, so a page that shows a banner
                                 for it did so because the decide failed
   * everything else          -> the row is decided and moves to `recent`
+
+`GET /recent` serves the whole History store (HISTORY_ROWS older rows plus the
+live `recent` list, so a row decided during a run shows up at the top) with
+real keyset paging over `decided_at DESC, request_id DESC`. The fixture has a
+tie block of `decided_at` values straddling the first page boundary and one row
+decided exactly 30 days before the stub's clock (ARCHIVE_HOST).
 """
 from __future__ import annotations
 
@@ -35,11 +41,16 @@ from admin_contract_validator import validate_document  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
 
 QUEUE_SCHEMA = "queue_snapshot.schema.json"
+RECENT_SCHEMA = "recent_page.schema.json"
 DECIDE_SCHEMA = "decide_response.schema.json"
 ERROR_SCHEMA = "error_response.schema.json"
 
 LONG_BOTTLE = "ci-runner-eu-west-1"   # in `recent` only: wide enough to wrap a phone-width row
 BAD_REQUEST_HOST = "bad-request.example.com"
+ARCHIVE_HOST = "archive.example.com"      # decided exactly 30 days before the stub's clock
+HISTORY_ROWS = 240
+TIE_FIRST, TIE_COUNT = 45, 12            # older[45..56] share one decided_at, across page 1's end
+RECENT_DEFAULT_LIMIT, RECENT_MAX_LIMIT = 50, 200
 APPLY_FAILED_HOST = "m2.example.com"
 
 SCOPE_OF_ACTION = {
@@ -119,6 +130,82 @@ def build_queue(now: datetime | None = None) -> dict[str, Any]:
     }
 
 
+def build_history(now: datetime | None = None) -> list[dict[str, Any]]:
+    """Decided rows older than the queue's `recent` list, newest first.
+
+    HISTORY_ROWS rows 37 minutes apart from four hours back, a tie block of
+    TIE_COUNT rows sharing one `decided_at`, then the archive rows at 29, 30 and
+    61 days. Ids are zero padded so `request_id DESC` orders the tie block.
+    """
+    now = now or datetime.now(timezone.utc)
+    bottles = ["alpha", "mid", "zeta", LONG_BOTTLE]
+    kinds = [
+        ("allowed", "live", "operator", "applied", None),
+        ("denied", "once", "operator", None, "not needed"),
+        ("allowed", "manifest", "operator", "applied", None),
+        ("denied", "global", "denylist", None, "denylist: telemetry"),
+        ("denied", "bottle", "operator", None, None),
+        ("stale", None, "sweep", None, "stale"),
+    ]
+    rows = []
+    tie_at = now - timedelta(hours=4, minutes=37 * TIE_FIRST)
+    for i in range(HISTORY_ROWS):
+        status, scope, by, applied, reason = kinds[i % len(kinds)]
+        in_tie = TIE_FIRST <= i < TIE_FIRST + TIE_COUNT
+        when = tie_at if in_tie else now - timedelta(hours=4, minutes=37 * i)
+        rows.append({
+            "request_id": f"h{i:04d}", "container": bottles[i % len(bottles)],
+            "host": f"history-{i:03d}.example.com", "port": 443, "status": status,
+            "scope": scope, "decided_at": _iso(when), "decided_by": by,
+            "apply_status": applied, "deny_reason": reason,
+        })
+    for rid, host, days in (("h9001", "twentynine.example.com", 29), ("h9002", ARCHIVE_HOST, 30),
+                            ("h9003", "old.example.com", 61)):
+        rows.append({
+            "request_id": rid, "container": "alpha", "host": host, "port": 443,
+            "status": "allowed", "scope": "live", "decided_at": _iso(now - timedelta(days=days)),
+            "decided_by": "operator", "apply_status": "applied", "deny_reason": None,
+        })
+    return rows
+
+
+def recent_reply(rows: list[dict[str, Any]], query: str) -> tuple[int, dict[str, Any]]:
+    """The broker's `GET /recent` over `rows`: keyset paging, filters, limit clamp.
+
+    Written against the contract, not by calling the real broker, so the
+    behaviour suite still runs on a bare stub. 400 on a malformed cursor, date
+    or limit, like the broker.
+    """
+    from urllib.parse import parse_qs
+    q = {k: v[0] for k, v in parse_qs(query).items() if v and v[0] != ""}
+    try:
+        limit = max(1, min(RECENT_MAX_LIMIT, int(q.get("limit", RECENT_DEFAULT_LIMIT))))
+        before = None
+        if "before" in q:
+            ts, comma, rid = q["before"].partition(",")
+            datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+            if not comma or not rid:
+                raise ValueError("cursor")
+            before = (ts, rid)
+        bounds = {}
+        for name in ("since", "until"):
+            if name in q:
+                bounds[name] = _iso(datetime.fromisoformat(q[name].replace("Z", "+00:00")))
+    except ValueError:
+        return 400, {"error": "invalid query"}
+    picked = [
+        r for r in rows
+        if (not q.get("container") or r["container"] == q["container"])
+        and ("since" not in bounds or r["decided_at"] >= bounds["since"])
+        and ("until" not in bounds or r["decided_at"] <= bounds["until"])
+        and (before is None or (r["decided_at"], r["request_id"]) < before)
+    ]
+    picked.sort(key=lambda r: (r["decided_at"], r["request_id"]), reverse=True)
+    page = picked[:limit]
+    nxt = f"{page[-1]['decided_at']},{page[-1]['request_id']}" if len(page) >= limit else None
+    return 200, {"rows": page, "next": nxt}
+
+
 class ContractViolation(AssertionError):
     """A stub reply the broker contract schemas reject."""
 
@@ -177,6 +264,8 @@ class StubBroker:
         self.log = log
         self.lock = threading.Lock()
         self.queue = build_queue()
+        self.history = build_history()
+        self.recent_queries: list[str] = []
         self.decides: list[dict[str, Any]] = []
         self.outage = False
         self.decide_outage: int | None = None
@@ -207,6 +296,14 @@ class StubBroker:
                 self._send(status, body)
 
             def do_GET(self):
+                path, _, query = self.path.partition("?")
+                if path == "/recent":
+                    with broker.lock:
+                        broker.recent_queries.append(query)
+                        if broker.outage:
+                            return self._serve(500, {"error": "broker down"}, ERROR_SCHEMA)
+                        status, reply = recent_reply(broker.history_rows(), query)
+                        return self._serve(status, reply, ERROR_SCHEMA if status >= 400 else RECENT_SCHEMA)
                 if self.path != "/queue":
                     return self._send(404, {"error": "not found"})
                 with broker.lock:
@@ -235,9 +332,17 @@ class StubBroker:
         """The /queue reply. The one place a snapshot is built for serving."""
         return self.queue
 
+    def history_rows(self) -> list[dict[str, Any]]:
+        """Every decided row: the live `recent` list (decided during the run
+        included) plus the fixed older store, each request once."""
+        live = {row["request_id"]: row for row in self.queue["recent"]}
+        return list(live.values()) + [r for r in self.history if r["request_id"] not in live]
+
     def reset(self) -> None:
         with self.lock:
             self.queue = build_queue()
+            self.history = build_history()
+            self.recent_queries = []
             self.decides = []
             self.outage = False
             self.decide_outage = None
@@ -246,6 +351,9 @@ class StubBroker:
         """Validate every reply shape the stub can produce; raise before serving."""
         with self.lock:
             _checked(self.queue_body(), QUEUE_SCHEMA)
+            for query in ("", "limit=50", "limit=500&container=alpha", "before=x", "since=nope"):
+                status, reply = recent_reply(self.history_rows(), query)
+                _checked(reply, ERROR_SCHEMA if status >= 400 else RECENT_SCHEMA)
             _checked({"error": "broker down"}, ERROR_SCHEMA)
             _checked({"error": "decide unavailable"}, ERROR_SCHEMA)
             scratch = copy.deepcopy(self.queue)

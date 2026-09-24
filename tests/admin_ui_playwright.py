@@ -36,6 +36,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Callable
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 WORKTREE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(WORKTREE / "src"))
@@ -146,11 +147,14 @@ class Traffic:
     statuses: list[int] = field(default_factory=list)   # decide response statuses
     queue_reads: int = 0                                # GET /api/egress/queue responses seen
     queue_statuses: list[int] = field(default_factory=list)
+    recent: list[dict] = field(default_factory=list)    # query of each GET /api/egress/recent, as {name: value}
     console_errors: list[str] = field(default_factory=list)
     expected_failures: int = 0                          # scripted 4xx/5xx the browser logs
 
     def attach(self, page) -> None:
         def on_request(request):
+            if request.method == "GET" and urlsplit(request.url).path == "/api/egress/recent":
+                self.recent.append({k: v[0] for k, v in parse_qs(urlsplit(request.url).query).items()})
             if request.method == "POST" and request.url.endswith("/api/egress/decide"):
                 self.decides.append({"body": json.loads(request.post_data or "{}"), "headers": request.headers})
 
@@ -167,7 +171,7 @@ class Traffic:
             url = (message.location or {}).get("url", "")
             # The browser logs every scripted 4xx/5xx from the admin API; those
             # are the outcomes under test, not page errors.
-            if message.text.startswith("Failed to load resource") and re.search(r"/api/egress/(decide|queue)$", url):
+            if message.text.startswith("Failed to load resource") and re.search(r"/api/egress/(decide|queue|recent)(\?.*)?$", url):
                 self.expected_failures += 1
                 return
             self.console_errors.append(message.text)
@@ -895,6 +899,291 @@ def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.
     return suite.results
 
 
+
+# ---- History tab ----------------------------------------------------------------------
+
+HISTORY_PAGES = [50, 50, 50, 50, 47]
+
+
+class HistoryPage:
+    """The SPA's History tab, driven by test ids. `stub.recent_reply` over the
+    stub's own rows is the oracle for what each page must show."""
+
+    def __init__(self, page, served: Served, traffic: Traffic, broker: stub.StubBroker):
+        self.page, self.served, self.traffic, self.broker = page, served, traffic, broker
+
+    def open(self) -> None:
+        from playwright.sync_api import expect
+        self.page.goto(self.served.base + "/egress")
+        self.page.get_by_test_id("tab-history").click()
+        expect(self.page.get_by_test_id("history-row").first).to_be_visible()
+
+    def rows(self):
+        return self.page.get_by_test_id("history-row")
+
+    def hosts(self) -> list[str]:
+        return [text.split("\n")[0].strip().rsplit(":", 1)[0] for text in self.rows().all_inner_texts()]
+
+    def label(self) -> str:
+        return self.page.get_by_test_id("history-page").inner_text().strip()
+
+    def older(self) -> None:
+        self._turn("history-older")
+
+    def newer(self) -> None:
+        self._turn("history-newer")
+
+    def _turn(self, test_id: str) -> None:
+        from playwright.sync_api import expect
+        before = self.label()
+        button = self.page.get_by_test_id(test_id)
+        expect(button).to_be_enabled()
+        button.click()
+        expect(self.page.get_by_test_id("history-page")).not_to_have_text(before)
+        expect(self.page.get_by_test_id("history-older")).to_be_visible()
+        self.settle()
+
+    def settle(self) -> None:
+        """Wait for the list to stop loading: both paging buttons are disabled while it does."""
+        self.page.wait_for_timeout(120)
+
+    def expected(self, query: str = "") -> dict:
+        with self.broker.lock:
+            status, page = stub.recent_reply(self.broker.history_rows(), query)
+        assert status == 200
+        return page
+
+    def last_query(self) -> dict:
+        assert self.traffic.recent, "the page sent no /api/egress/recent request"
+        return self.traffic.recent[-1]
+
+    def open_calendar(self):
+        self.page.get_by_test_id("history-range").click()
+        calendar = self.page.locator("[data-slot=range-calendar]")
+        calendar.wait_for()
+        return calendar
+
+    def pick_day(self, days_ago: int) -> str:
+        """Pick the local calendar day `days_ago` before the browser's today, going back through
+        the calendar's months. Returns that day as YYYY-MM-DD (browser-local)."""
+        year, month, day, months_back = self.page.evaluate(
+            """(daysAgo) => {
+              const now = new Date(), target = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo);
+              return [target.getFullYear(), target.getMonth() + 1, target.getDate(),
+                      (now.getFullYear() * 12 + now.getMonth()) - (target.getFullYear() * 12 + target.getMonth())];
+            }""", days_ago)
+        calendar = self.open_calendar()
+        for _ in range(months_back):
+            calendar.locator("[data-slot=range-calendar-prev-button]").click()
+        grid = calendar.locator("table").first
+        grid.locator("[data-slot=range-calendar-trigger]:not([data-outside-view])").get_by_text(
+            str(day), exact=True).first.click()
+        return f"{year:04d}-{month:02d}-{day:02d}"
+
+    def close_popover(self) -> None:
+        self.page.keyboard.press("Escape")
+        self.page.locator("[data-slot=range-calendar]").wait_for(state="hidden")
+
+
+def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    """History-tab checks (30..37). One page per viewport, checked in order; the SPA only."""
+    from playwright.sync_api import expect
+
+    suite = Suite(ui, viewport)
+    if ui == "legacy":
+        for number, name, _fn in HISTORY_CHECKS:
+            suite.check(number, name, lambda: None, spa_only=True)
+        return suite.results
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    hist = HistoryPage(page, served, traffic, broker)
+    try:
+        hist.open()
+        for number, name, fn in HISTORY_CHECKS:
+            suite.check(number, name, lambda fn=fn: fn(hist, page, traffic, broker))
+    except Exception as exc:  # noqa: BLE001 - the History tab could not even open
+        suite.results.append(Result("FAIL", viewport, "30", "History tab opens", squash(str(exc))[:300]))
+    finally:
+        context.close()
+    return suite.results
+
+
+def _h_newest_first(hist, page, traffic, broker) -> None:
+    want = [row["host"] for row in hist.expected()["rows"]]
+    _eq(hist.hosts(), want)
+    _eq(len(want), 50)
+    _eq(hist.label(), "Page 1")
+    assert hist.expected()["rows"][0]["host"] == "denied.example.com", "the newest decision is not first"
+    expect_disabled(page, "history-newer", True)
+    expect_disabled(page, "history-older", False)
+    _eq(hist.traffic.recent[0], {"limit": "50"})
+    # The queue is not left showing under the History tab.
+    _eq(page.locator("[data-testid=request]:visible").count(), 0)
+    _eq(page.locator("[data-testid=recent]:visible").count(), 0)
+
+
+def _h_walk(hist, page, traffic, broker) -> None:
+    every = [row["host"] for row in broker.history_rows()]
+    seen, pages = [hist.hosts()], [hist.hosts()]
+    for _ in range(len(HISTORY_PAGES) - 1):
+        hist.older()
+        seen.append(hist.hosts())
+    _eq([len(p) for p in seen], HISTORY_PAGES)
+    flat = [host for p in seen for host in p]
+    _eq(len(flat), len(every))
+    _eq(len(set(flat)), len(every))     # no repeats: the tie block straddles the first page boundary
+    ordered = sorted(broker.history_rows(), key=lambda r: (r["decided_at"], r["request_id"]), reverse=True)
+    _eq(flat, [r["host"] for r in ordered])
+    expect_disabled(page, "history-older", True)
+    _eq(hist.label(), f"Page {len(HISTORY_PAGES)}")
+    # Each Older sent the previous page's last row as the cursor.
+    for index, query in enumerate(traffic.recent[1:len(HISTORY_PAGES)]):
+        last = hist.expected(f"limit=50{'&before=' + traffic.recent[index]['before'] if index else ''}")["rows"][-1]
+        _eq(query["before"], f"{last['decided_at']},{last['request_id']}")
+    # And back: Newer walks the same pages in reverse without a repeat.
+    for index in range(len(HISTORY_PAGES) - 2, -1, -1):
+        hist.newer()
+        _eq(hist.hosts(), seen[index])
+    _eq(hist.label(), "Page 1")
+    expect_disabled(page, "history-newer", True)
+
+
+def _h_thirty_days(hist, page, traffic, broker) -> None:
+    for _ in range(len(HISTORY_PAGES) - 1):
+        hist.older()
+    row = hist.rows().filter(has_text=stub.ARCHIVE_HOST)
+    _eq(row.count(), 1)
+    archive = next(r for r in broker.history if r["host"] == stub.ARCHIVE_HOST)
+    day = page.evaluate("""(iso) => new Date(iso).toLocaleDateString(undefined, {month: 'short', day: 'numeric'})""",
+                        archive["decided_at"])
+    _in(day, row.inner_text())
+    ago = page.evaluate("(iso) => Math.round((Date.now() - Date.parse(iso)) / 86400000)", archive["decided_at"])
+    _eq(ago, 30)
+
+
+def _h_date_range(hist, page, traffic, broker) -> None:
+    from playwright.sync_api import expect
+    hist.open()
+    day = hist.pick_day(30)
+    expect(page.get_by_test_id("history-page")).to_have_text("Page 1")
+    expect(hist.rows()).to_have_count(1)
+    _in(stub.ARCHIVE_HOST, hist.rows().first.inner_text())
+    query = hist.last_query()
+    want = page.evaluate("""(day) => {
+      const [y, m, d] = day.split('-').map(Number);
+      const iso = (t) => t.toISOString().replace(/\\.\\d{3}Z$/, 'Z');
+      const start = new Date(y, m - 1, d, 0, 0, 0);
+      return [iso(start), iso(new Date(start.getTime() + 86400000 - 1000))];
+    }""", day)
+    _eq((query["since"], query["until"]), tuple(want))
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", query["since"]), query
+    _eq(hist.expected(f"since={query['since']}&until={query['until']}")["rows"][0]["host"], stub.ARCHIVE_HOST)
+    hist.close_popover()
+    # Escape closes the popover and keeps the filter (the calendar itself clears on Escape).
+    page.wait_for_timeout(300)
+    _eq(page.get_by_test_id("history-range").inner_text().strip(), page.evaluate(
+        "(day) => { const [y, m, d] = day.split('-').map(Number); "
+        "return new Date(y, m - 1, d).toLocaleDateString(undefined, {month: 'short', day: 'numeric'}); }", day))
+    expect(hist.rows()).to_have_count(1)
+    # Clearing the range asks for the newest page again, with neither bound.
+    page.get_by_test_id("history-range").click()
+    page.get_by_test_id("history-range-clear").click()
+    expect(hist.rows()).to_have_count(50)
+    query = hist.last_query()
+    assert "since" not in query and "until" not in query, query
+    hist.close_popover()
+
+
+def _h_bottle(hist, page, traffic, broker) -> None:
+    from playwright.sync_api import expect
+    hist.open()
+    page.get_by_test_id("history-bottle").click()
+    page.get_by_role("option", name="mid", exact=True).click()
+    expect(page.get_by_test_id("history-page")).to_have_text("Page 1")
+    query = hist.last_query()
+    _eq(query["container"], "mid")
+    want = [r["host"] for r in hist.expected("container=mid&limit=50")["rows"]]
+    expect(hist.rows()).to_have_count(len(want))
+    _eq(hist.hosts(), want)
+    for text in hist.rows().all_inner_texts():
+        assert re.search(r"\bmid\b", text), f"row from another bottle: {squash(text)!r}"
+    # Paging keeps the filter, and picking All drops it.
+    hist.older()
+    _eq(hist.last_query()["container"], "mid")
+    assert "before" in hist.last_query()
+    page.get_by_test_id("history-bottle").click()
+    page.get_by_role("option", name="All bottles", exact=True).click()
+    expect(hist.rows()).to_have_count(50)
+    assert "container" not in hist.last_query() and "before" not in hist.last_query(), hist.last_query()
+
+
+def _h_client_side(hist, page, traffic, broker) -> None:
+    from playwright.sync_api import expect
+    hist.open()
+    sent = len(traffic.recent)
+    page.get_by_placeholder("Search destination").fill("history-01")
+    expect(hist.rows()).to_have_count(10)
+    for host in hist.hosts():
+        assert "history-01" in host, host
+    page.get_by_placeholder("Search destination").fill("")
+    status_button = lambda label: page.get_by_test_id("history-status").get_by_text(label, exact=True)
+    status_button("Denied").click()
+    denied = hist.page.locator("[data-testid=history-row]")
+    expect(denied.first).to_be_visible()
+    for text in denied.all_inner_texts():
+        assert re.search(r"Denied|Denylist", text), squash(text)
+        assert "Allowed" not in text, squash(text)
+    status_button("All").click()
+    expect(hist.rows()).to_have_count(50)
+    _eq(len(traffic.recent), sent)      # search and the toggle never asked the broker again
+
+
+def _h_failure(hist, page, traffic, broker) -> None:
+    from playwright.sync_api import expect
+    hist.open()
+    before = hist.hosts()
+    with broker.lock:
+        broker.outage = True
+    try:
+        page.get_by_test_id("history-older").click()
+        expect(page.get_by_test_id("history-error")).to_be_visible()
+        _eq(hist.hosts(), before)                  # the list and the page number stay as they were
+        _eq(hist.label(), "Page 1")
+    finally:
+        with broker.lock:
+            broker.outage = False
+    page.get_by_test_id("history-error").get_by_role("button", name="Retry").click()
+    expect(page.get_by_test_id("history-error")).to_have_count(0)
+    _eq(hist.label(), "Page 2")
+
+
+def _h_overflow_and_console(hist, page, traffic, broker) -> None:
+    hist.open()
+    scroll, inner = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
+    assert scroll <= inner, f"scrollWidth {scroll} > innerWidth {inner}"
+    for row in hist.rows().all():
+        box = row.bounding_box()
+        assert box and box["x"] + box["width"] <= inner + 0.5, f"a row overflows: {box}"
+    _eq(traffic.console_errors, [])
+
+
+def expect_disabled(page, test_id: str, disabled: bool) -> None:
+    from playwright.sync_api import expect
+    button = page.get_by_test_id(test_id)
+    expect(button).to_be_disabled() if disabled else expect(button).to_be_enabled()
+
+
+HISTORY_CHECKS = [
+    ("30", "History lists the whole store newest first, 50 to a page, in keyset order", _h_newest_first),
+    ("31", "Older then Newer walk every page with no row repeated (across a tie in decided_at) and back", _h_walk),
+    ("32", "The row decided 30 days ago is reachable by paging", _h_thirty_days),
+    ("33", "Picking a day sends the local day as since and until; Clear drops both", _h_date_range),
+    ("34", "The bottle filter sends container, keeps it while paging and drops it for All bottles", _h_bottle),
+    ("35", "Search and the status toggle filter the loaded page without asking the broker", _h_client_side),
+    ("36", "A failed page keeps the list and the page number, shows a banner, and Retry recovers", _h_failure),
+    ("37", "History has no horizontal overflow and no console errors", _h_overflow_and_console),
+]
+
 # ---- serving --------------------------------------------------------------------
 
 
@@ -1014,6 +1303,7 @@ def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, view
     if ui == "spa":
         capture_stale_banner(browser, served, broker, driver_cls, out, viewport, theme)
         capture_empty(browser, served, broker, out, viewport, theme)
+        capture_history(browser, served, broker, out, viewport, theme)
 
 
 def capture_stale_banner(browser, served, broker, driver_cls, out: Path, viewport: str, theme: str) -> None:
@@ -1053,6 +1343,28 @@ def capture_empty(browser, served, broker, out: Path, viewport: str, theme: str)
         broker.reset()
         context.close()
 
+
+
+def capture_history(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """History: the first page, an older page (page 3), and the view filtered to the day 30 days back."""
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    try:
+        hist = HistoryPage(page, served, traffic, broker)
+        hist.open()
+        capture(page, out, "spa", viewport, theme, "history-first")
+        hist.older()
+        hist.older()
+        capture(page, out, "spa", viewport, theme, "history-older")
+        hist.open()
+        hist.pick_day(30)
+        from playwright.sync_api import expect
+        expect(hist.rows()).to_have_count(1)
+        capture(page, out, "spa", viewport, theme, "history-filtered-open")
+        hist.close_popover()
+        capture(page, out, "spa", viewport, theme, "history-filtered")
+    finally:
+        context.close()
 
 # ---- legacy → behaviour mapping ------------------------------------------------------
 
@@ -1099,6 +1411,14 @@ NEW_CHECKS = [
     ("27", "A recent row that wraps leaves no dangling separator", "N/A(spa-only) on legacy"),
     ("28", "A decide in flight locks every request it acts on and no other", "N/A(spa-only) on legacy"),
     ("29", "A poll already in flight when a decide fails does not clear the banner", "N/A(spa-only) on legacy"),
+    ("30", "History lists the whole store newest first, 50 to a page, in keyset order", "N/A(spa-only) on legacy: the History tab is new (PLN step 4)"),
+    ("31", "Older then Newer walk every page with no row repeated (across a tie in decided_at) and back", "N/A(spa-only) on legacy"),
+    ("32", "The row decided 30 days ago is reachable by paging", "N/A(spa-only) on legacy"),
+    ("33", "Picking a day sends the local day as since and until; Clear drops both", "N/A(spa-only) on legacy"),
+    ("34", "The bottle filter sends container, keeps it while paging and drops it for All bottles", "N/A(spa-only) on legacy"),
+    ("35", "Search and the status toggle filter the loaded page without asking the broker", "N/A(spa-only) on legacy"),
+    ("36", "A failed page keeps the list and the page number, shows a banner, and Retry recovers", "N/A(spa-only) on legacy"),
+    ("37", "History has no horizontal overflow and no console errors", "N/A(spa-only) on legacy"),
 ]
 
 
@@ -1166,6 +1486,7 @@ def main() -> int:
                 finally:
                     context.close()
                 results += run_dedicated(ui, viewport, browser, served, broker)
+                results += run_history(ui, viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):

@@ -49,6 +49,7 @@ REASON_MAX_CHARS = 200
 TOKEN_RACE_SLEEP_SECONDS = 0.2
 TOKEN_REJECTED_ERROR = "operator token rejected by daemon; restart djinn admin"
 UNREACHABLE_ERROR = "egress daemon unreachable"
+RECENT_QUERY_PARAMS = frozenset({"before", "limit", "container", "since", "until"})
 CONTAINER_MARKER_ENV = "DJINN_CONTAINER"
 ADMIN_UI_ENV = "DJINN_ADMIN_UI"
 ADMIN_UI_SPA_VALUE = "spa"
@@ -569,6 +570,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             ("GET", "/icon-192.png"): self._handle_icon_192,
             ("GET", "/icon-512.png"): self._handle_icon_512,
             ("GET", "/api/egress/queue"): self._handle_egress_queue_get,
+            ("GET", "/api/egress/recent"): self._handle_egress_recent_get,
             ("POST", "/api/egress/decide"): self._handle_egress_decide_post,
         }
         handler = routes.get((method, path))
@@ -593,6 +595,9 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/egress/queue":
                 self._handle_egress_queue_get()
+                return
+            if path == "/api/egress/recent":
+                self._handle_egress_recent_get()
                 return
             if path in (
                 "/app.js",
@@ -770,8 +775,35 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         return daemon_base_url(self.server.egress_root)
 
     def _handle_egress_queue_get(self) -> None:
-        LOG.info("admin request enter method=GET path=/api/egress/queue bytes=0")
-        # The queue read needs the session too: without this a bottle that can
+        self._proxy_egress_get(path="/api/egress/queue", upstream_path="/queue")
+
+    def _handle_egress_recent_get(self) -> None:
+        raw_query = self.path.partition("?")[2]
+        # Only the five history parameters reach the broker; anything else the
+        # browser sends (or a forged link adds) is dropped here, so the admin
+        # never widens what the broker's /recent is asked.
+        params = urllib.parse.parse_qsl(raw_query)
+        kept: dict[str, str] = {}
+        for name, value in params:
+            if name in RECENT_QUERY_PARAMS and name not in kept:
+                kept[name] = value
+        LOG.info(
+            "admin recent query params_in=%d params_forwarded=%d",
+            len(params),
+            len(kept),
+        )
+        query = urllib.parse.urlencode(kept)
+        self._proxy_egress_get(
+            path="/api/egress/recent",
+            upstream_path="/recent" + (f"?{query}" if query else ""),
+            pass_400=True,
+        )
+
+    def _proxy_egress_get(
+        self, *, path: str, upstream_path: str, pass_400: bool = False
+    ) -> None:
+        LOG.info("admin request enter method=GET path=%s bytes=0", path)
+        # The read needs the session too: without this a bottle that can
         # reach the published port over the host gateway (Docker Desktop) reads
         # every open request with a forged nothing. The page's own fetch is
         # same-origin and sends the cookie. POST-only checks (content type,
@@ -787,7 +819,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             status, upstream, _bytes = _upstream_json(
                 base_url=self._daemon_base_url(),
                 method="GET",
-                path="/queue",
+                path=upstream_path,
                 token=self.server.operator_token,
                 body=None,
                 timeout=UPSTREAM_TIMEOUT_SECONDS,
@@ -800,8 +832,17 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, upstream)
             return
         if status == HTTPStatus.UNAUTHORIZED:
-            LOG.warning("admin upstream auth rejected path=/queue")
+            LOG.warning("admin upstream auth rejected path=%s", upstream_path.split("?", 1)[0])
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": TOKEN_REJECTED_ERROR})
+            return
+        if pass_400 and status == HTTPStatus.BAD_REQUEST:
+            # The broker's validation message about the caller's own query
+            # (a malformed cursor or date), not an upstream failure.
+            error = upstream.get("error")
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": error if isinstance(error, str) else "bad request"},
+            )
             return
         if status >= 500:
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": UNREACHABLE_ERROR})

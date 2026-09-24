@@ -163,6 +163,40 @@ class RefTests(unittest.TestCase):
         )
 
 
+class PatternTests(unittest.TestCase):
+    SCHEMA = {"type": "string", "pattern": "^a+$"}
+
+    def test_matching_string_passes(self):
+        self.assertEqual(validate("aaa", self.SCHEMA), [])
+
+    def test_non_matching_string_is_reported_with_its_path(self):
+        self.assertEqual(
+            validate("ab", self.SCHEMA, path="$.next"),
+            ["$.next: 'ab' does not match pattern '^a+$'"],
+        )
+
+    def test_null_in_a_string_or_null_union_skips_the_pattern(self):
+        self.assertEqual(validate(None, {"type": ["string", "null"], "pattern": "^a$"}), [])
+
+    def test_recent_page_next_and_decided_at_are_pinned(self):
+        row = {
+            "request_id": "r1", "container": "c", "host": "h.example.com", "port": 443,
+            "status": "allowed", "scope": "live", "decided_at": "2026-09-23T12:00:00Z",
+            "decided_by": "operator", "apply_status": None, "deny_reason": None,
+        }
+        good = {"rows": [row], "next": "2026-09-23T12:00:00Z,r1"}
+        self.assertEqual(validate_document(good, "recent_page.schema.json"), [])
+        for bad_next in ("2026-09-23T12:00:00Z", "r1", "2026-09-23,r1", ""):
+            with self.subTest(next=bad_next):
+                self.assertTrue(
+                    validate_document({"rows": [row], "next": bad_next}, "recent_page.schema.json")
+                )
+        bad_row = dict(row, decided_at="2026-09-23 12:00")
+        self.assertTrue(
+            validate_document({"rows": [bad_row], "next": None}, "recent_page.schema.json")
+        )
+
+
 class ContractSchemasAreValidJsonTests(unittest.TestCase):
     def test_every_contract_schema_parses(self):
         for name in (
