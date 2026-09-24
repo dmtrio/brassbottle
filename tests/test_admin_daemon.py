@@ -1506,6 +1506,99 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    def test_spa_allowlist_drops_symlinks_and_hidden_files(self):
+        """Only regular, non-hidden files under dist are served: a symlinked
+        file or directory pointing outside dist, and a dotfile, are 404."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist(home)
+            outside = home / "outside"
+            outside.mkdir()
+            (outside / "secret.txt").write_text("operator-token", encoding="utf-8")
+            (dist / "assets" / "leak.txt").symlink_to(outside / "secret.txt")
+            (dist / "linked").symlink_to(outside, target_is_directory=True)
+            (dist / ".env").write_text("hidden", encoding="utf-8")
+            (dist / "assets" / ".cache").mkdir()
+            (dist / "assets" / ".cache" / "x.js").write_text("x", encoding="utf-8")
+            env = {
+                "DJINN_HOME": str(home),
+                "DJINN_ADMIN_UI": "spa",
+                "DJINN_ADMIN_UI_DIST": str(dist),
+            }
+            server, thread = self._start_admin(home, env=env)
+            host, port = server.server_address
+            try:
+                self.assertEqual(
+                    sorted(server.spa_allowlist),
+                    ["/assets/app-abc123.css", "/assets/app-abc123.js", "/favicon.svg"],
+                )
+                for path in ("/assets/leak.txt", "/linked/secret.txt", "/.env", "/assets/.cache/x.js"):
+                    with self.subTest(path=path):
+                        status, _payload, _headers, raw = self._request(host, port, "GET", path)
+                        self.assertEqual(status, HTTPStatus.NOT_FOUND)
+                        self.assertNotIn(b"operator-token", raw)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_spa_head_matches_get_without_body(self):
+        """HEAD in spa mode answers like GET (status, type, length, cache,
+        session gate) and sends no body; legacy mode keeps the 501."""
+        cookie = {"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"}
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist(home)
+            env = {
+                "DJINN_HOME": str(home),
+                "DJINN_ADMIN_UI": "spa",
+                "DJINN_ADMIN_UI_DIST": str(dist),
+            }
+            server, thread = self._start_admin(home, env=env)
+            host, port = server.server_address
+            try:
+                for path, headers in (
+                    ("/egress", cookie),
+                    ("/egress", {}),
+                    ("/assets/app-abc123.js", {}),
+                    ("/nope", {}),
+                ):
+                    with self.subTest(path=path, session=bool(headers)):
+                        g_status, _p, g_headers, g_raw = self._request(host, port, "GET", path, headers=headers)
+                        conn = HTTPConnection(host, port, timeout=5)
+                        conn.request("HEAD", path, headers=headers)
+                        resp = conn.getresponse()
+                        h_raw = resp.read()
+                        conn.close()
+                        self.assertEqual(resp.status, g_status)
+                        for name in ("Content-Type", "Content-Length", "Cache-Control"):
+                            self.assertEqual(resp.getheader(name), g_headers.get(name), name)
+                        self.assertEqual(int(resp.getheader("Content-Length")), len(g_raw))
+                        self.assertEqual(h_raw, b"")
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            # _start_admin's env patch from the spa server above is still
+            # active until test cleanup, so clear the flag explicitly.
+            server, thread = self._start_admin(home, env={"DJINN_ADMIN_UI": ""})
+            self.assertFalse(server.spa_mode)
+            host, port = server.server_address
+            try:
+                conn = HTTPConnection(host, port, timeout=5)
+                conn.request("HEAD", "/")
+                resp = conn.getresponse()
+                resp.read()
+                conn.close()
+                self.assertEqual(resp.status, HTTPStatus.NOT_IMPLEMENTED)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
     def test_spa_mode_missing_dist_returns_503_for_app_routes(self):
         """If the configured dist directory is missing, app routes answer 503
         'admin UI not built' while /health still works."""

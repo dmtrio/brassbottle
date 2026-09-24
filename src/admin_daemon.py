@@ -471,25 +471,45 @@ class AdminHTTPServer(ThreadingHTTPServer):
         if not self.spa_dist.is_dir():
             LOG.error("admin spa dist missing path=%s", self.spa_dist)
             return
-        index_path = self.spa_dist / "index.html"
+        dist = self.spa_dist.resolve()
+        index_path = dist / "index.html"
+        if index_path.is_symlink() or not index_path.is_file():
+            LOG.error("admin spa index missing or not a regular file path=%s", index_path)
+            return
         try:
             self.spa_index = index_path.read_bytes()
         except OSError as exc:
-            LOG.error("admin spa index missing path=%s error=%s", index_path, exc)
+            LOG.error("admin spa index unreadable path=%s error=%s", index_path, exc)
             return
         total_bytes = 0
-        for path in self.spa_dist.rglob("*"):
-            if not path.is_file() or path.name == "index.html":
+        skipped = 0
+        for path in sorted(dist.rglob("*")):
+            rel = path.relative_to(dist)
+            if rel.as_posix() == "index.html" or (path.is_dir() and not path.is_symlink()):
                 continue
-            rel = path.relative_to(self.spa_dist).as_posix()
-            url_path = "/" + rel
-            self.spa_allowlist[url_path] = (path, _content_type_for(url_path))
-            total_bytes += path.stat().st_size
+            # Only regular, non-hidden files that really live under dist are
+            # served: a symlink (to a file or a directory) or a dotfile in the
+            # build output is dropped, so nothing outside dist can be reached.
+            hidden = any(part.startswith(".") for part in rel.parts)
+            resolved = path.resolve()
+            if (
+                hidden
+                or path.is_symlink()
+                or not path.is_file()
+                or not resolved.is_relative_to(dist)
+            ):
+                skipped += 1
+                LOG.warning("admin spa skip path=%s", rel.as_posix())
+                continue
+            url_path = "/" + rel.as_posix()
+            self.spa_allowlist[url_path] = (resolved, _content_type_for(url_path))
+            total_bytes += resolved.stat().st_size
         LOG.info(
-            "admin spa mode enabled dist=%s files=%d bytes=%d",
-            self.spa_dist,
+            "admin spa mode enabled dist=%s files=%d bytes=%d skipped=%d",
+            dist,
             len(self.spa_allowlist),
             total_bytes,
+            skipped,
         )
 
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
@@ -504,6 +524,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     """Routes app shell/static and egress panel API calls."""
 
     server: AdminHTTPServer  # type: ignore[assignment]
+    # Set by do_HEAD: headers are sent as for GET, the body is not.
+    _suppress_body = False
 
     def log_message(self, format: str, *args: Any) -> None:
         # The request line carries the full request target — a
@@ -516,6 +538,16 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         LOG.info("admin http %s - %s", self.address_string(), format % args)
 
     def do_GET(self) -> None:
+        self._dispatch("GET")
+
+    def do_HEAD(self) -> None:
+        # Legacy mode keeps BaseHTTPRequestHandler's answer for a method it
+        # never implemented; spa mode answers HEAD exactly like GET, minus
+        # the body, through the same routing and session gate.
+        if not self.server.spa_mode:
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
+            return
+        self._suppress_body = True
         self._dispatch("GET")
 
     def do_POST(self) -> None:
@@ -626,7 +658,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             for key, value in headers.items():
                 self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(body)
+        if not self._suppress_body:
+            self.wfile.write(body)
 
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
         self._send_bytes(status, _json_bytes(body), content_type="application/json")
