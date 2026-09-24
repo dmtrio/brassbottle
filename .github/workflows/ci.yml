@@ -6,9 +6,6 @@
 # admin/ui/, builds the egress image with its UI stage, asserts the built
 # assets are present, and runs the spa-mode Playwright shell test.
 #
-# Step 4 revision: the admin UI step also runs `npm run test:unit` (vitest, the
-# SPA's TypeScript unit tests) before the build.
-#
 # Step 3 revision: after the spa shell test it runs the admin behaviour suite
 # against both UIs (`--ui spa`, then `--ui legacy`).
 name: ci
