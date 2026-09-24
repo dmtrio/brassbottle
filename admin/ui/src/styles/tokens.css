@@ -191,6 +191,15 @@
   &::before { content: "·"; position: absolute; left: 0; width: var(--spacing-sep); text-align: center; }
 }
 
+/*
+ * The same "·" separated facts, held to ONE line: the items never wrap, so an
+ * item that can shrink (min-width: 0 with truncate) ends in an ellipsis instead.
+ */
+@utility meta-line {
+  display: flex; flex-wrap: nowrap; align-items: center; column-gap: 0;
+  margin-left: calc(-1 * var(--spacing-sep));
+}
+
 /* Phone card: one request. */
 @utility item-card {
   display: flex; flex-direction: column; gap: var(--spacing-card);

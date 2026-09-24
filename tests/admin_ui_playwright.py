@@ -1207,7 +1207,7 @@ class HistoryPage:
 
 
 def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """History-tab checks (30..42, 60). One page per viewport, checked in order; the SPA only."""
+    """History-tab checks (30..42, 60, 61). One page per viewport, checked in order; the SPA only."""
     from playwright.sync_api import expect
 
     suite = Suite(ui, viewport)
@@ -1451,9 +1451,9 @@ def _h_stale_reply(hist, page, traffic, broker) -> None:
     expect_disabled(page, "history-older", hist.expected("container=zeta&limit=50")["next"] is None)
 
 
-# One row is two lines (host and date, then pill and bottle) with an optional third for a deny reason.
+# Every row is two lines (host and date, then pill and bottle) at every viewport, a denied row with a
+# reason and a row with a long bottle name included.
 TWO_LINE_ROW_MAX_PX = 80
-THREE_LINE_ROW_MAX_PX = 104
 
 
 def _h_row_layout(hist, page, traffic, broker) -> None:
@@ -1465,18 +1465,18 @@ def _h_row_layout(hist, page, traffic, broker) -> None:
     for row in rows:
         text = squash(row.inner_text())
         box = row.bounding_box()
-        # A deny reason is the optional third line; a bottle and pill too wide for a phone may wrap.
-        lines = 3 if any(r["host"] in text and r["deny_reason"] for r in hist.expected("limit=50")["rows"]) else 2
-        limit = THREE_LINE_ROW_MAX_PX if lines == 3 or (phone and stub.LONG_BOTTLE in text) else TWO_LINE_ROW_MAX_PX
-        if box["height"] > limit:
-            tall.append((round(box["height"]), limit, text[:70]))
+        if box["height"] > TWO_LINE_ROW_MAX_PX:
+            tall.append((round(box["height"]), text[:70]))
         if phone:
             assert "by operator" not in text and "by denylist" not in text, f"'by' shown on a phone: {text}"
             assert not re.search(r"\d+[smhd] ago", text), f"relative time shown on a phone: {text}"
         else:
             assert re.search(r"\bby (operator|denylist|sweep)\b", text), f"no 'by' on: {text}"
             assert re.search(r"\b\d+[smhd] ago\b", text), f"no relative time on: {text}"
-    assert not tall, f"rows taller than their line budget: {tall[:5]}"
+    assert not tall, f"rows taller than two lines ({TWO_LINE_ROW_MAX_PX}px): {tall[:5]}"
+    # The fixture page really holds the worst cases this budget is for.
+    texts = [squash(row.inner_text()) for row in rows]
+    assert any(stub.LONG_BOTTLE in t and "Denied permanently" in t for t in texts), "no long-bottle denied row on the page"
     # The date sits top-right, on the host's line.
     row = rows[0]
     head, when = row.locator(".row-title").bounding_box(), row.get_by_test_id("history-row-when").bounding_box()
@@ -1486,6 +1486,40 @@ def _h_row_layout(hist, page, traffic, broker) -> None:
     # Pill then bottle on the line below.
     pill, bottle = row.locator(".pill").first.bounding_box(), row.locator(".meta-item").nth(1).bounding_box()
     assert pill["y"] > head["y"] + head["height"] - 1 and pill["x"] < bottle["x"], f"meta line out of order: {pill} {bottle}"
+
+
+def _h_reason_and_long_bottle(hist, page, traffic, broker) -> None:
+    """The deny reason is a meta-item on the pill and bottle line from sm up and is not shown
+    below it; a long bottle name ends in an ellipsis on a phone rather than wrapping."""
+    hist.open()
+    phone = page.viewport_size["width"] < 640
+    denied = [r for r in hist.expected("limit=50")["rows"] if r["deny_reason"]]
+    assert any(r["deny_reason"] == stub.LONG_REASON for r in denied), "the fixture page has no long reason"
+    reasons = page.get_by_test_id("history-row-reason")
+    _eq(reasons.count(), len(denied))
+    for row in hist.rows().all():
+        reason = row.get_by_test_id("history-row-reason")
+        if reason.count() == 0:
+            continue
+        if phone:
+            assert not reason.is_visible(), f"a deny reason is shown on a phone: {reason.inner_text()!r}"
+            continue
+        assert reason.is_visible(), "the deny reason is hidden from sm up"
+        meta, bottle = reason.bounding_box(), row.get_by_test_id("history-row-bottle").bounding_box()
+        assert abs((meta["y"] + meta["height"] / 2) - (bottle["y"] + bottle["height"] / 2)) < 4, \
+            f"the reason is not on the bottle's line: {meta} {bottle}"
+    long_rows = [row for row in hist.rows().all() if stub.LONG_BOTTLE in squash(row.inner_text())]
+    assert long_rows, "no row with the long bottle name"
+    for row in long_rows:
+        name = row.get_by_test_id("history-row-bottle").locator(".truncate")
+        clipped = name.evaluate("el => el.scrollWidth > el.clientWidth")
+        overflow = name.evaluate("el => getComputedStyle(el).textOverflow")
+        _eq(overflow, "ellipsis")
+        wide = "Denied permanently" in squash(row.inner_text())   # the pill that leaves the bottle no room
+        if phone and wide:
+            assert clipped, f"the long bottle name is not cut off on a phone: {squash(row.inner_text())}"
+        elif not phone:
+            assert not clipped, f"the long bottle name is cut off from sm up: {squash(row.inner_text())}"
 
 
 def _h_toolbar_layout(hist, page, traffic, broker) -> None:
@@ -1594,9 +1628,10 @@ HISTORY_CHECKS = [
     ("37", "History has no horizontal overflow and no console errors", _h_overflow_and_console),
     ("38", "A failed fetch for a new filter shows no rows, no Older cursor and Page 1, not the old filter's", _h_filter_failure),
     ("39", "A slow reply for a superseded filter never replaces the current filter's rows", _h_stale_reply),
-    ("40", "Rows are two lines (host and date, pill and bottle), with by and relative time from sm up", _h_row_layout),
+    ("40", "Every row is two lines (host and date, pill and bottle) at every viewport, with by and relative time from sm up", _h_row_layout),
     ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", _h_toolbar_layout),
     ("42", "The date trigger is named \"Date range: <label>\"", _h_date_trigger_name),
+    ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone", _h_reason_and_long_bottle),
 ]
 
 # ---- serving --------------------------------------------------------------------
@@ -1856,13 +1891,14 @@ NEW_CHECKS = [
     ("37", "History has no horizontal overflow and no console errors", "N/A(spa-only) on legacy"),
     ("38", "A failed fetch for a new filter shows no rows, no Older cursor and Page 1, not the old filter's", "N/A(spa-only) on legacy"),
     ("39", "A slow reply for a superseded filter never replaces the current filter's rows", "N/A(spa-only) on legacy"),
-    ("40", "Rows are two lines (host and date, pill and bottle), with by and relative time from sm up", "N/A(spa-only) on legacy"),
+    ("40", "Every row is two lines (host and date, pill and bottle) at every viewport, with by and relative time from sm up", "N/A(spa-only) on legacy"),
     ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", "N/A(spa-only) on legacy"),
     ("42", "The date trigger is named \"Date range: <label>\"", "N/A(spa-only) on legacy"),
     ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
     ("51", "The light theme paints no pure-red (#ff0000) pixel in any request row", "N/A(spa-only) on legacy"),
     ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
+    ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone", "N/A(spa-only) on legacy"),
 ]
 
 

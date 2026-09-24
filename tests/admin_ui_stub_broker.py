@@ -45,7 +45,9 @@ RECENT_SCHEMA = "recent_page.schema.json"
 DECIDE_SCHEMA = "decide_response.schema.json"
 ERROR_SCHEMA = "error_response.schema.json"
 
-LONG_BOTTLE = "ci-runner-eu-west-1"   # in `recent` only: wide enough to wrap a phone-width row
+LONG_BOTTLE = "ci-runner-eu-west-1"   # wide enough to wrap a phone-width row
+LONG_REASON = ("denylist: telemetry and advertising hosts are blocked for every bottle by the operator "
+               "policy, see the egress section of the bottle manifest")   # far wider than any viewport's row
 BAD_REQUEST_HOST = "bad-request.example.com"
 ARCHIVE_HOST = "archive.example.com"      # decided exactly 30 days before the stub's clock
 HISTORY_ROWS = 240
@@ -143,7 +145,7 @@ def build_history(now: datetime | None = None) -> list[dict[str, Any]]:
         ("allowed", "live", "operator", "applied", None),
         ("denied", "once", "operator", None, "not needed"),
         ("allowed", "manifest", "operator", "applied", None),
-        ("denied", "global", "denylist", None, "denylist: telemetry"),
+        ("denied", "global", "denylist", None, LONG_REASON),
         ("denied", "bottle", "operator", None, None),
         ("stale", None, "sweep", None, "stale"),
     ]
