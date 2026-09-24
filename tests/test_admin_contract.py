@@ -659,6 +659,136 @@ class AdminContractTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    # -- History: GET /recent (broker) and GET /api/egress/recent (admin) ------
+
+    def _seed_history(self, b: broker.EgressBroker, count: int) -> None:
+        for i in range(count):
+            when = NOW - timedelta(days=30) + timedelta(minutes=i)
+            b._store.open_or_hit(
+                request_id=f"req-{i:04d}", container="coding-brassbottle",
+                host=f"h{i}.example.com", port=443, host_is_ip=False, uid=None,
+                comm=None, reason=None, hold_seconds=None, now=when,
+            )
+            b._store.close(
+                request_id=f"req-{i:04d}", status="allowed" if i % 2 else "denied",
+                now=when, decided_by="operator", scope="live" if i % 2 else "once",
+                decision_body={"decision": "allow"},
+            )
+
+    def _broker_get(self, host: str, port: int, path: str, *, authorization="operator"):
+        headers = {}
+        if authorization == "operator":
+            headers["Authorization"] = f"Bearer {self.OPERATOR_TOKEN}"
+        elif authorization is not None:
+            headers["Authorization"] = authorization
+        conn = HTTPConnection(host, port, timeout=5)
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        parsed = json.loads(resp.read().decode("utf-8"))
+        conn.close()
+        return resp.status, parsed
+
+    def test_broker_recent_pages_validate_and_walk_the_whole_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            self._seed_history(b, 5)
+            host, port = self._serve(root, b)
+            seen, path = [], "/recent?limit=2"
+            while True:
+                status, page = self._broker_get(host, port, path)
+                self.assertEqual(status, HTTPStatus.OK, page)
+                self.assertEqual(validate_document(page, "recent_page.schema.json"), [])
+                seen.extend(r["request_id"] for r in page["rows"])
+                if page["next"] is None:
+                    break
+                path = f"/recent?limit=2&before={page['next']}"
+            self.assertEqual(seen, [f"req-{i:04d}" for i in (4, 3, 2, 1, 0)])
+
+    def test_broker_recent_full_page_carries_a_valid_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            self._seed_history(b, 3)
+            host, port = self._serve(root, b)
+            _, page = self._broker_get(host, port, "/recent?limit=3")
+            self.assertEqual(validate_document(page, "recent_page.schema.json"), [])
+            self.assertIsNotNone(page["next"])
+
+    def test_broker_recent_400_and_401_validate_against_error_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            host, port = self._serve(root, b)
+            status, body = self._broker_get(host, port, "/recent?before=garbage")
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST, body)
+            self.assertEqual(validate_document(body, "error_response.schema.json"), [])
+            status, body = self._broker_get(host, port, "/recent", authorization=None)
+            self.assertEqual(status, HTTPStatus.UNAUTHORIZED, body)
+            self.assertEqual(validate_document(body, "error_response.schema.json"), [])
+            self.assertEqual(body["error"], "unauthorized")
+
+    def test_admin_recent_pages_validate_and_match_the_broker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            self._seed_history(b, 5)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            cookie = {"Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret"}
+            try:
+                status, page, _raw = self._admin_request(
+                    admin_host, admin_port, "GET",
+                    "/api/egress/recent?limit=2&container=coding-brassbottle&junk=1",
+                    headers=cookie,
+                )
+                self.assertEqual(status, HTTPStatus.OK, page)
+                self.assertEqual(validate_document(page, "recent_page.schema.json"), [])
+                self.assertEqual(len(page["rows"]), 2)
+                _, direct = self._broker_get(
+                    broker_host, broker_port, "/recent?limit=2&container=coding-brassbottle"
+                )
+                self.assertEqual(page, direct)
+                status, older, _raw = self._admin_request(
+                    admin_host, admin_port, "GET",
+                    f"/api/egress/recent?limit=2&before={page['next']}",
+                    headers=cookie,
+                )
+                self.assertEqual(status, HTTPStatus.OK, older)
+                self.assertEqual(validate_document(older, "recent_page.schema.json"), [])
+                self.assertEqual(
+                    [r["request_id"] for r in older["rows"]], ["req-0002", "req-0001"]
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_admin_recent_400_and_403_validate_against_error_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            try:
+                status, body, _raw = self._admin_request(
+                    admin_host, admin_port, "GET", "/api/egress/recent?before=garbage",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret"},
+                )
+                self.assertEqual(status, HTTPStatus.BAD_REQUEST, body)
+                self.assertEqual(validate_document(body, "error_response.schema.json"), [])
+                status, body, _raw = self._admin_request(
+                    admin_host, admin_port, "GET", "/api/egress/recent"
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN, body)
+                self.assertEqual(validate_document(body, "error_response.schema.json"), [])
+                self.assertEqual(body["error"], "forbidden")
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
 
 
 if __name__ == "__main__":

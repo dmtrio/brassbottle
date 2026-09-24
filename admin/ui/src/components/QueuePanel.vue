@@ -18,7 +18,8 @@ import {
 } from '@/components/ui/dialog'
 import { decide as apiDecide, type DecideAction, type DecidePayload } from '@/api/egress'
 import { useQueue } from '@/composables/useQueue'
-import type { DecidedRow, OpenRow } from '@/types'
+import { outcomeLabel, outcomeTone } from '@/lib/decision'
+import type { OpenRow } from '@/types'
 import DecideButtons from './DecideButtons.vue'
 import EmptyState from './EmptyState.vue'
 import RequestSummary, { type RowNote } from './RequestSummary.vue'
@@ -69,26 +70,6 @@ const sections = computed(() =>
 const recentRows = computed(() =>
   [...(snapshot.value?.recent ?? [])].sort((a, b) => Date.parse(b.decided_at) - Date.parse(a.decided_at)),
 )
-
-const OUTCOME_LABEL: Record<string, string> = {
-  live: 'Allowed',
-  manifest: 'Allowed permanently · bottle',
-  once: 'Denied',
-  bottle: 'Denied permanently · bottle',
-  global: 'Denied permanently · global',
-}
-
-function outcomeLabel(row: DecidedRow): string {
-  if (row.decided_by === 'denylist') return 'Denylist'
-  if (row.status === 'stale') return 'Expired'
-  return (row.scope && OUTCOME_LABEL[row.scope]) || (row.status === 'allowed' ? 'Allowed' : 'Denied')
-}
-
-function outcomeTone(row: DecidedRow): string {
-  if (row.status === 'allowed') return 'pill-allow'
-  if (row.status === 'stale') return 'pill-neutral'
-  return 'pill-deny'
-}
 
 function relTime(isoTs: string): string {
   const s = Math.max(0, Math.round((Date.now() - Date.parse(isoTs)) / 1000))

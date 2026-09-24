@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.parse
 from http import HTTPStatus
 from http.client import HTTPConnection
 from http.cookies import SimpleCookie
@@ -54,6 +55,8 @@ class _StubBrokerState:
         }
         self.decide_status = 200
         self.decide_body: dict[str, object] = {"decided": ["req-1"], "apply_failures": []}
+        self.recent_status = 200
+        self.recent_body: dict[str, object] = {"rows": [], "next": None}
         self._lock = threading.Lock()
 
     def record(self, call: dict[str, object]) -> None:
@@ -84,6 +87,17 @@ class StubBrokerHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self) -> None:
+        if self.path.partition("?")[0] == "/recent":
+            self.server.state.record(
+                {
+                    "method": "GET",
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization", ""),
+                    "body": None,
+                }
+            )
+            self._send(self.server.state.recent_status, self.server.state.recent_body)
+            return
         if self.path != "/queue":
             self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -1345,6 +1359,126 @@ class AdminDaemonTests(unittest.TestCase):
         self.assertIn("localTimestamp(row.decided_at)", text)
         # Apply failures surface as the attempt-counted chip.
         self.assertIn("apply failed \\u00d7", text)
+
+    # -- GET /api/egress/recent (History proxy) --------------------------------
+
+    def _recent_env(self, stub):
+        return {"EGRESS_BROKER_URL": f"http://127.0.0.1:{stub.server_address[1]}"}
+
+    def _stop_stub(self, stub, stub_thread):
+        stub.shutdown()
+        stub.server_close()
+        join_thread_or_fail(stub_thread, label="stub")
+
+    def _recent_get(self, path, *, cookie=True, env_extra=None, state=None):
+        """Run one GET against a fresh admin in front of the stub broker."""
+        state = state or _StubBrokerState()
+        stub, stub_thread = self._start_stub(state)
+        self.addCleanup(self._stop_stub, stub, stub_thread)
+        env = self._recent_env(stub)
+        env.update(env_extra or {})
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        server, thread = self._start_admin(Path(tmp.name), env=env)
+        def stop() -> None:
+            server.shutdown()
+            server.server_close()
+            join_thread_or_fail(thread, label="admin")
+        self.addCleanup(stop)
+        host, port = server.server_address
+        headers = {"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"} if cookie else {}
+        return state, self._request(host, port, "GET", path, headers=headers)
+
+    def test_get_recent_requires_session_cookie(self):
+        for env_extra in ({}, {"DJINN_ADMIN_UI": "spa"}):
+            with self.subTest(spa=bool(env_extra)):
+                state = _StubBrokerState()
+                state.recent_body = {"rows": [], "next": None}
+                _s, (status, payload, _h, _r) = self._recent_get(
+                    "/api/egress/recent", cookie=False, env_extra=env_extra, state=state
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN)
+                self.assertEqual(payload, {"error": "forbidden"})
+                self.assertEqual(state.snapshot_calls(), [])
+
+    def test_get_recent_proxies_in_legacy_and_spa_dispatch(self):
+        page = {"rows": [], "next": "2026-08-01T00:00:00Z,req-9"}
+        for env_extra in ({}, {"DJINN_ADMIN_UI": "spa"}):
+            with self.subTest(spa=bool(env_extra)):
+                state = _StubBrokerState()
+                state.recent_body = page
+                _s, (status, payload, _h, _r) = self._recent_get(
+                    "/api/egress/recent", env_extra=env_extra, state=state
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload, page)
+                calls = state.snapshot_calls()
+                self.assertEqual([c["path"] for c in calls], ["/recent"])
+                self.assertEqual(calls[0]["authorization"], "Bearer operator-test-token")
+
+    def test_get_recent_forwards_only_the_five_allowlisted_params(self):
+        state = _StubBrokerState()
+        query = (
+            "before=2026-08-01T00%3A00%3A00Z%2Creq-9&limit=25&container=coding-a"
+            "&since=2026-07-01T00%3A00%3A00Z&until=2026-08-01T00%3A00%3A00Z"
+            "&token=leak&x=1&limit_extra=2"
+        )
+        self._recent_get(f"/api/egress/recent?{query}", state=state)
+        (call,) = state.snapshot_calls()
+        path, _, forwarded = call["path"].partition("?")
+        self.assertEqual(path, "/recent")
+        self.assertEqual(
+            sorted(urllib.parse.parse_qsl(forwarded)),
+            sorted(
+                [
+                    ("before", "2026-08-01T00:00:00Z,req-9"),
+                    ("limit", "25"),
+                    ("container", "coding-a"),
+                    ("since", "2026-07-01T00:00:00Z"),
+                    ("until", "2026-08-01T00:00:00Z"),
+                ]
+            ),
+        )
+        self.assertNotIn("leak", call["path"])
+
+    def test_get_recent_with_only_unknown_params_sends_a_bare_recent(self):
+        state = _StubBrokerState()
+        self._recent_get("/api/egress/recent?evil=1", state=state)
+        self.assertEqual([c["path"] for c in state.snapshot_calls()], ["/recent"])
+
+    def test_get_recent_upstream_error_mapping(self):
+        cases = (
+            (401, admin.TOKEN_REJECTED_ERROR, HTTPStatus.SERVICE_UNAVAILABLE),
+            (500, admin.UNREACHABLE_ERROR, HTTPStatus.SERVICE_UNAVAILABLE),
+            (503, admin.UNREACHABLE_ERROR, HTTPStatus.SERVICE_UNAVAILABLE),
+            (404, admin.UNREACHABLE_ERROR, HTTPStatus.BAD_GATEWAY),
+            (400, "invalid before cursor", HTTPStatus.BAD_REQUEST),
+        )
+        for upstream, error, expected in cases:
+            with self.subTest(upstream=upstream):
+                state = _StubBrokerState()
+                state.recent_status = upstream
+                state.recent_body = {"error": error if upstream == 400 else "x"}
+                _s, (status, payload, _h, _r) = self._recent_get(
+                    "/api/egress/recent", state=state
+                )
+                self.assertEqual(status, expected)
+                self.assertEqual(payload, {"error": error})
+
+    def test_get_recent_unreachable_broker_is_503(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        server, thread = self._start_admin(
+            Path(tmp.name), env={"EGRESS_BROKER_URL": "http://127.0.0.1:9"}
+        )
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), join_thread_or_fail(thread, label="admin")))
+        host, port = server.server_address
+        status, payload, _h, _r = self._request(
+            host, port, "GET", "/api/egress/recent",
+            headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+        )
+        self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(payload["error"], admin.UNREACHABLE_ERROR)
 
     def test_legacy_routes_match_recorded_fixture(self):
         """With DJINN_ADMIN_UI unset, every legacy route returns exactly the

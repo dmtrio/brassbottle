@@ -3,7 +3,7 @@
 
 Stdlib-only. Covers exactly the draft-2020-12 subset the schemas in
 admin/contract/ use: type (including unions with null), required,
-properties, additionalProperties: false, items, enum, const, anyOf (valid
+properties, additionalProperties: false, items, enum, const, pattern (strings, re.search), anyOf (valid
 when any branch has zero errors; on failure one error names the branch count
 and the errors of the closest branch), and $ref to a sibling schema file (by bare filename). validate() returns a list of error
 strings, each with the JSON path of the offending value, e.g.
@@ -13,6 +13,7 @@ strings, each with the JSON path of the offending value, e.g.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,9 @@ def validate(
         errors.append(f"{path}: expected const {schema['const']!r}, got {instance!r}")
     if "enum" in schema and instance not in schema["enum"]:
         errors.append(f"{path}: {instance!r} not in enum {schema['enum']!r}")
+
+    if "pattern" in schema and isinstance(instance, str) and not re.search(schema["pattern"], instance):
+        errors.append(f"{path}: {instance!r} does not match pattern {schema['pattern']!r}")
 
     if "anyOf" in schema:
         branch_errors = [

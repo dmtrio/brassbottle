@@ -36,6 +36,7 @@ Schema (SQLite, journal_mode=WAL, foreign_keys=ON):
                                          -- set only by a terminal decision
       index (status, container, opened_at)
       index (container, host, port, status)
+      index (decided_at, request_id)   -- v2: keyset paging of decided rows
 
     events
       id              INTEGER PRIMARY KEY
@@ -49,7 +50,8 @@ Schema (SQLite, journal_mode=WAL, foreign_keys=ON):
       index (request_id, id)
 
     schema_version
-      version         INTEGER NOT NULL   -- 1
+      version         INTEGER NOT NULL   -- 2 (v1 lacked the decided_at index;
+                                         -- opening a v1 file migrates it)
 
 Statuses: a filing starts `open`; it leaves that state only through `close`
 (to `allowed`, `denied` or `stale`). Apply and persist outcomes are recorded
@@ -86,7 +88,8 @@ from typing import Any, Iterator
 
 LOG = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+_MIGRATABLE_FROM = 1
 DB_FILENAME = "egress.db"
 SQLITE_HEADER = b"SQLite format 3\x00"
 
@@ -153,6 +156,8 @@ CREATE INDEX IF NOT EXISTS idx_requests_status_container_opened_at
     ON requests(status, container, opened_at);
 CREATE INDEX IF NOT EXISTS idx_requests_container_host_port_status
     ON requests(container, host, port, status);
+CREATE INDEX IF NOT EXISTS idx_requests_decided_at_request_id
+    ON requests(decided_at, request_id);
 CREATE TABLE IF NOT EXISTS events (
     id              INTEGER PRIMARY KEY,
     request_id      TEXT NOT NULL REFERENCES requests,
@@ -663,10 +668,39 @@ class EgressStore:
         if row is None:
             raise EgressStoreError(f"{self._db_path} has an empty schema_version table")
         version = row[0]
+        if version == _MIGRATABLE_FROM:
+            self._migrate_v1_to_v2()
+            return
         if not isinstance(version, int) or version != SCHEMA_VERSION:
             raise EgressStoreError(
                 f"{self._db_path} has schema version {version!r}; expected {SCHEMA_VERSION}"
             )
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Add the decided_at keyset index and record version 2, atomically.
+
+        One transaction, so a crash leaves a clean v1 file that the next open
+        migrates again. The index build and the version write commit together
+        or not at all.
+        """
+        started = time.monotonic()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_requests_decided_at_request_id"
+                " ON requests(decided_at, request_id)"
+            )
+            self._conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        LOG.info(
+            "egress_store migrate from=%d to=%d duration_ms=%.1f",
+            _MIGRATABLE_FROM,
+            SCHEMA_VERSION,
+            (time.monotonic() - started) * 1000.0,
+        )
 
     def shutdown(self) -> None:
         """Close the connection. Tolerates being called twice."""
@@ -1199,13 +1233,42 @@ class EgressStore:
         with self._lock:
             return self._fetch_open_by_key(container, host, port)
 
-    def list_recent(self, *, since: datetime, limit: int | None = None) -> list[RequestRow]:
-        since_ts = _iso_ts(_utc_now(since))
-        sql = (
-            "SELECT %s FROM requests WHERE decided_at IS NOT NULL AND decided_at >= ?"
-            " ORDER BY decided_at DESC, request_id DESC" % ", ".join(_REQUEST_COLUMNS)
+    def list_recent(
+        self,
+        *,
+        since: datetime | None = None,
+        limit: int | None = None,
+        before: tuple[str, str] | None = None,
+        until: datetime | None = None,
+        container: str | None = None,
+    ) -> list[RequestRow]:
+        """Decided rows, newest first: `decided_at DESC, request_id DESC`.
+
+        `since` and `until` bound `decided_at` inclusively. `before` is the
+        keyset cursor `(decided_at_iso, request_id)` of the last row already
+        seen and is exclusive: only rows strictly after it in the ordering
+        (older, or equal `decided_at` with a smaller request_id) return, so
+        paging with it neither repeats nor skips a row across equal
+        timestamps. `container` restricts to one bottle.
+        """
+        clauses = ["decided_at IS NOT NULL"]
+        params: list[Any] = []
+        if since is not None:
+            clauses.append("decided_at >= ?")
+            params.append(_iso_ts(_utc_now(since)))
+        if until is not None:
+            clauses.append("decided_at <= ?")
+            params.append(_iso_ts(_utc_now(until)))
+        if container is not None:
+            clauses.append("container = ?")
+            params.append(container)
+        if before is not None:
+            clauses.append("(decided_at, request_id) < (?, ?)")
+            params.extend(before)
+        sql = "SELECT %s FROM requests WHERE %s ORDER BY decided_at DESC, request_id DESC" % (
+            ", ".join(_REQUEST_COLUMNS),
+            " AND ".join(clauses),
         )
-        params: list[Any] = [since_ts]
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)

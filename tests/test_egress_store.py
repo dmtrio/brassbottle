@@ -2,6 +2,7 @@
 """Unit tests for the SQLite egress request store (queue + audit)."""
 from __future__ import annotations
 import json
+import random
 import re
 import sqlite3
 import sys
@@ -44,7 +45,7 @@ class EgressStoreTests(unittest.TestCase):
         return egress_store.EgressStore(root)
     # -- 1. schema and on-disk state -------------------------------------
 
-    def test_fresh_root_creates_wal_db_with_schema_version_1(self):
+    def test_fresh_root_creates_wal_db_with_schema_version_2(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = self._store(root)
@@ -56,7 +57,7 @@ class EgressStoreTests(unittest.TestCase):
                 self.assertEqual(probe.execute("PRAGMA journal_mode").fetchone()[0], "wal")
                 self.assertEqual(
                     probe.execute("SELECT version FROM schema_version").fetchall(),
-                    [(1,)],
+                    [(2,)],
                 )
                 columns = [
                     row[1] for row in probe.execute("PRAGMA table_info(requests)").fetchall()
@@ -173,12 +174,12 @@ class EgressStoreTests(unittest.TestCase):
             finally:
                 probe.close()
 
-    def test_schema_version_2_refused(self):
+    def test_schema_version_3_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = self._store(root)
             store.open_or_hit(**_open_kwargs())
-            store._conn.execute("UPDATE schema_version SET version = 2")
+            store._conn.execute("UPDATE schema_version SET version = 3")
             store._conn.commit()
             store.shutdown()
             with self.assertRaises(egress_store.EgressStoreError):
@@ -1316,6 +1317,244 @@ class EgressStoreTests(unittest.TestCase):
                 ["req-1", "req-2"],
             )
             self.assertEqual(store.events(kind="allowed"), [])
+# -- keyset-paged history (list_recent before/until/container) and the v1 -> v2
+# migration ----------------------------------------------------------------
+INDEX_NAME = "idx_requests_decided_at_request_id"
+# The v1 DDL, copied from the store as of origin/main dedd5e2 (before the
+# decided_at index existed), so the migration tests open a real v1 file.
+_V1_DDL = """
+CREATE TABLE requests (
+    request_id      TEXT PRIMARY KEY,
+    container       TEXT NOT NULL,
+    host            TEXT NOT NULL,
+    port            INTEGER NOT NULL,
+    host_is_ip      INTEGER NOT NULL,
+    uid             INTEGER,
+    comm            TEXT,
+    reason          TEXT,
+    hold_seconds    INTEGER,
+    opened_at       TEXT NOT NULL,
+    last_hit_at     TEXT NOT NULL,
+    hit_count       INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL,
+    scope           TEXT,
+    decided_at      TEXT,
+    decided_by      TEXT,
+    deny_reason     TEXT,
+    apply_status    TEXT,
+    apply_attempts  INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    persist_status  TEXT,
+    denylist_zone   TEXT,
+    denylist_scope  TEXT,
+    decision_body   TEXT
+);
+CREATE INDEX idx_requests_status_container_opened_at
+    ON requests(status, container, opened_at);
+CREATE INDEX idx_requests_container_host_port_status
+    ON requests(container, host, port, status);
+CREATE TABLE events (
+    id              INTEGER PRIMARY KEY,
+    request_id      TEXT NOT NULL REFERENCES requests,
+    kind            TEXT NOT NULL,
+    ts              TEXT NOT NULL,
+    fields          TEXT
+);
+CREATE INDEX idx_events_request_id_id ON events(request_id, id);
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version (version) VALUES (1);
+"""
+def _index_names(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA index_list(requests)")}
+def _decide(store, request_id: str, when: datetime, *, container="coding-brassbottle", status="allowed"):
+    """File and close one request; `when` becomes its decided_at."""
+    store.open_or_hit(**_open_kwargs(request_id=request_id, container=container, now=when))
+    store.close(
+        request_id=request_id,
+        status=status,
+        now=when,
+        decided_by="operator",
+        decision_body={"decision": status},
+    )
+class ListRecentPagingTests(unittest.TestCase):
+    # Seeded through the store API (open_or_hit + close): close(now=...) sets
+    # decided_at, so no SQL back door is needed.
+    TOTAL = 1000
+    TIED = 300
+    PAGE = 50
+    TIE_AT = NOW - timedelta(days=1)
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.store = egress_store.EgressStore(Path(cls._tmp.name))
+        # Shuffled ids, so neither insertion order nor decided_at order equals
+        # request_id order; the 300 tied rows are ordered by request_id alone.
+        ids = [f"req-{i:04d}" for i in range(cls.TOTAL)]
+        random.Random(7).shuffle(ids)
+        cls.when = {}
+        cls.container = {}
+        for n, request_id in enumerate(ids):
+            when = cls.TIE_AT if n < cls.TIED else NOW - timedelta(minutes=n)
+            cls.when[request_id] = when
+            cls.container[request_id] = "bottle-a" if n % 2 == 0 else "bottle-b"
+            _decide(
+                cls.store,
+                request_id,
+                when,
+                container=cls.container[request_id],
+                status="allowed" if n % 3 else "denied",
+            )
+        cls.expected = sorted(ids, key=lambda r: (_iso_ts(cls.when[r]), r), reverse=True)
+    @classmethod
+    def tearDownClass(cls):
+        cls.store.shutdown()
+        cls._tmp.cleanup()
+    @staticmethod
+    def _cursor(row):
+        return (_iso_ts(row.decided_at), row.request_id)
+    def test_setup_has_the_tied_block(self):
+        rows = self.store.list_recent()
+        self.assertEqual(len(rows), self.TOTAL)
+        self.assertEqual(sum(1 for r in rows if r.decided_at == self.TIE_AT), self.TIED)
+    def test_paging_50_at_a_time_returns_each_row_exactly_once_in_order(self):
+        seen: list[str] = []
+        before = None
+        pages = 0
+        while True:
+            page = self.store.list_recent(limit=self.PAGE, before=before)
+            pages += 1
+            seen.extend(r.request_id for r in page)
+            if len(page) < self.PAGE:
+                break
+            before = self._cursor(page[-1])
+        self.assertEqual(len(seen), self.TOTAL)
+        self.assertEqual(len(set(seen)), self.TOTAL)
+        self.assertEqual(seen, self.expected)
+        # 1000 rows / 50 = 20 full pages, then one empty page.
+        self.assertEqual(pages, 21)
+    def test_cursor_inside_the_tied_block_neither_repeats_nor_skips(self):
+        tied = [r for r in self.expected if self.when[r] == self.TIE_AT]
+        boundary = tied[120]
+        rest = self.store.list_recent(before=(_iso_ts(self.TIE_AT), boundary))
+        self.assertEqual(
+            [r.request_id for r in rest], self.expected[self.expected.index(boundary) + 1 :]
+        )
+    def test_cursor_after_the_last_row_is_empty(self):
+        last = self.expected[-1]
+        self.assertEqual(self.store.list_recent(before=(_iso_ts(self.when[last]), last)), [])
+    def test_since_and_until_are_inclusive_bounds(self):
+        mid = NOW - timedelta(minutes=500)
+        self.assertEqual(
+            [r.decided_at for r in self.store.list_recent(since=mid, until=mid)], [mid]
+        )
+        window = self.store.list_recent(
+            since=NOW - timedelta(minutes=600), until=NOW - timedelta(minutes=500)
+        )
+        self.assertEqual(len(window), 101)  # n = 500..600
+        older = self.store.list_recent(until=NOW - timedelta(minutes=900))
+        # n = 900..999 is 100 rows, plus the 300 tied rows a day back.
+        self.assertEqual(len(older), 100 + self.TIED)
+    def test_container_filter(self):
+        a = self.store.list_recent(container="bottle-a")
+        b = self.store.list_recent(container="bottle-b")
+        self.assertEqual(len(a) + len(b), self.TOTAL)
+        self.assertTrue(all(r.container == "bottle-a" for r in a))
+        self.assertEqual(self.store.list_recent(container="nobody"), [])
+    def test_container_and_cursor_compose(self):
+        page1 = self.store.list_recent(container="bottle-b", limit=10)
+        page2 = self.store.list_recent(
+            container="bottle-b", limit=10, before=self._cursor(page1[-1])
+        )
+        self.assertEqual(
+            [r.request_id for r in page1 + page2],
+            [r for r in self.expected if self.container[r] == "bottle-b"][:20],
+        )
+    def test_since_without_limit_keeps_the_legacy_call_shape(self):
+        # The newest untied row is n=300, 300 minutes back; n=300..305 is 6 rows.
+        rows = self.store.list_recent(since=NOW - timedelta(minutes=305))
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(rows[0].decided_at, NOW - timedelta(minutes=300))
+class SchemaMigrationTests(unittest.TestCase):
+    def _v1_root(self, tmp: str) -> Path:
+        root = Path(tmp)
+        conn = sqlite3.connect(root / "egress.db")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(_V1_DDL)
+        conn.execute(
+            "INSERT INTO requests (request_id, container, host, port, host_is_ip,"
+            " opened_at, last_hit_at, status, decided_at)"
+            " VALUES ('old-1', 'b', 'x.example', 443, 0, '2026-01-01T00:00:00Z',"
+            " '2026-01-01T00:00:00Z', 'allowed', '2026-01-01T00:05:00Z')"
+        )
+        conn.commit()
+        conn.close()
+        return root
+    def test_v1_file_migrates_to_v2_with_the_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._v1_root(tmp)
+            probe = sqlite3.connect(root / "egress.db")
+            self.assertNotIn(INDEX_NAME, _index_names(probe))
+            probe.close()
+            with self.assertLogs("egress_store", level="INFO") as logs:
+                store = egress_store.EgressStore(root)
+            self.addCleanup(store.shutdown)
+            self.assertTrue(
+                any("migrate from=1 to=2 duration_ms=" in line for line in logs.output),
+                logs.output,
+            )
+            probe = sqlite3.connect(root / "egress.db")
+            try:
+                self.assertEqual(
+                    probe.execute("SELECT version FROM schema_version").fetchall(), [(2,)]
+                )
+                self.assertIn(INDEX_NAME, _index_names(probe))
+            finally:
+                probe.close()
+            self.assertEqual([r.request_id for r in store.list_recent()], ["old-1"])
+    def test_reopening_a_migrated_file_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._v1_root(tmp)
+            egress_store.EgressStore(root).shutdown()
+            with self.assertLogs("egress_store", level="INFO") as logs:
+                again = egress_store.EgressStore(root)
+            self.addCleanup(again.shutdown)
+            self.assertFalse(any("migrate" in line for line in logs.output), logs.output)
+            self.assertEqual(
+                again._conn.execute("SELECT version FROM schema_version").fetchall(), [(2,)]
+            )
+    def test_fresh_database_has_the_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = egress_store.EgressStore(Path(tmp))
+            self.addCleanup(store.shutdown)
+            self.assertIn(INDEX_NAME, _index_names(store._conn))
+    def test_failed_migration_leaves_a_clean_v1_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._v1_root(tmp)
+            # A view named like the index makes CREATE INDEX fail mid-migration.
+            conn = sqlite3.connect(root / "egress.db")
+            conn.execute(f"CREATE VIEW {INDEX_NAME} AS SELECT 1")
+            conn.commit()
+            conn.close()
+            with self.assertRaises(egress_store.EgressStoreError):
+                egress_store.EgressStore(root)
+            conn = sqlite3.connect(root / "egress.db")
+            try:
+                self.assertEqual(
+                    conn.execute("SELECT version FROM schema_version").fetchall(), [(1,)]
+                )
+            finally:
+                conn.close()
+    def test_unknown_versions_still_raise(self):
+        for version in (0, 3, 99):
+            with self.subTest(version=version):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = self._v1_root(tmp)
+                    conn = sqlite3.connect(root / "egress.db")
+                    conn.execute("UPDATE schema_version SET version = ?", (version,))
+                    conn.commit()
+                    conn.close()
+                    with self.assertRaises(egress_store.EgressStoreError):
+                        egress_store.EgressStore(root)
 def _open_kwargs_fields():
     return {
         "container": "coding-brassbottle",

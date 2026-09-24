@@ -1,0 +1,20 @@
+import { getLocalTimeZone, type DateValue } from '@internationalized/date'
+
+export type DayRange = { start?: DateValue; end?: DateValue }
+
+// The broker's timestamps: whole seconds, UTC, trailing Z.
+export function isoSeconds(when: Date): string {
+  return when.toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+// A picked day range as the `since` / `until` query values: local midnight at
+// the start of the first day to the last second of the last day. A range with
+// only a start is that one day.
+export function rangeToQuery(range: DayRange): { since: string | null; until: string | null } {
+  if (!range.start) return { since: null, until: null }
+  const zone = getLocalTimeZone()
+  const last = range.end ?? range.start
+  const since = range.start.toDate(zone)
+  const until = new Date(last.toDate(zone).getTime() + 24 * 3600 * 1000 - 1000)
+  return { since: isoSeconds(since), until: isoSeconds(until) }
+}

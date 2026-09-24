@@ -1,4 +1,4 @@
-import type { AdminDecideResponse, ErrorResponse, QueueSnapshot } from '@/contract'
+import type { AdminDecideResponse, ErrorResponse, QueueSnapshot, RecentPage } from '@/contract'
 
 export type ApiResult<T> =
   | { ok: true; data: T }
@@ -16,6 +16,16 @@ export type DecidePayload = {
   host: string
   container?: string
   reason?: string
+}
+
+// The five parameters the admin forwards to the broker's /recent; the admin
+// drops anything else.
+export type RecentQuery = {
+  before?: string | null
+  limit?: number
+  container?: string | null
+  since?: string | null
+  until?: string | null
 }
 
 // status 0 means the request never got an answer (network failure).
@@ -52,6 +62,15 @@ async function call<T>(url: string, init: RequestInit): Promise<ApiResult<T>> {
 
 export function fetchQueue(): Promise<ApiResult<QueueSnapshot>> {
   return call<QueueSnapshot>('/api/egress/queue', { method: 'GET' })
+}
+
+export function fetchRecent(query: RecentQuery = {}): Promise<ApiResult<RecentPage>> {
+  const params = new URLSearchParams()
+  for (const [name, value] of Object.entries(query)) {
+    if (value !== null && value !== undefined && value !== '') params.set(name, String(value))
+  }
+  const qs = params.toString()
+  return call<RecentPage>(`/api/egress/recent${qs ? `?${qs}` : ''}`, { method: 'GET' })
 }
 
 export function decide(payload: DecidePayload): Promise<ApiResult<AdminDecideResponse>> {
