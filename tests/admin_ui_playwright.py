@@ -79,14 +79,52 @@ def log(message: str) -> None:
     print(f"[suite] {message}", file=sys.stderr, flush=True)
 
 
-def sources_newer_than_bundle(src: Path, bundle: Path) -> list[Path]:
-    """Files under `src` modified after `bundle`: the built dist/ cannot reflect them.
+# Everything `npm run build` reads to produce dist/, relative to the repo root.
+BUILD_INPUTS = (
+    "admin/ui/src",
+    "admin/ui/public",
+    "admin/ui/index.html",
+    "admin/ui/vite.config.ts",
+    "admin/ui/package-lock.json",
+    "admin/contract",
+)
+BUNDLE = "admin/ui/dist/index.html"
 
-    A build that fails (vue-tsc, lint) leaves the previous dist/ in place, so a suite
-    run after it would test code that is no longer in the source tree.
+
+def build_inputs_newer_than_bundle(root: Path, bundle: Path) -> list[Path]:
+    """Build inputs modified after `bundle`: the built dist/ cannot reflect them.
+
+    Directories count too, so a file deleted from src/ (which bumps its
+    directory's mtime) is caught. A build that FAILS is caught as well, without
+    any help from this list: `prebuild` (gen:types) rewrites src/contract.ts
+    before vue-tsc and vite run, so a failed build always leaves a source newer
+    than the old bundle.
     """
     built = bundle.stat().st_mtime_ns
-    return sorted(path for path in src.rglob("*") if path.is_file() and path.stat().st_mtime_ns > built)
+    newer: list[Path] = []
+    for rel in BUILD_INPUTS:
+        path = root / rel
+        if not path.exists():
+            continue
+        candidates = [path, *path.rglob("*")] if path.is_dir() else [path]
+        newer.extend(c for c in candidates if c.stat().st_mtime_ns > built)
+    return sorted(newer)
+
+
+def bundle_refusal(root: Path) -> str | None:
+    """Why the spa suite must not run against `root`'s dist/, or None when it is fresh."""
+    bundle = root / BUNDLE
+    if not bundle.is_file():
+        return "admin/ui/dist is not built: run `cd admin/ui && npm ci && npm run build` first"
+    newer = build_inputs_newer_than_bundle(root, bundle)
+    log(f"stage=bundle dist_mtime={datetime.fromtimestamp(bundle.stat().st_mtime).isoformat(timespec='seconds')} "
+        f"inputs_newer={len(newer)}")
+    if not newer:
+        return None
+    shown = ", ".join(str(path.relative_to(root)) for path in newer[:5])
+    return (f"REFUSING TO RUN: admin/ui/dist is older than {len(newer)} build input(s) ({shown}"
+            f"{', …' if len(newer) > 5 else ''}): a failed or skipped build leaves the previous bundle in place. "
+            "Run `cd admin/ui && npm run build` and check that it exits 0.")
 
 
 def lines(text: str) -> list[str]:
@@ -1092,19 +1130,10 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
 
-    bundle = WORKTREE / "admin" / "ui" / "dist" / "index.html"
     if ui == "spa":
-        if not bundle.is_file():
-            print("admin/ui/dist is not built: run `cd admin/ui && npm ci && npm run build` first", file=sys.stderr)
-            return 2
-        newer = sources_newer_than_bundle(WORKTREE / "admin" / "ui" / "src", bundle)
-        log(f"stage=bundle dist_mtime={datetime.fromtimestamp(bundle.stat().st_mtime).isoformat(timespec='seconds')} "
-            f"sources_newer={len(newer)}")
-        if newer:
-            shown = ", ".join(str(path.relative_to(WORKTREE)) for path in newer[:5])
-            print(f"REFUSING TO RUN: admin/ui/dist is older than {len(newer)} file(s) in admin/ui/src ({shown}"
-                  f"{', …' if len(newer) > 5 else ''}): a failed build leaves the previous bundle in place. "
-                  "Run `cd admin/ui && npm run build` and check that it exits 0.", file=sys.stderr)
+        refusal = bundle_refusal(WORKTREE)
+        if refusal:
+            print(refusal, file=sys.stderr)
             return 2
 
     broker = stub.StubBroker(log=lambda message: None)
