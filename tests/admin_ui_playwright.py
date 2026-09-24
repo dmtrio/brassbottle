@@ -79,6 +79,16 @@ def log(message: str) -> None:
     print(f"[suite] {message}", file=sys.stderr, flush=True)
 
 
+def sources_newer_than_bundle(src: Path, bundle: Path) -> list[Path]:
+    """Files under `src` modified after `bundle`: the built dist/ cannot reflect them.
+
+    A build that fails (vue-tsc, lint) leaves the previous dist/ in place, so a suite
+    run after it would test code that is no longer in the source tree.
+    """
+    built = bundle.stat().st_mtime_ns
+    return sorted(path for path in src.rglob("*") if path.is_file() and path.stat().st_mtime_ns > built)
+
+
 def lines(text: str) -> list[str]:
     return [part.strip() for part in text.splitlines() if part.strip()]
 
@@ -638,24 +648,26 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
 
     def recent_shows_bottle_and_outcome():
         rows = drv.recent_rows()
-        for host, bottle, outcome in (
-            ("registry.npmjs.org", "mid", "allowed"), ("denied.example.com", "alpha", "denied"),
-            ("ads.example.com", "zeta", "denied|denylist"), ("check18.example.com", "alpha", "denied"),
-            ("z1.example.com", "zeta", "denied"),
+        for host, bottle, outcome, reason in (
+            ("registry.npmjs.org", "mid", "allowed", None), ("denied.example.com", "alpha", "denied", "telemetry"),
+            ("ads.example.com", "zeta", "denied|denylist", "denylist: telemetry"),
+            ("check18.example.com", "alpha", "denied", None), ("z1.example.com", "zeta", "denied", None),
         ):
             text = next((row for row in rows if f"{host}:" in row), None)
             assert text, f"{host} is not in recent: {rows}"
             assert bottle in text, f"bottle {bottle!r} missing from the recent row {text!r}"
             assert re.search(outcome, text, re.I), f"outcome {outcome!r} missing from the recent row {text!r}"
-    check("22", "Recent rows show the destination, the bottle and the outcome of each decision",
+            if reason:
+                assert reason in text, f"deny reason {reason!r} missing from the recent row {text!r}"
+    check("22", "Recent rows show the destination, the bottle, the outcome and the deny reason of each decision",
           recent_shows_bottle_and_outcome)
 
     def recent_labels():
         text = drv.recent_text()
         for needle in ("registry.npmjs.org", "Allowed", "ads.example.com", "Denylist", "denied.example.com",
-                       "Denied permanently · global", "telemetry", "z1.example.com", "Denied"):
+                       "Denied permanently · global", "z1.example.com", "Denied"):
             assert needle in text, f"{needle!r} missing from recent: {squash(text)[:300]}"
-    check("22b", "Recent rows carry the decision labels and the deny reason", recent_labels, spa_only=True)
+    check("22b", "Recent rows carry the decision labels", recent_labels, spa_only=True)
 
     def recent_separators():
         flows = page.evaluate("""() => [...document.querySelectorAll('[data-testid=recent-row] .meta-flow')].map((flow) => {
@@ -787,7 +799,8 @@ def sibling_rows_lock(browser, served: Served, broker: stub.StubBroker, viewport
 def inflight_poll_keeps_banner(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
     """A poll already in flight when a decide fails lands without clearing the banner; the next one does.
 
-    Page time is frozen so the 5 s interval cannot start a poll of its own between the steps.
+    Page time is frozen before the page loads (at a fixed instant, not one taken from the wall clock), so the
+    5 s interval cannot start a poll of its own between the steps however long the load takes.
     """
     from playwright.sync_api import expect
 
@@ -795,10 +808,16 @@ def inflight_poll_keeps_banner(browser, served: Served, broker: stub.StubBroker,
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
         drv = SpaDriver(page, traffic)
-        page.clock.install(time=datetime.now())
+        start = datetime(2026, 1, 1, 12, 0, 0)
+        page.clock.install(time=start)
+        page.clock.pause_at(start + timedelta(seconds=1))
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
-        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        # a slow load must not matter: page time was frozen before the load, so more real time than the
+        # 5 s poll interval passes without a poll
+        polls = len(traffic.queue_statuses)
+        page.wait_for_timeout(5500)
+        assert len(traffic.queue_statuses) == polls, "the page polled while its clock was frozen"
         held: list = []
         page.route("**/api/egress/queue", lambda route: held.append(route))
         # a 400 re-reads the queue at once; hold that poll in flight
@@ -1011,7 +1030,7 @@ LEGACY_MAP = [
     ("`requested cell carries raw UTC in title`", "retired: asserts legacy DOM", "a tooltip attribute on a legacy cell; the SPA shows relative time and the clock time instead"),
     ("`missing reason renders an em-dash`", "(4) runs on both UIs", "each UI asserts its own no-reason text: legacy `—`, SPA `No reason given`; no PLN decision is involved"),
     ("`IP badge and apply-failed chip on the IP row`", "(4)", "text differs per UI (legacy `apply failed ×1: ip_requires_cidr`, SPA `Apply failed after 1 attempt: an IP address needs a CIDR in the manifest`); each UI asserts its own text from the `last_error` object, on both `ip_requires_cidr` and `apply_failed` rows"),
-    ("`recent list renders decided time, bottle, destination, outcome, by`", "(18), (22)", "(18) asserts a decided row appears in recent on both UIs; (22) asserts on both UIs that each recent row shows its destination, bottle and outcome (legacy `denied / global`, SPA `Denied permanently · global`), which legacy's original check asserted only for the host; the legacy decided-time and `by` cells are retired with the legacy table, and (22b) checks the SPA's labels (N/A(spa-only) on legacy)"),
+    ("`recent list renders decided time, bottle, destination, outcome, by`", "(18), (22)", "(18) asserts a decided row appears in recent on both UIs; (22) asserts on both UIs that each recent row shows its destination, bottle, outcome and deny reason (legacy `denied / global`, SPA `Denied permanently · global`), which legacy's original check asserted only for the host; the legacy decided-time and `by` cells are retired with the legacy table, and (22b) checks the SPA's labels (N/A(spa-only) on legacy)"),
     ("`deny global with a wrong typed host is refused inline`", "(12)", "legacy shows an inline chip; the SPA disables the dialog button and shows a mismatch message, and also refuses Enter and a forced click"),
     ("`no decide POST was sent on the refusal`", "(12)", ""),
     ("`deny global body omits container and carries the reason`", "(13), (10)", "(10) adds the reason-less body"),
@@ -1034,7 +1053,7 @@ NEW_CHECKS = [
     ("16", "A 400 shows the server's error text on the row", "runs on both UIs"),
     ("17, 17b, 17c", "A decide fails alone (broker 500 → admin 502, broker 401 → admin 503, request aborted) while polls succeed: a banner from the decide, and on the SPA the row note `Not sent: …`", "runs on both UIs"),
     ("21", "No console errors", "runs on both UIs"),
-    ("22b", "Recent rows carry the SPA's decision labels and the deny reason", "N/A(spa-only) on legacy: SPA labels, no PLN decision"),
+    ("22b", "Recent rows carry the SPA's decision labels", "N/A(spa-only) on legacy: SPA labels, no PLN decision"),
     ("23", "Permanent-deny dialog caps the reason at 200 characters, with a counter and the design's label", "SKIP(design-change: Action labels map onto the existing decide API unchanged) on legacy"),
     ("24", "Every row button has its own accessible name", "N/A(spa-only) on legacy"),
     ("25", "Each row's status live region is rendered before any outcome", "N/A(spa-only) on legacy"),
@@ -1073,9 +1092,20 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
 
-    if ui == "spa" and not (WORKTREE / "admin" / "ui" / "dist" / "index.html").is_file():
-        print("admin/ui/dist is not built: run `cd admin/ui && npm ci && npm run build` first", file=sys.stderr)
-        return 2
+    bundle = WORKTREE / "admin" / "ui" / "dist" / "index.html"
+    if ui == "spa":
+        if not bundle.is_file():
+            print("admin/ui/dist is not built: run `cd admin/ui && npm ci && npm run build` first", file=sys.stderr)
+            return 2
+        newer = sources_newer_than_bundle(WORKTREE / "admin" / "ui" / "src", bundle)
+        log(f"stage=bundle dist_mtime={datetime.fromtimestamp(bundle.stat().st_mtime).isoformat(timespec='seconds')} "
+            f"sources_newer={len(newer)}")
+        if newer:
+            shown = ", ".join(str(path.relative_to(WORKTREE)) for path in newer[:5])
+            print(f"REFUSING TO RUN: admin/ui/dist is older than {len(newer)} file(s) in admin/ui/src ({shown}"
+                  f"{', …' if len(newer) > 5 else ''}): a failed build leaves the previous bundle in place. "
+                  "Run `cd admin/ui && npm run build` and check that it exits 0.", file=sys.stderr)
+            return 2
 
     broker = stub.StubBroker(log=lambda message: None)
     try:
