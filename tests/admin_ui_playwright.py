@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 from http.client import HTTPConnection
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
@@ -1207,12 +1207,12 @@ class HistoryPage:
 
 
 def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """History-tab checks (30..42). One page per viewport, checked in order; the SPA only."""
+    """History-tab checks (30..42, 60). One page per viewport, checked in order; the SPA only."""
     from playwright.sync_api import expect
 
     suite = Suite(ui, viewport)
     if ui == "legacy":
-        for number, name, _fn in HISTORY_CHECKS:
+        for number, name, _fn in HISTORY_CHECKS + [RELTIME_CHECK]:
             suite.check(number, name, lambda: None, spa_only=True)
         return suite.results
     broker.reset()
@@ -1226,6 +1226,8 @@ def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.St
         suite.results.append(Result("FAIL", viewport, "30", "History tab opens", squash(str(exc))[:300]))
     finally:
         context.close()
+    number, name, fn = RELTIME_CHECK
+    suite.check(number, name, lambda: fn(browser, served, broker, viewport))
     return suite.results
 
 
@@ -1530,6 +1532,45 @@ def expect_disabled(page, test_id: str, disabled: bool) -> None:
     expect(button).to_be_disabled() if disabled else expect(button).to_be_enabled()
 
 
+def _h_relative_time_ticks(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """Its own page, on a fake clock installed before load: the relative times are not
+    frozen at render. Two minutes pass and no /recent request is sent, yet every young
+    row's text has moved on. The queue poll is held: it re-renders the panel every 5 s
+    and would refresh the text by accident, so only the panel's own clock can pass."""
+    from playwright.sync_api import expect
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    try:
+        page.clock.install(time=datetime.now(timezone.utc))
+        hist = HistoryPage(page, served, traffic, broker)
+        hist.open()
+        held: list = []
+        page.route("**/api/egress/queue", lambda route: held.append(route))
+        when = page.get_by_test_id("history-row-when")
+        expect(when).to_have_count(50)
+        # The relative time is inside a span hidden below sm, so read text_content, not inner_text.
+        before = [squash(text or "") for text in when.evaluate_all("els => els.map(e => e.textContent)")]
+        assert all(re.search(r"\d+[smhd] ago", text) for text in before), before[:3]
+        sent = len(traffic.recent)
+        page.clock.run_for(2 * 60 * 1000)
+        page.wait_for_timeout(100)
+        after = [squash(text or "") for text in when.evaluate_all("els => els.map(e => e.textContent)")]
+        _eq(len(traffic.recent), sent)
+        # Rows already in hours or days rightly read the same two minutes on; the ones in
+        # seconds or minutes must have moved on to the age two minutes later.
+        fresh = [(b, a) for b, a in zip(before, after) if re.search(r"\b\d+[sm] ago", b)]
+        assert fresh, f"no row was young enough to show the change: {before[:5]}"
+        for b, a in fresh:
+            seconds = int(re.search(r"\b(\d+)([sm]) ago", b).group(1)) * (60 if b.endswith("m ago") else 1)
+            # The fake clock also runs in real time, so allow a few seconds of drift past the boundary.
+            wanted = {f"· {(seconds + 120 + drift) // 60}m ago" for drift in range(6)} if seconds + 120 < 3540 else {"· 1h ago"}
+            assert any(a.endswith(w) for w in wanted), f"a row said {b!r}, then {a!r} after 2 minutes (wanted one of {sorted(wanted)})"
+    finally:
+        context.close()
+
+
+RELTIME_CHECK = ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row)", _h_relative_time_ticks)
+
 HISTORY_CHECKS = [
     ("30", "History lists the whole store newest first, 50 to a page, in keyset order", _h_newest_first),
     ("31", "Older then Newer walk every page with no row repeated (across a tie in decided_at) and back", _h_walk),
@@ -1809,6 +1850,7 @@ NEW_CHECKS = [
     ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
     ("51", "The light theme paints no pure-red (#ff0000) pixel in any request row", "N/A(spa-only) on legacy"),
     ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
+    ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row)", "N/A(spa-only) on legacy"),
 ]
 
 

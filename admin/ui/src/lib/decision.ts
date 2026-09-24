@@ -47,9 +47,10 @@ export function decidedDay(isoTs: string): string {
   })
 }
 
-// "5m ago": how long ago a timestamp was, to the largest whole unit.
-export function relTime(isoTs: string): string {
-  const s = Math.max(0, Math.round((Date.now() - Date.parse(isoTs)) / 1000))
+// "5m ago": how long ago a timestamp was, to the largest whole unit. `nowMs`
+// lets a caller hand in a reactive clock so the text can refresh.
+export function relTime(isoTs: string, nowMs: number = Date.now()): string {
+  const s = Math.max(0, Math.round((nowMs - Date.parse(isoTs)) / 1000))
   if (s < 60) return `${s}s ago`
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`
