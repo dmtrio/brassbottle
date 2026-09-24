@@ -101,6 +101,7 @@
   --spacing-inline: 0.5rem;     /* between inline items (badges, icon+label) */
   --spacing-tight: 0.25rem;     /* icon to text inside a chip */
   --spacing-line: 0.375rem;     /* between the lines of one row */
+  --spacing-sep: 1rem;          /* room for a "·" between inline facts */
 
   /* Controls */
   --spacing-control: 2.5rem;        /* height of inputs, selects, toolbar buttons */
@@ -171,6 +172,21 @@
 @utility row-meta { font-size: var(--text-body); line-height: var(--text-body--line-height); color: var(--muted-foreground); }
 @utility row-caption { font-size: var(--text-caption); line-height: var(--text-caption--line-height); color: var(--muted-foreground); }
 @utility row-error { display: flex; gap: var(--spacing-line); font-size: var(--text-body); color: var(--destructive); }
+
+/*
+ * Facts on one line separated by "·", with no separator left dangling when
+ * the line wraps. Each .meta-item draws its own "·" in the padding to its left;
+ * .meta-flow is pulled left by that padding and its parent (overflow-hidden)
+ * clips it, so the first item on any line, wrapped or not, shows no separator.
+ */
+@utility meta-flow {
+  display: flex; flex-wrap: wrap; align-items: center; column-gap: 0;
+  row-gap: var(--spacing-tight); margin-left: calc(-1 * var(--spacing-sep));
+}
+@utility meta-item {
+  position: relative; padding-left: var(--spacing-sep);
+  &::before { content: "·"; position: absolute; left: 0; width: var(--spacing-sep); text-align: center; }
+}
 
 /* Phone card: one request. */
 @utility item-card {

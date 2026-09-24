@@ -70,6 +70,32 @@ class StubBrokerTests(unittest.TestCase):
         _a, _s, body = _decide(queue, decision="allow", scope="live", host="m2.example.com", container="mid")
         self.assertEqual(body["apply_failures"], [{"request_id": "m2", "reason": "apply_failed"}])
 
+    def test_decide_outage_fails_decide_only_and_leaves_the_queue_healthy(self):
+        broker = stub.StubBroker()
+        broker.decide_outage = 401
+        base = broker.start()
+        try:
+            host, port = base.split("//")[1].split(":")[0], broker.server.server_address[1]
+            conn = HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/queue")
+            resp = conn.getresponse()
+            queue = json.loads(resp.read())
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(validate_document(queue, stub.QUEUE_SCHEMA), [])
+            payload = {"decision": "deny", "scope": "once", "host": "a1.example.com", "container": "alpha"}
+            conn.request("POST", "/decide", body=json.dumps(payload), headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            conn.close()
+            self.assertEqual((resp.status, body), (401, {"error": "decide unavailable"}))
+            self.assertEqual(broker.decides, [payload])  # the attempt is recorded
+            self.assertEqual(broker.violations, [])
+            self.assertEqual(len(broker.queue["open"]), broker.queue["count"])  # nothing was decided
+            broker.reset()
+            self.assertIsNone(broker.decide_outage)
+        finally:
+            broker.stop()
+
     def test_preflight_refuses_a_queue_reply_with_an_extra_field(self):
         broker = stub.StubBroker()
         broker.preflight()  # unmodified stub passes

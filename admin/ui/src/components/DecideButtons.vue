@@ -33,12 +33,17 @@ const emit = defineEmits<{
 }>()
 
 const allowLabel = computed(() => (props.row.last_error ? 'Retry allow' : ACTION_LABEL.allow_live))
+
+// Every row shows the same visible labels, so each button's accessible name
+// says which request it acts on (the bottle too: the All view repeats hosts).
+const target = computed(() => `${props.row.host}:${props.row.port} in ${props.row.container}`)
 </script>
 
 <template>
   <div
     class="flex gap-inline"
     :class="stretch ? 'w-full' : 'justify-end'"
+    data-testid="decide-actions"
   >
     <div
       class="flex"
@@ -50,6 +55,7 @@ const allowLabel = computed(() => (props.row.last_error ? 'Retry allow' : ACTION
         class="rounded-r-none"
         :class="stretch && 'flex-1'"
         :disabled="busy"
+        :aria-label="`${allowLabel} ${target}`"
         @click="emit('decide', 'allow_live')"
       >
         <Loader2
@@ -73,7 +79,7 @@ const allowLabel = computed(() => (props.row.last_error ? 'Retry allow' : ACTION
             variant="allow"
             class="rounded-l-none border-l border-background/30 px-inline"
             :disabled="busy"
-            aria-label="More allow options"
+            :aria-label="`More allow options for ${target}`"
           >
             <ChevronDown class="size-icon" />
           </Button>
@@ -109,6 +115,7 @@ const allowLabel = computed(() => (props.row.last_error ? 'Retry allow' : ACTION
         class="rounded-r-none text-destructive hover:text-destructive"
         :class="stretch && 'flex-1'"
         :disabled="busy"
+        :aria-label="`Deny ${target}`"
         @click="emit('decide', 'deny')"
       >
         <X class="size-icon" /> Deny
@@ -120,7 +127,7 @@ const allowLabel = computed(() => (props.row.last_error ? 'Retry allow' : ACTION
             variant="outline"
             class="rounded-l-none border-l-0 px-inline text-destructive hover:text-destructive"
             :disabled="busy"
-            aria-label="More deny options"
+            :aria-label="`More deny options for ${target}`"
           >
             <ChevronDown class="size-icon" />
           </Button>

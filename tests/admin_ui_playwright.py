@@ -13,8 +13,10 @@ whose every reply is validated against admin/contract/ before it is served; a
 stub that drifts from the contract refuses to start the suite. The browser's own
 `POST /api/egress/decide` requests are captured and their JSON bodies asserted
 literally. One PASS/FAIL line per behaviour check, per viewport. A check tagged
-`design-change` asserts a deliberate difference from the legacy page (PLN Admin
-UI rework); `--ui legacy` reports it as SKIP(design-change) instead of running it.
+`design-change` asserts a deliberate difference from the legacy page and names
+the PLN Architecture decision that makes it deliberate; `--ui legacy` reports it
+as SKIP(design-change: <decision>) instead of running it. A check of behaviour
+that only exists in the new app (`spa-only`) reports N/A(spa-only) on legacy.
 
 Exit status: 0 with no FAIL, 1 with any FAIL, 2 when the stub violates the contract.
 """
@@ -31,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 from http.client import HTTPConnection
 from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Callable
 from unittest import mock
 
@@ -51,6 +54,25 @@ TIMEOUT_MS = 10_000
 BANNER_CLEAR_MS = 15_000
 BOTTLES_ALPHABETICAL = [("alpha", 5), ("mid", 3), ("zeta", 3)]
 KNOWN_HOSTS = [row[2] for row in stub.OPEN_ROWS]
+FIXTURE_ROW = {row[2]: row for row in stub.OPEN_ROWS}   # host -> (id, bottle, host, port, ...)
+
+# The PLN Architecture decisions a design-change check may cite, by exact name.
+D_ORDERING = "Queue ordering and views"
+D_ACTIONS = "Action labels map onto the existing decide API unchanged"
+D_TITLE = "Tab title carries the open count"
+
+# Records every stale-banner text the page renders, so a banner that flashes and
+# clears is still seen. Works on both UIs (the SPA's test id, legacy's class).
+BANNER_OBSERVER = """() => {
+  window.__banners = [];
+  const read = () => {
+    const el = document.querySelector('[data-testid=stale-banner], .banner.error');
+    const text = el ? (el.innerText || '').trim() : '';
+    if (text) window.__banners.push(text);
+  };
+  new MutationObserver(read).observe(document.body, {subtree: true, childList: true, characterData: true, attributes: true});
+  read();
+}"""
 
 
 def log(message: str) -> None:
@@ -75,6 +97,7 @@ class Traffic:
     decides: list[dict] = field(default_factory=list)   # {"body": dict, "headers": dict}
     statuses: list[int] = field(default_factory=list)   # decide response statuses
     queue_reads: int = 0                                # GET /api/egress/queue responses seen
+    queue_statuses: list[int] = field(default_factory=list)
     console_errors: list[str] = field(default_factory=list)
     expected_failures: int = 0                          # scripted 4xx/5xx the browser logs
 
@@ -88,6 +111,7 @@ class Traffic:
                 self.statuses.append(response.status)
             elif response.url.endswith("/api/egress/queue"):
                 self.queue_reads += 1
+                self.queue_statuses.append(response.status)
 
         def on_console(message):
             if message.type != "error":
@@ -141,6 +165,9 @@ class Driver:
     def recent_text(self) -> str:
         raise NotImplementedError
 
+    def recent_rows(self) -> list[str]:
+        raise NotImplementedError
+
     def stale_banner(self):
         raise NotImplementedError
 
@@ -148,19 +175,37 @@ class Driver:
         """Inline outcome text on a row, apart from the row's own facts."""
         raise NotImplementedError
 
+    def wait_note(self, host: str, pattern: str) -> str:
+        """The row's outcome text once it matches `pattern` (case-insensitive)."""
+        self._wait_until(lambda: re.search(pattern, self.note(host), re.I) is not None, TIMEOUT_MS / 1000)
+        text = self.note(host)
+        assert re.search(pattern, text, re.I), f"row note {text!r} does not match {pattern!r}"
+        return text
+
     # -- acting
-    def act(self, host: str, action: str, *, reason: str | None = None, typed: str | None = None) -> dict:
-        """Perform one action on a row and return the decide the browser sent."""
+    def act(self, host: str, action: str, *, reason: str | None = None, typed: str | None = None,
+            aborted: bool = False, reread: bool = True) -> dict:
+        """Perform one action on a row and return the decide the browser sent.
+
+        `aborted`: the request is expected to fail on the wire (no response).
+        `reread`: wait for the queue re-read a decide normally triggers; a
+        failed decide may legitimately not trigger one.
+        """
         before = len(self.traffic.decides)
-        with self.page.expect_response(lambda r: r.url.endswith("/api/egress/decide"), timeout=TIMEOUT_MS):
-            self._click_action(host, action, reason, typed)
+        if aborted:
+            with self.page.expect_event("requestfailed", timeout=TIMEOUT_MS):
+                self._click_action(host, action, reason, typed)
+        else:
+            with self.page.expect_response(lambda r: r.url.endswith("/api/egress/decide"), timeout=TIMEOUT_MS):
+                self._click_action(host, action, reason, typed)
         self._wait_until(lambda: len(self.traffic.decides) > before, 2)
         sent = self.traffic.decides[-1] if len(self.traffic.decides) > before else {}
         # Let the queue re-read that follows a decide land and render before the
         # next action: the legacy table has unkeyed rows, so a click aimed while
         # rows shift can hit the row that moved into place.
-        reads = self.traffic.queue_reads
-        self._wait_until(lambda: self.traffic.queue_reads > reads, 3)
+        if reread:
+            reads = self.traffic.queue_reads
+            self._wait_until(lambda: self.traffic.queue_reads > reads, 3)
         self.page.wait_for_timeout(150)
         return sent
 
@@ -195,6 +240,10 @@ class LegacyDriver(Driver):
 
     def recent_text(self):
         return self.page.locator("section.panel").filter(has_text="Recent decisions").inner_text()
+
+    def recent_rows(self):
+        panel = self.page.locator("section.panel").filter(has_text="Recent decisions")
+        return [squash(text) for text in panel.locator("tbody tr").all_inner_texts()]
 
     def stale_banner(self):
         return self.page.locator(".banner.error")
@@ -239,6 +288,9 @@ class SpaDriver(Driver):
     def recent_text(self):
         return self.page.locator("[data-testid=recent]").inner_text()
 
+    def recent_rows(self):
+        return [squash(text) for text in self.page.locator("[data-testid=recent-row]").all_inner_texts()]
+
     def stale_banner(self):
         return self.page.locator("[data-testid=stale-banner]")
 
@@ -248,26 +300,31 @@ class SpaDriver(Driver):
     def set_view(self, label: str) -> None:
         self.page.locator("button, [role=radio]").filter(has_text=re.compile(rf"^\s*{label}\s*$")).click()
 
+    def button(self, label: str, host: str, port: int | None = None, bottle: str | None = None):
+        """A row button by its unique accessible name, e.g. `Allow a1.example.com:443 in alpha`."""
+        _id, fixture_bottle, _host, fixture_port, *_rest = FIXTURE_ROW[host]
+        target = f"{host}:{port or fixture_port} in {bottle or fixture_bottle}"
+        return self.page.get_by_role("button", name=f"{label} {target}", exact=True)
+
     def _menu(self, host, trigger, item):
-        self.row(host).get_by_role("button", name=trigger).click()
+        self.button(trigger, host).click()
         self.page.get_by_role("menuitem", name=item).click()
 
     def open_permanent_deny(self, host: str, action: str):
         item = "Deny permanently · bottle" if action == "deny_bottle" else "Deny permanently · global"
-        self._menu(host, "More deny options", item)
+        self._menu(host, "More deny options for", item)
         dialog = self.page.get_by_role("dialog")
         dialog.wait_for()
         return dialog
 
     def _click_action(self, host, action, reason, typed):
-        row = self.row(host)
         if action == "allow_live":
-            name = "Retry allow" if row.get_by_role("button", name="Retry allow", exact=True).count() else "Allow"
-            row.get_by_role("button", name=name, exact=True).click()
+            retry = self.button("Retry allow", host)
+            (retry if retry.count() else self.button("Allow", host)).click()
         elif action == "allow_manifest":
-            self._menu(host, "More allow options", "Allow permanently · bottle")
+            self._menu(host, "More allow options for", "Allow permanently · bottle")
         elif action == "deny":
-            row.get_by_role("button", name="Deny", exact=True).click()
+            self.button("Deny", host).click()
         else:
             dialog = self.open_permanent_deny(host, action)
             if reason:
@@ -278,9 +335,13 @@ class SpaDriver(Driver):
 
     def refuse_global(self, host: str, typed: str) -> tuple[bool, str]:
         dialog = self.open_permanent_deny(host, "deny_global")
-        dialog.locator("#confirm-host").fill(typed)
+        confirm = dialog.locator("#confirm-host")
+        confirm.fill(typed)
         button = dialog.get_by_role("button", name="Deny permanently")
-        sent = self.sent_nothing_after(lambda: None) and button.is_disabled()
+        # Try every way of submitting: Enter in the field and a forced click on
+        # the button. The guard, not just the disabled state, must refuse them.
+        sent = self.sent_nothing_after(lambda: (confirm.press("Enter"), button.click(force=True))) \
+            and button.is_disabled()
         text = squash(dialog.inner_text())
         dialog.get_by_role("button", name="Cancel").click()
         dialog.wait_for(state="hidden")
@@ -292,14 +353,18 @@ class SpaDriver(Driver):
 
 @dataclass
 class Result:
-    status: str          # PASS | FAIL | SKIP
+    status: str          # PASS | FAIL | SKIP | N/A
     viewport: str
     number: str
     name: str
-    detail: str = ""
+    detail: str = ""     # FAIL: what failed. SKIP: the PLN decision. N/A: why.
 
     def line(self) -> str:
-        tag = "(design-change)" if self.status == "SKIP" else ""
+        tag = ""
+        if self.status == "SKIP":
+            tag = f"(design-change: {self.detail})"
+        elif self.status == "N/A":
+            tag = f"({self.detail})"
         detail = f": {self.detail}" if self.detail and self.status == "FAIL" else ""
         return f"{self.status}{tag} [{self.viewport}] ({self.number}) {self.name}{detail}"
 
@@ -309,10 +374,20 @@ class Suite:
         self.ui, self.viewport = ui, viewport
         self.results: list[Result] = []
 
-    def check(self, number: str, name: str, fn: Callable[[], None], *, design_change: bool = False) -> None:
-        """Run `fn` (asserting inside); a design-change check is skipped on legacy."""
-        if design_change and self.ui == "legacy":
-            self.results.append(Result("SKIP", self.viewport, number, name))
+    def check(self, number: str, name: str, fn: Callable[[], None], *,
+              decision: str | None = None, spa_only: bool = False) -> None:
+        """Run `fn` (asserting inside).
+
+        `decision`: the PLN Architecture decision that makes this check assert a
+        deliberate difference from legacy; skipped (SKIP) on legacy.
+        `spa_only`: behaviour that only exists in the new app; N/A on legacy.
+        """
+        assert not (decision and spa_only), "a check is design-change or spa-only, not both"
+        if decision and self.ui == "legacy":
+            self.results.append(Result("SKIP", self.viewport, number, name, decision))
+            return
+        if spa_only and self.ui == "legacy":
+            self.results.append(Result("N/A", self.viewport, number, name, "spa-only"))
             return
         try:
             fn()
@@ -348,23 +423,21 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
     check("1", "Rows are grouped by bottle with the right open counts (any bottle order)",
           lambda: _eq(sorted(drv.groups()), BOTTLES_ALPHABETICAL))
     check("1", "By-bottle grouping: bottles alphabetical",
-          lambda: _eq(drv.groups(), BOTTLES_ALPHABETICAL), design_change=True)
+          lambda: _eq(drv.groups(), BOTTLES_ALPHABETICAL), decision=D_ORDERING)
     check("2", "By-bottle: rows newest first within each bottle",
           lambda: _eq(drv.hosts(), [h for bottle in ("alpha", "mid", "zeta") for h in by_bottle[bottle]]),
-          design_change=True)
-    if ui == "spa":
-        def all_view():
-            drv.set_view("All")
-            expect(page.locator("[data-testid=group]")).to_have_count(0)
-            _eq(drv.hosts(), ["check18.example.com", "a2.example.com", "z3.example.com", "m2.example.com",
-                              "bad-request.example.com", "a3.example.com", "m1.example.com", "z2.example.com",
-                              "192.0.2.55", "a1.example.com", "z1.example.com"])
-            assert "alpha" in drv.row("check18.example.com").inner_text(), "the bottle is not on line 2"
-            drv.set_view("By bottle")
-            expect(page.locator("[data-testid=group]")).to_have_count(3)
-        check("3", "All view: newest first across bottles, bottle shown on line 2", all_view, design_change=True)
-    else:
-        check("3", "All view: newest first across bottles, bottle shown on line 2", lambda: None, design_change=True)
+          decision=D_ORDERING)
+
+    def all_view():
+        drv.set_view("All")
+        expect(page.locator("[data-testid=group]")).to_have_count(0)
+        _eq(drv.hosts(), ["check18.example.com", "a2.example.com", "z3.example.com", "m2.example.com",
+                          "bad-request.example.com", "a3.example.com", "m1.example.com", "z2.example.com",
+                          "192.0.2.55", "a1.example.com", "z1.example.com"])
+        assert "alpha" in drv.row("check18.example.com").inner_text(), "the bottle is not on line 2"
+        drv.set_view("By bottle")
+        expect(page.locator("[data-testid=group]")).to_have_count(3)
+    check("3", "All view: newest first across bottles, bottle shown on line 2", all_view, decision=D_ORDERING)
 
     def facts():
         text = drv.row("z1.example.com").inner_text()
@@ -373,7 +446,7 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
     check("4", "Row shows host:port, hit count and reason", facts)
     no_reason = {"spa": "No reason given", "legacy": "—"}[ui]
     check("4", "Row without a reason says so",
-          lambda: _in(no_reason, drv.row("a1.example.com").inner_text()), design_change=True)
+          lambda: _in(no_reason, drv.row("a1.example.com").inner_text()))
     apply_text = {
         "spa": ("IP address", "Apply failed after 1 attempt: an IP address needs a CIDR in the manifest",
                 "Apply failed after 2 attempts: rule install failed"),
@@ -394,14 +467,51 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
 
     check("5", "Title carries the open count", lambda: title_is(rf"^\({total}\) "))
     check("5", "Title format is '(N) Egress · Djinn admin'",
-          lambda: title_is(rf"^\({total}\) Egress · Djinn admin$"), design_change=True)
-    if ui == "spa":
-        def badge():
-            expect(page.locator(".count-badge").first).to_have_text(str(total))
-        check("5", "The Egress nav entry carries the count badge", badge, design_change=True)
-    else:
-        check("5", "The Egress nav entry carries the count badge", lambda: None, design_change=True)
+          lambda: title_is(rf"^\({total}\) Egress · Djinn admin$"), decision=D_TITLE)
+
+    def badge():
+        expect(page.locator(".count-badge").first).to_have_text(str(total))
+    check("5b", "The Egress nav entry carries the count badge", badge, spa_only=True)
     check("20", "No horizontal overflow (initial state)", overflow)
+
+    def layout():
+        rows = page.evaluate("""() => [...document.querySelectorAll('[data-testid=request]')].map((row) => {
+            const box = row.closest('.panel, .item-card').getBoundingClientRect();
+            const actions = row.querySelector('[data-testid=decide-actions]').getBoundingClientRect();
+            const host = row.querySelector('[data-testid=request-host]');
+            const size = parseFloat(getComputedStyle(host).fontSize);
+            const line = parseFloat(getComputedStyle(host).lineHeight) || size * 1.5;
+            return {host: host.textContent, actionsLeft: actions.left, actionsRight: actions.right,
+                    panelLeft: box.left, panelRight: box.right, hostHeight: host.getBoundingClientRect().height, line};
+        })""")
+        assert len(rows) == total, f"{len(rows)} rows measured, expected {total}"
+        for r in rows:
+            assert r["actionsLeft"] >= r["panelLeft"] - 0.5 and r["actionsRight"] <= r["panelRight"] + 0.5, \
+                f"{r['host']}: the action group [{r['actionsLeft']:.0f}, {r['actionsRight']:.0f}] leaves the panel " \
+                f"[{r['panelLeft']:.0f}, {r['panelRight']:.0f}]"
+            assert r["hostHeight"] <= r["line"] * 1.05, \
+                f"{r['host']}: host text wraps ({r['hostHeight']:.0f}px tall for a {r['line']:.0f}px line)"
+    check("26", "Every row's action group sits inside its panel and no host breaks across lines",
+          layout, spa_only=True)
+
+    def accessible_names():
+        names = page.evaluate("""() => [...document.querySelectorAll('[data-testid=request]')].flatMap(
+            (row) => [...row.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') || b.innerText.trim()))""")
+        assert len(names) == 4 * total, f"{len(names)} row buttons, expected {4 * total}"
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        assert not dupes, f"row buttons share accessible names: {dupes[:3]}"
+        for name in ("Allow a1.example.com:443 in alpha", "More deny options for a1.example.com:443 in alpha",
+                     "Retry allow m2.example.com:443 in mid"):
+            assert name in names, f"{name!r} not among the row buttons"
+    check("24", "Every row button has its own accessible name (action, destination, bottle)",
+          accessible_names, spa_only=True)
+
+    def live_regions():
+        regions = page.locator("[data-testid=request] [role=status]")
+        assert regions.count() == total, f"{regions.count()} status regions for {total} rows"
+        assert all(not text.strip() for text in regions.all_inner_texts()), "a status region is not empty before any decision"
+    check("25", "Each row's status live region is rendered before any outcome and starts empty",
+          live_regions, spa_only=True)
 
     # ---- the five actions and their exact bodies ------------------------------
     sent: dict[str, dict] = {}
@@ -430,7 +540,7 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
         assert "reason" not in sent["8"]["body"], "plain Deny sent a reason"
         # a1 was decided; check a fresh row still open
         assert drv.row("z1.example.com").get_by_role("textbox").count() == 0, "a reason field is offered"
-    check("11", "Plain Deny offers and sends no reason", plain_deny_offers_no_reason, design_change=True)
+    check("11", "Plain Deny offers and sends no reason", plain_deny_offers_no_reason, decision=D_ACTIONS)
 
     def wrong_host_refused():
         refused, text = drv.refuse_global("z1.example.com", "wrong.example.com")
@@ -448,9 +558,12 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
     check("14", "ip_requires_cidr: the row says to add the CIDR by hand", ip_note)
 
     def apply_failed_note():
+        # The row's own last_error already says "rule install failed"; the
+        # outcome note is what this decide adds, so it must be absent before.
+        assert "stays queued" not in drv.note("m2.example.com").lower(), "the outcome note exists before the decide"
         do("15", "m2.example.com", "allow_live")
-        expect(drv.row("m2.example.com")).to_contain_text(re.compile("rule install failed", re.I))
-        assert re.search("stays queued", drv.row("m2.example.com").inner_text(), re.I), "row not marked as queued"
+        note = drv.wait_note("m2.example.com", r"rule install failed.*stays queued")
+        assert re.search("stays queued", note, re.I), "row not marked as queued"
         assert drv.row("m2.example.com").is_visible(), "row left the queue"
     check("15", "apply_failed: the row stays queued and is marked", apply_failed_note)
 
@@ -460,24 +573,50 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
         assert sent["16"], "no decide sent"
     check("16", "A 400 shows the server's error text on the row", bad_request_text)
 
-    def outage_banner():
-        with broker.lock:
-            broker.outage = True
-        try:
-            before = len(traffic.statuses)
-            do("17", "check18.example.com", "deny")
-            deadline = time.monotonic() + 3
-            while len(traffic.statuses) == before and time.monotonic() < deadline:
-                page.wait_for_timeout(20)
-            assert traffic.statuses[-1] == 502, f"admin answered {traffic.statuses[-1:]} to a broker 500"
-            expect(drv.stale_banner()).to_be_visible()
-            assert drv.stale_banner().inner_text().strip(), "the banner is empty"
-            assert drv.row("check18.example.com").is_visible(), "the row left despite the failed decide"
-        finally:
-            with broker.lock:
-                broker.outage = False
-        expect(drv.stale_banner()).to_be_hidden(timeout=BANNER_CLEAR_MS)
-    check("17", "Broker 500 → admin 502 → stale banner, cleared by the next good poll", outage_banner)
+    def decide_failure(number: str, name: str, *, broker_status: int | None, admin_status: int | None,
+                       banner: str, clears: bool, abort: bool = False) -> None:
+        """One decide fails while /queue polls keep succeeding: the banner can only come from the decide."""
+        def run():
+            row = "check18.example.com"
+            assert not broker.outage, "the stub is in a full outage, not a decide-only one"
+            page.evaluate(BANNER_OBSERVER)
+            reads = len(traffic.queue_statuses)
+            statuses = len(traffic.statuses)
+            if abort:
+                page.route("**/api/egress/decide", lambda route: route.abort())
+            else:
+                with broker.lock:
+                    broker.decide_outage = broker_status
+            try:
+                sent = drv.act(row, "deny", aborted=abort, reread=False)
+                assert sent, "the page sent no decide request"
+                if admin_status is not None:
+                    assert traffic.statuses[statuses:] == [admin_status], \
+                        f"admin answered {traffic.statuses[statuses:]}, expected [{admin_status}]"
+                page.wait_for_timeout(300)
+            finally:
+                if abort:
+                    page.unroute("**/api/egress/decide")
+                with broker.lock:
+                    broker.decide_outage = None
+            seen = page.evaluate("window.__banners")
+            assert any(banner in text for text in seen), f"no banner containing {banner!r} was shown; saw {seen}"
+            assert set(traffic.queue_statuses[reads:]) <= {200}, \
+                f"a queue poll failed ({traffic.queue_statuses[reads:]}): the banner may not come from the decide"
+            assert drv.row(row).is_visible(), "the row left despite the failed decide"
+            if ui == "spa":
+                assert any(text.startswith("Showing data from ") for text in seen), f"banner names no data time: {seen}"
+                drv.wait_note(row, "^Not sent: " + re.escape(banner))
+            if clears:
+                expect(drv.stale_banner()).to_be_hidden(timeout=BANNER_CLEAR_MS)
+        check(number, name, run)
+
+    decide_failure("17", "Broker 500 on decide only → admin 502 → stale banner from the decide, cleared by the next good poll",
+                   broker_status=500, admin_status=502, banner="decide failed on the daemon", clears=True)
+    decide_failure("17b", "Broker 401 on decide only → admin 503 → stale banner from the decide",
+                   broker_status=401, admin_status=503, banner="operator token rejected by daemon", clears=False)
+    decide_failure("17c", "Decide request aborted on the wire → stale banner from the decide, cleared by the next good poll",
+                   broker_status=None, admin_status=None, banner="egress daemon unreachable", clears=True, abort=True)
 
     # ---- decided rows leave the queue and land in recent ------------------------
     def leaves_and_lands():
@@ -497,23 +636,61 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
     check("5", "Title count follows the decided rows",
           lambda: title_is(rf"^\({len(stub.OPEN_ROWS) - 8}\) "))
 
+    def recent_shows_bottle_and_outcome():
+        rows = drv.recent_rows()
+        for host, bottle, outcome in (
+            ("registry.npmjs.org", "mid", "allowed"), ("denied.example.com", "alpha", "denied"),
+            ("ads.example.com", "zeta", "denied|denylist"), ("check18.example.com", "alpha", "denied"),
+            ("z1.example.com", "zeta", "denied"),
+        ):
+            text = next((row for row in rows if f"{host}:" in row), None)
+            assert text, f"{host} is not in recent: {rows}"
+            assert bottle in text, f"bottle {bottle!r} missing from the recent row {text!r}"
+            assert re.search(outcome, text, re.I), f"outcome {outcome!r} missing from the recent row {text!r}"
+    check("22", "Recent rows show the destination, the bottle and the outcome of each decision",
+          recent_shows_bottle_and_outcome)
+
     def recent_labels():
         text = drv.recent_text()
         for needle in ("registry.npmjs.org", "Allowed", "ads.example.com", "Denylist", "denied.example.com",
                        "Denied permanently · global", "telemetry", "z1.example.com", "Denied"):
             assert needle in text, f"{needle!r} missing from recent: {squash(text)[:300]}"
-    check("22", "Recent rows carry destination, bottle, decision label and deny reason", recent_labels,
-          design_change=True)
+    check("22b", "Recent rows carry the decision labels and the deny reason", recent_labels, spa_only=True)
+
+    def recent_separators():
+        flows = page.evaluate("""() => [...document.querySelectorAll('[data-testid=recent-row] .meta-flow')].map((flow) => {
+            const clip = flow.parentElement;
+            const clipBox = clip.getBoundingClientRect();
+            const boxes = [...flow.children].map((item) => item.getBoundingClientRect());
+            const sep = parseFloat(getComputedStyle(flow.children[0], '::before').width);
+            const bad = []; let wraps = 0;
+            boxes.forEach((box, i) => {
+                // items are centred, so a shorter one sits lower on its own line: compare with the previous bottom
+                const first = i === 0 || box.top >= boxes[i - 1].bottom - 1;
+                if (i > 0 && first) wraps += 1;
+                // a separator sits in the item's left padding; on the first item
+                // of a line it must lie outside the clip box, so it is not drawn
+                if (first && box.left + sep > clipBox.left + 1) bad.push(i);
+            });
+            return {clips: getComputedStyle(clip).overflowX === 'hidden', bad, wraps};
+        })""")
+        assert flows, "no recent rows"
+        assert all(f["clips"] for f in flows), "the recent meta line is not clipped, so a wrapped separator shows"
+        assert not any(f["bad"] for f in flows), f"a separator starts a wrapped line: {flows}"
+        if viewport == "phone":
+            assert sum(f["wraps"] for f in flows) >= 1, "no recent row wraps at phone width, so this check proves nothing"
+    check("27", "A recent row that wraps leaves no dangling separator", recent_separators, spa_only=True)
 
     def reason_limit():
         dialog = drv.open_permanent_deny("m2.example.com", "deny_bottle")
         dialog.locator("#deny-reason").fill("x" * 250)
         assert len(dialog.locator("#deny-reason").input_value()) == 200, "reason not capped at 200"
         assert "200/200" in dialog.inner_text(), "no character counter"
+        assert "(optional, shown to the agent)" in dialog.inner_text(), "the reason label is not the design's"
         dialog.get_by_role("button", name="Cancel").click()
         dialog.wait_for(state="hidden")
     check("23", "Permanent-deny dialog caps the reason at 200 characters with a counter", reason_limit,
-          design_change=True)
+          decision=D_ACTIONS)
 
     # ---- request headers, overflow, console ---------------------------------------
     def headers_ok():
@@ -540,6 +717,125 @@ def _loose(text: str) -> str:
 
 def _in(needle: str, text: str) -> None:
     assert needle in text, f"{needle!r} not in {squash(text)!r}"
+
+
+# ---- scenarios that need their own page ---------------------------------------------
+
+
+def add_siblings(broker: stub.StubBroker) -> None:
+    """Two more open requests for a1.example.com: alpha:8443 (same bottle) and zeta:443 (another bottle)."""
+    with broker.lock:
+        base = next(row for row in broker.queue["open"] if row["request_id"] == "a1")
+        opened = datetime.strptime(base["opened_at"], "%Y-%m-%dT%H:%M:%SZ")
+        for offset, (rid, container, port) in enumerate((("a1p", "alpha", 8443), ("a1z", "zeta", 443)), start=1):
+            broker.queue["open"].append({
+                **base, "request_id": rid, "container": container, "port": port,
+                "opened_at": stub._iso(opened + timedelta(seconds=offset)), "age_seconds": base["age_seconds"] - offset,
+            })
+        broker.queue["open"].sort(key=lambda row: row["opened_at"])
+        broker.queue["count"] = len(broker.queue["open"])
+
+
+def sibling_rows_lock(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """While a decide is in flight every open request it acts on is busy, and no other is."""
+    from playwright.sync_api import expect
+
+    broker.reset()
+    add_siblings(broker)
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    try:
+        drv = SpaDriver(page, traffic)
+        page.goto(served.base + "/")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 2)
+        held: list = []
+        page.route("**/api/egress/decide", lambda route: held.append(route))
+
+        def release(answers: int) -> None:
+            for route in held:
+                route.continue_()
+            held.clear()
+            drv._wait_until(lambda: len(traffic.statuses) >= answers, 5)
+
+        def button(label, **kw):
+            return drv.button(label, "a1.example.com", **kw)
+
+        # An allow acts on the host in ITS bottle: the alpha:8443 sibling locks, zeta's a1 does not.
+        button("Allow").click()
+        drv._wait_until(lambda: len(held) == 1, 5)
+        for label in ("Allow", "Deny", "More allow options for", "More deny options for"):
+            expect(button(label, port=8443, bottle="alpha")).to_be_disabled()
+        expect(button("Allow", bottle="zeta")).to_be_enabled()
+        expect(drv.button("Allow", "a2.example.com")).to_be_enabled()
+        release(1)
+        expect(button("Allow", port=8443, bottle="alpha")).to_be_enabled()
+
+        # A global deny acts on the host in EVERY bottle: both remaining a1 rows lock.
+        button("More deny options for", port=8443, bottle="alpha").click()
+        page.get_by_role("menuitem", name="Deny permanently · global").click()
+        dialog = page.get_by_role("dialog")
+        dialog.locator("#confirm-host").fill("a1.example.com")
+        dialog.get_by_role("button", name="Deny permanently").click()
+        drv._wait_until(lambda: len(held) == 1, 5)
+        expect(button("Allow", port=8443, bottle="alpha")).to_be_disabled()
+        expect(button("Allow", bottle="zeta")).to_be_disabled()
+        expect(drv.button("Allow", "a2.example.com")).to_be_enabled()
+        release(2)
+    finally:
+        context.close()
+
+
+def inflight_poll_keeps_banner(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """A poll already in flight when a decide fails lands without clearing the banner; the next one does.
+
+    Page time is frozen so the 5 s interval cannot start a poll of its own between the steps.
+    """
+    from playwright.sync_api import expect
+
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    try:
+        drv = SpaDriver(page, traffic)
+        page.clock.install(time=datetime.now())
+        page.goto(served.base + "/")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        held: list = []
+        page.route("**/api/egress/queue", lambda route: held.append(route))
+        # a 400 re-reads the queue at once; hold that poll in flight
+        drv.button("Deny", stub.BAD_REQUEST_HOST).click()
+        drv._wait_until(lambda: len(held) >= 1, 5)
+        assert held, "no queue poll went in flight"
+        with broker.lock:
+            broker.decide_outage = 500
+        drv.button("Deny", "check18.example.com").click()
+        expect(drv.stale_banner()).to_be_visible()
+        # the poll in flight predates the failure: it lands and the banner stays
+        reads = len(traffic.queue_statuses)
+        for route in held:
+            route.continue_()
+        held.clear()
+        drv._wait_until(lambda: len(traffic.queue_statuses) > reads, 5)
+        page.wait_for_timeout(300)
+        assert len(traffic.queue_statuses) > reads, "the held poll never landed"
+        expect(drv.stale_banner()).to_be_visible()
+        # the next poll starts after the failure and succeeds: the banner clears
+        page.unroute("**/api/egress/queue")
+        page.clock.run_for(5500)
+        expect(drv.stale_banner()).to_be_hidden()
+    finally:
+        with broker.lock:
+            broker.decide_outage = None
+        context.close()
+
+
+def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(ui, viewport)
+    suite.check("28", "A decide in flight locks every request it acts on (same host and bottle; all bottles on a "
+                      "global deny) and no other",
+                lambda: sibling_rows_lock(browser, served, broker, viewport), spa_only=True)
+    suite.check("29", "A poll already in flight when a decide fails does not clear the banner; the next poll does",
+                lambda: inflight_poll_keeps_banner(browser, served, broker, viewport), spa_only=True)
+    return suite.results
 
 
 # ---- serving --------------------------------------------------------------------
@@ -614,20 +910,36 @@ def open_queue(page, served: Served, driver_cls, traffic: Traffic) -> Driver:
     return drv
 
 
-def capture(page, out: Path, ui: str, viewport: str, theme: str, state: str) -> None:
+def capture(page, out: Path, ui: str, viewport: str, theme: str, state: str, *, scroll_to=None) -> None:
+    """Screenshot at scroll 0 (the whole page), or with `scroll_to` in view (the viewport only).
+
+    A full-page capture of a scrolled page shows the sticky header over ghosted
+    content, so every capture starts from the top.
+    """
     path = out / f"{ui}-{viewport}-{theme}-{state}.png"
-    page.screenshot(path=str(path), full_page=True)
+    if scroll_to is not None:
+        scroll_to.scroll_into_view_if_needed()
+        page.wait_for_timeout(150)
+        page.screenshot(path=str(path))
+    else:
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(150)
+        page.screenshot(path=str(path), full_page=True)
     log(f"capture path={path.name} bytes={path.stat().st_size}")
 
 
 def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, viewport: str, theme: str) -> None:
-    """Initial queue, a dialog (spa), and a queue carrying the three outcome notes."""
+    """Initial queue, then (spa) the dialog, All view, stale banner, empty queue; the outcome notes."""
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, theme)
     try:
         drv = open_queue(page, served, driver_cls, traffic)
         capture(page, out, ui, viewport, theme, "initial")
         if ui == "spa":
+            drv.set_view("All")
+            page.wait_for_timeout(200)
+            capture(page, out, ui, viewport, theme, "all-view")
+            drv.set_view("By bottle")
             drv.open_permanent_deny("z1.example.com", "deny_global")
             page.get_by_role("dialog").locator("#confirm-host").fill("z1.example")
             capture(page, out, ui, viewport, theme, "dialog")
@@ -638,7 +950,50 @@ def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, view
         drv.act("bad-request.example.com", "deny")
         page.wait_for_timeout(500)
         capture(page, out, ui, viewport, theme, "outcomes")
+        if ui == "spa":
+            capture(page, out, ui, viewport, theme, "failed-apply", scroll_to=drv.row("m2.example.com"))
     finally:
+        context.close()
+    if ui == "spa":
+        capture_stale_banner(browser, served, broker, driver_cls, out, viewport, theme)
+        capture_empty(browser, served, broker, out, viewport, theme)
+
+
+def capture_stale_banner(browser, served, broker, driver_cls, out: Path, viewport: str, theme: str) -> None:
+    """A decide fails on the broker while polls succeed; later polls are held so the banner stays for the capture."""
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    try:
+        drv = open_queue(page, served, driver_cls, traffic)
+        held: list = []
+        page.route("**/api/egress/queue", lambda route: held.append(route))
+        with broker.lock:
+            broker.decide_outage = 500
+        drv.act("a1.example.com", "deny", reread=False)
+        from playwright.sync_api import expect
+        expect(drv.stale_banner()).to_be_visible()
+        capture(page, out, "spa", viewport, theme, "stale-banner")
+    finally:
+        with broker.lock:
+            broker.decide_outage = None
+        context.close()
+
+
+def capture_empty(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """No open requests; the recent list still shows."""
+    from playwright.sync_api import expect
+
+    broker.reset()
+    with broker.lock:
+        broker.queue["open"] = []
+        broker.queue["count"] = 0
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    try:
+        page.goto(served.base + "/")
+        expect(page.get_by_text("No open requests.")).to_be_visible()
+        capture(page, out, "spa", viewport, theme, "empty")
+    finally:
+        broker.reset()
         context.close()
 
 
@@ -647,17 +1002,17 @@ def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, view
 LEGACY_MAP = [
     # (original check in the legacy suite, behaviour check(s), note)
     ("`{light,dark}/mobile: no horizontal overflow` (1 site, 2 lines)", "(20)", "now at desktop, tablet and phone, before and after decisions"),
-    ("`tab title carries the count`", "(5) count; (5) format is design-change", "the title text changed on purpose: `(N) Egress · Djinn admin` (PLN, Architecture); the count assertion runs on both UIs"),
-    ("`group headers by bottle in first-seen order`", "(1) design-change", "PLN decision 2026-09-23: bottles alphabetical, replacing legacy's first-seen order"),
-    ("`bottle-a's two rows stay together ahead of bottle-b`", "(1), (2) design-change", "contiguity is asserted by the grouped host order; the order itself is a PLN decision (newest first within a bottle)"),
+    ("`tab title carries the count`", "(5) count; (5) format SKIP(design-change: Tab title carries the open count)", "the count assertion runs on both UIs; the format `(N) Egress · Djinn admin` is the PLN decision \"Tab title carries the open count\""),
+    ("`group headers by bottle in first-seen order`", "(1) SKIP(design-change: Queue ordering and views)", "PLN decision \"Queue ordering and views\" (2026-09-23): bottles alphabetical, replacing legacy's first-seen order; (1) any-order grouping and counts still run on both UIs"),
+    ("`bottle-a's two rows stay together ahead of bottle-b`", "(1) any-order grouping; (2) SKIP(design-change: Queue ordering and views)", "contiguity is asserted by the grouped host order; the order itself is the PLN decision \"Queue ordering and views\" (newest first within a bottle)"),
     ("`four columns per request row`", "retired: asserts legacy DOM", "the SPA row is two lines in three columns; the facts it carried are covered by (4)"),
     ("`destination cell: host:port and hits`", "(4)", ""),
     ("`reason cell`", "(4)", ""),
     ("`requested cell carries raw UTC in title`", "retired: asserts legacy DOM", "a tooltip attribute on a legacy cell; the SPA shows relative time and the clock time instead"),
-    ("`missing reason renders an em-dash`", "(4) design-change", "the SPA says `No reason given`, per the accepted mockup"),
+    ("`missing reason renders an em-dash`", "(4) runs on both UIs", "each UI asserts its own no-reason text: legacy `—`, SPA `No reason given`; no PLN decision is involved"),
     ("`IP badge and apply-failed chip on the IP row`", "(4)", "text differs per UI (legacy `apply failed ×1: ip_requires_cidr`, SPA `Apply failed after 1 attempt: an IP address needs a CIDR in the manifest`); each UI asserts its own text from the `last_error` object, on both `ip_requires_cidr` and `apply_failed` rows"),
-    ("`recent list renders decided time, bottle, destination, outcome, by`", "(18), (22) design-change", "(18) asserts a decided row appears in recent on both UIs; (22) asserts the SPA's decision labels (the legacy `denied / global` text is retired with the legacy table)"),
-    ("`deny global with a wrong typed host is refused inline`", "(12)", "legacy shows an inline chip; the SPA disables the dialog button and shows a mismatch message"),
+    ("`recent list renders decided time, bottle, destination, outcome, by`", "(18), (22)", "(18) asserts a decided row appears in recent on both UIs; (22) asserts on both UIs that each recent row shows its destination, bottle and outcome (legacy `denied / global`, SPA `Denied permanently · global`), which legacy's original check asserted only for the host; the legacy decided-time and `by` cells are retired with the legacy table, and (22b) checks the SPA's labels (N/A(spa-only) on legacy)"),
+    ("`deny global with a wrong typed host is refused inline`", "(12)", "legacy shows an inline chip; the SPA disables the dialog button and shows a mismatch message, and also refuses Enter and a forced click"),
     ("`no decide POST was sent on the refusal`", "(12)", ""),
     ("`deny global body omits container and carries the reason`", "(13), (10)", "(10) adds the reason-less body"),
     ("`decide carries the UI header and JSON content type`", "(19)", "asserted for every decide the page sent"),
@@ -669,19 +1024,41 @@ LEGACY_MAP = [
     ("`bottle-a's header disappears after its last request is decided`", "(18)", "asserted on zeta"),
 ]
 
+# New behaviour checks with no legacy original: (number, name, decision or N/A).
+NEW_CHECKS = [
+    ("1", "By-bottle grouping as a full-order assertion (bottles alphabetical)", "SKIP(design-change: Queue ordering and views) on legacy"),
+    ("3", "All view: newest first across bottles, bottle on line 2", "SKIP(design-change: Queue ordering and views) on legacy"),
+    ("5b", "The Egress nav entry carries the count badge", "N/A(spa-only) on legacy: the badge is new SPA behaviour, no PLN decision"),
+    ("11", "Plain Deny offers and sends no reason", "SKIP(design-change: Action labels map onto the existing decide API unchanged) on legacy"),
+    ("15", "`apply_failed` outcome: the note is added by the decide and the row stays queued", "runs on both UIs"),
+    ("16", "A 400 shows the server's error text on the row", "runs on both UIs"),
+    ("17, 17b, 17c", "A decide fails alone (broker 500 → admin 502, broker 401 → admin 503, request aborted) while polls succeed: a banner from the decide, and on the SPA the row note `Not sent: …`", "runs on both UIs"),
+    ("21", "No console errors", "runs on both UIs"),
+    ("22b", "Recent rows carry the SPA's decision labels and the deny reason", "N/A(spa-only) on legacy: SPA labels, no PLN decision"),
+    ("23", "Permanent-deny dialog caps the reason at 200 characters, with a counter and the design's label", "SKIP(design-change: Action labels map onto the existing decide API unchanged) on legacy"),
+    ("24", "Every row button has its own accessible name", "N/A(spa-only) on legacy"),
+    ("25", "Each row's status live region is rendered before any outcome", "N/A(spa-only) on legacy"),
+    ("26", "Every row's action group sits inside its panel and no host breaks across lines", "N/A(spa-only) on legacy"),
+    ("27", "A recent row that wraps leaves no dangling separator", "N/A(spa-only) on legacy"),
+    ("28", "A decide in flight locks every request it acts on and no other", "N/A(spa-only) on legacy"),
+    ("29", "A poll already in flight when a decide fails does not clear the banner", "N/A(spa-only) on legacy"),
+]
+
 
 def mapping_markdown() -> str:
     rows = ["| Original legacy check | Behaviour check | Note |", "|---|---|---|"]
     rows += [f"| {a} | {b} | {c} |" for a, b, c in LEGACY_MAP]
+    new = ["| Check | What it asserts | On legacy |", "|---|---|---|"]
+    new += [f"| ({a}) | {b} | {c} |" for a, b, c in NEW_CHECKS]
     return (
         "# Legacy check → behaviour check mapping\n\n"
         "Every check in the pre-refactor `tests/admin_ui_playwright.py` (21 call sites, 24 report lines when the "
-        "overflow and action loops expand) and where it went. `design-change` checks assert a deliberate "
-        "difference from the legacy page and report SKIP under `--ui legacy`.\n\n"
+        "overflow and action loops expand) and where it went. A check that asserts a deliberate difference from the "
+        "legacy page reports `SKIP(design-change: <PLN Architecture decision>)` under `--ui legacy`; a check of "
+        "behaviour that only exists in the new app reports `N/A(spa-only)`. Nothing else is skipped.\n\n"
         + "\n".join(rows) + "\n\n"
-        "New behaviour checks with no legacy original: (1) as a full-order assertion, (3) the All view, (11) plain "
-        "Deny without a reason, (15) `apply_failed` outcome, (16) a 400 on the row, (17) the stale banner and its "
-        "recovery, (21) no console errors, (22) recent labels, (23) the dialog's reason limit.\n"
+        "## New behaviour checks with no legacy original\n\n"
+        + "\n".join(new) + "\n"
     )
 
 
@@ -729,10 +1106,14 @@ def main() -> int:
                     results.append(Result("FAIL", viewport, "0", "queue renders", squash(str(exc))[:300]))
                 finally:
                     context.close()
+                results += run_dedicated(ui, viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):
-                    capture_states(browser, served, broker, driver_cls, out, ui, viewport, theme)
+                    try:
+                        capture_states(browser, served, broker, driver_cls, out, ui, viewport, theme)
+                    except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
+                        results.append(Result("FAIL", viewport, "0", f"captures ({theme})", squash(str(exc))[:300]))
             browser.close()
     finally:
         served.stop()
@@ -744,8 +1125,9 @@ def main() -> int:
         return 2
 
     printed = [result.line() for result in results]
-    counts = {status: sum(1 for r in results if r.status == status) for status in ("PASS", "SKIP", "FAIL")}
-    summary = f"{ui.upper()}: {counts['PASS']} PASS, {counts['SKIP']} SKIP(design-change), {counts['FAIL']} FAIL"
+    counts = {status: sum(1 for r in results if r.status == status) for status in ("PASS", "SKIP", "N/A", "FAIL")}
+    summary = (f"{ui.upper()}: {counts['PASS']} PASS, {counts['SKIP']} SKIP(design-change), "
+               f"{counts['N/A']} N/A(spa-only), {counts['FAIL']} FAIL")
     mapping = mapping_markdown()
     (out / "legacy-mapping.md").write_text(mapping, encoding="utf-8")
     (out / f"REPORT-{ui}.md").write_text("\n".join(f"- {line}" for line in printed) + f"\n\n{summary}\n", encoding="utf-8")
