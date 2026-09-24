@@ -136,6 +136,7 @@ class Traffic:
     queue_reads: int = 0                                # GET /api/egress/queue responses seen
     queue_statuses: list[int] = field(default_factory=list)
     recent: list[dict] = field(default_factory=list)    # query of each GET /api/egress/recent, as {name: value}
+    recent_done: list[dict] = field(default_factory=list)  # the same queries once the page has the whole reply
     console_errors: list[str] = field(default_factory=list)
     expected_failures: int = 0                          # scripted 4xx/5xx the browser logs
 
@@ -145,6 +146,10 @@ class Traffic:
                 self.recent.append({k: v[0] for k, v in parse_qs(urlsplit(request.url).query).items()})
             if request.method == "POST" and request.url.endswith("/api/egress/decide"):
                 self.decides.append({"body": json.loads(request.post_data or "{}"), "headers": request.headers})
+
+        def on_finished(request):
+            if request.method == "GET" and urlsplit(request.url).path == "/api/egress/recent":
+                self.recent_done.append({k: v[0] for k, v in parse_qs(urlsplit(request.url).query).items()})
 
         def on_response(response):
             if response.request.method == "POST" and response.url.endswith("/api/egress/decide"):
@@ -165,6 +170,7 @@ class Traffic:
             self.console_errors.append(message.text)
 
         page.on("request", on_request)
+        page.on("requestfinished", on_finished)
         page.on("response", on_response)
         page.on("console", on_console)
         page.on("pageerror", lambda error: self.console_errors.append(f"pageerror: {error}"))
@@ -1418,7 +1424,7 @@ def _h_filter_failure(hist, page, traffic, broker) -> None:
 def _h_stale_reply(hist, page, traffic, broker) -> None:
     from playwright.sync_api import expect
     hist.open()
-    sent = len(traffic.recent)
+    sent, done = len(traffic.recent), len(traffic.recent_done)
     held = broker.hold_next_recent()
     try:
         _pick_bottle(page, "mid")                    # its reply is held
@@ -1429,7 +1435,12 @@ def _h_stale_reply(hist, page, traffic, broker) -> None:
     finally:
         held.release()
     assert held.sent.wait(5), "the held reply was never sent"
-    page.wait_for_timeout(400)                       # let the late reply reach the page
+    # The late reply's arrival is the signal, not a sleep: the stub has only handed it to the socket.
+    deadline = time.monotonic() + 15
+    while "mid" not in [q.get("container") for q in traffic.recent_done[done:]]:
+        assert time.monotonic() < deadline, "the held reply never reached the page"
+        page.wait_for_timeout(20)
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")  # and was handled
     _eq([q.get("container") for q in traffic.recent[sent:]], ["mid", "zeta"])
     _eq(hist.hosts(), want)                          # the superseded reply did not replace them
     _in("zeta", page.get_by_test_id("history-bottle").inner_text())
