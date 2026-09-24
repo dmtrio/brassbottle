@@ -2,8 +2,9 @@
 # `workflow` scope, so a human moves this file into .github/workflows/ and a
 # follow-up commit removes this staged copy.
 #
-# This revision runs the admin contract tests (tests/test_admin_contract.py,
-# tests/test_admin_contract_validator.py) added with admin/contract/.
+# This revision runs the admin contract tests, builds the Vue admin SPA in
+# admin/ui/, builds the egress image with its UI stage, asserts the built
+# assets are present, and runs the spa-mode Playwright shell test.
 name: ci
 
 on:
@@ -21,6 +22,19 @@ jobs:
           sudo wget -qO /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin/ui/package-lock.json
+      - name: Admin UI install, lint, token check and build
+        working-directory: admin/ui
+        run: |
+          npm ci
+          npm run lint
+          npm run test:tokens
+          npm run build
       - name: Run test suite
         # jq and python3 are preinstalled on ubuntu-latest; the suite
         # hard-skips (exit 0) only when yq/jq are missing, so installing yq
@@ -77,3 +91,30 @@ jobs:
         # container — assert the declared ENTRYPOINT file is present and
         # executable inside the built image.
         run: docker run --rm --entrypoint test djinn-ci-smoke -x /home/coder/entrypoint.sh
+      - name: Egress image with admin UI
+        # The egress image now builds the Vue admin SPA; assert the dist
+        # directory and every hashed asset referenced from index.html land in
+        # the image at the expected path.
+        run: docker build -f egress/Dockerfile -t djinn-egress-ci-smoke .
+      - name: Egress image admin dist entry point exists
+        run: |
+          docker run --rm --entrypoint test djinn-egress-ci-smoke -f /opt/brassbottle/admin/ui/dist/index.html
+          docker run --rm -i --entrypoint python3 djinn-egress-ci-smoke - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          html = Path('/opt/brassbottle/admin/ui/dist/index.html').read_text()
+          refs = re.findall(r'/(assets/[^"\'\s>]+)', html)
+          missing = [r for r in refs if not (Path('/opt/brassbottle/admin/ui/dist') / r).is_file()]
+          # An index.html that references no assets is itself a broken build.
+          if not refs or missing:
+              print(f'asset refs={len(refs)} missing={missing}')
+              sys.exit(1)
+          print(f'assets ok: {len(refs)} referenced, all present')
+          PY
+      - name: Install Playwright Chromium
+        run: |
+          pip install playwright
+          python3 -m playwright install --with-deps chromium
+      - name: Admin spa shell Playwright test
+        run: python3 tests/admin_spa_playwright.py
