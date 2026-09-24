@@ -378,6 +378,20 @@ locations:
     path: .github/workflows/ci.yml
     component: ci-selectors
     find: "runs-on: ubuntu-latest"
+  ci-selectors.setup-node:
+    path: .github/workflows/ci.yml
+    component: ci-selectors
+    find: "actions/setup-node@v4"
+  ci-selectors.admin-ui-npm-ci:
+    path: .github/workflows/ci.yml
+    component: ci-selectors
+    find: "npm ci"
+    note: admin/ui install from the committed package-lock.json
+  ci-selectors.playwright:
+    path: .github/workflows/ci.yml
+    component: ci-selectors
+    find: "pip install playwright"
+    note: CI-only browser driver for tests/admin_spa_playwright.py
 
   user-repositories.template:
     path: bottles/TEMPLATE.yml
