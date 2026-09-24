@@ -16,6 +16,10 @@ const state = reactive<QueueState>({ snapshot: null, stale: null })
 let intervalId: ReturnType<typeof setInterval> | null = null
 let consumers = 0
 let seq = 0
+// The banner clears only on a good poll that STARTED after the failure that
+// raised it: a poll already in flight when a decide fails predates the failure
+// and must not wipe the banner before anyone has seen it.
+let staleAfter = 0
 
 async function refresh(): Promise<void> {
   const mine = ++seq
@@ -23,16 +27,18 @@ async function refresh(): Promise<void> {
   if (mine !== seq) return // a newer poll is in flight or landed; drop this one
   if (result.ok) {
     state.snapshot = result.data
-    state.stale = null
+    if (mine > staleAfter) state.stale = null
   } else {
     state.stale = result.error
+    staleAfter = mine
   }
 }
 
 // A failed decide raises the same banner as a failed poll. It clears on the
-// next good poll.
+// first good poll that starts after this call.
 function setStale(message: string): void {
   state.stale = message
+  staleAfter = seq
 }
 
 export function useQueue() {

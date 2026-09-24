@@ -12,6 +12,9 @@ Scripted outcomes (by host):
   * allow of m2.example.com  -> 200, `apply_failed` in apply_failures
   * anything for bad-request.example.com -> 400 `bad request from broker`
   * outage flag set          -> 500 on both routes (broker down)
+  * decide_outage=<status>   -> that status on POST /decide only; GET /queue
+                                stays healthy, so a page that shows a banner
+                                for it did so because the decide failed
   * everything else          -> the row is decided and moves to `recent`
 """
 from __future__ import annotations
@@ -35,6 +38,7 @@ QUEUE_SCHEMA = "queue_snapshot.schema.json"
 DECIDE_SCHEMA = "decide_response.schema.json"
 ERROR_SCHEMA = "error_response.schema.json"
 
+LONG_BOTTLE = "ci-runner-eu-west-1"   # in `recent` only: wide enough to wrap a phone-width row
 BAD_REQUEST_HOST = "bad-request.example.com"
 APPLY_FAILED_HOST = "m2.example.com"
 
@@ -110,6 +114,7 @@ def build_queue(now: datetime | None = None) -> dict[str, Any]:
             recent("r2", "alpha", "denied.example.com", "denied", "global", 600, "operator", None, "telemetry"),
             recent("r1", "mid", "registry.npmjs.org", "allowed", "live", 1800, "operator", "applied", None),
             recent("r3", "zeta", "ads.example.com", "denied", "global", 3600, "denylist", None, "denylist: telemetry"),
+            recent("r4", LONG_BOTTLE, "telemetry.example.net", "denied", "global", 7200, "operator", None, None),
         ],
     }
 
@@ -174,6 +179,7 @@ class StubBroker:
         self.queue = build_queue()
         self.decides: list[dict[str, Any]] = []
         self.outage = False
+        self.decide_outage: int | None = None
         self.violations: list[str] = []
         self.served = 0
         broker = self
@@ -217,6 +223,8 @@ class StubBroker:
                     broker.decides.append(body)
                     if broker.outage:
                         return self._serve(500, {"error": "broker down"}, ERROR_SCHEMA)
+                    if broker.decide_outage is not None:
+                        return self._serve(broker.decide_outage, {"error": "decide unavailable"}, ERROR_SCHEMA)
                     status, reply = decide_reply(broker.queue, body)
                     self._serve(status, reply, ERROR_SCHEMA if status >= 400 else DECIDE_SCHEMA)
 
@@ -232,12 +240,14 @@ class StubBroker:
             self.queue = build_queue()
             self.decides = []
             self.outage = False
+            self.decide_outage = None
 
     def preflight(self) -> None:
         """Validate every reply shape the stub can produce; raise before serving."""
         with self.lock:
             _checked(self.queue_body(), QUEUE_SCHEMA)
             _checked({"error": "broker down"}, ERROR_SCHEMA)
+            _checked({"error": "decide unavailable"}, ERROR_SCHEMA)
             scratch = copy.deepcopy(self.queue)
             for payload in (
                 {"decision": "allow", "scope": "live", "host": "a1.example.com", "container": "alpha"},

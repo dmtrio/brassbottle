@@ -25,7 +25,9 @@ import RequestSummary, { type RowNote } from './RequestSummary.vue'
 
 const REASON_MAX = 200
 
-const phone = useMediaQuery('(max-width: 639px)')
+// Below 1024 px the sidebar leaves the table too little width (the Decision
+// column clips and hosts break mid-word), so requests become cards.
+const compact = useMediaQuery('(max-width: 1023px)')
 const { snapshot, stale, refresh, setStale } = useQueue()
 
 type View = 'grouped' | 'flat'
@@ -100,6 +102,15 @@ function clock(isoTs: string): string {
   return new Date(isoTs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 }
 
+// The banner says which data the list still shows: the last good snapshot.
+const staleText = computed(() => {
+  if (!stale.value) return null
+  const at = snapshot.value?.generated_at
+  if (!at) return stale.value
+  const time = new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return `Showing data from ${time}: ${stale.value}`
+})
+
 // Permanent deny dialog: optional reason; global also needs the exact host.
 const dlg = reactive({
   open: false,
@@ -126,6 +137,17 @@ async function submitPermanentDeny(): Promise<void> {
   await runDecision(row, action, reason)
 }
 
+// Every open request this decide acts on: the broker decides all rows for the
+// host in the clicked row's bottle (all ports and subzones), or for the host in
+// every bottle on a global deny. They all lock while it is in flight, or a
+// second click on a sibling would double-decide.
+function affectedIds(row: OpenRow, action: DecideAction): string[] {
+  const ids = (snapshot.value?.open ?? [])
+    .filter((r) => r.host === row.host && (action === 'deny_global' || r.container === row.container))
+    .map((r) => r.request_id)
+  return ids.includes(row.request_id) ? ids : [...ids, row.request_id]
+}
+
 // Legacy semantics for each outcome; see PLN "Decide outcomes".
 async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Promise<void> {
   const key = row.request_id
@@ -133,18 +155,21 @@ async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Pro
   if (action !== 'deny_global') payload.container = row.container
   if (reason) payload.reason = reason
 
-  busy.add(key)
+  const locked = affectedIds(row, action)
+  for (const id of locked) busy.add(id)
   notes[key] = undefined
   const result = await apiDecide(payload)
-  busy.delete(key)
+  for (const id of locked) busy.delete(id)
 
   if (!result.ok) {
     if (result.status === 400) {
       notes[key] = { tone: 'deny', text: result.error }
       await refresh()
     } else {
-      // 502/503/network: the banner stays until the next good poll, so no
-      // immediate refresh here (a good one would wipe it before it is seen).
+      // 502/503/network: the banner stays until a poll that starts after this
+      // failure succeeds, and the row says the decision was not sent. No
+      // immediate refresh here: a good one would clear the banner unseen.
+      notes[key] = { tone: 'deny', text: `Not sent: ${result.error}` }
       setStale(result.error)
     }
     return
@@ -202,7 +227,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
       role="alert"
       data-testid="stale-banner"
     >
-      <span class="pill pill-warn">{{ stale }}</span>
+      <span class="pill pill-warn">{{ staleText }}</span>
     </p>
 
     <EmptyState
@@ -212,7 +237,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
 
     <!-- Desktop / tablet -->
     <div
-      v-else-if="!phone"
+      v-else-if="!compact"
       class="panel"
     >
       <Table>
@@ -284,7 +309,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
       </Table>
     </div>
 
-    <!-- Phone -->
+    <!-- Compact: tablet and phone -->
     <div
       v-else
       class="stack-section"
@@ -344,15 +369,15 @@ function onDecide(row: OpenRow, action: DecideAction): void {
           <div class="row-title">
             {{ r.host }}<span class="font-normal text-muted-foreground">:{{ r.port }}</span>
           </div>
-          <div class="inline-row row-meta">
-            <span class="inline-flex items-center gap-tight font-medium text-foreground"><Box class="size-icon-sm" />{{ r.container }}</span>
-            <span aria-hidden="true">·</span>
-            <span
-              class="pill"
-              :class="outcomeTone(r)"
-            >{{ outcomeLabel(r) }}</span>
-            <span aria-hidden="true">·</span>
-            <span class="row-caption">{{ relTime(r.decided_at) }}</span>
+          <div class="overflow-hidden">
+            <div class="meta-flow row-meta">
+              <span class="meta-item inline-flex items-center gap-tight font-medium text-foreground"><Box class="size-icon-sm" />{{ r.container }}</span>
+              <span class="meta-item"><span
+                class="pill"
+                :class="outcomeTone(r)"
+              >{{ outcomeLabel(r) }}</span></span>
+              <span class="meta-item row-caption">{{ relTime(r.decided_at) }}</span>
+            </div>
           </div>
           <p
             v-if="r.deny_reason"
@@ -401,7 +426,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
           </p>
         </div>
         <div class="stack-line">
-          <Label for="deny-reason">Reason <span class="font-normal text-muted-foreground">(optional)</span></Label>
+          <Label for="deny-reason">Reason <span class="font-normal text-muted-foreground">(optional, shown to the agent)</span></Label>
           <Textarea
             id="deny-reason"
             v-model="dlg.reason"
