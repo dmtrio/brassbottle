@@ -17,6 +17,7 @@ import random
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -876,6 +877,28 @@ class AdminContractTests(unittest.TestCase):
         self.assertEqual(sizes, [page_size] * 20 + [0])
 
     def test_stub_recent_pages_match_the_real_broker_on_the_same_seed(self):
+        self._check_stub_recent_pages()
+
+    def test_stub_reads_an_offsetless_bound_as_utc_whatever_the_local_zone(self):
+        # An offset-less since/until is UTC to the real broker. The stub's copy
+        # once went through the process's local zone, which a UTC runner hides,
+        # so the same cross-check runs with the zone forced to New York.
+        previous = os.environ.get("TZ")
+
+        def restore():
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.addCleanup(restore)
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        self.assertNotEqual(datetime(2026, 8, 1, 12).astimezone(timezone.utc).hour, 12, "the zone did not change")
+        self._check_stub_recent_pages()
+
+    def _check_stub_recent_pages(self):
         # The behaviour suite's History checks run against the stub's own copy
         # of keyset paging. Seed the real broker with the stub's exact rows and
         # require the same pages, cursors and errors, so the copy cannot drift.
@@ -929,7 +952,17 @@ class AdminContractTests(unittest.TestCase):
                 f"since={iso(now - timedelta(days=40))}&until={iso(now - timedelta(days=1))}",
                 f"since={iso(day30 - timedelta(hours=1))}&until={iso(day30 + timedelta(hours=1))}",
             )
-            for query in queries:
+            # The same windows with no offset: UTC to the real broker.
+            bare = lambda moment: iso(moment).rstrip("Z")
+            offsetless = (
+                f"since={bare(day30 - timedelta(hours=1))}&until={bare(day30 + timedelta(hours=1))}",
+                f"since={bare(day30 - timedelta(hours=1))}.900&until={bare(day30 + timedelta(hours=1))}.100",
+                f"since={bare(now - timedelta(days=40))}&until={bare(now - timedelta(days=1))}",
+                f"since={bare(day30).replace('T', '%20')}",
+                f"until={bare(day30 - timedelta(hours=1))}",
+                f"since={day30.strftime('%Y-%m-%d')}",
+            )
+            for query in (*queries, *offsetless):
                 with self.subTest(query=query):
                     real_pages, stub_pages = walk(query, real), walk(query, fake)
                     self.assertEqual(
@@ -938,8 +971,11 @@ class AdminContractTests(unittest.TestCase):
                     )
             # The 30-day-old row the UI check leans on is what the real store
             # returns for a window around it.
-            (only,) = walk(queries[-1], real)
-            self.assertEqual([r["host"] for r in only["rows"]], [stub.ARCHIVE_HOST])
+            for query in (queries[-1], offsetless[0]):
+                (only,) = walk(query, real)
+                self.assertEqual([r["host"] for r in only["rows"]], [stub.ARCHIVE_HOST])
+                (only,) = walk(query, fake)
+                self.assertEqual([r["host"] for r in only["rows"]], [stub.ARCHIVE_HOST])
             for query in (
                 "before=x", "before=2026-08-01T00:00:00Z,", "since=nope", "until=2026-13-45",
                 "limit=abc", *OVERFLOWING_BOUNDS,

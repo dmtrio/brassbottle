@@ -191,6 +191,8 @@ def recent_reply(rows: list[dict[str, Any]], query: str) -> tuple[int, dict[str,
         for name in ("since", "until"):
             if name in q:
                 moment = datetime.fromisoformat(q[name].replace("Z", "+00:00"))
+                if moment.tzinfo is None:  # the real broker reads an offset-less bound as UTC, not local time
+                    moment = moment.replace(tzinfo=timezone.utc)
                 bounds[name] = _iso(moment.astimezone(timezone.utc))
     except (ValueError, OverflowError):
         return 400, {"error": "invalid query"}
