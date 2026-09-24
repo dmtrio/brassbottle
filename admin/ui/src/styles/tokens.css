@@ -107,6 +107,7 @@
   --spacing-control: 2.5rem;        /* height of inputs, selects, toolbar buttons */
   --spacing-control-sm: 2rem;
   --spacing-search-min: 13.75rem;
+  --spacing-search-min-wide: 10.5rem; /* from sm up, so search, date and bottle share a tablet row */
   --spacing-search-icon: 0.75rem;   /* search icon inset */
   --spacing-search-pad: 2.25rem;    /* input left padding past the icon */
   --spacing-popover: 18rem;
@@ -261,7 +262,10 @@
 @utility live-dot { width: var(--spacing-dot); height: var(--spacing-dot); border-radius: 9999px; background-color: currentColor; }
 
 /* Search field: icon inside the input. */
-@utility search-field { position: relative; flex: 1 1 auto; min-width: var(--spacing-search-min); }
+@utility search-field {
+  position: relative; flex: 1 1 auto; min-width: var(--spacing-search-min);
+  @media (width >= 40rem) { flex-basis: 0; min-width: var(--spacing-search-min-wide); }
+}
 @utility search-icon {
   pointer-events: none; position: absolute; left: var(--spacing-search-icon); top: 50%; transform: translateY(-50%);
   width: var(--spacing-icon); height: var(--spacing-icon); color: var(--muted-foreground);

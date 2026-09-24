@@ -986,7 +986,7 @@ class HistoryPage:
 
 
 def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """History-tab checks (30..37). One page per viewport, checked in order; the SPA only."""
+    """History-tab checks (30..42). One page per viewport, checked in order; the SPA only."""
     from playwright.sync_api import expect
 
     suite = Suite(ui, viewport)
@@ -1073,7 +1073,8 @@ def _h_date_range(hist, page, traffic, broker) -> None:
       const [y, m, d] = day.split('-').map(Number);
       const iso = (t) => t.toISOString().replace(/\\.\\d{3}Z$/, 'Z');
       const start = new Date(y, m - 1, d, 0, 0, 0);
-      return [iso(start), iso(new Date(start.getTime() + 86400000 - 1000))];
+      // The next local midnight, not start + 24 h: a DST day is 23 or 25 hours long.
+      return [iso(start), iso(new Date(new Date(y, m - 1, d + 1, 0, 0, 0).getTime() - 1000))];
     }""", day)
     _eq((query["since"], query["until"]), tuple(want))
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", query["since"]), query
@@ -1167,6 +1168,134 @@ def _h_overflow_and_console(hist, page, traffic, broker) -> None:
     _eq(traffic.console_errors, [])
 
 
+def _pick_bottle(page, name: str) -> None:
+    page.get_by_test_id("history-bottle").click()
+    page.get_by_role("option", name=name, exact=True).click()
+
+
+def _h_filter_failure(hist, page, traffic, broker) -> None:
+    from playwright.sync_api import expect
+    hist.open()
+    hist.older()                                     # page 2: a cursor is on the stack
+    _eq(hist.label(), "Page 2")
+    with broker.lock:
+        broker.outage = True
+    try:
+        _pick_bottle(page, "mid")
+        expect(page.get_by_test_id("history-error")).to_be_visible()
+        # The previous filter's rows, Older cursor and page number are gone, not left under "mid".
+        _eq(hist.rows().count(), 0)
+        _eq(hist.label(), "Page 1")
+        expect_disabled(page, "history-older", True)
+        expect_disabled(page, "history-newer", True)
+        _in("0 of 0", page.get_by_test_id("history-summary").inner_text())
+    finally:
+        with broker.lock:
+            broker.outage = False
+    page.get_by_test_id("history-error").get_by_role("button", name="Retry").click()
+    expect(page.get_by_test_id("history-error")).to_have_count(0)
+    want = [r["host"] for r in hist.expected("container=mid&limit=50")["rows"]]
+    expect(hist.rows()).to_have_count(len(want))
+    _eq(hist.hosts(), want)
+    _eq(hist.label(), "Page 1")
+
+
+def _h_stale_reply(hist, page, traffic, broker) -> None:
+    from playwright.sync_api import expect
+    hist.open()
+    sent = len(traffic.recent)
+    held = broker.hold_next_recent()
+    try:
+        _pick_bottle(page, "mid")                    # its reply is held
+        expect(page.get_by_test_id("history-summary")).to_be_visible()
+        _pick_bottle(page, "zeta")                   # answered at once
+        want = [r["host"] for r in hist.expected("container=zeta&limit=50")["rows"]]
+        expect(hist.rows()).to_have_count(len(want))
+    finally:
+        held.release()
+    assert held.sent.wait(5), "the held reply was never sent"
+    page.wait_for_timeout(400)                       # let the late reply reach the page
+    _eq([q.get("container") for q in traffic.recent[sent:]], ["mid", "zeta"])
+    _eq(hist.hosts(), want)                          # the superseded reply did not replace them
+    _in("zeta", page.get_by_test_id("history-bottle").inner_text())
+    expect_disabled(page, "history-older", hist.expected("container=zeta&limit=50")["next"] is None)
+
+
+# One row is two lines (host and date, then pill and bottle) with an optional third for a deny reason.
+TWO_LINE_ROW_MAX_PX = 80
+THREE_LINE_ROW_MAX_PX = 104
+
+
+def _h_row_layout(hist, page, traffic, broker) -> None:
+    hist.open()
+    phone = page.viewport_size["width"] < 640
+    rows = hist.rows().all()
+    assert len(rows) == 50, len(rows)
+    tall = []
+    for row in rows:
+        text = squash(row.inner_text())
+        box = row.bounding_box()
+        # A deny reason is the optional third line; a bottle and pill too wide for a phone may wrap.
+        lines = 3 if any(r["host"] in text and r["deny_reason"] for r in hist.expected("limit=50")["rows"]) else 2
+        limit = THREE_LINE_ROW_MAX_PX if lines == 3 or (phone and stub.LONG_BOTTLE in text) else TWO_LINE_ROW_MAX_PX
+        if box["height"] > limit:
+            tall.append((round(box["height"]), limit, text[:70]))
+        if phone:
+            assert "by operator" not in text and "by denylist" not in text, f"'by' shown on a phone: {text}"
+            assert not re.search(r"\d+[smhd] ago", text), f"relative time shown on a phone: {text}"
+        else:
+            assert re.search(r"\bby (operator|denylist|sweep)\b", text), f"no 'by' on: {text}"
+            assert re.search(r"\b\d+[smhd] ago\b", text), f"no relative time on: {text}"
+    assert not tall, f"rows taller than their line budget: {tall[:5]}"
+    # The date sits top-right, on the host's line.
+    row = rows[0]
+    head, when = row.locator(".row-title").bounding_box(), row.get_by_test_id("history-row-when").bounding_box()
+    box = row.bounding_box()
+    assert when["y"] < head["y"] + head["height"], f"date is below the host: {when} {head}"
+    assert when["x"] + when["width"] > box["x"] + box["width"] - 40, f"date is not at the right edge: {when} {box}"
+    # Pill then bottle on the line below.
+    pill, bottle = row.locator(".pill").first.bounding_box(), row.locator(".meta-item").nth(1).bounding_box()
+    assert pill["y"] > head["y"] + head["height"] - 1 and pill["x"] < bottle["x"], f"meta line out of order: {pill} {bottle}"
+
+
+def _h_toolbar_layout(hist, page, traffic, broker) -> None:
+    hist.open()
+    box = lambda locator: locator.bounding_box()
+    search = box(page.get_by_placeholder("Search destination"))
+    date = box(page.get_by_test_id("history-range"))
+    bottle = box(page.get_by_test_id("history-bottle"))
+    status = box(page.get_by_test_id("history-status"))
+    same_row = lambda *boxes: max(b["y"] for b in boxes) < min(b["y"] + b["height"] for b in boxes)
+    width = page.viewport_size["width"]
+    if width >= 1024:
+        assert same_row(search, date, bottle, status), f"desktop toolbar wraps: {search} {date} {bottle} {status}"
+    elif width >= 640:
+        assert same_row(search, date, bottle), f"tablet: search, date and bottle are not on one row: {search} {date} {bottle}"
+        assert status["y"] >= search["y"] + search["height"], f"tablet: the status toggle is not below: {status} {search}"
+    else:
+        assert status["y"] >= search["y"] + search["height"], f"phone: status is not below search: {status}"
+    for name, b in (("search", search), ("date", date), ("bottle", bottle), ("status", status)):
+        assert b["x"] >= 0 and b["x"] + b["width"] <= width + 0.5, f"{name} leaves the viewport: {b}"
+    # The bottle label sits next to its icon, not centred in the trigger.
+    trigger = page.get_by_test_id("history-bottle")
+    icon = trigger.locator("svg").first.bounding_box()
+    label = trigger.locator("[data-slot=select-value]").bounding_box()
+    assert label["x"] - (icon["x"] + icon["width"]) < 16, f"gap between the bottle icon and its label: {icon} {label}"
+
+
+def _h_date_trigger_name(hist, page, traffic, broker) -> None:
+    hist.open()
+    button = page.get_by_test_id("history-range")
+    _eq(button.get_attribute("aria-label"), "Date range: Any date")
+    _eq(page.get_by_role("button", name="Date range: Any date").count(), 1)
+    hist.pick_day(30)
+    label = button.inner_text().strip()
+    assert label != "Any date", label
+    _eq(button.get_attribute("aria-label"), f"Date range: {label}")
+    _eq(page.get_by_role("button", name=f"Date range: {label}", exact=True).count(), 1)
+    hist.close_popover()
+
+
 def expect_disabled(page, test_id: str, disabled: bool) -> None:
     from playwright.sync_api import expect
     button = page.get_by_test_id(test_id)
@@ -1182,6 +1311,11 @@ HISTORY_CHECKS = [
     ("35", "Search and the status toggle filter the loaded page without asking the broker", _h_client_side),
     ("36", "A failed page keeps the list and the page number, shows a banner, and Retry recovers", _h_failure),
     ("37", "History has no horizontal overflow and no console errors", _h_overflow_and_console),
+    ("38", "A failed fetch for a new filter shows no rows, no Older cursor and Page 1, not the old filter's", _h_filter_failure),
+    ("39", "A slow reply for a superseded filter never replaces the current filter's rows", _h_stale_reply),
+    ("40", "Rows are two lines (host and date, pill and bottle), with by and relative time from sm up", _h_row_layout),
+    ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", _h_toolbar_layout),
+    ("42", "The date trigger is named \"Date range: <label>\"", _h_date_trigger_name),
 ]
 
 # ---- serving --------------------------------------------------------------------
@@ -1419,6 +1553,11 @@ NEW_CHECKS = [
     ("35", "Search and the status toggle filter the loaded page without asking the broker", "N/A(spa-only) on legacy"),
     ("36", "A failed page keeps the list and the page number, shows a banner, and Retry recovers", "N/A(spa-only) on legacy"),
     ("37", "History has no horizontal overflow and no console errors", "N/A(spa-only) on legacy"),
+    ("38", "A failed fetch for a new filter shows no rows, no Older cursor and Page 1, not the old filter's", "N/A(spa-only) on legacy"),
+    ("39", "A slow reply for a superseded filter never replaces the current filter's rows", "N/A(spa-only) on legacy"),
+    ("40", "Rows are two lines (host and date, pill and bottle), with by and relative time from sm up", "N/A(spa-only) on legacy"),
+    ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", "N/A(spa-only) on legacy"),
+    ("42", "The date trigger is named \"Date range: <label>\"", "N/A(spa-only) on legacy"),
 ]
 
 

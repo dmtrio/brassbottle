@@ -190,8 +190,9 @@ def recent_reply(rows: list[dict[str, Any]], query: str) -> tuple[int, dict[str,
         bounds = {}
         for name in ("since", "until"):
             if name in q:
-                bounds[name] = _iso(datetime.fromisoformat(q[name].replace("Z", "+00:00")))
-    except ValueError:
+                moment = datetime.fromisoformat(q[name].replace("Z", "+00:00"))
+                bounds[name] = _iso(moment.astimezone(timezone.utc))
+    except (ValueError, OverflowError):
         return 400, {"error": "invalid query"}
     picked = [
         r for r in rows
@@ -257,6 +258,20 @@ def decide_reply(queue: dict[str, Any], body: dict[str, Any], *, now: datetime |
     return 200, {"decided": [rid]}
 
 
+class HeldReply:
+    """A `/recent` reply the stub computes at once but sends only when released."""
+
+    def __init__(self) -> None:
+        self._release = threading.Event()
+        self.sent = threading.Event()
+
+    def release(self) -> None:
+        self._release.set()
+
+    def wait_released(self, timeout: float = 15.0) -> None:
+        self._release.wait(timeout)
+
+
 class StubBroker:
     """The stub server plus its scripted state. Thread-safe."""
 
@@ -266,6 +281,7 @@ class StubBroker:
         self.queue = build_queue()
         self.history = build_history()
         self.recent_queries: list[str] = []
+        self.recent_hold: HeldReply | None = None
         self.decides: list[dict[str, Any]] = []
         self.outage = False
         self.decide_outage: int | None = None
@@ -300,10 +316,18 @@ class StubBroker:
                 if path == "/recent":
                     with broker.lock:
                         broker.recent_queries.append(query)
+                        held, broker.recent_hold = broker.recent_hold, None
                         if broker.outage:
-                            return self._serve(500, {"error": "broker down"}, ERROR_SCHEMA)
-                        status, reply = recent_reply(broker.history_rows(), query)
-                        return self._serve(status, reply, ERROR_SCHEMA if status >= 400 else RECENT_SCHEMA)
+                            status, reply, schema = 500, {"error": "broker down"}, ERROR_SCHEMA
+                        else:
+                            status, reply = recent_reply(broker.history_rows(), query)
+                            schema = ERROR_SCHEMA if status >= 400 else RECENT_SCHEMA
+                    if held:
+                        held.wait_released()   # outside the lock, so later requests are served meanwhile
+                    self._serve(status, reply, schema)
+                    if held:
+                        held.sent.set()
+                    return
                 if self.path != "/queue":
                     return self._send(404, {"error": "not found"})
                 with broker.lock:
@@ -332,6 +356,13 @@ class StubBroker:
         """The /queue reply. The one place a snapshot is built for serving."""
         return self.queue
 
+    def hold_next_recent(self) -> HeldReply:
+        """Hold the reply to the next `GET /recent` until `.release()`; later ones are not held."""
+        held = HeldReply()
+        with self.lock:
+            self.recent_hold = held
+        return held
+
     def history_rows(self) -> list[dict[str, Any]]:
         """Every decided row: the live `recent` list (decided during the run
         included) plus the fixed older store, each request once."""
@@ -343,6 +374,9 @@ class StubBroker:
             self.queue = build_queue()
             self.history = build_history()
             self.recent_queries = []
+            if self.recent_hold:
+                self.recent_hold.release()
+            self.recent_hold = None
             self.decides = []
             self.outage = False
             self.decide_outage = None

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 import tempfile
 import threading
@@ -28,12 +29,19 @@ TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(TESTS_DIR))
 
+import admin_ui_stub_broker as stub  # noqa: E402
 import egress_broker_host as broker  # noqa: E402
 from admin_contract_validator import validate_document  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
 import admin_daemon as admin  # noqa: E402
 
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
+
+# Valid ISO 8601 whose UTC instant falls outside years 1..9999.
+OVERFLOWING_BOUNDS = (
+    "since=0001-01-01T00:00:00%2B01:00",
+    "until=9999-12-31T23:59:59-01:00",
+)
 
 
 class FakeClock:
@@ -723,6 +731,11 @@ class AdminContractTests(unittest.TestCase):
             status, body = self._broker_get(host, port, "/recent?before=garbage")
             self.assertEqual(status, HTTPStatus.BAD_REQUEST, body)
             self.assertEqual(validate_document(body, "error_response.schema.json"), [])
+            for query in OVERFLOWING_BOUNDS:
+                with self.subTest(query=query):
+                    status, body = self._broker_get(host, port, f"/recent?{query}")
+                    self.assertEqual(status, HTTPStatus.BAD_REQUEST, body)
+                    self.assertEqual(validate_document(body, "error_response.schema.json"), [])
             status, body = self._broker_get(host, port, "/recent", authorization=None)
             self.assertEqual(status, HTTPStatus.UNAUTHORIZED, body)
             self.assertEqual(validate_document(body, "error_response.schema.json"), [])
@@ -779,6 +792,16 @@ class AdminContractTests(unittest.TestCase):
                 )
                 self.assertEqual(status, HTTPStatus.BAD_REQUEST, body)
                 self.assertEqual(validate_document(body, "error_response.schema.json"), [])
+                # A date that overflows once normalised to UTC is a 400 through
+                # the proxy too, not the 503 a dead broker handler produced.
+                for query in OVERFLOWING_BOUNDS:
+                    with self.subTest(query=query):
+                        status, body, _raw = self._admin_request(
+                            admin_host, admin_port, "GET", f"/api/egress/recent?{query}",
+                            headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret"},
+                        )
+                        self.assertEqual(status, HTTPStatus.BAD_REQUEST, body)
+                        self.assertEqual(validate_document(body, "error_response.schema.json"), [])
                 status, body, _raw = self._admin_request(
                     admin_host, admin_port, "GET", "/api/egress/recent"
                 )
@@ -789,6 +812,143 @@ class AdminContractTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
+
+
+    # -- History end to end: the Claim's 1,000-row, 300-tied walk --------------
+
+    def _decide_at(self, b, request_id, when, *, container="coding-brassbottle", host=None,
+                   status="allowed", scope="live", decided_by="operator", deny_reason=None):
+        b._store.open_or_hit(
+            request_id=request_id, container=container, host=host or f"{request_id}.example.com",
+            port=443, host_is_ip=False, uid=None, comm=None, reason=None,
+            hold_seconds=None, now=when,
+        )
+        b._store.close(
+            request_id=request_id, status=status, now=when, decided_by=decided_by,
+            scope=scope, deny_reason=deny_reason, decision_body={"decision": status},
+        )
+
+    def test_admin_recent_walks_1000_rows_300_tied_by_next_once_and_in_order(self):
+        total, tied, page_size = 1000, 300, 50
+        # Seeded through the store API, into the REAL broker's store. The tie
+        # block sits mid-history (200 rows are newer) so page edges 250..450
+        # fall inside it; ids are shuffled so insertion order is not id order.
+        tie_at = NOW - timedelta(minutes=500, seconds=30)
+        ids = [f"req-{i:04d}" for i in range(total)]
+        random.Random(7).shuffle(ids)
+        when = {
+            rid: tie_at if n < tied else NOW - timedelta(minutes=n)
+            for n, rid in enumerate(ids)
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            for rid in ids:
+                self._decide_at(b, rid, when[rid])
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            cookie = {"Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret"}
+            try:
+                seen: list[str] = []
+                sizes: list[int] = []
+                path = f"/api/egress/recent?limit={page_size}"
+                while True:
+                    status, page, _raw = self._admin_request(
+                        admin_host, admin_port, "GET", path, headers=cookie
+                    )
+                    self.assertEqual(status, HTTPStatus.OK, page)
+                    self.assertEqual(validate_document(page, "recent_page.schema.json"), [])
+                    seen.extend(r["request_id"] for r in page["rows"])
+                    sizes.append(len(page["rows"]))
+                    if page["next"] is None:
+                        break
+                    path = f"/api/egress/recent?limit={page_size}&before={page['next']}"
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+        expected = sorted(ids, key=lambda r: (when[r].strftime("%Y-%m-%dT%H:%M:%SZ"), r), reverse=True)
+        self.assertEqual(len(seen), total)
+        self.assertEqual(len(set(seen)), total)
+        self.assertEqual(seen, expected)
+        # 1000 / 50 = 20 full pages, then the empty page that ends the walk.
+        self.assertEqual(sizes, [page_size] * 20 + [0])
+
+    def test_stub_recent_pages_match_the_real_broker_on_the_same_seed(self):
+        # The behaviour suite's History checks run against the stub's own copy
+        # of keyset paging. Seed the real broker with the stub's exact rows and
+        # require the same pages, cursors and errors, so the copy cannot drift.
+        fixture = stub.build_queue()
+        now = datetime.strptime(fixture["generated_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        rows = fixture["recent"] + stub.build_history(now)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            for row in rows:
+                self._decide_at(
+                    b, row["request_id"],
+                    datetime.strptime(row["decided_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                        tzinfo=timezone.utc
+                    ),
+                    container=row["container"], host=row["host"], status=row["status"],
+                    scope=row["scope"],
+                    decided_by=row["decided_by"], deny_reason=row["deny_reason"],
+                )
+            host, port = self._serve(root, b)
+            iso = lambda moment: moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            def real(query):
+                return self._broker_get(host, port, f"/recent?{query}")
+
+            def fake(query):
+                return stub.recent_reply(rows, query)
+
+            def project(page):
+                keys = ("request_id", "container", "host", "status", "scope", "decided_at",
+                        "decided_by", "deny_reason")
+                return [{k: r[k] for k in keys} for r in page["rows"]]
+
+            def walk(query, call):
+                pages, cursor = [], None
+                while True:
+                    q = "&".join(p for p in (query, f"before={cursor}" if cursor else "") if p)
+                    status, page = call(q)
+                    self.assertEqual(status, 200, page)
+                    self.assertEqual(validate_document(page, stub.RECENT_SCHEMA), [])
+                    pages.append(page)
+                    cursor = page["next"]
+                    if cursor is None:
+                        return pages
+
+            day30 = now - timedelta(days=30)
+            queries = (
+                "", "limit=50", "limit=7", "limit=200", "container=alpha&limit=13",
+                f"since={iso(now - timedelta(days=40))}&until={iso(now - timedelta(days=1))}",
+                f"since={iso(day30 - timedelta(hours=1))}&until={iso(day30 + timedelta(hours=1))}",
+            )
+            for query in queries:
+                with self.subTest(query=query):
+                    real_pages, stub_pages = walk(query, real), walk(query, fake)
+                    self.assertEqual(
+                        [(project(p), p["next"]) for p in real_pages],
+                        [(project(p), p["next"]) for p in stub_pages],
+                    )
+            # The 30-day-old row the UI check leans on is what the real store
+            # returns for a window around it.
+            (only,) = walk(queries[-1], real)
+            self.assertEqual([r["host"] for r in only["rows"]], [stub.ARCHIVE_HOST])
+            for query in (
+                "before=x", "before=2026-08-01T00:00:00Z,", "since=nope", "until=2026-13-45",
+                "limit=abc", *OVERFLOWING_BOUNDS,
+            ):
+                with self.subTest(query=query):
+                    real_status, real_body = real(query)
+                    stub_status, stub_body = fake(query)
+                    self.assertEqual((real_status, stub_status), (400, 400))
+                    self.assertEqual(set(real_body), set(stub_body))
 
 
 if __name__ == "__main__":

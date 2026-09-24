@@ -53,6 +53,11 @@ Schema (SQLite, journal_mode=WAL, foreign_keys=ON):
       version         INTEGER NOT NULL   -- 2 (v1 lacked the decided_at index;
                                          -- opening a v1 file migrates it)
 
+Downgrading: a v1 binary refuses a v2 file ("expected 1"). To roll a deploy
+back, run `UPDATE schema_version SET version = 1` on egress.db (sqlite3, with
+the broker stopped). The v2 index is harmless to v1, which ignores it; the
+next v2 open then migrates the file again.
+
 Statuses: a filing starts `open`; it leaves that state only through `close`
 (to `allowed`, `denied` or `stale`). Apply and persist outcomes are recorded
 alongside by `mark_apply` / `mark_persist` and never change `status`.

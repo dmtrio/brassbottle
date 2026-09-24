@@ -620,9 +620,11 @@ def parse_recent_cursor(raw: str) -> tuple[str, str]:
 
 
 def _parse_recent_bound(name: str, raw: str) -> datetime:
+    # Normalised to UTC here: an offset that pushes the instant past year 1 or
+    # 9999 overflows in `astimezone`, which must be a 400 and not a dead handler.
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
+        return _utc_now(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except (ValueError, OverflowError):
         raise RecentQueryError(f"invalid {name}: want an ISO 8601 timestamp") from None
 
 

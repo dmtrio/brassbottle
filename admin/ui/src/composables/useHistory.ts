@@ -53,7 +53,20 @@ export function useHistory(filters: Ref<HistoryFilters>) {
     for (const row of result.data.rows) bottles.add(row.container)
   }
 
-  watch(filters, () => void go([null]), { deep: true })
+  // A new filter is a new walk: nothing of the old one may stay on screen, or a
+  // failed fetch would leave the previous filter's rows, and an Older cursor
+  // that belongs to it, under the new filter.
+  watch(
+    filters,
+    () => {
+      rows.value = []
+      next.value = null
+      loaded.value = false
+      cursors.value = [null]
+      void go([null])
+    },
+    { deep: true },
+  )
 
   return {
     rows,

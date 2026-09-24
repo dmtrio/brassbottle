@@ -18,7 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { decide as apiDecide, type DecideAction, type DecidePayload } from '@/api/egress'
 import { useQueue } from '@/composables/useQueue'
-import { outcomeLabel, outcomeTone } from '@/lib/decision'
+import { outcomeLabel, outcomeTone, relTime } from '@/lib/decision'
 import type { OpenRow } from '@/types'
 import DecideButtons from './DecideButtons.vue'
 import EmptyState from './EmptyState.vue'
@@ -70,14 +70,6 @@ const sections = computed(() =>
 const recentRows = computed(() =>
   [...(snapshot.value?.recent ?? [])].sort((a, b) => Date.parse(b.decided_at) - Date.parse(a.decided_at)),
 )
-
-function relTime(isoTs: string): string {
-  const s = Math.max(0, Math.round((Date.now() - Date.parse(isoTs)) / 1000))
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
-}
 
 function clock(isoTs: string): string {
   return new Date(isoTs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
