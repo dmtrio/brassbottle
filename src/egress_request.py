@@ -90,32 +90,18 @@ def parse_host_target(raw: str, *, default_port: int = 443) -> HostTarget:
     return HostTarget(host=host, port=port, host_is_ip=host_is_ip, raw=value)
 
 
-def split_hosts_and_reason(tokens: list[str]) -> tuple[list[str], str | None]:
-    """Split positional arguments into hosts and an optional trailing reason.
+def validate_hosts(tokens: list[str]) -> list[str]:
+    """Return tokens unchanged when every one parses as host[:port].
 
-    Every leading token that parses as host[:port] is a host; the first
-    token that does not is the reason and must be the LAST token — two
-    non-host tokens raise ValueError naming them. A single-word reason
-    that happens to be a valid domain is indistinguishable from a host and
-    is treated as one; quote multi-word reasons.
+    Raises ValueError naming the first token that does not, so a stray
+    reason typed as a positional is rejected instead of guessed at.
     """
-    hosts: list[str] = []
-    rest: list[str] | None = None
-    for index, token in enumerate(tokens):
+    for token in tokens:
         try:
             parse_host_target(token)
-        except ValueError:
-            rest = tokens[index:]
-            break
-        hosts.append(token)
-    if not rest:
-        return hosts, None
-    if len(rest) > 1:
-        raise ValueError(
-            "expected one reason token after the hosts; got extra argument(s): "
-            + ", ".join(repr(token) for token in rest[1:])
-        )
-    return hosts, rest[0]
+        except ValueError as exc:
+            raise ValueError(f"not a valid host: {token!r} ({exc}); pass a reason with --reason") from exc
+    return tokens
 
 
 def container_name() -> str:
@@ -351,14 +337,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="File egress approval requests with the host broker and wait for a decision",
     )
     parser.add_argument(
-        "arguments",
+        "hosts",
         nargs="+",
         metavar="HOST",
-        help=(
-            "one or more hostnames (optionally host:port), optionally followed"
-            " by ONE quoted reason token, e.g.: request-egress example.com"
-            ' "installing deps"'
-        ),
+        help="one or more hostnames, optionally host:port",
+    )
+    parser.add_argument(
+        "-r",
+        "--reason",
+        default=None,
+        help='why access is needed, shown to the operator, e.g. --reason "installing deps"',
     )
     parser.add_argument(
         "--hold-seconds",
@@ -380,15 +368,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_intermixed_args(argv)
     try:
-        hosts, reason = split_hosts_and_reason(args.arguments)
+        hosts = validate_hosts(args.hosts)
     except ValueError as exc:
         print(f"usage error: {exc}", file=sys.stderr)
         return EXIT_DENIED
-    if not hosts:
-        print("at least one host is required", file=sys.stderr)
-        return EXIT_DENIED
+    reason = args.reason
 
     if args.check:
         results = check_hosts(hosts)

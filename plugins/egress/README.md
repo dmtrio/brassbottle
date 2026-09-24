@@ -24,11 +24,14 @@ Both call the same host broker endpoint (`POST /egress` on port **8816**).
 ## `request-egress` CLI
 
 ```bash
-request-egress docs.stripe.com "fetch API reference"
-request-egress host1.example.com host2.example.com "batch pre-flight"
-request-egress neon.tech:5432 "db:migrate pre-flight"
+request-egress docs.stripe.com --reason "fetch API reference"
+request-egress host1.example.com host2.example.com --reason "batch pre-flight"
+request-egress neon.tech:5432 --reason "db:migrate pre-flight"
 request-egress --check api.stripe.com    # ipset probe only, no filing
 ```
+
+Every positional is a host (`host` or `host:port`); a positional that is not one is
+rejected by name. Give the reason with `--reason TEXT` (`-r`).
 
 Exit codes: **0** allowed, **1** denied (or broker error), **2** timed out still
 queued (`decision: pending`).

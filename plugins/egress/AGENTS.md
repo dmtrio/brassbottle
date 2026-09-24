@@ -12,7 +12,7 @@ errors to discover the hostname.
 - **Non-TLS destinations** (Postgres :5432, SIP, raw TCP) are invisible to the
   transparent :80/:443 proxy. Name the **hostname zone** explicitly before the
   command runs — e.g. `request_egress(["neon.tech"], "db:migrate")` or
-  `request-egress neon.tech:5432 "db:migrate"` — not the IP and not `*.zone`
+  `request-egress neon.tech:5432 --reason "db:migrate"` — not the IP and not `*.zone`
   wildcards (bare zones already cover subdomains).
 - **Codex** has no remote MCP servers in this image; use the `request-egress`
   shell command instead of these MCP tools.

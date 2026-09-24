@@ -26,56 +26,79 @@ class EgressRequestTests(unittest.TestCase):
         self.assertEqual(target.host, "neon.tech")
         self.assertEqual(target.port, 5432)
 
-    # ── reason parsing (PIN) ──────────────────────────────────────────────
+    # ── reason option (PIN) ───────────────────────────────────────────────
 
-    def test_reason_after_hosts_is_split_from_positionals(self):
-        """PIN — pre-change, `hosts` was nargs="+" and `reason` nargs="?", so
-        argparse handed EVERY positional to hosts and a quoted reason was
-        rejected as a bad host. The split keeps leading host tokens and
-        treats the first non-host token as the reason."""
-        hosts, reason = er.split_hosts_and_reason(["example.com", "reason text"])
-        self.assertEqual(hosts, ["example.com"])
-        self.assertEqual(reason, "reason text")
+    def _run_main(self, argv):
+        """Drive main() through request_hosts/request_host/file_egress with only
+        urllib's urlopen faked; return (exit code, stderr text, filed bodies)."""
+        import io
+        import json as jsonlib
 
-    def test_reason_must_be_the_last_token(self):
-        with self.assertRaises(ValueError) as ctx:
-            er.split_hosts_and_reason(["example.com", "reason text", "extra"])
-        self.assertIn("extra", str(ctx.exception))
+        filed: list[dict] = []
 
-    def test_host_like_reason_is_treated_as_a_host(self):
-        hosts, reason = er.split_hosts_and_reason(["example.com", "other.example.com"])
-        self.assertEqual(hosts, ["example.com", "other.example.com"])
-        self.assertIsNone(reason)
+        class _Resp:
+            def __enter__(self):
+                return self
 
-    def test_no_reason_gives_none(self):
-        hosts, reason = er.split_hosts_and_reason(["example.com"])
-        self.assertEqual(hosts, ["example.com"])
-        self.assertIsNone(reason)
+            def __exit__(self, *a):
+                return False
 
-    def test_main_files_with_reason_attached(self):
-        """PIN — `request-egress example.com "reason text"` files with
-        reason="reason text", not with the reason swallowed into hosts."""
-        captured: list[dict] = []
+            def read(self):
+                return jsonlib.dumps({"decision": "allow", "scope": "live"}).encode("utf-8")
 
-        def fake_request_hosts(hosts, **kwargs):
-            captured.append({"hosts": hosts, **kwargs})
-            return ([er.HostRequestResult("docs.stripe.com", 443, "allowed")], er.EXIT_ALLOWED)
+        def fake_urlopen(request, timeout=None):
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.full_url.endswith("/egress"))
+            filed.append(jsonlib.loads(request.data))
+            return _Resp()
 
-        with mock.patch.object(er, "request_hosts", fake_request_hosts):
-            with mock.patch("sys.stdout"):
-                code = er.main(["docs.stripe.com", "reason text"])
-        self.assertEqual(code, er.EXIT_ALLOWED)
-        self.assertEqual(captured[0]["hosts"], ["docs.stripe.com"])
-        self.assertEqual(captured[0]["reason"], "reason text")
+        stderr = io.StringIO()
+        env = {"EGRESS_BROKER_TOKEN": "tok", "CONTAINER_NAME": "bottle"}
+        with mock.patch.dict("os.environ", env), mock.patch(
+            "urllib.request.urlopen", fake_urlopen
+        ), mock.patch("sys.stdout"), mock.patch("sys.stderr", stderr):
+            code = er.main(argv)
+        return code, stderr.getvalue(), filed
 
-    def test_main_two_non_host_tokens_is_a_usage_error(self):
-        with mock.patch("sys.stderr") as stderr:
-            code = er.main(["example.com", "reason text", "extra junk"])
-        self.assertEqual(code, er.EXIT_DENIED)
-        stderr_text = "".join(
-            call.args[0] for call in stderr.write.call_args_list if call.args
+    def test_main_reason_option_reaches_filed_request_body(self):
+        """PIN — `request-egress HOST... --reason TEXT` POSTs one body per host
+        carrying reason == TEXT."""
+        code, _, filed = self._run_main(
+            ["docs.stripe.com", "neon.tech:5432", "--reason", "fetch API reference"]
         )
-        self.assertIn("extra junk", stderr_text)
+        self.assertEqual(code, er.EXIT_ALLOWED)
+        self.assertEqual(
+            [(body["host"], body["port"], body["reason"]) for body in filed],
+            [
+                ("docs.stripe.com", 443, "fetch API reference"),
+                ("neon.tech", 5432, "fetch API reference"),
+            ],
+        )
+
+    def test_main_reason_short_option_and_leading_position(self):
+        code, _, filed = self._run_main(["-r", "db:migrate", "neon.tech"])
+        self.assertEqual(code, er.EXIT_ALLOWED)
+        self.assertEqual([body["reason"] for body in filed], ["db:migrate"])
+
+    def test_main_without_reason_files_no_reason_key(self):
+        code, _, filed = self._run_main(["docs.stripe.com"])
+        self.assertEqual(code, er.EXIT_ALLOWED)
+        self.assertNotIn("reason", filed[0])
+
+    def test_main_positional_reason_is_rejected_naming_it(self):
+        """PIN — a positional that is not a valid host is an error naming it,
+        and nothing is filed (pre-change it was treated as the reason)."""
+        code, stderr, filed = self._run_main(["example.com", "fetch API reference"])
+        self.assertEqual(code, er.EXIT_DENIED)
+        self.assertIn("'fetch API reference'", stderr)
+        self.assertEqual(filed, [])
+
+    def test_validate_hosts_names_first_invalid_token(self):
+        self.assertEqual(er.validate_hosts(["a.example.com", "b.io:22"]), ["a.example.com", "b.io:22"])
+        with self.assertRaises(ValueError) as ctx:
+            er.validate_hosts(["a.example.com", "why not", "also bad"])
+        self.assertIn("'why not'", str(ctx.exception))
+        self.assertNotIn("also bad", str(ctx.exception))
 
     # ── filing + polling ─────────────────────────────────────────────────
 
