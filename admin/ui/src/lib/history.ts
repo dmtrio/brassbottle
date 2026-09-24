@@ -9,12 +9,16 @@ export function isoSeconds(when: Date): string {
 
 // A picked day range as the `since` / `until` query values: local midnight at
 // the start of the first day to the last second of the last day. A range with
-// only a start is that one day.
-export function rangeToQuery(range: DayRange): { since: string | null; until: string | null } {
+// only a start is that one day. The end is the next local midnight less one
+// second, found by calendar arithmetic: a 23 or 25 hour DST day still ends at
+// its own last second.
+export function rangeToQuery(
+  range: DayRange,
+  zone: string = getLocalTimeZone(),
+): { since: string | null; until: string | null } {
   if (!range.start) return { since: null, until: null }
-  const zone = getLocalTimeZone()
   const last = range.end ?? range.start
   const since = range.start.toDate(zone)
-  const until = new Date(last.toDate(zone).getTime() + 24 * 3600 * 1000 - 1000)
+  const until = new Date(last.add({ days: 1 }).toDate(zone).getTime() - 1000)
   return { since: isoSeconds(since), until: isoSeconds(until) }
 }

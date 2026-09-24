@@ -35,3 +35,23 @@ export function decidedAt(isoTs: string): string {
     minute: '2-digit',
   })
 }
+
+// "Sep 23": the day alone, for a phone row that has no room for the clock.
+export function decidedDay(isoTs: string): string {
+  const when = new Date(isoTs)
+  const sameYear = when.getFullYear() === new Date().getFullYear()
+  return when.toLocaleDateString(undefined, {
+    year: sameYear ? undefined : 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+// "5m ago": how long ago a timestamp was, to the largest whole unit.
+export function relTime(isoTs: string): string {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(isoTs)) / 1000))
+  if (s < 60) return `${s}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}

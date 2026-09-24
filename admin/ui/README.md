@@ -6,6 +6,7 @@ Vue 3 + shadcn-vue SPA for the djinn admin plane.
 - `npm run build` — `check:tokens`, `vue-tsc` and `vite build`.
 - `npm run lint` — ESLint over `src/` (generated `src/components/ui/` is ignored).
 - `npm run test:tokens` — unit tests for the token Gate.
+- `npm run test:unit` — vitest unit tests of the SPA's TypeScript (`src/**/*.test.ts`), e.g. the DST-day range maths in `src/lib/history.ts`.
 
 Styling rule: every spacing, size, type and status colour in app code must
 come from `src/styles/tokens.css`; see the header comment there. The Gate

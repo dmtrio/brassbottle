@@ -23,7 +23,10 @@ function choose(value: unknown): void {
       data-testid="history-bottle"
     >
       <Box class="size-icon" />
-      <SelectValue placeholder="All bottles" />
+      <SelectValue
+        class="flex-1 text-left"
+        placeholder="All bottles"
+      />
     </SelectTrigger>
     <SelectContent>
       <SelectItem :value="ALL">

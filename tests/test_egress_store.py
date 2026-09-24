@@ -1535,15 +1535,21 @@ class SchemaMigrationTests(unittest.TestCase):
             conn.execute(f"CREATE VIEW {INDEX_NAME} AS SELECT 1")
             conn.commit()
             conn.close()
-            with self.assertRaises(egress_store.EgressStoreError):
+            # `failed` keeps the exception, and with it the half-built store's
+            # connection, alive: an abandoned open transaction would still hold
+            # the write lock here, so only the migration's own rollback frees it.
+            with self.assertRaises(egress_store.EgressStoreError) as failed:
                 egress_store.EgressStore(root)
-            conn = sqlite3.connect(root / "egress.db")
+            conn = sqlite3.connect(root / "egress.db", timeout=0)
             try:
                 self.assertEqual(
                     conn.execute("SELECT version FROM schema_version").fetchall(), [(1,)]
                 )
+                conn.execute("BEGIN IMMEDIATE")  # raises "database is locked" if not rolled back
+                conn.rollback()
             finally:
                 conn.close()
+            self.assertIsNotNone(failed.exception)
     def test_unknown_versions_still_raise(self):
         for version in (0, 3, 99):
             with self.subTest(version=version):

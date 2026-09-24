@@ -8,7 +8,7 @@ import { RangeCalendar } from '@/components/ui/range-calendar'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useHistory, type HistoryFilters } from '@/composables/useHistory'
 import { useQueue } from '@/composables/useQueue'
-import { decidedAt, outcomeLabel, outcomeTone } from '@/lib/decision'
+import { decidedAt, decidedDay, outcomeLabel, outcomeTone, relTime } from '@/lib/decision'
 import { rangeToQuery, type DayRange } from '@/lib/history'
 import type { DateRange } from 'reka-ui'
 import { getLocalTimeZone } from '@internationalized/date'
@@ -89,6 +89,7 @@ function clearRange(): void {
           <Button
             variant="outline"
             class="h-control bg-background"
+            :aria-label="`Date range: ${rangeLabel}`"
             data-testid="history-range"
           >
             <CalendarDays class="size-icon" />{{ rangeLabel }}
@@ -186,12 +187,17 @@ function clearRange(): void {
         class="cell-group stack-line"
         data-testid="history-row"
       >
-        <div class="row-title">
-          {{ r.host }}<span class="font-normal text-muted-foreground">:{{ r.port }}</span>
+        <div class="flex items-start justify-between gap-inline">
+          <div class="row-title">
+            {{ r.host }}<span class="font-normal text-muted-foreground">:{{ r.port }}</span>
+          </div>
+          <span
+            class="row-caption flex-none"
+            data-testid="history-row-when"
+          ><span class="sm:hidden">{{ decidedDay(r.decided_at) }}</span><span class="hidden sm:inline">{{ decidedAt(r.decided_at) }} · {{ relTime(r.decided_at) }}</span></span>
         </div>
         <div class="overflow-hidden">
           <div class="meta-flow row-meta">
-            <span class="meta-item inline-flex items-center gap-tight font-medium text-foreground"><Box class="size-icon-sm" />{{ r.container }}</span>
             <span class="meta-item inline-flex items-center gap-inline">
               <span
                 class="pill"
@@ -202,14 +208,16 @@ function clearRange(): void {
                 class="pill pill-deny"
               ><AlertTriangle class="size-icon-sm" />apply failed</span>
             </span>
-            <span class="meta-item">by {{ r.decided_by }}</span>
-            <span class="meta-item row-caption">{{ decidedAt(r.decided_at) }}</span>
-            <span
-              v-if="r.deny_reason"
-              class="meta-item"
-            >{{ r.deny_reason }}</span>
+            <span class="meta-item inline-flex items-center gap-tight font-medium text-foreground"><Box class="size-icon-sm" />{{ r.container }}</span>
+            <span class="meta-item hidden sm:block">by {{ r.decided_by }}</span>
           </div>
         </div>
+        <p
+          v-if="r.deny_reason"
+          class="row-caption"
+        >
+          {{ r.deny_reason }}
+        </p>
       </div>
     </div>
 

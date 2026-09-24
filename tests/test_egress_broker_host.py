@@ -2126,6 +2126,8 @@ class EgressBrokerHostTests(unittest.TestCase):
                 "?before=2026-08-01T00:00:00Z,bad%20id!",
                 "?since=last-tuesday",
                 "?until=2026-13-45",
+                "?since=0001-01-01T00:00:00%2B01:00",
+                "?until=9999-12-31T23:59:59-01:00",
                 "?limit=abc",
             ):
                 with self.subTest(query=query):
