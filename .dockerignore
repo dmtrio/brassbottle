@@ -14,3 +14,8 @@ plugins/*/test_*.py
 agents/*/test_*.py
 agents/agent_test_kit.py
 agents/*/golden/
+# Built admin UI artifacts are produced inside the image build; never copy
+# them from the host context, and never send node_modules to the daemon.
+admin/ui/node_modules
+admin/ui/dist
+

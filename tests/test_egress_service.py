@@ -55,6 +55,7 @@ class ComposeSpecTests(unittest.TestCase):
             docker_socket=svc.resolve_docker_socket(env or {}),
             actions_url=(env or {}).get("EGRESS_ACTIONS_URL"),
             repo_root=Path("/repo"),
+            env=env,
         )
 
     def test_rendered_project_is_pinned_as_a_literal_dict(self):
@@ -138,6 +139,23 @@ class ComposeSpecTests(unittest.TestCase):
             self.assertIn(
                 "/custom/path.sock:/var/run/docker.sock",
                 spec["services"]["broker"]["volumes"],
+            )
+
+    def test_djinn_admin_ui_passed_to_admin_only_when_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bottles = base / "bottles"
+            # unset: admin env is byte-identical to the pre-step dict
+            spec_unset = self._spec(base, bottles)
+            self.assertNotIn("DJINN_ADMIN_UI", spec_unset["services"]["admin"]["environment"])
+            # set: the value reaches only the admin service
+            spec_set = self._spec(base, bottles, env={"DJINN_ADMIN_UI": "spa"})
+            self.assertEqual(
+                spec_set["services"]["admin"]["environment"].get("DJINN_ADMIN_UI"),
+                "spa",
+            )
+            self.assertNotIn(
+                "DJINN_ADMIN_UI", spec_set["services"]["broker"]["environment"]
             )
 
     def test_actions_url_only_in_secrets_env_reaches_broker_env(self):

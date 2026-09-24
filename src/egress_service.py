@@ -172,6 +172,7 @@ def build_compose_spec(
     docker_socket: str,
     actions_url: str | None,
     repo_root: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict:
     """The compose project as data — tests pin this dict literally.
 
@@ -188,6 +189,14 @@ def build_compose_spec(
     }
     if actions_url:
         broker_env["EGRESS_ACTIONS_URL"] = actions_url
+    admin_env: dict[str, str] = {
+        "DJINN_HOME": str(base_path),
+        "DJINN_CONTAINER": "1",
+        "EGRESS_BROKER_URL": f"http://{SERVICE_BROKER}:{BROKER_DEFAULT_PORT}",
+    }
+    djinn_admin_ui = (env or {}).get("DJINN_ADMIN_UI")
+    if djinn_admin_ui:
+        admin_env["DJINN_ADMIN_UI"] = djinn_admin_ui
     return {
         "networks": {
             "djinn-net": {"name": djinn_net_addr.NETWORK_NAME, "external": True},
@@ -236,11 +245,7 @@ def build_compose_spec(
                 "networks": {"egress-backend": None},
                 "ports": [f"127.0.0.1:{ADMIN_DEFAULT_PORT}:{ADMIN_DEFAULT_PORT}"],
                 "volumes": [f"{base_path}:{base_path}"],
-                "environment": {
-                    "DJINN_HOME": str(base_path),
-                    "DJINN_CONTAINER": "1",
-                    "EGRESS_BROKER_URL": f"http://{SERVICE_BROKER}:{BROKER_DEFAULT_PORT}",
-                },
+                "environment": admin_env,
                 "command": [
                     "python3",
                     f"{PYTHON_ENTRY}/admin_daemon.py",
@@ -535,6 +540,7 @@ def cmd_start(base_path: Path) -> int:
             egress_ip=egress_ip,
             docker_socket=docker_socket,
             actions_url=actions_url,
+            env=env,
         )
         write_compose_file(base_path, spec)
     except (EgressServiceError, ValueError) as exc:
