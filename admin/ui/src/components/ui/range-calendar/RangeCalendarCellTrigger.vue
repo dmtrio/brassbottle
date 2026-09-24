@@ -24,6 +24,8 @@ const forwardedProps = useForwardProps(delegatedProps)
       '[&[data-today]:not([data-selected])]:bg-accent [&[data-today]:not([data-selected])]:text-accent-foreground',
       // Selection Start
       'data-[selection-start]:bg-primary data-[selection-start]:text-primary-foreground data-[selection-start]:hover:bg-primary data-[selection-start]:hover:text-primary-foreground data-[selection-start]:focus:bg-primary data-[selection-start]:focus:text-primary-foreground',
+      // The ghost variant's dark hover fill would otherwise win over the selection's, leaving dark text on it
+      'dark:data-[selection-start]:hover:bg-primary dark:data-[selection-end]:hover:bg-primary',
       // Selection End
       'data-[selection-end]:bg-primary data-[selection-end]:text-primary-foreground data-[selection-end]:hover:bg-primary data-[selection-end]:hover:text-primary-foreground data-[selection-end]:focus:bg-primary data-[selection-end]:focus:text-primary-foreground',
       // Outside months
