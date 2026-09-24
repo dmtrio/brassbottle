@@ -179,13 +179,15 @@
  * the line wraps. Each .meta-item draws its own "·" in the padding to its left;
  * .meta-flow is pulled left by that padding and its parent (overflow-hidden)
  * clips it, so the first item on any line, wrapped or not, shows no separator.
+ * The clip would also hide an item wider than the row, so an item may shrink
+ * below its content and break an unbreakable string (a long comm) anywhere.
  */
 @utility meta-flow {
   display: flex; flex-wrap: wrap; align-items: center; column-gap: 0;
   row-gap: var(--spacing-tight); margin-left: calc(-1 * var(--spacing-sep));
 }
 @utility meta-item {
-  position: relative; padding-left: var(--spacing-sep);
+  position: relative; padding-left: var(--spacing-sep); min-width: 0; overflow-wrap: anywhere;
   &::before { content: "·"; position: absolute; left: 0; width: var(--spacing-sep); text-align: center; }
 }
 

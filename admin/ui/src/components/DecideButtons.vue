@@ -77,7 +77,7 @@ const target = computed(() => `${props.row.host}:${props.row.port} in ${props.ro
           <Button
             size="sm"
             variant="allow"
-            class="rounded-l-none border-l border-background/30 px-inline"
+            class="rounded-l-none border-l border-l-background/30 px-inline"
             :disabled="busy"
             :aria-label="`More allow options for ${target}`"
           >
