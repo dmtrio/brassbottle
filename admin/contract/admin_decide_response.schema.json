@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdminDecideResponse",
+  "description": "Exact 200 body of POST /api/egress/decide from _handle_egress_decide_post in src/admin_daemon.py. The admin daemon transforms the broker's /decide response into this shape for the browser.",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "const": true,
+      "$comment": "The proxy always sets ok: true on a 200."
+    },
+    "decided": {
+      "type": "integer",
+      "minimum": 0,
+      "$comment": "Count of request ids decided by this action."
+    },
+    "apply_failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" },
+          "reason": {
+            "enum": ["ip_requires_cidr", "apply_failed"],
+            "$comment": "Reasons the admin proxy forwards from the broker's apply_failures."
+          }
+        },
+        "required": ["request_id", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "persisted": {
+      "type": "object",
+      "properties": {
+        "zone": { "type": "string" },
+        "scope": { "type": "string" }
+      },
+      "required": ["zone", "scope"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["ok", "decided"],
+  "additionalProperties": false
+}

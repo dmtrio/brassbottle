@@ -8,6 +8,7 @@ const outPath = path.resolve(import.meta.dirname, '../src/contract.ts')
 const schemas = [
   'queue_snapshot',
   'decide_response',
+  'admin_decide_response',
   'recent_page',
   'sse_event',
   'error_response',

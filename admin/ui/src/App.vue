@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useColorMode, useMediaQuery } from '@vueuse/core'
 import { Ban, Box, Database, Globe, Moon, ShieldCheck, Sun } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { useQueue } from '@/composables/useQueue'
 
 const route = useRoute()
 const phone = useMediaQuery('(max-width: 639px)')
 const mode = useColorMode()
+const { openCount } = useQueue()
+
 const nav = [
   { to: '/egress', label: 'Egress', icon: Globe, showCaption: false },
   { to: '/denylist', label: 'Denylist', icon: Ban, showCaption: true },
@@ -18,6 +21,16 @@ const activeLabel = computed(() => {
   const match = nav.find((n) => n.to === route.path)
   return match?.label ?? 'Djinn admin'
 })
+
+// "(N) Egress · Djinn admin" on the egress route; the count rides on every
+// route's title so a background tab still shows it.
+watch(
+  [openCount, activeLabel],
+  ([count, label]) => {
+    window.document.title = `${count > 0 ? `(${count}) ` : ''}${label} · Djinn admin`
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -41,6 +54,10 @@ const activeLabel = computed(() => {
             :is="n.icon"
             class="size-icon"
           /> {{ n.label }}
+          <span
+            v-if="n.to === '/egress' && openCount > 0"
+            class="count-badge"
+          >{{ openCount }}</span>
           <span
             v-if="n.showCaption"
             class="nav-caption"
@@ -91,6 +108,10 @@ const activeLabel = computed(() => {
           :is="n.icon"
           class="size-icon-lg"
         />{{ n.label }}
+        <span
+          v-if="n.to === '/egress' && openCount > 0"
+          class="tabbar-badge count-badge"
+        >{{ openCount }}</span>
       </RouterLink>
     </nav>
   </div>
