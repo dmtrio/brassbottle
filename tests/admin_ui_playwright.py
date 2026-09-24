@@ -1207,12 +1207,12 @@ class HistoryPage:
 
 
 def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """History-tab checks (30..42, 60, 61). One page per viewport, checked in order; the SPA only."""
+    """History-tab checks (30..42, 60, 61, 62). One page per viewport, checked in order; the SPA only."""
     from playwright.sync_api import expect
 
     suite = Suite(ui, viewport)
     if ui == "legacy":
-        for number, name, _fn in HISTORY_CHECKS + [RELTIME_CHECK]:
+        for number, name, _fn in HISTORY_CHECKS + [RELTIME_CHECK, CONTRAST_CHECK]:
             suite.check(number, name, lambda: None, spa_only=True)
         return suite.results
     broker.reset()
@@ -1226,8 +1226,8 @@ def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.St
         suite.results.append(Result("FAIL", viewport, "30", "History tab opens", squash(str(exc))[:300]))
     finally:
         context.close()
-    number, name, fn = RELTIME_CHECK
-    suite.check(number, name, lambda: fn(browser, served, broker, viewport))
+    for number, name, fn in (RELTIME_CHECK, CONTRAST_CHECK):
+        suite.check(number, name, lambda fn=fn: fn(browser, served, broker, viewport))
     return suite.results
 
 
@@ -1638,6 +1638,65 @@ def _h_relative_time_ticks(browser, served: Served, broker: stub.StubBroker, vie
 
 RELTIME_CHECK = ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", _h_relative_time_ticks)
 
+
+# The selected day's text over its effective background: each ancestor's colour composited from the
+# page canvas up (colours resolved through a canvas, so any CSS colour syntax works), then WCAG 2.x
+# relative luminance. Returns {ratio, fg, bg}.
+SELECTED_DAY_CONTRAST_JS = """(cell) => {
+  const ctx = document.createElement('canvas').getContext('2d', {willReadFrequently: true});
+  const rgba = (css) => {
+    ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = '#000'; ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data; return [r, g, b, a / 255];
+  };
+  const over = (top, under) => top.slice(0, 3).map((c, i) => c * top[3] + under[i] * (1 - top[3]));
+  const layers = [];
+  for (let el = cell; el; el = el.parentElement) layers.push(rgba(getComputedStyle(el).backgroundColor));
+  let bg = [255, 255, 255];
+  for (const layer of layers.reverse()) bg = over(layer, bg);
+  const text = rgba(getComputedStyle(cell).color);
+  const fg = over(text, bg);
+  const lum = (rgb) => {
+    const [r, g, b] = rgb.map((c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [hi, lo] = [lum(fg), lum(bg)].sort((x, y) => y - x);
+  return {ratio: (hi + 0.05) / (lo + 0.05), fg: fg.map(Math.round), bg: bg.map(Math.round)};
+}"""
+MIN_TEXT_CONTRAST = 4.5
+
+
+def selected_day_contrast(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str) -> dict:
+    """Pick a day in the History date picker and measure its selected cell, mouse over it and away."""
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    try:
+        hist = HistoryPage(page, served, traffic, broker)
+        hist.open()
+        hist.pick_day(3)                         # the popover stays open on the selected day
+        cell = page.locator("[data-slot=range-calendar-trigger][data-selected]").first
+        cell.wait_for()
+        settle = "el => Promise.all(el.getAnimations().map((a) => a.finished))"   # past the colour transition
+        cell.evaluate(settle)
+        hovered = cell.evaluate(SELECTED_DAY_CONTRAST_JS)     # the click left the mouse over it
+        page.mouse.move(0, 0)
+        cell.evaluate(settle)
+        away = cell.evaluate(SELECTED_DAY_CONTRAST_JS)
+        return {"hovered": hovered, "away": away}
+    finally:
+        context.close()
+
+
+def _h_calendar_contrast(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    low = []
+    for theme in ("light", "dark"):
+        for state, got in selected_day_contrast(browser, served, broker, viewport, theme).items():
+            if got["ratio"] < MIN_TEXT_CONTRAST:
+                low.append(f"{theme}/{state}: {got['ratio']:.2f}:1 (text {got['fg']} on {got['bg']})")
+    assert not low, f"the selected day is under {MIN_TEXT_CONTRAST}:1: " + "; ".join(low)
+
+
+CONTRAST_CHECK = ("62", "The selected day in the History date picker has at least 4.5:1 text contrast, light and dark", _h_calendar_contrast)
+
 HISTORY_CHECKS = [
     ("30", "History lists the whole store newest first, 50 to a page, in keyset order", _h_newest_first),
     ("31", "Older then Newer walk every page with no row repeated (across a tie in decided_at) and back", _h_walk),
@@ -1855,6 +1914,8 @@ def capture_history(browser, served, broker, out: Path, viewport: str, theme: st
         hist.pick_day(30)
         from playwright.sync_api import expect
         expect(hist.rows()).to_have_count(1)
+        page.locator("[data-slot=range-calendar-trigger][data-selected]").first.evaluate(
+            "el => Promise.all(el.getAnimations().map((a) => a.finished))")   # a settled selected day, mouse over it
         capture(page, out, "spa", viewport, theme, "history-filtered-open")
         hist.close_popover()
         capture(page, out, "spa", viewport, theme, "history-filtered")
@@ -1925,6 +1986,7 @@ NEW_CHECKS = [
     ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
     ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
+    ("62", "The selected day in the History date picker has at least 4.5:1 text contrast, light and dark", "N/A(spa-only) on legacy"),
 ]
 
 
