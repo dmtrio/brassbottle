@@ -1542,6 +1542,24 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    def _raw_head_body(self, host: str, port: int, path: str, headers: dict[str, str]) -> bytes:
+        """Send HEAD over a raw socket and return every byte after the header
+        terminator (the server closes the HTTP/1.0 connection when done)."""
+        lines = [f"HEAD {path} HTTP/1.1", f"Host: {host}:{port}", "Connection: close"]
+        lines += [f"{k}: {v}" for k, v in headers.items()]
+        with socket.create_connection((host, port), timeout=5) as sock:
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        raw = b"".join(chunks)
+        head, sep, rest = raw.partition(b"\r\n\r\n")
+        self.assertTrue(sep, f"no header terminator in {raw[:200]!r}")
+        return rest
+
     def test_spa_head_matches_get_without_body(self):
         """HEAD in spa mode answers like GET (status, type, length, cache,
         session gate) and sends no body; legacy mode keeps the 501."""
@@ -1575,6 +1593,11 @@ class AdminDaemonTests(unittest.TestCase):
                             self.assertEqual(resp.getheader(name), g_headers.get(name), name)
                         self.assertEqual(int(resp.getheader("Content-Length")), len(g_raw))
                         self.assertEqual(h_raw, b"")
+                        # http.client discards a HEAD body by protocol, so read
+                        # the raw wire: nothing may follow the header block.
+                        self.assertEqual(self._raw_head_body(host, port, path, headers), b"")
+                with self.subTest(path="/api/egress/queue", session=False, wire=True):
+                    self.assertEqual(self._raw_head_body(host, port, "/api/egress/queue", {}), b"")
             finally:
                 server.shutdown()
                 server.server_close()
