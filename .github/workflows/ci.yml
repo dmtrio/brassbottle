@@ -5,6 +5,9 @@
 # This revision runs the admin contract tests, builds the Vue admin SPA in
 # admin/ui/, builds the egress image with its UI stage, asserts the built
 # assets are present, and runs the spa-mode Playwright shell test.
+#
+# Step 3 revision: after the spa shell test it runs the admin behaviour suite
+# against both UIs (`--ui spa`, then `--ui legacy`).
 name: ci
 
 on:
@@ -118,3 +121,7 @@ jobs:
           python3 -m playwright install --with-deps chromium
       - name: Admin spa shell Playwright test
         run: python3 tests/admin_spa_playwright.py
+      - name: Admin behaviour suite, spa
+        run: python3 tests/admin_ui_playwright.py --ui spa
+      - name: Admin behaviour suite, legacy
+        run: python3 tests/admin_ui_playwright.py --ui legacy
