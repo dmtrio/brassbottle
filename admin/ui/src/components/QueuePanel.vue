@@ -29,7 +29,7 @@ const REASON_MAX = 200
 // Below 1024 px the sidebar leaves the table too little width (the Decision
 // column clips and hosts break mid-word), so requests become cards.
 const compact = useMediaQuery('(max-width: 1023px)')
-const { snapshot, stale, refresh, setStale } = useQueue()
+const { snapshot, stale, staleSource, refresh, setStale } = useQueue()
 
 type View = 'grouped' | 'flat'
 const view = ref<View>('grouped')
@@ -79,9 +79,12 @@ function clock(isoTs: string): string {
   return new Date(isoTs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 }
 
-// The banner says which data the list still shows: the last good snapshot.
+// A failed poll leaves the last good snapshot on screen, so the banner says
+// when it is from. A failed decide leaves the list current: it only says the
+// decision was not sent.
 const staleText = computed(() => {
   if (!stale.value) return null
+  if (staleSource.value === 'decide') return `Decision not sent: ${stale.value}`
   const at = snapshot.value?.generated_at
   if (!at) return stale.value
   const time = new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })

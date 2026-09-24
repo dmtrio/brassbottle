@@ -657,7 +657,8 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
                 f"a queue poll failed ({traffic.queue_statuses[reads:]}): the banner may not come from the decide"
             assert drv.row(row).is_visible(), "the row left despite the failed decide"
             if ui == "spa":
-                assert any(text.startswith("Showing data from ") for text in seen), f"banner names no data time: {seen}"
+                assert all(text.startswith("Decision not sent: ") for text in seen), \
+                    f"a decide-only failure must not read as stale data: {seen}"
                 drv.wait_note(row, "^Not sent: " + re.escape(banner))
             if clears:
                 expect(drv.stale_banner()).to_be_hidden(timeout=BANNER_CLEAR_MS)
@@ -947,6 +948,56 @@ def inflight_poll_keeps_banner(browser, served: Served, broker: stub.StubBroker,
         context.close()
 
 
+def banner_copy(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """The banner claims stale data only after a failed poll; a decide failure reads as an unsent decision."""
+    from playwright.sync_api import expect
+
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    try:
+        drv = SpaDriver(page, traffic)
+        # frozen before the load, so only the explicit run_for below starts a poll
+        start = datetime(2026, 1, 1, 12, 0, 0)
+        page.clock.install(time=start)
+        page.clock.pause_at(start + timedelta(seconds=1))
+        page.goto(served.base + "/")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
+        banner = drv.stale_banner()
+
+        # A failed poll: the list on screen is the last good snapshot, and the banner says when it is from.
+        with broker.lock:
+            broker.outage = True
+        page.clock.run_for(5500)
+        expect(banner).to_be_visible()
+        poll_text = banner.inner_text().strip()
+        assert re.fullmatch(r"Showing data from \d{1,2}:\d{2}:\d{2}\s[AP]M: .+", poll_text), \
+            f"poll-failure banner: {poll_text!r}"
+
+        # A decide that also fails does not turn that banner into a decide message.
+        drv.button("Deny", "check18.example.com").click()
+        drv.wait_note("check18.example.com", "^Not sent: ")
+        assert banner.inner_text().strip() == poll_text, f"banner changed to {banner.inner_text().strip()!r}"
+
+        # The queue recovers: the next poll clears the banner.
+        with broker.lock:
+            broker.outage = False
+        page.clock.run_for(5500)
+        expect(banner).to_be_hidden()
+
+        # A decide fails while polls are healthy: the list is current, so the banner must not say otherwise.
+        with broker.lock:
+            broker.decide_outage = 500
+        drv.button("Deny", "check18.example.com").click()
+        expect(banner).to_be_visible()
+        assert banner.inner_text().strip() == "Decision not sent: decide failed on the daemon", \
+            f"decide-failure banner: {banner.inner_text().strip()!r}"
+    finally:
+        with broker.lock:
+            broker.outage = False
+            broker.decide_outage = None
+        context.close()
+
+
 def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
     suite = Suite(ui, viewport)
     suite.check("28", "A decide in flight locks every request it acts on (the host or a subzone of it in the same "
@@ -956,6 +1007,9 @@ def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.
                 lambda: overlapping_decides_lock(browser, served, broker, viewport), spa_only=True)
     suite.check("29", "A poll already in flight when a decide fails does not clear the banner; the next poll does",
                 lambda: inflight_poll_keeps_banner(browser, served, broker, viewport), spa_only=True)
+    suite.check("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure "
+                      "with healthy polls reads `Decision not sent: <error>`",
+                lambda: banner_copy(browser, served, broker, viewport), spa_only=True)
     return suite.results
 
 
@@ -1619,6 +1673,7 @@ NEW_CHECKS = [
     ("40", "Rows are two lines (host and date, pill and bottle), with by and relative time from sm up", "N/A(spa-only) on legacy"),
     ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", "N/A(spa-only) on legacy"),
     ("42", "The date trigger is named \"Date range: <label>\"", "N/A(spa-only) on legacy"),
+    ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
 ]
 
 
