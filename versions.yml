@@ -354,9 +354,11 @@ components:
     enabled_when: "GitHub Actions runs"
     policy: deferred
     deferral_reason: >-
-      the workflow's runner image (ubuntu-latest) and action tags
-      (actions/checkout@v4) keep existing behavior; CI administration is
-      out of managed scope
+      the workflow's runner image (ubuntu-latest), action tags
+      (actions/checkout@v4, actions/setup-node@v4), the admin UI's `npm ci`
+      (pinned by admin/ui/package-lock.json) and the CI-only Playwright
+      driver keep existing behavior; CI administration is out of managed
+      scope
 
   user-repositories:
     name: User repositories
