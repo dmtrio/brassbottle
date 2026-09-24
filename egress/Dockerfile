@@ -6,12 +6,25 @@
 # request. Compose picks the entry per service via `command:` — there is no
 # ENTRYPOINT here on purpose.
 #
-# debian:bookworm-slim, same base as the jump: the container runs the repo's
-# own Python sources (stdlib only) plus the two things bin/allow-egress.sh
-# needs that a bare python image lacks: the docker CLI (it speaks to the
-# mounted docker socket to exec into bottles) and yq (the --save yml manifest
-# edit). No .env is copied or mounted: DJINN_HOME/BOTTLES_PATH are bind-mounted
-# at their host paths by compose.
+# The first stage builds the Vue admin SPA from admin/ui/; the final stage
+# copies only the built dist/ so the image does not carry node_modules or the
+# TypeScript sources. Building the UI is part of the image build so a broken
+# UI cannot reach the host.
+
+FROM node:22-bookworm-slim AS ui
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build/admin/ui
+COPY admin/ui/package.json admin/ui/package-lock.json ./
+RUN npm ci
+
+COPY admin/ui/ .
+COPY admin/contract/ /build/admin/contract/
+RUN npm run build
+
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -41,6 +54,7 @@ RUN set -eu; arch="$(dpkg --print-architecture)"; \
 COPY src/ /opt/brassbottle/src/
 COPY bin/ /opt/brassbottle/bin/
 COPY djinn /opt/brassbottle/djinn
+COPY --from=ui /build/admin/ui/dist /opt/brassbottle/admin/ui/dist
 RUN chmod +x /opt/brassbottle/bin/allow-egress.sh /opt/brassbottle/djinn
 
 # The compose file sets `command:` per service:

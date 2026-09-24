@@ -1,0 +1,204 @@
+[
+  {
+    "body_sha256": "8a3ea4606ca0531cec080da1f31b13a4d795c3a1fd35d647143e76f1d2b9f38b",
+    "headers": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Set-Cookie": false
+    },
+    "route": "/",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "da5982a606a4ea709298c318231858e5c97fa6ece04967f11d693c2b04483a55",
+    "headers": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Set-Cookie": false
+    },
+    "route": "/",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+    "headers": {
+      "Content-Type": "application/json",
+      "Set-Cookie": false
+    },
+    "route": "/health",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+    "headers": {
+      "Content-Type": "application/json",
+      "Set-Cookie": false
+    },
+    "route": "/health",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "headers": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Location": "/",
+      "Set-Cookie": true
+    },
+    "route": "/session?key=admin-test-key",
+    "status": 302,
+    "with_session": false
+  },
+  {
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "headers": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Location": "/",
+      "Set-Cookie": true
+    },
+    "route": "/session?key=admin-test-key",
+    "status": 302,
+    "with_session": true
+  },
+  {
+    "body_sha256": "7773b2b25a4a7fa28eac2ca9c8d2f8dff319014ae0379d2ee31d4e932b44812b",
+    "headers": {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Set-Cookie": false
+    },
+    "route": "/app.js",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "7773b2b25a4a7fa28eac2ca9c8d2f8dff319014ae0379d2ee31d4e932b44812b",
+    "headers": {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Set-Cookie": false
+    },
+    "route": "/app.js",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "72284e8e9079c87817145df1110f74e8a2aa040b2fc384922e18dfcb46fc1fd7",
+    "headers": {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Set-Cookie": false
+    },
+    "route": "/vendor/htm-preact-standalone.module.js",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "72284e8e9079c87817145df1110f74e8a2aa040b2fc384922e18dfcb46fc1fd7",
+    "headers": {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Set-Cookie": false
+    },
+    "route": "/vendor/htm-preact-standalone.module.js",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "4e4c7490ad853fb6223063489c114e1201751da2b8209e9afd50299942a41bad",
+    "headers": {
+      "Content-Type": "application/manifest+json",
+      "Set-Cookie": false
+    },
+    "route": "/manifest.webmanifest",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "4e4c7490ad853fb6223063489c114e1201751da2b8209e9afd50299942a41bad",
+    "headers": {
+      "Content-Type": "application/manifest+json",
+      "Set-Cookie": false
+    },
+    "route": "/manifest.webmanifest",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "0b80772ed0cf62d590c85b9ab8422ae8f42470c4d71bc979c1c05d03680601f7",
+    "headers": {
+      "Content-Type": "application/javascript",
+      "Set-Cookie": false
+    },
+    "route": "/sw.js",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "0b80772ed0cf62d590c85b9ab8422ae8f42470c4d71bc979c1c05d03680601f7",
+    "headers": {
+      "Content-Type": "application/javascript",
+      "Set-Cookie": false
+    },
+    "route": "/sw.js",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "0cc61212ab2f688dda86e6a63870166821e863f03e9292dedff7fe050ad795ea",
+    "headers": {
+      "Content-Type": "image/png",
+      "Set-Cookie": false
+    },
+    "route": "/icon-192.png",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "0cc61212ab2f688dda86e6a63870166821e863f03e9292dedff7fe050ad795ea",
+    "headers": {
+      "Content-Type": "image/png",
+      "Set-Cookie": false
+    },
+    "route": "/icon-192.png",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "598e7537e0f722929e20e6f9133bcd53347393626fcc1ab16f61b123111e1f48",
+    "headers": {
+      "Content-Type": "image/png",
+      "Set-Cookie": false
+    },
+    "route": "/icon-512.png",
+    "status": 200,
+    "with_session": false
+  },
+  {
+    "body_sha256": "598e7537e0f722929e20e6f9133bcd53347393626fcc1ab16f61b123111e1f48",
+    "headers": {
+      "Content-Type": "image/png",
+      "Set-Cookie": false
+    },
+    "route": "/icon-512.png",
+    "status": 200,
+    "with_session": true
+  },
+  {
+    "body_sha256": "51d0a9e3bd9ffc25483790aaffe7a3597e642edd040dddb16aafc324e6e922ed",
+    "headers": {
+      "Content-Type": "application/json",
+      "Set-Cookie": false
+    },
+    "route": "/nope",
+    "status": 404,
+    "with_session": false
+  },
+  {
+    "body_sha256": "51d0a9e3bd9ffc25483790aaffe7a3597e642edd040dddb16aafc324e6e922ed",
+    "headers": {
+      "Content-Type": "application/json",
+      "Set-Cookie": false
+    },
+    "route": "/nope",
+    "status": 404,
+    "with_session": true
+  }
+]

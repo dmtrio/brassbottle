@@ -1,0 +1,258 @@
+/*
+ * Djinn admin design tokens and layout classes.
+ *
+ * Rule: app code (everything outside src/components/ui/, which shadcn owns)
+ * uses only these tokens and classes for spacing, sizing, type and status
+ * colour. No numeric spacing utilities (px-6), no arbitrary values
+ * (text-[15px]), no raw palette colours (emerald-600), no inline style.
+ * scripts/check_tokens.py enforces it: `npm run check:tokens`.
+ *
+ * Tailwind v4 turns each --spacing-<name> into p-<name>, gap-<name>,
+ * w-<name>, h-<name>, size-<name>…, each --text-<name> into text-<name>,
+ * and each --color-<name> into bg-/text-/border-<name>.
+ *
+ * Two layers, on purpose:
+ *  - House defaults for shadcn primitives (table cell padding, control
+ *    height, the `allow` button variant) live IN src/components/ui/, so every
+ *    page gets them without asking.
+ *  - The @utility classes below are for app-level composition and never
+ *    restyle a property a shadcn primitive already sets. To override a
+ *    primitive, pass a token class (h-control, py-cell-y-compact, pl-indent):
+ *    tailwind-merge understands those and resolves the conflict. It does not
+ *    understand custom @utility names, so a conflict there is decided by CSS
+ *    order, which is how the Allow button once rendered black.
+ */
+
+/* Status colours: light and dark values, mapped into Tailwind below. */
+:root {
+  --allow: oklch(0.596 0.145 163.225);
+  --allow-hover: oklch(0.508 0.118 165.612);
+  --allow-foreground: oklch(0.985 0 0);
+  --allow-text: oklch(0.508 0.118 165.612);
+  --allow-subtle: oklch(0.596 0.145 163.225 / 12%);
+  --warn-text: oklch(0.555 0.163 48.998);
+  --warn-subtle: oklch(0.769 0.188 70.08 / 15%);
+  --warn-border: oklch(0.769 0.188 70.08 / 50%);
+  --deny-subtle: oklch(0.577 0.245 27.325 / 8%);
+  --deny-border: oklch(0.577 0.245 27.325 / 40%);
+  --app-canvas: oklch(0.985 0.001 286 / 1);
+}
+.dark {
+  --allow: oklch(0.596 0.145 163.225);
+  --allow-hover: oklch(0.508 0.118 165.612);
+  --allow-foreground: oklch(0.985 0 0);
+  --allow-text: oklch(0.765 0.177 163.223);
+  --allow-subtle: oklch(0.696 0.17 162.48 / 15%);
+  --warn-text: oklch(0.828 0.189 84.429);
+  --warn-subtle: oklch(0.769 0.188 70.08 / 15%);
+  --warn-border: oklch(0.769 0.188 70.08 / 45%);
+  --deny-subtle: oklch(0.704 0.191 22.216 / 10%);
+  --deny-border: oklch(0.704 0.191 22.216 / 40%);
+  --app-canvas: oklch(0.17 0.005 285.823);
+}
+
+@theme inline {
+  --color-allow: var(--allow);
+  --color-allow-hover: var(--allow-hover);
+  --color-allow-foreground: var(--allow-foreground);
+  --color-allow-text: var(--allow-text);
+  --color-allow-subtle: var(--allow-subtle);
+  --color-warn-text: var(--warn-text);
+  --color-warn-subtle: var(--warn-subtle);
+  --color-warn-border: var(--warn-border);
+  --color-deny-subtle: var(--deny-subtle);
+  --color-deny-border: var(--deny-border);
+  --color-canvas: var(--app-canvas);
+  --color-on-status: oklch(1 0 0);   /* text on a solid allow/deny fill */
+}
+
+@theme {
+  /* Type scale */
+  --text-title: 1.125rem;          /* page title in the top bar */
+  --text-title--line-height: 1.75rem;
+  --text-row-title: 0.9375rem;     /* line 1 of a row: the destination */
+  --text-row-title--line-height: 1.4;
+  --text-body: 0.875rem;           /* line 2 of a row, controls, body copy */
+  --text-body--line-height: 1.25rem;
+  --text-caption: 0.75rem;         /* timestamps, hints, secondary facts */
+  --text-caption--line-height: 1rem;
+  --text-lead: 1rem;               /* brand, card headings */
+  --text-lead--line-height: 1.5rem;
+  --text-micro: 0.6875rem;         /* count badges, nav captions */
+  --text-micro--line-height: 1rem;
+
+  /* Page frame */
+  --spacing-sidebar: 15rem;
+  --spacing-page-x: 2rem;
+  --spacing-page-x-phone: 1rem;
+  --spacing-page-y: 1.5rem;
+  --spacing-page-bottom-phone: 7rem;  /* clears the bottom tab bar */
+  --spacing-bar-y: 0.75rem;           /* top bar vertical padding */
+
+  --spacing-frame-y: 1.25rem;         /* sidebar top/bottom padding */
+  --spacing-frame-x: 0.75rem;         /* sidebar side padding */
+  --spacing-nav-x: 0.75rem;           /* nav item padding */
+  --spacing-nav-y: 0.5rem;
+  --spacing-brand-bottom: 1.5rem;
+
+  /* Rhythm */
+  --spacing-section: 1.25rem;   /* between blocks on a page */
+  --spacing-toolbar: 0.75rem;   /* between controls in a toolbar */
+  --spacing-inline: 0.5rem;     /* between inline items (badges, icon+label) */
+  --spacing-tight: 0.25rem;     /* icon to text inside a chip */
+  --spacing-line: 0.375rem;     /* between the lines of one row */
+
+  /* Controls */
+  --spacing-control: 2.5rem;        /* height of inputs, selects, toolbar buttons */
+  --spacing-control-sm: 2rem;
+  --spacing-search-min: 13.75rem;
+  --spacing-search-icon: 0.75rem;   /* search icon inset */
+  --spacing-search-pad: 2.25rem;    /* input left padding past the icon */
+  --spacing-popover: 18rem;
+  --spacing-dialog: 28rem;
+  --spacing-select: 11rem;
+  --spacing-menu: 15rem;            /* dropdown menu width */
+  --spacing-icon: 1rem;
+  --spacing-icon-sm: 0.875rem;
+  --spacing-icon-lg: 1.25rem;
+  --spacing-icon-xl: 2rem;
+  --spacing-dot: 0.375rem;
+
+  /* Tables */
+  --spacing-cell-x: 1.5rem;
+  --spacing-cell-y: 1.25rem;
+  --spacing-cell-y-compact: 1rem;
+  --spacing-group-y: 0.75rem;
+  --spacing-indent: 3rem;           /* rows under a group header */
+  --spacing-head: 2.75rem;          /* table header row height */
+  --spacing-col-time: 8rem;
+  --spacing-col-date: 11rem;         /* date + clock + relative */
+  --spacing-col-actions: 18.75rem;
+
+  /* Cards (phone) */
+  --spacing-card: 1rem;
+  --spacing-empty-y: 4rem;
+}
+
+/* ---- Layout classes ------------------------------------------------- */
+
+@utility page {
+  padding: var(--spacing-page-y) var(--spacing-page-x);
+  @media (width < 40rem) {
+    padding: var(--spacing-page-y) var(--spacing-page-x-phone) var(--spacing-page-bottom-phone);
+  }
+}
+@utility page-bar {
+  padding: var(--spacing-bar-y) var(--spacing-page-x);
+  @media (width < 40rem) { padding: var(--spacing-bar-y) var(--spacing-page-x-phone); }
+}
+@utility stack-section { display: flex; flex-direction: column; gap: var(--spacing-section); }
+@utility stack-line { display: flex; flex-direction: column; gap: var(--spacing-line); }
+@utility toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-toolbar); }
+@utility inline-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-inline); }
+
+/* A bordered surface holding a table or a list. */
+@utility panel {
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  background-color: var(--background);
+  box-shadow: var(--shadow-xs);
+}
+
+/* A padded band: group headers, collapsible headers, popover footers. */
+@utility cell-group { padding: var(--spacing-group-y) var(--spacing-cell-x); }
+
+/* Row text hierarchy: title (what), meta (who/why), caption (when), error. */
+@utility row-title {
+  font-family: var(--font-mono); font-size: var(--text-row-title); line-height: var(--text-row-title--line-height);
+  font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere;
+}
+@utility row-meta { font-size: var(--text-body); line-height: var(--text-body--line-height); color: var(--muted-foreground); }
+@utility row-caption { font-size: var(--text-caption); line-height: var(--text-caption--line-height); color: var(--muted-foreground); }
+@utility row-error { display: flex; gap: var(--spacing-line); font-size: var(--text-body); color: var(--destructive); }
+
+/* Phone card: one request. */
+@utility item-card {
+  display: flex; flex-direction: column; gap: var(--spacing-card);
+  padding: var(--spacing-card); border-radius: var(--radius-xl);
+  border: 1px solid var(--border); background-color: var(--background); box-shadow: var(--shadow-xs);
+}
+
+/* Status pills. One base, one tone class each. */
+@utility pill {
+  display: inline-flex; align-items: center; gap: var(--spacing-tight);
+  border-radius: var(--radius-md); padding: 0.125rem var(--spacing-inline);
+  font-size: var(--text-caption); line-height: var(--text-caption--line-height); font-weight: 500;
+}
+@utility pill-allow { background-color: var(--allow-subtle); color: var(--allow-text); }
+@utility pill-deny { background-color: var(--deny-subtle); color: var(--destructive); }
+@utility pill-warn { background-color: var(--warn-subtle); color: var(--warn-text); }
+@utility pill-neutral { background-color: var(--muted); color: var(--muted-foreground); }
+
+/* Small red count on nav items and tabs. */
+@utility count-badge {
+  display: inline-flex; min-width: 1.25rem; justify-content: center; border-radius: 9999px;
+  background-color: var(--destructive); color: white; padding-inline: var(--spacing-dot);
+  font-size: var(--text-micro); line-height: 1.25rem; font-weight: 600;
+}
+
+
+/* ---- App frame ------------------------------------------------------ */
+
+@utility sidebar {
+  position: sticky; top: 0; height: 100vh; width: var(--spacing-sidebar); flex: none;
+  display: flex; flex-direction: column; gap: var(--spacing-tight);
+  padding: var(--spacing-frame-y) var(--spacing-frame-x);
+  border-right: 1px solid var(--border); background-color: var(--background);
+}
+@utility brand {
+  display: flex; align-items: center; gap: var(--spacing-inline);
+  padding: 0 var(--spacing-nav-x) var(--spacing-brand-bottom);
+  font-size: var(--text-lead); line-height: var(--text-lead--line-height); font-weight: 600;
+}
+@utility nav-item {
+  display: flex; align-items: center; gap: var(--spacing-toolbar);
+  padding: var(--spacing-nav-y) var(--spacing-nav-x); border-radius: var(--radius-md);
+  font-size: var(--text-body); line-height: var(--text-body--line-height); color: var(--muted-foreground);
+  transition: background-color 150ms, color 150ms;
+  &:hover { background-color: var(--muted); color: var(--foreground); }
+}
+@utility nav-item-active { background-color: var(--muted); color: var(--foreground); font-weight: 500; }
+@utility nav-caption { margin-left: auto; font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); opacity: 0.7; }
+@utility frame-foot { margin-top: auto; padding-inline: var(--spacing-nav-x); font-size: var(--text-caption); color: var(--muted-foreground); }
+
+@utility topbar {
+  position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: var(--spacing-toolbar);
+  border-bottom: 1px solid var(--border); background-color: color-mix(in oklab, var(--background) 95%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+/* Phone bottom tab bar. */
+@utility tabbar {
+  position: fixed; inset-inline: 0; bottom: 0; z-index: 20; display: flex;
+  border-top: 1px solid var(--border); background-color: var(--background);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@utility tabbar-item {
+  position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; gap: var(--spacing-tight);
+  padding-block: var(--spacing-nav-y); font-size: var(--text-micro); color: var(--muted-foreground);
+}
+@utility tabbar-item-active { color: var(--foreground); font-weight: 500; }
+@utility tabbar-badge { position: absolute; top: var(--spacing-tight); left: 55%; }
+
+/* Live connection indicator. */
+@utility live-dot { width: var(--spacing-dot); height: var(--spacing-dot); border-radius: 9999px; background-color: currentColor; }
+
+/* Search field: icon inside the input. */
+@utility search-field { position: relative; flex: 1 1 auto; min-width: var(--spacing-search-min); }
+@utility search-icon {
+  pointer-events: none; position: absolute; left: var(--spacing-search-icon); top: 50%; transform: translateY(-50%);
+  width: var(--spacing-icon); height: var(--spacing-icon); color: var(--muted-foreground);
+}
+
+@utility empty-state {
+  display: flex; flex-direction: column; align-items: center; gap: var(--spacing-toolbar);
+  padding-block: var(--spacing-empty-y); color: var(--muted-foreground); text-align: center;
+}
+

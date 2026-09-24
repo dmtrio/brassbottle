@@ -50,6 +50,9 @@ TOKEN_RACE_SLEEP_SECONDS = 0.2
 TOKEN_REJECTED_ERROR = "operator token rejected by daemon; restart djinn admin"
 UNREACHABLE_ERROR = "egress daemon unreachable"
 CONTAINER_MARKER_ENV = "DJINN_CONTAINER"
+ADMIN_UI_ENV = "DJINN_ADMIN_UI"
+ADMIN_UI_SPA_VALUE = "spa"
+ADMIN_UI_DIST_ENV = "DJINN_ADMIN_UI_DIST"
 
 # Per-run session secret, created host-side by `djinn egress start` (never in
 # secrets.env, never mounted into a bottle). GET /session?key=<secret> is the
@@ -255,6 +258,30 @@ def _json_bytes(body: dict[str, Any]) -> bytes:
     return json.dumps(body, separators=(",", ":")).encode("utf-8")
 
 
+_SPA_CONTENT_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".json": "application/json",
+    ".webmanifest": "application/manifest+json",
+    ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+def _content_type_for(path: str) -> str:
+    ext = Path(path).suffix.lower()
+    return _SPA_CONTENT_TYPES.get(ext, "application/octet-stream")
+
+
+def _default_spa_dist() -> Path:
+    return _SRC_DIR.parent / "admin" / "ui" / "dist"
+
+
 def _is_loopback_value(raw_host: str) -> bool:
     host = raw_host.strip().lower()
     if not host:
@@ -432,7 +459,38 @@ class AdminHTTPServer(ThreadingHTTPServer):
         self.admin_key = admin_key
         self.app_js = _APP_JS_BYTES
         self.vendor_js = _VENDOR_JS_BYTES
+        self.spa_mode = os.environ.get(ADMIN_UI_ENV) == ADMIN_UI_SPA_VALUE
+        self.spa_dist = Path(os.environ.get(ADMIN_UI_DIST_ENV) or _default_spa_dist())
+        self.spa_index: bytes | None = None
+        self.spa_allowlist: dict[str, tuple[Path, str]] = {}
+        if self.spa_mode:
+            self._load_spa()
         super().__init__(server_address, AdminRequestHandler)
+
+    def _load_spa(self) -> None:
+        if not self.spa_dist.is_dir():
+            LOG.error("admin spa dist missing path=%s", self.spa_dist)
+            return
+        index_path = self.spa_dist / "index.html"
+        try:
+            self.spa_index = index_path.read_bytes()
+        except OSError as exc:
+            LOG.error("admin spa index missing path=%s error=%s", index_path, exc)
+            return
+        total_bytes = 0
+        for path in self.spa_dist.rglob("*"):
+            if not path.is_file() or path.name == "index.html":
+                continue
+            rel = path.relative_to(self.spa_dist).as_posix()
+            url_path = "/" + rel
+            self.spa_allowlist[url_path] = (path, _content_type_for(url_path))
+            total_bytes += path.stat().st_size
+        LOG.info(
+            "admin spa mode enabled dist=%s files=%d bytes=%d",
+            self.spa_dist,
+            len(self.spa_allowlist),
+            total_bytes,
+        )
 
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
         exc = sys.exc_info()[1]
@@ -465,6 +523,9 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         path = self.path.split("?", 1)[0]
+        if self.server.spa_mode:
+            self._dispatch_spa(method, path)
+            return
         routes: dict[tuple[str, str], Callable[[], None]] = {
             ("GET", "/"): self._handle_root,
             ("GET", "/health"): self._handle_health,
@@ -483,6 +544,71 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         handler()
+
+    def _dispatch_spa(self, method: str, path: str) -> None:
+        if method == "GET":
+            if path in self.server.spa_allowlist:
+                self._handle_spa_asset(path)
+                return
+            if path in ("/", "/egress", "/denylist", "/bottles", "/backup"):
+                self._handle_spa_app_route()
+                return
+            if path == "/health":
+                self._handle_health()
+                return
+            if path == "/session":
+                self._handle_session_get()
+                return
+            if path == "/api/egress/queue":
+                self._handle_egress_queue_get()
+                return
+            if path in (
+                "/app.js",
+                "/vendor/htm-preact-standalone.module.js",
+                "/manifest.webmanifest",
+                "/sw.js",
+                "/icon-192.png",
+                "/icon-512.png",
+            ):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+        elif method == "POST" and path == "/api/egress/decide":
+            self._handle_egress_decide_post()
+            return
+        self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def _handle_spa_app_route(self) -> None:
+        if self.server.spa_index is None:
+            self._send_bytes(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                b"admin UI not built",
+                content_type="text/plain; charset=utf-8",
+            )
+            return
+        if self._cookie_matches():
+            self._send_bytes(
+                HTTPStatus.OK,
+                self.server.spa_index,
+                content_type="text/html; charset=utf-8",
+                headers={"Cache-Control": "no-store"},
+            )
+            return
+        self._send_bytes(
+            HTTPStatus.OK,
+            POINTER_HTML.encode("utf-8"),
+            content_type="text/html; charset=utf-8",
+        )
+
+    def _handle_spa_asset(self, path: str) -> None:
+        file_path, content_type = self.server.spa_allowlist[path]
+        body = file_path.read_bytes()
+        cache = "public, max-age=31536000, immutable" if path.startswith("/assets/") else "no-cache"
+        self._send_bytes(
+            HTTPStatus.OK,
+            body,
+            content_type=content_type,
+            headers={"Cache-Control": cache},
+        )
 
     def _send_bytes(
         self,

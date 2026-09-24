@@ -42,7 +42,9 @@ discipline) that the harness supplies separately.
 - `admin/` — the admin plane's browser side: `admin/contract/` holds the JSON
   Schemas of the broker-to-admin bodies (`queue_snapshot`, `/decide`, and
   the planned recent page and SSE event), enforced by
-  `tests/test_admin_contract.py` against the real broker.
+  `tests/test_admin_contract.py` against the real broker; `admin/ui/` is the
+  Vue 3 + shadcn-vue SPA (`npm run build`), styled only through
+  `src/styles/tokens.css` and guarded by `scripts/check_tokens.py`.
 - `docs/` — deep guides (`script.md` explains every shell script by
   lifecycle); `docs/workspace.CONTRACT.md` is the workspace contract copied
   into containers.

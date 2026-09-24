@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -143,6 +144,12 @@ class AdminDaemonTests(unittest.TestCase):
         egress_root.mkdir(parents=True, exist_ok=True)
         token_path = egress_root / admin.OPERATOR_TOKEN_FILENAME
         token_path.write_text(operator_token + "\n", encoding="utf-8")
+        env_map = {"DJINN_HOME": str(home)}
+        if env:
+            env_map.update(env)
+        patcher = mock.patch.dict(os.environ, env_map, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         server = admin.AdminHTTPServer(
             (host, 0),
             egress_root=egress_root,
@@ -151,12 +158,6 @@ class AdminDaemonTests(unittest.TestCase):
             admin_key=admin_key,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
-        env_map = {"DJINN_HOME": str(home)}
-        if env:
-            env_map.update(env)
-        patcher = mock.patch.dict(os.environ, env_map, clear=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         thread.start()
         wait_for_tcp_listening(server.server_address[0], server.server_address[1])
         return server, thread
@@ -1344,3 +1345,215 @@ class AdminDaemonTests(unittest.TestCase):
         self.assertIn("localTimestamp(row.decided_at)", text)
         # Apply failures surface as the attempt-counted chip.
         self.assertIn("apply failed \\u00d7", text)
+
+    def test_legacy_routes_match_recorded_fixture(self):
+        """With DJINN_ADMIN_UI unset, every legacy route returns exactly the
+        status, headers and body that the pre-step code returned."""
+        fixture = json.loads(
+            (TESTS_DIR / "fixtures" / "admin_legacy_responses.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread = self._start_admin(Path(tmp))
+            host, port = server.server_address
+            try:
+                for entry in fixture:
+                    headers: dict[str, str] = {}
+                    if entry["with_session"]:
+                        headers["Cookie"] = f"{admin.SESSION_COOKIE_NAME}=session-secret"
+                    status, _payload, resp_headers, raw = self._request(
+                        host, port, "GET", entry["route"], headers=headers
+                    )
+                    self.assertEqual(
+                        status,
+                        entry["status"],
+                        f"{entry['route']} session={entry['with_session']}",
+                    )
+                    self.assertEqual(
+                        resp_headers.get("Content-Type"),
+                        entry["headers"].get("Content-Type"),
+                        f"{entry['route']} Content-Type",
+                    )
+                    self.assertEqual(
+                        resp_headers.get("Cache-Control"),
+                        entry["headers"].get("Cache-Control"),
+                        f"{entry['route']} Cache-Control",
+                    )
+                    self.assertEqual(
+                        resp_headers.get("Location"),
+                        entry["headers"].get("Location"),
+                        f"{entry['route']} Location",
+                    )
+                    self.assertEqual(
+                        "Set-Cookie" in resp_headers,
+                        entry["headers"].get("Set-Cookie", False),
+                        f"{entry['route']} Set-Cookie presence",
+                    )
+                    self.assertEqual(
+                        hashlib.sha256(raw).hexdigest(),
+                        entry["body_sha256"],
+                        f"{entry['route']} body sha256",
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def _build_spa_dist(self, parent: Path, *, with_index: bool = True) -> Path:
+        dist = parent / "dist"
+        dist.mkdir(parents=True)
+        if with_index:
+            (dist / "index.html").write_text(
+                "<!doctype html><html><body>SPA</body></html>", encoding="utf-8"
+            )
+        assets = dist / "assets"
+        assets.mkdir()
+        (assets / "app-abc123.js").write_text("console.log('app')", encoding="utf-8")
+        (assets / "app-abc123.css").write_text("body{color:red}", encoding="utf-8")
+        (dist / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+        return dist
+
+    def test_spa_mode_serves_app_routes_and_assets(self):
+        """With DJINN_ADMIN_UI=spa the daemon serves index.html at the five app
+        routes to session holders, the pointer page without a session, hashed
+        assets with the right content type and cache header, and 404 for legacy
+        assets and traversal attempts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist(home)
+            env = {
+                "DJINN_HOME": str(home),
+                "DJINN_ADMIN_UI": "spa",
+                "DJINN_ADMIN_UI_DIST": str(dist),
+            }
+            server, thread = self._start_admin(home, env=env)
+            host, port = server.server_address
+            try:
+                # app routes with cookie -> index.html, no-store
+                for route in ("/", "/egress", "/denylist", "/bottles", "/backup"):
+                    with self.subTest(route=route, session=True):
+                        status, _payload, headers, raw = self._request(
+                            host,
+                            port,
+                            "GET",
+                            route,
+                            headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                        )
+                        self.assertEqual(status, HTTPStatus.OK)
+                        self.assertEqual(headers.get("Content-Type"), "text/html; charset=utf-8")
+                        self.assertEqual(headers.get("Cache-Control"), "no-store")
+                        self.assertIn(b"SPA", raw)
+
+                # app routes without cookie -> pointer page
+                for route in ("/", "/egress", "/denylist", "/bottles", "/backup"):
+                    with self.subTest(route=route, session=False):
+                        status, _payload, headers, raw = self._request(host, port, "GET", route)
+                        self.assertEqual(status, HTTPStatus.OK)
+                        self.assertEqual(headers.get("Content-Type"), "text/html; charset=utf-8")
+                        self.assertIn(b"./djinn egress url", raw)
+
+                # query string ignored for app routes
+                status, _payload, _headers, raw = self._request(
+                    host,
+                    port,
+                    "GET",
+                    "/egress?foo=bar",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertIn(b"SPA", raw)
+
+                # allowlisted assets
+                status, _payload, headers, raw = self._request(host, port, "GET", "/assets/app-abc123.js")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(headers.get("Content-Type"), "text/javascript; charset=utf-8")
+                self.assertEqual(headers.get("Cache-Control"), "public, max-age=31536000, immutable")
+
+                status, _payload, headers, raw = self._request(host, port, "GET", "/assets/app-abc123.css")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(headers.get("Content-Type"), "text/css; charset=utf-8")
+                self.assertEqual(headers.get("Cache-Control"), "public, max-age=31536000, immutable")
+
+                status, _payload, headers, raw = self._request(host, port, "GET", "/favicon.svg")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(headers.get("Content-Type"), "image/svg+xml")
+                self.assertEqual(headers.get("Cache-Control"), "no-cache")
+
+                # legacy assets 404
+                for route in (
+                    "/app.js",
+                    "/vendor/htm-preact-standalone.module.js",
+                    "/manifest.webmanifest",
+                    "/sw.js",
+                    "/icon-192.png",
+                    "/icon-512.png",
+                ):
+                    with self.subTest(legacy=route):
+                        status, _payload, _headers, _raw = self._request(host, port, "GET", route)
+                        self.assertEqual(status, HTTPStatus.NOT_FOUND)
+
+                # traversal / outside-allowlist paths are 404
+                for route in (
+                    "/../src/admin_daemon.py",
+                    "/assets/../../src/admin_daemon.py",
+                    "/assets/%2e%2e/x",
+                    "/nope",
+                ):
+                    with self.subTest(traversal=route):
+                        status, _payload, _headers, _raw = self._request(host, port, "GET", route)
+                        self.assertEqual(status, HTTPStatus.NOT_FOUND)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_spa_mode_missing_dist_returns_503_for_app_routes(self):
+        """If the configured dist directory is missing, app routes answer 503
+        'admin UI not built' while /health still works."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                "DJINN_HOME": str(home),
+                "DJINN_ADMIN_UI": "spa",
+                "DJINN_ADMIN_UI_DIST": str(home / "no-such-dist"),
+            }
+            server, thread = self._start_admin(home, env=env)
+            host, port = server.server_address
+            try:
+                status, _payload, _headers, raw = self._request(
+                    host,
+                    port,
+                    "GET",
+                    "/egress",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
+                )
+                self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+                self.assertEqual(raw, b"admin UI not built")
+
+                status, _payload, _headers, _raw = self._request(host, port, "GET", "/health")
+                self.assertEqual(status, HTTPStatus.OK)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_spa_mode_logs_boundary_at_startup(self):
+        """The spa startup logs mode, dist path, file count and total bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist(home)
+            env = {
+                "DJINN_HOME": str(home),
+                "DJINN_ADMIN_UI": "spa",
+                "DJINN_ADMIN_UI_DIST": str(dist),
+            }
+            with self.assertLogs(admin.LOG, level="INFO") as captured:
+                server, thread = self._start_admin(home, env=env)
+                try:
+                    joined = "\n".join(captured.output)
+                    self.assertIn("admin spa mode enabled", joined)
+                    self.assertIn(str(dist), joined)
+                    self.assertIn("files=3", joined)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    join_thread_or_fail(thread, label="admin")
