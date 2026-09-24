@@ -777,17 +777,37 @@ def _in(needle: str, text: str) -> None:
 
 
 def add_siblings(broker: stub.StubBroker) -> None:
-    """Two more open requests for a1.example.com: alpha:8443 (same bottle) and zeta:443 (another bottle)."""
+    """Four more open requests around a1.example.com: alpha:8443 (same bottle, another port), zeta:443 (another
+    bottle), api.a1.example.com in alpha (a subzone of it) and xa1.example.com in alpha (a lookalike, not a subzone)."""
     with broker.lock:
         base = next(row for row in broker.queue["open"] if row["request_id"] == "a1")
         opened = datetime.strptime(base["opened_at"], "%Y-%m-%dT%H:%M:%SZ")
-        for offset, (rid, container, port) in enumerate((("a1p", "alpha", 8443), ("a1z", "zeta", 443)), start=1):
+        extra = (("a1p", "alpha", "a1.example.com", 8443), ("a1z", "zeta", "a1.example.com", 443),
+                 ("a1s", "alpha", "api.a1.example.com", 443), ("a1x", "alpha", "xa1.example.com", 443))
+        for offset, (rid, container, host, port) in enumerate(extra, start=1):
             broker.queue["open"].append({
-                **base, "request_id": rid, "container": container, "port": port,
+                **base, "request_id": rid, "container": container, "host": host, "port": port,
                 "opened_at": stub._iso(opened + timedelta(seconds=offset)), "age_seconds": base["age_seconds"] - offset,
             })
         broker.queue["open"].sort(key=lambda row: row["opened_at"])
         broker.queue["count"] = len(broker.queue["open"])
+
+
+def _held_decides(page, traffic: Traffic, drv: "SpaDriver"):
+    """Hold every decide POST at the page's network layer. Returns (held routes, release_next(), button(...))."""
+    held: list = []
+    page.route("**/api/egress/decide", lambda route: held.append(route))
+    answered = [len(traffic.statuses)]
+
+    def release_next() -> None:
+        held.pop(0).continue_()
+        answered[0] += 1
+        drv._wait_until(lambda: len(traffic.statuses) >= answered[0], 5)
+
+    def button(label: str, host: str = "a1.example.com", port: int = 443, bottle: str = "alpha"):
+        return page.get_by_role("button", name=f"{label} {host}:{port} in {bottle}", exact=True)
+
+    return held, release_next, button
 
 
 def sibling_rows_lock(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
@@ -800,40 +820,78 @@ def sibling_rows_lock(browser, served: Served, broker: stub.StubBroker, viewport
     try:
         drv = SpaDriver(page, traffic)
         page.goto(served.base + "/")
-        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 2)
-        held: list = []
-        page.route("**/api/egress/decide", lambda route: held.append(route))
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 4)
+        held, release_next, button = _held_decides(page, traffic, drv)
+        sub = dict(host="api.a1.example.com")
+        lookalike = dict(host="xa1.example.com")
 
-        def release(answers: int) -> None:
-            for route in held:
-                route.continue_()
-            held.clear()
-            drv._wait_until(lambda: len(traffic.statuses) >= answers, 5)
-
-        def button(label, **kw):
-            return drv.button(label, "a1.example.com", **kw)
-
-        # An allow acts on the host in ITS bottle: the alpha:8443 sibling locks, zeta's a1 does not.
+        # An allow acts on the zone in ITS bottle: the alpha:8443 sibling and the alpha subzone lock; zeta's a1,
+        # the alpha lookalike and an unrelated host do not.
         button("Allow").click()
         drv._wait_until(lambda: len(held) == 1, 5)
         for label in ("Allow", "Deny", "More allow options for", "More deny options for"):
-            expect(button(label, port=8443, bottle="alpha")).to_be_disabled()
+            expect(button(label, port=8443)).to_be_disabled()
+            expect(button(label, **sub)).to_be_disabled()
         expect(button("Allow", bottle="zeta")).to_be_enabled()
+        expect(button("Allow", **lookalike)).to_be_enabled()
         expect(drv.button("Allow", "a2.example.com")).to_be_enabled()
-        release(1)
-        expect(button("Allow", port=8443, bottle="alpha")).to_be_enabled()
+        release_next()
+        expect(button("Allow", port=8443)).to_be_enabled()
+        expect(button("Allow", **sub)).to_be_enabled()
 
-        # A global deny acts on the host in EVERY bottle: both remaining a1 rows lock.
-        button("More deny options for", port=8443, bottle="alpha").click()
+        # A global deny acts on the zone in EVERY bottle: the alpha:8443 row, the alpha subzone and zeta's row lock.
+        button("More deny options for", port=8443).click()
         page.get_by_role("menuitem", name="Deny permanently · global").click()
         dialog = page.get_by_role("dialog")
         dialog.locator("#confirm-host").fill("a1.example.com")
         dialog.get_by_role("button", name="Deny permanently").click()
         drv._wait_until(lambda: len(held) == 1, 5)
-        expect(button("Allow", port=8443, bottle="alpha")).to_be_disabled()
+        expect(button("Allow", **sub)).to_be_disabled()
         expect(button("Allow", bottle="zeta")).to_be_disabled()
+        expect(button("Allow", **lookalike)).to_be_enabled()
         expect(drv.button("Allow", "a2.example.com")).to_be_enabled()
-        release(2)
+        release_next()
+    finally:
+        context.close()
+
+
+def overlapping_decides_lock(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """A row stays locked until EVERY in-flight decide covering it has finished, not just the first to finish."""
+    from playwright.sync_api import expect
+
+    broker.reset()
+    add_siblings(broker)
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    try:
+        drv = SpaDriver(page, traffic)
+        page.goto(served.base + "/")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 4)
+        held, release_next, button = _held_decides(page, traffic, drv)
+        sub = dict(host="api.a1.example.com")
+
+        # 1st: Allow a1 in alpha locks a1, a1:8443 and the subzone. 2nd: a global deny from zeta's a1 also locks
+        # zeta's row, and re-locks the alpha ones.
+        button("Allow").click()
+        drv._wait_until(lambda: len(held) == 1, 5)
+        button("More deny options for", bottle="zeta").click()
+        page.get_by_role("menuitem", name="Deny permanently · global").click()
+        dialog = page.get_by_role("dialog")
+        dialog.locator("#confirm-host").fill("a1.example.com")
+        dialog.get_by_role("button", name="Deny permanently").click()
+        drv._wait_until(lambda: len(held) == 2, 5)
+        for locked in (button("Allow", port=8443), button("Allow", **sub), button("Allow", bottle="zeta")):
+            expect(locked).to_be_disabled()
+
+        # The first decide finishes: every row the second still covers stays locked.
+        release_next()
+        expect(drv.button("Allow", "a2.example.com")).to_be_enabled()
+        for locked in (button("Allow", port=8443), button("Allow", **sub), button("Allow", bottle="zeta")):
+            expect(locked).to_be_disabled()
+
+        # The second finishes: now they unlock.
+        release_next()
+        expect(button("Allow", **sub)).to_be_enabled()
+        expect(button("Allow", bottle="zeta")).to_be_enabled()
     finally:
         context.close()
 
@@ -891,9 +949,11 @@ def inflight_poll_keeps_banner(browser, served: Served, broker: stub.StubBroker,
 
 def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
     suite = Suite(ui, viewport)
-    suite.check("28", "A decide in flight locks every request it acts on (same host and bottle; all bottles on a "
-                      "global deny) and no other",
+    suite.check("28", "A decide in flight locks every request it acts on (the host or a subzone of it in the same "
+                      "bottle; all bottles on a global deny) and no other",
                 lambda: sibling_rows_lock(browser, served, broker, viewport), spa_only=True)
+    suite.check("28b", "A row stays locked until every in-flight decide that covers it has finished",
+                lambda: overlapping_decides_lock(browser, served, broker, viewport), spa_only=True)
     suite.check("29", "A poll already in flight when a decide fails does not clear the banner; the next poll does",
                 lambda: inflight_poll_keeps_banner(browser, served, broker, viewport), spa_only=True)
     return suite.results
@@ -1544,6 +1604,7 @@ NEW_CHECKS = [
     ("26", "Every row's action group sits inside its panel and no host breaks across lines", "N/A(spa-only) on legacy"),
     ("27", "A recent row that wraps leaves no dangling separator", "N/A(spa-only) on legacy"),
     ("28", "A decide in flight locks every request it acts on and no other", "N/A(spa-only) on legacy"),
+    ("28b", "A row stays locked until every in-flight decide that covers it has finished", "N/A(spa-only) on legacy"),
     ("29", "A poll already in flight when a decide fails does not clear the banner", "N/A(spa-only) on legacy"),
     ("30", "History lists the whole store newest first, 50 to a page, in keyset order", "N/A(spa-only) on legacy: the History tab is new (PLN step 4)"),
     ("31", "Older then Newer walk every page with no row repeated (across a tie in decided_at) and back", "N/A(spa-only) on legacy"),

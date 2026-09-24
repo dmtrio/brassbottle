@@ -39,7 +39,11 @@ function chooseView(next: unknown): void {
   if (next === 'grouped' || next === 'flat') view.value = next
 }
 
-const busy = reactive(new Set<string>())
+// Request id -> how many in-flight decides cover it. A count, not a flag: with
+// two overlapping decides the first to finish must not unlock rows the second
+// still holds.
+const busy = reactive(new Map<string, number>())
+const isBusy = (id: string): boolean => (busy.get(id) ?? 0) > 0
 const notes = reactive<Record<string, RowNote | undefined>>({})
 
 function byNewest(a: OpenRow, b: OpenRow): number {
@@ -111,12 +115,16 @@ async function submitPermanentDeny(): Promise<void> {
 }
 
 // Every open request this decide acts on: the broker decides all rows for the
-// host in the clicked row's bottle (all ports and subzones), or for the host in
-// every bottle on a global deny. They all lock while it is in flight, or a
-// second click on a sibling would double-decide.
+// zone in the clicked row's bottle (the host on any port, and every subzone of
+// it), or in every bottle on a global deny. They all lock while it is in
+// flight, or a second click on a sibling would double-decide.
 function affectedIds(row: OpenRow, action: DecideAction): string[] {
   const ids = (snapshot.value?.open ?? [])
-    .filter((r) => r.host === row.host && (action === 'deny_global' || r.container === row.container))
+    .filter(
+      (r) =>
+        (r.host === row.host || r.host.endsWith(`.${row.host}`)) &&
+        (action === 'deny_global' || r.container === row.container),
+    )
     .map((r) => r.request_id)
   return ids.includes(row.request_id) ? ids : [...ids, row.request_id]
 }
@@ -129,10 +137,14 @@ async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Pro
   if (reason) payload.reason = reason
 
   const locked = affectedIds(row, action)
-  for (const id of locked) busy.add(id)
+  for (const id of locked) busy.set(id, (busy.get(id) ?? 0) + 1)
   notes[key] = undefined
   const result = await apiDecide(payload)
-  for (const id of locked) busy.delete(id)
+  for (const id of locked) {
+    const left = (busy.get(id) ?? 1) - 1
+    if (left > 0) busy.set(id, left)
+    else busy.delete(id)
+  }
 
   if (!result.ok) {
     if (result.status === 400) {
@@ -271,7 +283,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
               <TableCell>
                 <DecideButtons
                   :row="r"
-                  :busy="busy.has(r.request_id)"
+                  :busy="isBusy(r.request_id)"
                   @decide="(a) => onDecide(r, a)"
                   @permanent-deny="(a) => openPermanentDeny(r, a)"
                 />
@@ -314,7 +326,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
           />
           <DecideButtons
             :row="r"
-            :busy="busy.has(r.request_id)"
+            :busy="isBusy(r.request_id)"
             stretch
             @decide="(a) => onDecide(r, a)"
             @permanent-deny="(a) => openPermanentDeny(r, a)"
