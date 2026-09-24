@@ -295,7 +295,7 @@ components:
     policy: deferred
     deferral_reason: >-
       container base-image tags (ubuntu:24.04, python:3.12-alpine,
-      debian:bookworm-slim) keep their existing policies; image selection is
+      debian:bookworm-slim, node:22-bookworm-slim) keep their existing policies; image selection is
       out of this release's managed scope
 
   distro-packages:
@@ -314,7 +314,7 @@ components:
     policy: deferred
     deferral_reason: >-
       the Dockerfile's toolchain layer (gh via its stable apt line, tea,
-      yq, herdr with sha256, mcp-remote caret range, fnm and uv live
+      yq (also pinned in egress/Dockerfile), herdr with sha256, mcp-remote caret range, fnm and uv live
       installers, Node LTS, pip tooling) keeps existing behavior; several
       members are exact today, but the group is managed as one only if a
       later release adopts it
@@ -322,12 +322,13 @@ components:
   service-images:
     name: Service images
     kind: group
-    enabled_when: "backup/tunnel service start"
+    enabled_when: "backup/tunnel/egress service start"
     policy: deferred
     deferral_reason: >-
       Backrest (ghcr.io/garethgeorge/backrest:v1.14.1) and Newt
-      (fosrl/newt:1.16.0) service-image pins keep existing behavior;
-      service upgrade is out of managed scope
+      (fosrl/newt:1.16.0) service-image pins, and the egress image's admin UI
+      `npm ci` (pinned by admin/ui/package-lock.json), keep existing
+      behavior; service upgrade is out of managed scope
 
   host-bridges:
     name: Host-side service launchers

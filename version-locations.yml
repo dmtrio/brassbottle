@@ -227,6 +227,16 @@ locations:
     path: jump/Dockerfile
     component: base-images
     find: "FROM debian:bookworm-slim"
+  base-images.egress-ui:
+    path: egress/Dockerfile
+    component: base-images
+    find: "FROM node:22-bookworm-slim"
+    note: the admin SPA build stage
+  base-images.egress:
+    path: egress/Dockerfile
+    component: base-images
+    find: "FROM debian:bookworm-slim"
+    note: the broker/admin runtime stage
 
   # Three separate records for three identical apt-update install lines —
   # one-to-one accounting: each record allows exactly one hit line, so a
@@ -262,6 +272,18 @@ locations:
     path: jump/Dockerfile
     component: distro-packages
     find: "apt-get install -y --no-install-recommends"
+  # Two identical apt RUN lines in the egress image (build stage, runtime
+  # stage) — one record each, same one-to-one accounting as the main image.
+  distro-packages.egress-ui:
+    path: egress/Dockerfile
+    component: distro-packages
+    find: 'apt-get update && apt-get install -y --no-install-recommends \'
+    note: the SPA build stage's python3 install
+  distro-packages.egress:
+    path: egress/Dockerfile
+    component: distro-packages
+    find: 'apt-get update && apt-get install -y --no-install-recommends \'
+    note: the runtime stage's python3/ca-certificates/curl/docker.io install
   distro-packages.gear360:
     path: plugins/gear360/install.sh
     component: distro-packages
@@ -323,6 +345,15 @@ locations:
     path: Dockerfile
     component: base-tools
     find: "herdr/releases/download/v"
+  base-tools.egress-yq:
+    path: egress/Dockerfile
+    component: base-tools
+    find: "YQ_VERSION=v4.44.3"
+    note: the egress image's own copy of the pinned mikefarah/yq release
+  base-tools.egress-yq-download:
+    path: egress/Dockerfile
+    component: base-tools
+    find: "yq/releases/download/"
 
   service-images.backrest:
     path: src/backup_config.py
@@ -332,6 +363,11 @@ locations:
     path: src/tunnel_config.py
     component: service-images
     find: "fosrl/newt:1.16.0"
+  service-images.egress-ui-npm-ci:
+    path: egress/Dockerfile
+    component: service-images
+    find: "npm ci"
+    note: the egress image's admin/ui install from the committed package-lock.json
 
   # The CI smoke pulls of the same two service images — current selectors in
   # the workflow file, anchored per line (one record per line).
@@ -427,6 +463,7 @@ discovery:
     - compose
     - backup
     - jump
+    - egress
     - bin
     - .github
     - Dockerfile

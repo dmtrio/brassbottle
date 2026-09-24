@@ -842,6 +842,33 @@ class RealRepoIntegrationTests(unittest.TestCase):
             text = (REPO_ROOT / record["path"]).read_text()
             self.assertIn(record["find"], text, loc_id)
 
+    def test_egress_dockerfile_selectors_are_inventoried(self):
+        """PIN — egress/Dockerfile is in the discovery scope and every
+        selector in it (both base images, both apt installs, npm ci, the
+        pinned yq release) has its own record; removing any one leaves a
+        hit line unaccounted for and test_real_repo_has_no_findings fails."""
+        self.assertIn("egress", self.locations["discovery"]["scope"])
+        egress = {loc_id: record
+                  for loc_id, record in self.locations["locations"].items()
+                  if record["path"] == "egress/Dockerfile"}
+        self.assertEqual(
+            sorted((record["component"], record["find"])
+                   for record in egress.values()),
+            sorted([
+                ("base-images", "FROM node:22-bookworm-slim"),
+                ("base-images", "FROM debian:bookworm-slim"),
+                ("distro-packages",
+                 "apt-get update && apt-get install -y --no-install-recommends \\"),
+                ("distro-packages",
+                 "apt-get update && apt-get install -y --no-install-recommends \\"),
+                ("service-images", "npm ci"),
+                ("base-tools", "YQ_VERSION=v4.44.3"),
+                ("base-tools", "yq/releases/download/"),
+            ]))
+        text = (REPO_ROOT / "egress/Dockerfile").read_text()
+        for loc_id, record in egress.items():
+            self.assertIn(record["find"], text, loc_id)
+
     def test_every_baseline_descriptor_is_catalogued(self):
         # The acceptance baseline: every shipped agent and plugin
         # descriptor directory is owned by a catalog location.
