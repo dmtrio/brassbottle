@@ -21,7 +21,7 @@ const activeLabel = computed(() => {
 </script>
 
 <template>
-  <div class="flex min-h-screen text-foreground">
+  <div class="px-6 flex min-h-screen text-foreground">
     <aside
       v-if="!phone"
       class="sidebar"
