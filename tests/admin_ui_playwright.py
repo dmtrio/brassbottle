@@ -44,6 +44,7 @@ sys.path.insert(0, str(WORKTREE / "tests"))
 
 import admin_daemon as admin  # noqa: E402
 import admin_ui_stub_broker as stub  # noqa: E402
+import png_pixels  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
 
 VIEWPORTS = {
@@ -1035,6 +1036,69 @@ def banner_copy(browser, served: Served, broker: stub.StubBroker, viewport: str)
         context.close()
 
 
+def light_rows_have_no_red_pixels(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """Each request row, photographed in the light theme, holds no pure-red (#ff0000) pixel.
+
+    A `border-background/30` on the Allow chevron once coloured all four of its borders, and Chromium painted
+    pure red on the antialiased right-hand corners wherever the compact (tablet, phone) card stretched the
+    button to a sub-pixel position. Nothing in the light theme is meant to be exactly #ff0000.
+    """
+    from playwright.sync_api import expect
+
+    broker.reset()
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    try:
+        drv = SpaDriver(page, traffic)
+        page.goto(served.base + "/")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
+        red = {}
+        for index in range(len(stub.OPEN_ROWS)):
+            row = drv.requests().nth(index)
+            red[f"{index}: {row.inner_text().split(chr(10))[0]}"] = png_pixels.count_pixels(
+                row.screenshot(), (255, 0, 0))
+        assert len(red) == len(stub.OPEN_ROWS), f"photographed {len(red)} rows, expected {len(stub.OPEN_ROWS)}"
+        assert sum(red.values()) == 0, f"pure-red pixels per row: { {k: v for k, v in red.items() if v} }"
+    finally:
+        context.close()
+
+
+def add_long_comm_row(broker: stub.StubBroker) -> None:
+    """One more open request whose `comm` is a single unbreakable string wider than any viewport's row."""
+    with broker.lock:
+        base = next(row for row in broker.queue["open"] if row["request_id"] == "a1")
+        broker.queue["open"].append({**base, "request_id": "lc1", "host": "lc.example.com", "comm": "x" * 120})
+        broker.queue["open"].sort(key=lambda row: row["opened_at"])
+        broker.queue["count"] = len(broker.queue["open"])
+
+
+def long_meta_string_wraps(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """An unbreakable meta string breaks onto further lines inside its row instead of being clipped."""
+    from playwright.sync_api import expect
+
+    broker.reset()
+    add_long_comm_row(broker)
+    context, page, traffic = new_page(browser, served, viewport, "light")
+    try:
+        drv = SpaDriver(page, traffic)
+        page.goto(served.base + "/")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 1)
+        found = drv.requests().filter(has_text="lc.example.com").first.evaluate("""(row) => {
+            const flow = row.querySelector('.meta-flow');
+            const clip = flow.parentElement.getBoundingClientRect();
+            const item = [...flow.children].find((el) => el.textContent.includes('xxxx'));
+            const box = item.getBoundingClientRect();
+            return {right: box.right, clipRight: clip.right, height: box.height,
+                    line: parseFloat(getComputedStyle(item).lineHeight),
+                    overflow: item.scrollWidth - item.clientWidth};
+        }""")
+        assert found["right"] <= found["clipRight"] + 1, \
+            f"the string runs {found['right'] - found['clipRight']:.0f}px past the row, where it is clipped: {found}"
+        assert found["overflow"] <= 1, f"the string overflows its own box by {found['overflow']}px: {found}"
+        assert found["height"] >= 2 * found["line"] - 1, f"the string did not wrap onto a second line: {found}"
+    finally:
+        context.close()
+
+
 def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
     suite = Suite(ui, viewport)
     suite.check("28", "A decide in flight locks every request it acts on (the host or a subzone of it in the same "
@@ -1047,6 +1111,11 @@ def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.
     suite.check("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure "
                       "with healthy polls reads `Decision not sent: <error>`",
                 lambda: banner_copy(browser, served, broker, viewport), spa_only=True)
+    suite.check("51", "The light theme paints no pure-red (#ff0000) pixel in any request row, on the compact "
+                      "layout included",
+                lambda: light_rows_have_no_red_pixels(browser, served, broker, viewport), spa_only=True)
+    suite.check("52", "An unbreakable meta string (a 120-character comm) wraps inside its row instead of being clipped",
+                lambda: long_meta_string_wraps(browser, served, broker, viewport), spa_only=True)
     return suite.results
 
 
@@ -1711,6 +1780,8 @@ NEW_CHECKS = [
     ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", "N/A(spa-only) on legacy"),
     ("42", "The date trigger is named \"Date range: <label>\"", "N/A(spa-only) on legacy"),
     ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
+    ("51", "The light theme paints no pure-red (#ff0000) pixel in any request row", "N/A(spa-only) on legacy"),
+    ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
 ]
 
 
