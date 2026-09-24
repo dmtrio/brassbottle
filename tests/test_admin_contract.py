@@ -12,6 +12,7 @@ renaming a broker field without updating the schema fails here.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -30,6 +31,7 @@ sys.path.insert(0, str(TESTS_DIR))
 import egress_broker_host as broker  # noqa: E402
 from admin_contract_validator import validate_document  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
+import admin_daemon as admin  # noqa: E402
 
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -388,6 +390,274 @@ class AdminContractTests(unittest.TestCase):
             self.assertEqual(status, HTTPStatus.INTERNAL_SERVER_ERROR, parsed)
             self.assertEqual(validate_document(parsed, "error_response.schema.json"), [])
             self.assertEqual(parsed["error"], broker.DENYLIST_PERSIST_FAILED_REASON)
+
+    # ---- Browser-facing admin proxy contract tests ------------------------
+    # These run the real admin daemon in front of the real broker and validate
+    # the transformed bodies against the admin contract schemas.
+
+    def _start_admin(
+        self,
+        root: Path,
+        broker_host: str,
+        broker_port: int,
+        *,
+        admin_key: str = "admin-test-key",
+        session_secret: str = "admin-session-secret",
+    ) -> tuple[admin.AdminHTTPServer, threading.Thread]:
+        egress_root = root / "run" / "egress"
+        egress_root.mkdir(parents=True, exist_ok=True)
+        (egress_root / admin.OPERATOR_TOKEN_FILENAME).write_text(
+            self.OPERATOR_TOKEN + "\n", encoding="utf-8"
+        )
+        env = {
+            "DJINN_HOME": str(root),
+            "EGRESS_BROKER_URL": f"http://{broker_host}:{broker_port}",
+        }
+        patcher = mock.patch.dict(os.environ, env, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        server = admin.AdminHTTPServer(
+            ("127.0.0.1", 0),
+            egress_root=egress_root,
+            session_secret=session_secret,
+            operator_token=self.OPERATOR_TOKEN,
+            admin_key=admin_key,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        wait_for_tcp_listening(server.server_address[0], server.server_address[1])
+        return server, thread
+
+    def _admin_request(
+        self,
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: dict[str, object] | None = None,
+    ) -> tuple[int, dict[str, object], bytes]:
+        conn = HTTPConnection(host, port, timeout=5)
+        body_bytes: bytes | None = None
+        send_headers = dict(headers or {})
+        if body is not None:
+            body_bytes = json.dumps(body).encode("utf-8")
+            send_headers.setdefault("Content-Type", "application/json")
+        conn.request(method, path, body_bytes, send_headers)
+        resp = conn.getresponse()
+        raw = resp.read()
+        conn.close()
+        try:
+            parsed = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = {}
+        return resp.status, parsed, raw
+
+    def test_admin_queue_200_validates_against_queue_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            ids = self._seed(b)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            try:
+                status, payload, _raw = self._admin_request(
+                    admin_host,
+                    admin_port,
+                    "GET",
+                    "/api/egress/queue",
+                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret"},
+                )
+                self.assertEqual(status, HTTPStatus.OK, payload)
+                self.assertEqual(validate_document(payload, "queue_snapshot.schema.json"), [])
+                # Non-vacuous: seeded rows are present.
+                open_by_id = {row["request_id"]: row for row in payload["open"]}
+                self.assertIn(ids["open_plain"], open_by_id)
+                self.assertIn(ids["open_apply_failed"], open_by_id)
+                recent_by_id = {row["request_id"]: row for row in payload["recent"]}
+                self.assertIn(ids["allowed"], recent_by_id)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_admin_decide_allow_ip_literal_response_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            _, request_id = b.file_request("coding-brassbottle", "192.0.2.55", 443)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            try:
+                status, payload, _raw = self._admin_request(
+                    admin_host,
+                    admin_port,
+                    "POST",
+                    "/api/egress/decide",
+                    headers={
+                        "Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret",
+                        "X-Admin-UI": "1",
+                        "Origin": "http://127.0.0.1",
+                        "Host": "127.0.0.1",
+                    },
+                    body={
+                        "action": "allow_live",
+                        "host": "192.0.2.55",
+                        "container": "coding-brassbottle",
+                    },
+                )
+                self.assertEqual(status, HTTPStatus.OK, payload)
+                self.assertEqual(validate_document(payload, "admin_decide_response.schema.json"), [])
+                self.assertEqual(payload["ok"], True)
+                self.assertEqual(payload["decided"], 0)
+                self.assertEqual(
+                    payload["apply_failures"],
+                    [{"request_id": request_id, "reason": "ip_requires_cidr"}],
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_admin_decide_deny_once_response_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            _, request_id = b.file_request("coding-brassbottle", "once.example.com", 443)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            try:
+                status, payload, _raw = self._admin_request(
+                    admin_host,
+                    admin_port,
+                    "POST",
+                    "/api/egress/decide",
+                    headers={
+                        "Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret",
+                        "X-Admin-UI": "1",
+                        "Origin": "http://127.0.0.1",
+                        "Host": "127.0.0.1",
+                    },
+                    body={
+                        "action": "deny",
+                        "host": "once.example.com",
+                        "container": "coding-brassbottle",
+                    },
+                )
+                self.assertEqual(status, HTTPStatus.OK, payload)
+                self.assertEqual(validate_document(payload, "admin_decide_response.schema.json"), [])
+                self.assertEqual(payload["ok"], True)
+                self.assertEqual(payload["decided"], 1)
+                self.assertNotIn("apply_failures", payload)
+                self.assertNotIn("persisted", payload)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_admin_decide_deny_bottle_response_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tokens = root / broker.TOKENS_DIRNAME
+            tokens.mkdir(parents=True, exist_ok=True)
+            (tokens / "coding-brassbottle.token").write_text("tok\n", encoding="utf-8")
+            b = self._broker(root)
+            _, request_id = b.file_request("coding-brassbottle", "b2.example.com", 443)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            try:
+                status, payload, _raw = self._admin_request(
+                    admin_host,
+                    admin_port,
+                    "POST",
+                    "/api/egress/decide",
+                    headers={
+                        "Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret",
+                        "X-Admin-UI": "1",
+                        "Origin": "http://127.0.0.1",
+                        "Host": "127.0.0.1",
+                    },
+                    body={
+                        "action": "deny_bottle",
+                        "host": "b2.example.com",
+                        "container": "coding-brassbottle",
+                        "reason": "not needed",
+                    },
+                )
+                self.assertEqual(status, HTTPStatus.OK, payload)
+                self.assertEqual(validate_document(payload, "admin_decide_response.schema.json"), [])
+                self.assertEqual(payload["ok"], True)
+                self.assertEqual(payload["decided"], 1)
+                self.assertEqual(
+                    payload["persisted"],
+                    {"zone": "b2.example.com", "scope": "coding-brassbottle"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_admin_decide_bad_action_400_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            try:
+                status, payload, _raw = self._admin_request(
+                    admin_host,
+                    admin_port,
+                    "POST",
+                    "/api/egress/decide",
+                    headers={
+                        "Cookie": f"{admin.SESSION_COOKIE_NAME}=admin-session-secret",
+                        "X-Admin-UI": "1",
+                        "Origin": "http://127.0.0.1",
+                        "Host": "127.0.0.1",
+                    },
+                    body={"action": "allow_forever", "host": "x.example.com", "container": "c"},
+                )
+                self.assertEqual(status, HTTPStatus.BAD_REQUEST, payload)
+                self.assertEqual(validate_document(payload, "error_response.schema.json"), [])
+                self.assertEqual(payload["error"], "invalid action")
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_admin_decide_missing_cookie_403_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            b = self._broker(root)
+            broker_host, broker_port = self._serve(root, b)
+            server, thread = self._start_admin(root, broker_host, broker_port)
+            admin_host, admin_port = server.server_address
+            try:
+                status, payload, _raw = self._admin_request(
+                    admin_host,
+                    admin_port,
+                    "POST",
+                    "/api/egress/decide",
+                    headers={
+                        "X-Admin-UI": "1",
+                        "Origin": "http://127.0.0.1",
+                        "Host": "127.0.0.1",
+                    },
+                    body={"action": "deny", "host": "x.example.com", "container": "c"},
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN, payload)
+                self.assertEqual(validate_document(payload, "error_response.schema.json"), [])
+                self.assertEqual(payload["error"], "forbidden")
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
 
 
 

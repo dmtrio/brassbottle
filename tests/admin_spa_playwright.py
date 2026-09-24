@@ -27,10 +27,11 @@ sys.path.insert(0, str(WORKTREE / "src"))
 sys.path.insert(0, str(WORKTREE / "tests"))
 
 import admin_daemon as admin
+import admin_ui_stub_broker as stub
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening
 
 
-def _start_admin() -> tuple[admin.AdminHTTPServer, threading.Thread, str]:
+def _start_admin(broker_url: str) -> tuple[admin.AdminHTTPServer, threading.Thread, str]:
     home = Path(tempfile.mkdtemp())
     egress_root = home / "run" / "egress"
     egress_root.mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,8 @@ def _start_admin() -> tuple[admin.AdminHTTPServer, threading.Thread, str]:
     env = {
         "DJINN_HOME": str(home),
         "DJINN_ADMIN_UI": "spa",
+        # The egress route polls the queue; a contract-validated stub answers it.
+        "EGRESS_BROKER_URL": broker_url,
     }
     patcher = mock.patch.dict(os.environ, env, clear=False)
     patcher.start()
@@ -65,7 +68,9 @@ def main() -> int:
         report.append(("PASS " if cond else "FAIL ") + msg)
         ok = ok and bool(cond)
 
-    server, thread, admin_key = _start_admin()
+    broker = stub.StubBroker()
+    broker.preflight()
+    server, thread, admin_key = _start_admin(broker.start())
     host, port = server.server_address
     base = f"http://{host}:{port}"
     daemon_origin = f"{host}:{port}"
@@ -208,6 +213,7 @@ def main() -> int:
     server.shutdown()
     server.server_close()
     join_thread_or_fail(thread, label="admin")
+    broker.stop()
 
     print("\n".join(report))
     return 0 if ok else 1

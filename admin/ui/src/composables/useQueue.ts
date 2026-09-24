@@ -1,0 +1,62 @@
+import { computed, onMounted, onUnmounted, reactive } from 'vue'
+import type { QueueSnapshot } from '@/contract'
+import { fetchQueue } from '@/api/egress'
+
+const POLL_INTERVAL_MS = 5000
+
+type QueueState = {
+  snapshot: QueueSnapshot | null
+  stale: string | null
+}
+
+// One queue for the whole app: the sidebar badge, the tab title and the
+// queue panel read the same snapshot and share one poller.
+const state = reactive<QueueState>({ snapshot: null, stale: null })
+
+let intervalId: ReturnType<typeof setInterval> | null = null
+let consumers = 0
+let seq = 0
+
+async function refresh(): Promise<void> {
+  const mine = ++seq
+  const result = await fetchQueue()
+  if (mine !== seq) return // a newer poll is in flight or landed; drop this one
+  if (result.ok) {
+    state.snapshot = result.data
+    state.stale = null
+  } else {
+    state.stale = result.error
+  }
+}
+
+// A failed decide raises the same banner as a failed poll. It clears on the
+// next good poll.
+function setStale(message: string): void {
+  state.stale = message
+}
+
+export function useQueue() {
+  onMounted(() => {
+    consumers++
+    if (consumers === 1) {
+      void refresh()
+      intervalId = setInterval(() => void refresh(), POLL_INTERVAL_MS)
+    }
+  })
+
+  onUnmounted(() => {
+    consumers--
+    if (consumers === 0 && intervalId !== null) {
+      clearInterval(intervalId)
+      intervalId = null
+    }
+  })
+
+  return {
+    snapshot: computed(() => state.snapshot),
+    stale: computed(() => state.stale),
+    openCount: computed(() => state.snapshot?.count ?? 0),
+    refresh,
+    setStale,
+  }
+}
