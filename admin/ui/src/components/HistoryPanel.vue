@@ -202,8 +202,8 @@ function clearRange(): void {
           ><span class="sm:hidden">{{ decidedDay(r.decided_at) }}</span><span class="hidden sm:inline">{{ decidedAt(r.decided_at) }} · {{ relTime(r.decided_at, now) }}</span></span>
         </div>
         <div class="overflow-hidden">
-          <div class="meta-flow row-meta">
-            <span class="meta-item inline-flex items-center gap-inline">
+          <div class="meta-line row-meta">
+            <span class="meta-item inline-flex flex-none items-center gap-inline">
               <span
                 class="pill"
                 :class="outcomeTone(r)"
@@ -213,16 +213,19 @@ function clearRange(): void {
                 class="pill pill-deny"
               ><AlertTriangle class="size-icon-sm" />apply failed</span>
             </span>
-            <span class="meta-item inline-flex items-center gap-tight font-medium text-foreground"><Box class="size-icon-sm" />{{ r.container }}</span>
-            <span class="meta-item hidden sm:block">by {{ r.decided_by }}</span>
+            <span
+              class="meta-item flex min-w-0 items-center gap-tight font-medium text-foreground sm:flex-none"
+              data-testid="history-row-bottle"
+            ><Box class="size-icon-sm flex-none" /><span class="truncate">{{ r.container }}</span></span>
+            <span class="meta-item hidden flex-none sm:block">by {{ r.decided_by }}</span>
+            <span
+              v-if="r.deny_reason"
+              class="meta-item hidden min-w-0 truncate sm:block"
+              data-testid="history-row-reason"
+              :title="r.deny_reason"
+            >{{ r.deny_reason }}</span>
           </div>
         </div>
-        <p
-          v-if="r.deny_reason"
-          class="row-caption"
-        >
-          {{ r.deny_reason }}
-        </p>
       </div>
     </div>
 
