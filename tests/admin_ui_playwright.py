@@ -91,9 +91,9 @@ def bundle_refusal(root: Path) -> str | None:
 
     `npm run build` records every input it read in dist/.build-inputs.json. The
     bundle is stale when the inputs now differ from that record: a file added,
-    deleted or changed. A build that FAILS is caught too: `prebuild` (gen:types)
-    rewrites src/contract.ts before the rest runs, and the manifest, written
-    last, is then missing or out of date.
+    deleted or changed. A build that FAILS is caught too: it never writes the
+    manifest, so a failure that matters (an input changed since the last good
+    build) shows as that input's difference.
     """
     if not (root / BUNDLE).is_file():
         return "admin/ui/dist is not built: run `cd admin/ui && npm ci && npm run build` first"
