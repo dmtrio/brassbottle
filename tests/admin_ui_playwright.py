@@ -1440,7 +1440,9 @@ def _h_stale_reply(hist, page, traffic, broker) -> None:
     while "mid" not in [q.get("container") for q in traffic.recent_done[done:]]:
         assert time.monotonic() < deadline, "the held reply never reached the page"
         page.wait_for_timeout(20)
-    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")  # and was handled
+    # Two frames after arrival: room for a reply handler deferred by a task or two. This is a bound, not
+    # proof: a stale reply applied later than that would still pass, as it would have with the old sleep.
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
     _eq([q.get("container") for q in traffic.recent[sent:]], ["mid", "zeta"])
     _eq(hist.hosts(), want)                          # the superseded reply did not replace them
     _in("zeta", page.get_by_test_id("history-bottle").inner_text())
