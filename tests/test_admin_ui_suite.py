@@ -56,6 +56,10 @@ NOT_INPUTS = (
     "admin/ui/.gitignore",
     "admin/ui/.eslintcache",
     "admin/ui/src/.App.vue.swp",
+    "admin/ui/src/App.vue.swp",          # a swap file whose name does not start with a dot
+    "admin/ui/src/App.vue.swo",
+    "admin/ui/scripts/gen-types.ts.swx",
+    "admin/ui/scripts/check_tokens.pyc",
     "admin/ui/src/App.vue~",
     "admin/ui/src/#App.vue#",
     "admin/ui/src/4913",
@@ -228,10 +232,30 @@ class TailwindScopeTests(unittest.TestCase):
 
     def test_every_extra_source_is_an_input(self):
         sources = re.findall(r'^@source "([^"]+)";', self.css, re.M)
-        self.assertEqual(sources, ["../scripts"])
+        self.assertEqual(sources, ["../scripts", "../index.html"])
         for source in sources:
             resolved = os.path.normpath(REPO / "admin/ui/src" / source)
             self.assertIn(Path(resolved).relative_to(REPO).as_posix(), build_inputs.INPUTS)
+
+    # INPUTS the build reads that hold no markup or scripts, so no class can live in them.
+    NO_CLASSES = ("admin/ui/vite.config.ts", "admin/ui/package.json", "admin/ui/package-lock.json",
+                  "admin/ui/tsconfig*.json", "admin/contract/*.schema.json")
+
+    def test_every_input_that_can_hold_a_class_is_scanned(self):
+        """The other direction: Vite reads index.html, so a class written there must reach the CSS."""
+        scanned = ["admin/ui/src"] + [
+            Path(os.path.normpath(REPO / "admin/ui/src" / source)).relative_to(REPO).as_posix()
+            for source in re.findall(r'^@source "([^"]+)";', self.css, re.M)]
+        for entry in build_inputs.INPUTS:
+            if entry in build_inputs.UNFILTERED or entry in self.NO_CLASSES:
+                continue    # public/ is copied whole, never scanned
+            with self.subTest(entry=entry):
+                self.assertTrue(any(entry == root or entry.startswith(root + "/") for root in scanned),
+                                f"{entry} is a build input Tailwind does not scan: add it as an @source, "
+                                f"or to NO_CLASSES if it can hold no class")
+
+    def test_no_classes_names_only_inputs(self):
+        self.assertLessEqual(set(self.NO_CLASSES), set(build_inputs.INPUTS))
 
     def test_the_names_the_guard_ignores_are_excluded_from_the_scan(self):
         excluded = re.findall(r'^@source not "([^"]+)";', self.css, re.M)

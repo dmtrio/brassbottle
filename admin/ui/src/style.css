@@ -3,9 +3,11 @@
 @import "tw-animate-css";
 @import "./styles/tokens.css";
 
-/* Tailwind reads src/ and scripts/ only, minus the names the build never reads:
-   INPUTS in scripts/build_inputs.py is the same list, and must agree with it. */
+/* Tailwind reads src/, scripts/ and index.html only, minus the names the build never reads:
+   the INPUTS in scripts/build_inputs.py that can hold a class, and no others.
+   TailwindScopeTests checks the two lists agree in both directions. */
 @source "../scripts";
+@source "../index.html";
 @source not "../**/.*";
 @source not "../**/.*/**";
 @source not "../**/*~";
