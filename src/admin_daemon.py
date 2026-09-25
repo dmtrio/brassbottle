@@ -54,6 +54,7 @@ CONTAINER_MARKER_ENV = "DJINN_CONTAINER"
 ADMIN_UI_ENV = "DJINN_ADMIN_UI"
 ADMIN_UI_SPA_VALUE = "spa"
 ADMIN_UI_DIST_ENV = "DJINN_ADMIN_UI_DIST"
+SPA_BUILD_MANIFEST = ".build-inputs.json"   # admin/ui/scripts/build_inputs.py writes it into dist/; never served
 
 # Per-run session secret, created host-side by `djinn egress start` (never in
 # secrets.env, never mounted into a bottle). GET /session?key=<secret> is the
@@ -492,6 +493,11 @@ class AdminHTTPServer(ThreadingHTTPServer):
             # served: a symlink (to a file or a directory) or a dotfile in the
             # build output is dropped, so nothing outside dist can be reached.
             hidden = any(part.startswith(".") for part in rel.parts)
+            if rel.as_posix() == SPA_BUILD_MANIFEST and path.is_file() and not path.is_symlink():
+                # The build's own record of its inputs: known, never served, and no news at startup.
+                skipped += 1
+                LOG.debug("admin spa skip path=%s (build manifest)", rel.as_posix())
+                continue
             resolved = path.resolve()
             if (
                 hidden
