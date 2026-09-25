@@ -21,10 +21,16 @@ const state = reactive<QueueState>({ snapshot: null, stale: null, staleSource: '
 let intervalId: ReturnType<typeof setInterval> | null = null
 let consumers = 0
 let seq = 0
-// The banner clears only on a good poll that STARTED after the failure that
-// raised it: a poll already in flight when a decide fails predates the failure
-// and must not wipe the banner before anyone has seen it.
-let staleAfter = 0
+// Each banner has its own clearing marker. A poll banner clears on the first
+// good poll that started after the failed poll that raised it. A decide banner
+// clears on the first good poll that started after that decide failed: a poll
+// already in flight when a decide fails predates the failure and must not wipe
+// the banner before anyone has seen it.
+let pollFailedAt = 0
+let decideFailedAt = 0
+// The message of a decide that failed while a poll banner was up. If the poll
+// that recovers the list predates that failure, it becomes the banner.
+let pendingDecide: string | null = null
 
 async function refresh(): Promise<void> {
   const mine = ++seq
@@ -32,22 +38,40 @@ async function refresh(): Promise<void> {
   if (mine !== seq) return // a newer poll is in flight or landed; drop this one
   if (result.ok) {
     state.snapshot = result.data
-    if (mine > staleAfter) state.stale = null
+    if (state.stale === null) return
+    if (state.staleSource === 'poll') {
+      if (mine <= pollFailedAt) return
+      if (pendingDecide !== null && mine <= decideFailedAt) {
+        state.stale = pendingDecide
+        state.staleSource = 'decide'
+        pendingDecide = null
+        return
+      }
+    } else if (mine <= decideFailedAt) {
+      return
+    }
+    state.stale = null
+    pendingDecide = null
   } else {
     state.stale = result.error
     state.staleSource = 'poll'
-    staleAfter = mine
+    pollFailedAt = mine
+    pendingDecide = null
   }
 }
 
-// A failed decide raises the banner too, and it clears on the first good poll
-// that starts after this call. When a failed poll already raised it, that one
-// stays: it says more (the list is out of date).
+// A failed decide raises the banner too. When a failed poll already raised it,
+// that one stays (it says more: the list is out of date) and the decide's
+// message waits behind it.
 function setStale(message: string): void {
-  staleAfter = seq
-  if (state.stale && state.staleSource === 'poll') return
+  decideFailedAt = seq
+  if (state.stale && state.staleSource === 'poll') {
+    pendingDecide = message
+    return
+  }
   state.stale = message
   state.staleSource = 'decide'
+  pendingDecide = null
 }
 
 export function useQueue() {
