@@ -1,4 +1,8 @@
 """Unit tests for the helpers of the admin behaviour suite (tests/admin_ui_playwright.py)."""
+import contextlib
+import hashlib
+import io
+import json
 import os
 import sys
 import tempfile
@@ -9,80 +13,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import admin_ui_playwright as suite  # noqa: E402
 
-OLD, BUILT, LATER = 1_000, 2_000, 3_000
+build_inputs = suite.build_inputs
+REPO = Path(__file__).resolve().parent.parent
+LATER = 4_000_000_000_000_000_000  # ns
 
 
-def _touch(path: Path, mtime: int) -> Path:
+def _write(path: Path, text: str = "x") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("x")
-    os.utime(path, ns=(mtime, mtime))
+    path.write_text(text)
     return path
 
 
-def _age(path: Path, mtime: int) -> None:
-    os.utime(path, ns=(mtime, mtime))
+def _age(path: Path) -> None:
+    """Bump an mtime, as an editor, `touch` or a scratch file in the directory does."""
+    os.utime(path, ns=(LATER, LATER))
 
 
-class BundleRefusalTests(unittest.TestCase):
-    """bundle_refusal(root) is what main() calls, on the real repo layout."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
-        self.app = _touch(self.root / "admin/ui/src/App.vue", OLD)
-        self.gone = _touch(self.root / "admin/ui/src/components/Gone.vue", OLD)
-        self.schema = _touch(self.root / "admin/contract/queue_snapshot.schema.json", OLD)
-        _touch(self.root / "admin/ui/index.html", OLD)
-        # node_modules is not a build input the guard watches; a newer file there is ignored.
-        _touch(self.root / "admin/ui/node_modules/x/index.js", LATER)
-        for directory in ("admin/ui/src/components", "admin/ui/src", "admin/contract"):
-            _age(self.root / directory, OLD)
-        self.bundle = _touch(self.root / suite.BUNDLE, BUILT)
-
-    def test_a_fresh_bundle_is_accepted(self):
-        self.assertIsNone(suite.bundle_refusal(self.root))
-
-    def test_a_touched_source_is_refused_and_named(self):
-        _age(self.app, LATER)
-        refusal = suite.bundle_refusal(self.root)
-        self.assertIsNotNone(refusal)
-        self.assertIn("admin/ui/src/App.vue", refusal)
-
-    def test_a_deleted_source_is_refused_through_its_directory(self):
-        self.gone.unlink()
-        _age(self.root / "admin/ui/src/components", LATER)
-        refusal = suite.bundle_refusal(self.root)
-        self.assertIsNotNone(refusal)
-        self.assertIn("admin/ui/src/components", refusal)
-
-    def test_a_contract_edit_is_refused(self):
-        _age(self.schema, LATER)
-        refusal = suite.bundle_refusal(self.root)
-        self.assertIsNotNone(refusal)
-        self.assertIn("admin/contract/queue_snapshot.schema.json", refusal)
-
-    def test_a_missing_bundle_is_refused(self):
-        self.bundle.unlink()
-        self.assertIn("not built", suite.bundle_refusal(self.root))
-
-
-# The path that stands for each BUILD_INPUTS entry when the test touches it. A new
-# entry without a line here fails test_every_entry_has_a_touch_case.
-TOUCH = {
-    "admin/ui/src": "admin/ui/src/components/Deep.vue",
-    "admin/ui/public": "admin/ui/public/favicon.svg",
-    "admin/ui/scripts": "admin/ui/scripts/gen-types.ts",
-    "admin/ui/index.html": "admin/ui/index.html",
-    "admin/ui/vite.config.ts": "admin/ui/vite.config.ts",
-    "admin/ui/package.json": "admin/ui/package.json",
-    "admin/ui/package-lock.json": "admin/ui/package-lock.json",
-    "admin/ui/tsconfig*.json": "admin/ui/tsconfig.app.json",
-    "admin/contract/": "admin/contract",
-    "admin/contract/*.schema.json": "admin/contract/recent_page.schema.json",
+# The path that stands for each INPUTS entry (and each kind of file inside a tree)
+# when a test changes it. A new entry without a line here fails test_every_entry_has_a_case.
+CASES = {
+    "admin/ui/src": ("admin/ui/src/components/Deep.vue", "admin/ui/src/README.md"),
+    "admin/ui/public": ("admin/ui/public/favicon.svg", "admin/ui/public/README.md",
+                        "admin/ui/public/.well-known/security.txt", "admin/ui/public/.DS_Store"),
+    "admin/ui/scripts": ("admin/ui/scripts/gen-types.ts", "admin/ui/scripts/check_tokens.py"),
+    "admin/ui/index.html": ("admin/ui/index.html",),
+    "admin/ui/vite.config.ts": ("admin/ui/vite.config.ts",),
+    "admin/ui/package.json": ("admin/ui/package.json",),
+    "admin/ui/package-lock.json": ("admin/ui/package-lock.json",),
+    "admin/ui/tsconfig*.json": ("admin/ui/tsconfig.json", "admin/ui/tsconfig.app.json",
+                                "admin/ui/tsconfig.node.json"),
+    "admin/contract/*.schema.json": ("admin/contract/queue_snapshot.schema.json",
+                                     "admin/contract/recent_page.schema.json"),
 }
+INPUT_PATHS = [path for paths in CASES.values() for path in paths]
 
-# Files the build never reads, inside the watched trees.
+# Files the build never reads.
 NOT_INPUTS = (
     "admin/ui/README.md",
     "admin/ui/.gitignore",
@@ -92,75 +57,166 @@ NOT_INPUTS = (
     "admin/ui/src/#App.vue#",
     "admin/ui/src/4913",
     "admin/ui/src/.cache/chunk.js",
-    "admin/ui/scripts/README.md",
+    "admin/ui/scripts/__pycache__/check_tokens.cpython-312.pyc",
+    "admin/ui/scripts/__pycache__/test_check_tokens.cpython-312.pyc",
     "admin/ui/scripts/.gen-types.ts.swo",
-    "admin/ui/public/.DS_Store",
     "admin/contract/README.md",
     "admin/contract/notes.txt",
-    "admin/contract/queue_snapshot.schema.json.orig",
     "admin/contract/.recent_page.schema.json.swp",
+    "admin/ui/node_modules/x/index.js",
 )
 
 
-class BuildInputsTests(unittest.TestCase):
-    """Every input the build reads makes a stale bundle refuse; nothing else does."""
+def _build(root: Path) -> None:
+    """The tree of a finished build: every input, a bundle, and the manifest the build writes."""
+    for path in [*INPUT_PATHS, "admin/ui/src/App.vue", *NOT_INPUTS]:
+        _write(root / path, path)
+    _write(root / suite.BUNDLE, "<html>")
+    with contextlib.redirect_stderr(io.StringIO()):
+        build_inputs.write_manifest(root)
 
+
+class FixtureCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        for touched in TOUCH.values():
-            if touched != "admin/contract":
-                _touch(self.root / touched, OLD)
-        for extra in ("admin/ui/src/App.vue", "admin/ui/tsconfig.json", "admin/ui/tsconfig.node.json",
-                      "admin/contract/queue_snapshot.schema.json"):
-            _touch(self.root / extra, OLD)
-        for noise in NOT_INPUTS:
-            _touch(self.root / noise, OLD)
-        _touch(self.root / "admin/ui/node_modules/x/index.js", OLD)
-        self.bundle = _touch(self.root / suite.BUNDLE, BUILT)
-        self.reset()
+        _build(self.root)
 
-    def reset(self):
-        """Every input, and every directory, back to before the build."""
-        for path in [self.root, *self.root.rglob("*")]:
-            if path != self.bundle:
-                _age(path, OLD)
 
-    def test_every_entry_has_a_touch_case(self):
-        self.assertEqual(sorted(suite.BUILD_INPUTS), sorted(TOUCH))
+class BundleRefusalTests(FixtureCase):
+    """bundle_refusal(root) is what main() calls, on the real repo layout."""
 
-    def test_the_fixture_is_fresh(self):
+    def test_a_fresh_bundle_is_accepted(self):
         self.assertIsNone(suite.bundle_refusal(self.root))
 
-    def test_touching_any_build_input_refuses_and_names_it(self):
-        for entry, touched in TOUCH.items():
-            with self.subTest(entry=entry):
-                self.reset()
-                _age(self.root / touched, LATER)
-                refusal = suite.bundle_refusal(self.root)
-                self.assertIsNotNone(refusal, f"{touched} changed and the guard accepted the bundle")
-                self.assertIn(touched, refusal)
+    def test_a_changed_source_is_refused_and_named(self):
+        _write(self.root / "admin/ui/src/App.vue", "changed")
+        refusal = suite.bundle_refusal(self.root)
+        self.assertIn("changed admin/ui/src/App.vue", refusal)
 
-    def test_a_wildcard_entry_covers_every_match(self):
-        for touched in ("admin/ui/tsconfig.json", "admin/ui/tsconfig.node.json",
-                        "admin/contract/queue_snapshot.schema.json"):
-            with self.subTest(touched=touched):
-                self.reset()
-                _age(self.root / touched, LATER)
-                self.assertIn(touched, suite.bundle_refusal(self.root) or "")
+    def test_a_deleted_source_is_refused_and_named(self):
+        (self.root / "admin/ui/src/components/Deep.vue").unlink()
+        self.assertIn("deleted admin/ui/src/components/Deep.vue", suite.bundle_refusal(self.root))
 
-    def test_touching_a_non_input_is_ignored(self):
-        for noise in NOT_INPUTS:
-            with self.subTest(noise=noise):
-                self.reset()
-                _age(self.root / noise, LATER)
+    def test_an_added_source_is_refused_and_named(self):
+        _write(self.root / "admin/ui/src/New.vue")
+        self.assertIn("added admin/ui/src/New.vue", suite.bundle_refusal(self.root))
+
+    def test_a_missing_bundle_is_refused(self):
+        (self.root / suite.BUNDLE).unlink()
+        self.assertIn("not built", suite.bundle_refusal(self.root))
+
+    def test_a_missing_manifest_is_refused(self):
+        (self.root / build_inputs.MANIFEST).unlink()
+        self.assertIn("no readable build-input manifest", suite.bundle_refusal(self.root))
+
+    def test_an_unreadable_manifest_is_refused(self):
+        for text in ("", "{", "[]", '{"inputs": 3}', '{"version": 1}'):
+            with self.subTest(text=text):
+                (self.root / build_inputs.MANIFEST).write_text(text)
+                self.assertIn("no readable build-input manifest", suite.bundle_refusal(self.root))
+
+    def test_many_differences_are_counted_and_the_list_is_cut(self):
+        for n in range(8):
+            _write(self.root / f"admin/ui/src/Extra{n}.vue")
+        refusal = suite.bundle_refusal(self.root)
+        self.assertIn("(8 differ: added admin/ui/src/Extra0.vue", refusal)
+        self.assertIn(", …)", refusal)
+
+
+class BuildInputsTests(FixtureCase):
+    """Every input the build reads makes a stale bundle refuse; nothing else does."""
+
+    def test_every_entry_has_a_case(self):
+        self.assertEqual(sorted(suite.build_inputs.INPUTS), sorted(CASES))
+
+    def test_changing_an_input_refuses_and_names_it(self):
+        for path in INPUT_PATHS:
+            with self.subTest(input=path):
+                _write(self.root / path, "edited")
+                self.assertIn(f"changed {path}", suite.bundle_refusal(self.root) or "")
+                _write(self.root / path, path)
                 self.assertIsNone(suite.bundle_refusal(self.root))
 
-    def test_a_schema_deleted_from_the_contract_directory_is_refused(self):
-        (self.root / "admin/contract/recent_page.schema.json").unlink()
-        _age(self.root / "admin/contract", LATER)
-        self.assertIn("admin/contract", suite.bundle_refusal(self.root))
+    def test_deleting_an_input_refuses_and_names_it(self):
+        for path in INPUT_PATHS:
+            with self.subTest(input=path):
+                (self.root / path).unlink()
+                self.assertIn(f"deleted {path}", suite.bundle_refusal(self.root) or "")
+                _write(self.root / path, path)
+
+    def test_adding_an_input_refuses_and_names_it(self):
+        for tree in ("admin/ui/src/New.vue", "admin/ui/public/robots.txt", "admin/ui/public/.well-known/new.txt",
+                     "admin/ui/scripts/new.ts", "admin/ui/tsconfig.extra.json", "admin/contract/new.schema.json"):
+            with self.subTest(input=tree):
+                _write(self.root / tree)
+                self.assertIn(f"added {tree}", suite.bundle_refusal(self.root) or "")
+                (self.root / tree).unlink()
+
+    def test_a_file_that_looks_like_noise_is_an_input_inside_public(self):
+        """Vite ships public/ whole, README and dotfiles included; src/README.md is scanned by Tailwind."""
+        for path in ("admin/ui/public/README.md", "admin/ui/public/.well-known/security.txt",
+                     "admin/ui/public/.DS_Store", "admin/ui/src/README.md"):
+            with self.subTest(input=path):
+                _write(self.root / path, "edited")
+                self.assertIn(f"changed {path}", suite.bundle_refusal(self.root) or "")
+                _write(self.root / path, path)
+
+    def test_creating_a_non_input_is_ignored(self):
+        """A new scratch file also bumps its directory's mtime; nothing depends on that."""
+        for noise in NOT_INPUTS:
+            with self.subTest(noise=noise):
+                path = self.root / noise
+                path.unlink(missing_ok=True)
+                _write(path, "new")
+                for directory in path.relative_to(self.root).parents:
+                    _age(self.root / directory)
+                self.assertIsNone(suite.bundle_refusal(self.root))
+
+    def test_editing_or_deleting_a_non_input_is_ignored(self):
+        for noise in NOT_INPUTS:
+            with self.subTest(noise=noise):
+                path = self.root / noise
+                _write(path, "edited")
+                self.assertIsNone(suite.bundle_refusal(self.root))
+                path.unlink()
+                self.assertIsNone(suite.bundle_refusal(self.root))
+                _write(path, noise)
+
+    def test_touching_files_and_directories_without_changing_them_is_ignored(self):
+        for path in [self.root, *self.root.rglob("*")]:
+            if path != self.root / suite.BUNDLE:
+                _age(path)
+        self.assertIsNone(suite.bundle_refusal(self.root))
+
+    def test_a_removed_scratch_file_leaves_no_trace(self):
+        """Vim's swap file, and its 4913 probe, come and go in a watched directory."""
+        for name in (".App.vue.swp", "4913"):
+            _write(self.root / "admin/ui/src" / name)
+            (self.root / "admin/ui/src" / name).unlink()
+        _age(self.root / "admin/ui/src")
+        self.assertIsNone(suite.bundle_refusal(self.root))
+
+
+class ManifestTests(FixtureCase):
+    def test_the_manifest_lists_exactly_the_inputs_with_size_and_hash(self):
+        recorded = json.loads((self.root / build_inputs.MANIFEST).read_text())
+        self.assertEqual(recorded["version"], 1)
+        self.assertEqual(sorted(recorded["inputs"]), sorted([*INPUT_PATHS, "admin/ui/src/App.vue"]))
+        self.assertEqual(recorded["inputs"]["admin/ui/public/README.md"],
+                         {"size": len("admin/ui/public/README.md"),
+                          "sha256": hashlib.sha256(b"admin/ui/public/README.md").hexdigest()})
+
+    def test_writing_needs_a_dist_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(Path(tmp) / "admin/ui/index.html")
+            with self.assertRaises(FileNotFoundError):
+                build_inputs.write_manifest(Path(tmp))
+
+    def test_the_build_script_writes_the_manifest_after_vite(self):
+        script = json.loads((REPO / "admin/ui/package.json").read_text())["scripts"]["build"]
+        self.assertTrue(script.endswith("vite build && python3 scripts/build_inputs.py write"), script)
 
 
 if __name__ == "__main__":

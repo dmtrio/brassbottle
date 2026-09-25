@@ -41,9 +41,11 @@ from urllib.parse import parse_qs, urlsplit
 WORKTREE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(WORKTREE / "src"))
 sys.path.insert(0, str(WORKTREE / "tests"))
+sys.path.insert(0, str(WORKTREE / "admin" / "ui" / "scripts"))
 
 import admin_daemon as admin  # noqa: E402
 import admin_ui_stub_broker as stub  # noqa: E402
+import build_inputs  # noqa: E402
 import png_pixels  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
 
@@ -81,75 +83,37 @@ def log(message: str) -> None:
     print(f"[suite] {message}", file=sys.stderr, flush=True)
 
 
-# Everything `npm run build` reads to produce dist/, relative to the repo root.
-# A plain entry is a file, or a directory watched with everything under it; a
-# trailing "/" watches the directory node only (a file added to or deleted from it);
-# an entry with a wildcard is the files it matches.
-BUILD_INPUTS = (
-    "admin/ui/src",
-    "admin/ui/public",
-    "admin/ui/scripts",
-    "admin/ui/index.html",
-    "admin/ui/vite.config.ts",
-    "admin/ui/package.json",
-    "admin/ui/package-lock.json",
-    "admin/ui/tsconfig*.json",
-    "admin/contract/",
-    "admin/contract/*.schema.json",
-)
 BUNDLE = "admin/ui/dist/index.html"
 
 
-def is_build_noise(name: str) -> bool:
-    """A file name the build never reads: dotfiles, editor swap and backup files, READMEs."""
-    return (name.startswith(".") or name.endswith("~") or name == "4913"
-            or (name.startswith("#") and name.endswith("#"))
-            or name.endswith((".swp", ".swo", ".swx")) or name == "README.md")
-
-
-def build_input_paths(root: Path, entry: str) -> list[Path]:
-    """The existing paths one BUILD_INPUTS entry stands for, noise left out."""
-    if "*" in entry:
-        return [path for path in root.glob(entry) if not is_build_noise(path.name)]
-    path = root / entry.rstrip("/")
-    if not path.exists():
-        return []
-    if entry.endswith("/") or not path.is_dir():
-        return [path]
-    return [path, *(found for found in path.rglob("*")
-                    if not any(is_build_noise(part) for part in found.relative_to(path).parts))]
-
-
-def build_inputs_newer_than_bundle(root: Path, bundle: Path) -> list[Path]:
-    """Build inputs modified after `bundle`: the built dist/ cannot reflect them.
-
-    Directories count too, so a file deleted from src/ (which bumps its
-    directory's mtime) is caught; that also means a swap file created in a
-    watched directory trips the guard through the directory, though the swap
-    file itself is ignored. A build that FAILS is caught as well, without
-    any help from this list: `prebuild` (gen:types) rewrites src/contract.ts
-    before vue-tsc and vite run, so a failed build always leaves a source newer
-    than the old bundle.
-    """
-    built = bundle.stat().st_mtime_ns
-    newer = {c for entry in BUILD_INPUTS for c in build_input_paths(root, entry) if c.stat().st_mtime_ns > built}
-    return sorted(newer)
-
-
 def bundle_refusal(root: Path) -> str | None:
-    """Why the spa suite must not run against `root`'s dist/, or None when it is fresh."""
-    bundle = root / BUNDLE
-    if not bundle.is_file():
+    """Why the spa suite must not run against `root`'s dist/, or None when it is fresh.
+
+    `npm run build` records every input it read in dist/.build-inputs.json. The
+    bundle is stale when the inputs now differ from that record: a file added,
+    deleted or changed. A build that FAILS is caught too: `prebuild` (gen:types)
+    rewrites src/contract.ts before the rest runs, and the manifest, written
+    last, is then missing or out of date.
+    """
+    if not (root / BUNDLE).is_file():
         return "admin/ui/dist is not built: run `cd admin/ui && npm ci && npm run build` first"
-    newer = build_inputs_newer_than_bundle(root, bundle)
-    log(f"stage=bundle dist_mtime={datetime.fromtimestamp(bundle.stat().st_mtime).isoformat(timespec='seconds')} "
-        f"inputs_newer={len(newer)}")
-    if not newer:
+    started = time.monotonic()
+    recorded = build_inputs.read_manifest(root)
+    if recorded is None:
+        log(f"stage=bundle manifest=missing duration={time.monotonic() - started:.2f}s")
+        return ("REFUSING TO RUN: admin/ui/dist has no readable build-input manifest (dist/.build-inputs.json), "
+                "so it cannot be told from a stale bundle. Run `cd admin/ui && npm run build` and check that it exits 0.")
+    added, deleted, changed = build_inputs.drift(root, recorded)
+    log(f"stage=bundle recorded={len(recorded)} added={len(added)} deleted={len(deleted)} changed={len(changed)} "
+        f"duration={time.monotonic() - started:.2f}s")
+    if not (added or deleted or changed):
         return None
-    shown = ", ".join(str(path.relative_to(root)) for path in newer[:5])
-    return (f"REFUSING TO RUN: admin/ui/dist is older than {len(newer)} build input(s) ({shown}"
-            f"{', …' if len(newer) > 5 else ''}): a failed or skipped build leaves the previous bundle in place. "
-            "Run `cd admin/ui && npm run build` and check that it exits 0.")
+    shown = [f"{kind} {path}" for kind, paths in (("added", added), ("deleted", deleted), ("changed", changed))
+             for path in paths]
+    total = len(shown)
+    return (f"REFUSING TO RUN: admin/ui/dist was built from different inputs than the current ones "
+            f"({total} differ: {', '.join(shown[:5])}{', …' if total > 5 else ''}): a failed or skipped build leaves the "
+            "previous bundle in place. Run `cd admin/ui && npm run build` and check that it exits 0.")
 
 
 def lines(text: str) -> list[str]:
