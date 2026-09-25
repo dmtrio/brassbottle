@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
 import socket
@@ -1675,6 +1676,36 @@ class AdminDaemonTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
+
+    def test_spa_skips_the_build_manifest_quietly_and_never_serves_it(self):
+        """dist/.build-inputs.json is written by every build: startup skips it without
+        a WARNING and still answers 404 for it, while any other hidden file still warns."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist(home)
+            (dist / ".build-inputs.json").write_text('{"version": 1, "inputs": {}}', encoding="utf-8")
+            (dist / ".env").write_text("hidden", encoding="utf-8")
+            env = {
+                "DJINN_HOME": str(home),
+                "DJINN_ADMIN_UI": "spa",
+                "DJINN_ADMIN_UI_DIST": str(dist),
+            }
+            with self.assertLogs(admin.LOG, level="DEBUG") as captured:
+                server, thread = self._start_admin(home, env=env)
+                host, port = server.server_address
+                try:
+                    warnings = [r.getMessage() for r in captured.records if r.levelno >= logging.WARNING]
+                    self.assertEqual(warnings, ["admin spa skip path=.env"])
+                    self.assertFalse([w for w in warnings if ".build-inputs.json" in w])
+                    self.assertIn("skipped=2", "\n".join(captured.output))
+                    self.assertNotIn("/.build-inputs.json", server.spa_allowlist)
+                    status, _payload, _headers, raw = self._request(host, port, "GET", "/.build-inputs.json")
+                    self.assertEqual(status, HTTPStatus.NOT_FOUND)
+                    self.assertNotIn(b"inputs", raw)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    join_thread_or_fail(thread, label="admin")
 
     def _raw_head_body(self, host: str, port: int, path: str, headers: dict[str, str]) -> bytes:
         """Send HEAD over a raw socket and return every byte after the header
