@@ -1532,6 +1532,19 @@ def expect_disabled(page, test_id: str, disabled: bool) -> None:
     expect(button).to_be_disabled() if disabled else expect(button).to_be_enabled()
 
 
+RELTIME_DRIFT_SECONDS = 6   # the fake clock also runs in real time, so allow a few seconds past the boundary
+
+
+def reltime_labels_after(seconds_ago: int, advance: int) -> set:
+    """The relative-time tails a row `seconds_ago` old may read `advance` seconds later: the
+    seconds or minutes below an hour (relTime switches to hours at 3600 s), then whole hours."""
+    labels = set()
+    for drift in range(RELTIME_DRIFT_SECONDS):
+        total = seconds_ago + advance + drift
+        labels.add(f"· {total // 60}m ago" if total < 3600 else f"· {total // 3600}h ago")
+    return labels
+
+
 def _h_relative_time_ticks(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
     """Its own page, on a fake clock installed before load: the relative times are not
     frozen at render. Two minutes pass and no /recent request is sent, yet every young
@@ -1562,14 +1575,13 @@ def _h_relative_time_ticks(browser, served: Served, broker: stub.StubBroker, vie
         assert fresh, f"no row was young enough to show the change: {before[:5]}"
         for b, a in fresh:
             seconds = int(re.search(r"\b(\d+)([sm]) ago", b).group(1)) * (60 if b.endswith("m ago") else 1)
-            # The fake clock also runs in real time, so allow a few seconds of drift past the boundary.
-            wanted = {f"· {(seconds + 120 + drift) // 60}m ago" for drift in range(6)} if seconds + 120 < 3540 else {"· 1h ago"}
+            wanted = reltime_labels_after(seconds, 120)
             assert any(a.endswith(w) for w in wanted), f"a row said {b!r}, then {a!r} after 2 minutes (wanted one of {sorted(wanted)})"
     finally:
         context.close()
 
 
-RELTIME_CHECK = ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row)", _h_relative_time_ticks)
+RELTIME_CHECK = ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", _h_relative_time_ticks)
 
 HISTORY_CHECKS = [
     ("30", "History lists the whole store newest first, 50 to a page, in keyset order", _h_newest_first),
@@ -1850,7 +1862,7 @@ NEW_CHECKS = [
     ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
     ("51", "The light theme paints no pure-red (#ff0000) pixel in any request row", "N/A(spa-only) on legacy"),
     ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
-    ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row)", "N/A(spa-only) on legacy"),
+    ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
 ]
 
 

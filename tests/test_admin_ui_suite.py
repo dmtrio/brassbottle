@@ -260,3 +260,20 @@ class ManifestTests(FixtureCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RelativeTimeLabelTests(unittest.TestCase):
+    """reltime_labels_after(...) is check 60's expectation; it must follow relTime's unit switches."""
+
+    def test_a_57_minute_row_reads_59_minutes_two_minutes_later_not_an_hour(self):
+        self.assertEqual(suite.reltime_labels_after(57 * 60, 120), {"· 59m ago"})
+
+    def test_a_59_minute_row_reads_an_hour_two_minutes_later(self):
+        self.assertEqual(suite.reltime_labels_after(59 * 60, 120), {"· 1h ago"})
+
+    def test_a_seconds_row_reads_minutes_and_may_drift_into_the_next_minute(self):
+        self.assertEqual(suite.reltime_labels_after(30, 120), {"· 2m ago"})
+        self.assertEqual(suite.reltime_labels_after(57, 120), {"· 2m ago", "· 3m ago"})
+
+    def test_a_10_minute_row_reads_12_minutes(self):
+        self.assertEqual(suite.reltime_labels_after(10 * 60, 120), {"· 12m ago"})
