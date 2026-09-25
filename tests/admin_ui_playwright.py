@@ -1063,10 +1063,14 @@ def light_rows_have_no_red_pixels(browser, served: Served, broker: stub.StubBrok
 
 
 def add_long_comm_row(broker: stub.StubBroker) -> None:
-    """One more open request whose `comm` is a single unbreakable string wider than any viewport's row."""
+    """One more open request whose `comm` is a single unbreakable string wider than any viewport's row.
+
+    It has no uid, so the comm is the only text of its meta item: a wrap can only be the string breaking itself.
+    """
     with broker.lock:
         base = next(row for row in broker.queue["open"] if row["request_id"] == "a1")
-        broker.queue["open"].append({**base, "request_id": "lc1", "host": "lc.example.com", "comm": "x" * 120})
+        broker.queue["open"].append({**base, "request_id": "lc1", "host": "lc.example.com", "comm": "x" * 120,
+                                        "uid": None})
         broker.queue["open"].sort(key=lambda row: row["opened_at"])
         broker.queue["count"] = len(broker.queue["open"])
 
@@ -1087,14 +1091,18 @@ def long_meta_string_wraps(browser, served: Served, broker: stub.StubBroker, vie
             const clip = flow.parentElement.getBoundingClientRect();
             const item = [...flow.children].find((el) => el.textContent.includes('xxxx'));
             const box = item.getBoundingClientRect();
-            return {right: box.right, clipRight: clip.right, height: box.height,
-                    line: parseFloat(getComputedStyle(item).lineHeight),
-                    overflow: item.scrollWidth - item.clientWidth};
+            const text = document.createTreeWalker(item, NodeFilter.SHOW_TEXT).nextNode();
+            const range = document.createRange();
+            range.selectNodeContents(text);
+            return {right: box.right, clipRight: clip.right, overflow: item.scrollWidth - item.clientWidth,
+                    lines: new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size,
+                    text: text.textContent};
         }""")
+        assert found["text"] == "x" * 120, f"the item holds more than the comm: {found}"
         assert found["right"] <= found["clipRight"] + 1, \
             f"the string runs {found['right'] - found['clipRight']:.0f}px past the row, where it is clipped: {found}"
         assert found["overflow"] <= 1, f"the string overflows its own box by {found['overflow']}px: {found}"
-        assert found["height"] >= 2 * found["line"] - 1, f"the string did not wrap onto a second line: {found}"
+        assert found["lines"] >= 2, f"the string itself did not break onto a second line: {found}"
     finally:
         context.close()
 
@@ -1655,9 +1663,28 @@ def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, view
     finally:
         context.close()
     if ui == "spa":
+        if theme == "light" and viewport != "desktop":
+            capture_long_comm(browser, served, broker, out, viewport, theme)
         capture_stale_banner(browser, served, broker, driver_cls, out, viewport, theme)
         capture_empty(browser, served, broker, out, viewport, theme)
         capture_history(browser, served, broker, out, viewport, theme)
+
+
+def capture_long_comm(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """A 120-character comm on one request: the string wraps inside its card."""
+    from playwright.sync_api import expect
+
+    broker.reset()
+    add_long_comm_row(broker)
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    try:
+        drv = SpaDriver(page, traffic)
+        page.goto(served.base + "/")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 1)
+        capture(page, out, "spa", viewport, theme, "long-comm", scroll_to=drv.row("lc.example.com"))
+    finally:
+        broker.reset()
+        context.close()
 
 
 def capture_stale_banner(browser, served, broker, driver_cls, out: Path, viewport: str, theme: str) -> None:
