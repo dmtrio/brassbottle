@@ -845,8 +845,10 @@ class RealRepoIntegrationTests(unittest.TestCase):
     def test_egress_dockerfile_selectors_are_inventoried(self):
         """PIN — egress/Dockerfile is in the discovery scope and every
         selector in it (both base images, both apt installs, npm ci, the
-        pinned yq release) has its own record; removing any one leaves a
-        hit line unaccounted for and test_real_repo_has_no_findings fails."""
+        pinned yq release) has its own record, the build-time npm ci filed
+        under base-tools (an image-build step, not a service pin); removing
+        any one leaves a hit line unaccounted for and
+        test_real_repo_has_no_findings fails."""
         self.assertIn("egress", self.locations["discovery"]["scope"])
         egress = {loc_id: record
                   for loc_id, record in self.locations["locations"].items()
@@ -861,7 +863,7 @@ class RealRepoIntegrationTests(unittest.TestCase):
                  "apt-get update && apt-get install -y --no-install-recommends \\"),
                 ("distro-packages",
                  "apt-get update && apt-get install -y --no-install-recommends \\"),
-                ("service-images", "npm ci"),
+                ("base-tools", "npm ci"),
                 ("base-tools", "YQ_VERSION=v4.44.3"),
                 ("base-tools", "yq/releases/download/"),
             ]))
