@@ -1090,7 +1090,7 @@ def long_meta_string_wraps(browser, served: Served, broker: stub.StubBroker, vie
             range.selectNodeContents(text);
             return {right: box.right, clipRight: clip.right, overflow: item.scrollWidth - item.clientWidth,
                     lines: new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size,
-                    text: text.textContent};
+                    text: item.textContent.trim()};
         }""")
         assert found["text"] == "x" * 120, f"the item holds more than the comm: {found}"
         assert found["right"] <= found["clipRight"] + 1, \
@@ -1815,8 +1815,11 @@ class Served:
 
 
 def new_page(browser, served: Served, viewport: str, theme: str):
+    # A fixed locale and zone: check 50 reads the banner's 12-hour clock, and the date picker checks
+    # count local days (UTC has no DST day to shift a row across midnight), so the runner's own
+    # LANG/TZ must not decide whether a check passes.
     context = browser.new_context(
-        viewport=VIEWPORTS[viewport], color_scheme=theme,
+        viewport=VIEWPORTS[viewport], color_scheme=theme, locale="en-US", timezone_id="UTC",
         device_scale_factor=2 if viewport == "phone" else 1)
     context.add_cookies([{
         "name": admin.SESSION_COOKIE_NAME, "value": served.cookie, "domain": served.host,
