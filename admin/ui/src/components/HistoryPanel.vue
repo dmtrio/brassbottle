@@ -224,7 +224,7 @@ function clearRange(): void {
             <span class="meta-item hidden flex-none sm:block">by {{ r.decided_by }}</span>
             <span
               v-if="r.deny_reason"
-              class="meta-item hidden min-w-0 flex-1 basis-0 truncate sm:block"
+              class="meta-item hidden min-w-reason-min flex-1 basis-0 truncate sm:block"
               data-testid="history-row-reason"
               :title="r.deny_reason"
             >{{ r.deny_reason }}</span>

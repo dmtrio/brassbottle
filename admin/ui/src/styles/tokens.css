@@ -102,6 +102,7 @@
   --spacing-tight: 0.25rem;     /* icon to text inside a chip */
   --spacing-line: 0.375rem;     /* between the lines of one row */
   --spacing-sep: 1rem;          /* room for a "·" between inline facts */
+  --spacing-reason-min: 5rem;   /* a shrunken deny reason: its "·" plus a few characters and an ellipsis */
 
   /* Controls */
   --spacing-control: 2.5rem;        /* height of inputs, selects, toolbar buttons */

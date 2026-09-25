@@ -1455,6 +1455,8 @@ def _h_stale_reply(hist, page, traffic, broker) -> None:
 # Every row is two lines (host and date, then pill and bottle) at every viewport, a denied row with a
 # reason and a row with a long bottle name included.
 TWO_LINE_ROW_MAX_PX = 80
+REASON_MIN_PX = 64                       # a shrunken deny reason keeps a few characters and an ellipsis
+SM_WIDTHS = (640, 700, 768, 820)         # the widths where the reason's line is tightest
 
 
 def _h_row_layout(hist, page, traffic, broker) -> None:
@@ -1522,6 +1524,21 @@ def _h_reason_and_long_bottle(hist, page, traffic, broker) -> None:
         # A bottle name far wider than the line gives way to an ellipsis; "by ..." and the reason are not clipped.
         xl_rows = [row for row in hist.rows().all() if stub.XL_BOTTLE in squash(row.inner_text())]
         assert xl_rows, "no row with the 47 character bottle name"
+        # The bottle fills the line: the reason still shows a few characters, ending in an ellipsis.
+        own = page.viewport_size
+        for width in dict.fromkeys((*SM_WIDTHS, own["width"])):
+            page.set_viewport_size({"width": width, "height": own["height"]})
+            for row in xl_rows:
+                reason = row.get_by_test_id("history-row-reason")
+                if reason.count() == 0:
+                    continue
+                content = reason.evaluate(
+                    "el => { const s = getComputedStyle(el); "
+                    "return el.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight); }")
+                assert content >= REASON_MIN_PX, f"at {width}px the deny reason has a {content}px content box: {squash(row.inner_text())}"
+                _eq(reason.evaluate("el => getComputedStyle(el).textOverflow"), "ellipsis")
+                assert reason.evaluate("el => el.scrollWidth > el.clientWidth"), f"at {width}px the deny reason is not cut off with an ellipsis"
+        page.set_viewport_size(own)
         for row in xl_rows:
             line = row.locator(".meta-line").bounding_box()
             by = row.locator(".meta-item", has_text=re.compile(r"^by ")).bounding_box()

@@ -51,7 +51,7 @@ LONG_REASON = ("denylist: telemetry and advertising hosts are blocked for every 
 XL_BOTTLE = "build-farm-eu-west-1-production-canary-shard-07"   # 47 chars, valid to the broker; wider than a row's line from sm up on a tablet
 LONG_HOST_SUFFIX = ".d3k9x7q2m1abcdefghij.cloudfront-origin.eu-west-1.amazonaws.com"   # a realistic 60+ character host after "history-NNN"
 LONG_HOST_EVERY, LONG_HOST_AT = 12, 9    # history rows i % 12 == 9 (denied, with LONG_REASON) get the long host
-XL_BOTTLE_EVERY, XL_BOTTLE_AT = 12, 7    # history rows i % 12 == 7 (denied once) get the 48 character bottle
+XL_BOTTLE_EVERY, XL_BOTTLE_AT = 12, 7    # history rows i % 12 == 7 (denied once) get the 47 character bottle and LONG_REASON
 BAD_REQUEST_HOST = "bad-request.example.com"
 ARCHIVE_HOST = "archive.example.com"      # decided exactly 30 days before the stub's clock
 HISTORY_ROWS = 240
@@ -162,7 +162,9 @@ def build_history(now: datetime | None = None) -> list[dict[str, Any]]:
         host = f"history-{i:03d}.example.com"
         if i % LONG_HOST_EVERY == LONG_HOST_AT:
             host = f"history-{i:03d}{LONG_HOST_SUFFIX}"
-        container = XL_BOTTLE if i % XL_BOTTLE_EVERY == XL_BOTTLE_AT else bottles[i % len(bottles)]
+        container = bottles[i % len(bottles)]
+        if i % XL_BOTTLE_EVERY == XL_BOTTLE_AT:
+            container, reason = XL_BOTTLE, LONG_REASON
         rows.append({
             "request_id": f"h{i:04d}", "container": container,
             "host": host, "port": 443, "status": status,
