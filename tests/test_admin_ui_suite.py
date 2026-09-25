@@ -66,6 +66,7 @@ NOT_INPUTS = (
     "admin/ui/src/.cache/chunk.js",
     "admin/ui/scripts/__pycache__/check_tokens.cpython-312.pyc",
     "admin/ui/scripts/__pycache__/test_check_tokens.cpython-312.pyc",
+    "admin/ui/src/__pycache__/notes.txt",   # only the __pycache__ rule covers it (no .pyc suffix)
     "admin/ui/scripts/.gen-types.ts.swo",
     "admin/contract/README.md",
     "admin/contract/notes.txt",
@@ -191,6 +192,7 @@ class BuildInputsTests(FixtureCase):
                 for directory in path.relative_to(self.root).parents:
                     _age(self.root / directory)
                 self.assertIsNone(suite.bundle_refusal(self.root))
+                _write(path, noise)
 
     def test_editing_or_deleting_a_non_input_is_ignored(self):
         for noise in NOT_INPUTS:
@@ -259,7 +261,8 @@ class TailwindScopeTests(unittest.TestCase):
 
     def test_the_names_the_guard_ignores_are_excluded_from_the_scan(self):
         excluded = re.findall(r'^@source not "([^"]+)";', self.css, re.M)
-        self.assertEqual(excluded, ["../**/.*", "../**/.*/**", "../**/*~", "../**/#*#", "../**/4913"])
+        self.assertEqual(excluded, ["../**/.*", "../**/.*/**", "../**/*~", "../**/#*#", "../**/4913",
+                                    "../**/*.sw?", "../**/*.pyc", "../**/__pycache__/**"])
 
 
 class ManifestTests(FixtureCase):

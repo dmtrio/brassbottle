@@ -13,6 +13,9 @@
 @source not "../**/*~";
 @source not "../**/#*#";
 @source not "../**/4913";
+@source not "../**/*.sw?";
+@source not "../**/*.pyc";
+@source not "../**/__pycache__/**";
 
 @custom-variant dark (&:is(.dark *));
 
