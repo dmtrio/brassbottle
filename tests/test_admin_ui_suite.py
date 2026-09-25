@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -50,6 +51,8 @@ INPUT_PATHS = [path for paths in CASES.values() for path in paths]
 # Files the build never reads.
 NOT_INPUTS = (
     "admin/ui/README.md",
+    "admin/ui/components.json",
+    "admin/ui/eslint.config.js",
     "admin/ui/.gitignore",
     "admin/ui/.eslintcache",
     "admin/ui/src/.App.vue.swp",
@@ -139,6 +142,17 @@ class BuildInputsTests(FixtureCase):
                 _write(self.root / path, path)
                 self.assertIsNone(suite.bundle_refusal(self.root))
 
+    def test_a_change_of_the_same_length_refuses_and_names_it(self):
+        """Same size, different content: only the hash tells it."""
+        for path in INPUT_PATHS:
+            with self.subTest(input=path):
+                same_length = "X" + path[1:]
+                self.assertEqual(len(same_length), len(path))
+                _write(self.root / path, same_length)
+                self.assertIn(f"changed {path}", suite.bundle_refusal(self.root) or "")
+                _write(self.root / path, path)
+                self.assertIsNone(suite.bundle_refusal(self.root))
+
     def test_deleting_an_input_refuses_and_names_it(self):
         for path in INPUT_PATHS:
             with self.subTest(input=path):
@@ -197,6 +211,31 @@ class BuildInputsTests(FixtureCase):
             (self.root / "admin/ui/src" / name).unlink()
         _age(self.root / "admin/ui/src")
         self.assertIsNone(suite.bundle_refusal(self.root))
+
+
+class TailwindScopeTests(unittest.TestCase):
+    """Tailwind reads every file it can find, so src/style.css scopes it to what INPUTS lists.
+
+    Bare `@import "tailwindcss"` scans all of admin/ui/ that .gitignore does not
+    exclude, README.md included: a class added there changes the CSS while the
+    guard, which does not list the README, accepts the stale bundle.
+    """
+    css = (REPO / "admin/ui/src/style.css").read_text()
+
+    def test_the_scan_is_scoped_to_src(self):
+        self.assertIn('@import "tailwindcss" source("./");', self.css)
+        self.assertNotRegex(self.css, r'@import "tailwindcss";')
+
+    def test_every_extra_source_is_an_input(self):
+        sources = re.findall(r'^@source "([^"]+)";', self.css, re.M)
+        self.assertEqual(sources, ["../scripts"])
+        for source in sources:
+            resolved = os.path.normpath(REPO / "admin/ui/src" / source)
+            self.assertIn(Path(resolved).relative_to(REPO).as_posix(), build_inputs.INPUTS)
+
+    def test_the_names_the_guard_ignores_are_excluded_from_the_scan(self):
+        excluded = re.findall(r'^@source not "([^"]+)";', self.css, re.M)
+        self.assertEqual(excluded, ["../**/.*", "../**/.*/**", "../**/*~", "../**/#*#", "../**/4913"])
 
 
 class ManifestTests(FixtureCase):

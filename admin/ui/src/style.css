@@ -1,7 +1,16 @@
 
-@import "tailwindcss";
+@import "tailwindcss" source("./");
 @import "tw-animate-css";
 @import "./styles/tokens.css";
+
+/* Tailwind reads src/ and scripts/ only, minus the names the build never reads:
+   INPUTS in scripts/build_inputs.py is the same list, and must agree with it. */
+@source "../scripts";
+@source not "../**/.*";
+@source not "../**/.*/**";
+@source not "../**/*~";
+@source not "../**/#*#";
+@source not "../**/4913";
 
 @custom-variant dark (&:is(.dark *));
 
