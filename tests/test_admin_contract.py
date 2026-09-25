@@ -954,21 +954,23 @@ class AdminContractTests(unittest.TestCase):
             )
             # The same windows with no offset: UTC to the real broker.
             bare = lambda moment: iso(moment).rstrip("Z")
+            # A row sits exactly on `day30`. Dropping the fraction (the broker) keeps it: since=day30.900
+            # and until=day30.100 both include it. Rounding .900 up would drop it from `since`; a stub that
+            # keeps the fraction would drop it from `until` only (in ASCII "Z" sorts after "."), so `since` alone cannot tell.
+            on_day30 = (f"since={bare(day30)}.900", f"until={bare(day30)}.100")
             offsetless = (
                 f"since={bare(day30 - timedelta(hours=1))}&until={bare(day30 + timedelta(hours=1))}",
                 f"since={bare(day30 - timedelta(hours=1))}.900&until={bare(day30 + timedelta(hours=1))}.100",
                 f"since={bare(now - timedelta(days=40))}&until={bare(now - timedelta(days=1))}",
                 f"since={bare(day30).replace('T', '%20')}",
-                # A row sits exactly on `day30`. Dropping the fraction (the broker) keeps it, so
-                # since=day30.900 includes it; rounding .900 up to the next second would drop it.
-                f"since={bare(day30)}.900",
+                *on_day30,
                 f"until={bare(day30 - timedelta(hours=1))}",
                 f"since={day30.strftime('%Y-%m-%d')}",
             )
             for query in (*queries, *offsetless):
                 with self.subTest(query=query):
                     real_pages, stub_pages = walk(query, real), walk(query, fake)
-                    if query == f"since={bare(day30)}.900":
+                    if query in on_day30:
                         for label, pages in (("real broker", real_pages), ("stub", stub_pages)):
                             self.assertTrue(
                                 any(r["host"] == stub.ARCHIVE_HOST for p in pages for r in p["rows"]),
