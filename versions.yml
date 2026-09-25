@@ -315,20 +315,20 @@ components:
     deferral_reason: >-
       the Dockerfile's toolchain layer (gh via its stable apt line, tea,
       yq (also pinned in egress/Dockerfile), herdr with sha256, mcp-remote caret range, fnm and uv live
-      installers, Node LTS, pip tooling) keeps existing behavior; several
+      installers, Node LTS, pip tooling, and the egress image's build-time
+      admin UI `npm ci`, pinned by admin/ui/package-lock.json) keeps existing behavior; several
       members are exact today, but the group is managed as one only if a
       later release adopts it
 
   service-images:
     name: Service images
     kind: group
-    enabled_when: "backup/tunnel/egress service start"
+    enabled_when: "backup/tunnel service start"
     policy: deferred
     deferral_reason: >-
       Backrest (ghcr.io/garethgeorge/backrest:v1.14.1) and Newt
-      (fosrl/newt:1.16.0) service-image pins, and the egress image's admin UI
-      `npm ci` (pinned by admin/ui/package-lock.json), keep existing
-      behavior; service upgrade is out of managed scope
+      (fosrl/newt:1.16.0) service-image pins keep existing behavior;
+      service upgrade is out of managed scope
 
   host-bridges:
     name: Host-side service launchers

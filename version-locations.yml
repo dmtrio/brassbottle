@@ -354,6 +354,11 @@ locations:
     path: egress/Dockerfile
     component: base-tools
     find: "yq/releases/download/"
+  base-tools.egress-ui-npm-ci:
+    path: egress/Dockerfile
+    component: base-tools
+    find: "npm ci"
+    note: the egress image's build-time admin/ui install from the committed package-lock.json
 
   service-images.backrest:
     path: src/backup_config.py
@@ -363,11 +368,6 @@ locations:
     path: src/tunnel_config.py
     component: service-images
     find: "fosrl/newt:1.16.0"
-  service-images.egress-ui-npm-ci:
-    path: egress/Dockerfile
-    component: service-images
-    find: "npm ci"
-    note: the egress image's admin/ui install from the committed package-lock.json
 
   # The CI smoke pulls of the same two service images — current selectors in
   # the workflow file, anchored per line (one record per line).
