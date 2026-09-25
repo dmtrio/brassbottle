@@ -23,6 +23,7 @@ Exit status: 0 with no FAIL, 1 with any FAIL, 2 when the stub violates the contr
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import re
@@ -1665,23 +1666,54 @@ SELECTED_DAY_CONTRAST_JS = """(cell) => {
 MIN_TEXT_CONTRAST = 4.5
 
 
+def _measure_cell(cell, prefix: str) -> dict:
+    """The cell's contrast in the four states a person meets it in: the mouse over it or away, the
+    keyboard focus on it or not (the focus: classes would otherwise mask the base and hover colours)."""
+    settle = "el => Promise.all(el.getAnimations().map((a) => a.finished))"   # past the colour transition
+    page = cell.page
+    out = {}
+    cell.focus()
+    cell.hover()
+    cell.evaluate(settle)
+    out[f"{prefix}/hovered+focused"] = cell.evaluate(SELECTED_DAY_CONTRAST_JS)
+    page.mouse.move(0, 0)
+    cell.evaluate(settle)
+    out[f"{prefix}/away+focused"] = cell.evaluate(SELECTED_DAY_CONTRAST_JS)
+    cell.evaluate("el => el.blur()")
+    cell.evaluate(settle)
+    assert cell.evaluate("el => document.activeElement !== el"), "the cell kept its focus"
+    out[f"{prefix}/away+unfocused"] = cell.evaluate(SELECTED_DAY_CONTRAST_JS)
+    cell.hover()
+    cell.evaluate(settle)
+    assert cell.evaluate("el => document.activeElement !== el"), "hovering the cell focused it"
+    out[f"{prefix}/hovered+unfocused"] = cell.evaluate(SELECTED_DAY_CONTRAST_JS)
+    return out
+
+
 def selected_day_contrast(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str) -> dict:
-    """Pick a day in the History date picker and measure its selected cell, mouse over it and away."""
+    """Pick a day in the History date picker and measure its selected cell, then extend the pick to
+    a two-day range and measure the range's end cell (selection-end without selection-start) and
+    its start cell. A single-day pick carries both attributes, so only the range reaches each half."""
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, theme)
     try:
         hist = HistoryPage(page, served, traffic, broker)
         hist.open()
-        hist.pick_day(3)                         # the popover stays open on the selected day
+        picked = hist.pick_day(3)                # the popover stays open on the selected day
         cell = page.locator("[data-slot=range-calendar-trigger][data-selected]").first
         cell.wait_for()
-        settle = "el => Promise.all(el.getAnimations().map((a) => a.finished))"   # past the colour transition
-        cell.evaluate(settle)
-        hovered = cell.evaluate(SELECTED_DAY_CONTRAST_JS)     # the click left the mouse over it
-        page.mouse.move(0, 0)
-        cell.evaluate(settle)
-        away = cell.evaluate(SELECTED_DAY_CONTRAST_JS)
-        return {"hovered": hovered, "away": away}
+        found = _measure_cell(cell, "single day")
+        year, month, day = (int(part) for part in picked.split("-"))
+        other = day + 1 if day < calendar.monthrange(year, month)[1] else day - 1
+        page.locator("[data-slot=range-calendar] table").first.locator(
+            "[data-slot=range-calendar-trigger]:not([data-outside-view])").get_by_text(str(other), exact=True).first.click()
+        end = page.locator("[data-slot=range-calendar-trigger][data-selection-end]:not([data-selection-start])")
+        start = page.locator("[data-slot=range-calendar-trigger][data-selection-start]:not([data-selection-end])")
+        _eq(end.count(), 1)
+        _eq(start.count(), 1)
+        found.update(_measure_cell(end, "range end"))
+        found.update(_measure_cell(start, "range start"))
+        return found
     finally:
         context.close()
 
@@ -1689,13 +1721,15 @@ def selected_day_contrast(browser, served: Served, broker: stub.StubBroker, view
 def _h_calendar_contrast(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
     low = []
     for theme in ("light", "dark"):
-        for state, got in selected_day_contrast(browser, served, broker, viewport, theme).items():
+        measured = selected_day_contrast(browser, served, broker, viewport, theme)
+        _eq(len(measured), 12)                   # three cells (single day, range end, range start), four states each
+        for state, got in measured.items():
             if got["ratio"] < MIN_TEXT_CONTRAST:
                 low.append(f"{theme}/{state}: {got['ratio']:.2f}:1 (text {got['fg']} on {got['bg']})")
     assert not low, f"the selected day is under {MIN_TEXT_CONTRAST}:1: " + "; ".join(low)
 
 
-CONTRAST_CHECK = ("62", "The selected day in the History date picker has at least 4.5:1 text contrast, light and dark", _h_calendar_contrast)
+CONTRAST_CHECK = ("62", "The selected day, a range's end and its start in the History date picker have at least 4.5:1 text contrast, hovered or not, focused or not, light and dark", _h_calendar_contrast)
 
 HISTORY_CHECKS = [
     ("30", "History lists the whole store newest first, 50 to a page, in keyset order", _h_newest_first),
@@ -1986,7 +2020,7 @@ NEW_CHECKS = [
     ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
     ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
-    ("62", "The selected day in the History date picker has at least 4.5:1 text contrast, light and dark", "N/A(spa-only) on legacy"),
+    ("62", "The selected day, a range's end and its start in the History date picker have at least 4.5:1 text contrast, hovered or not, focused or not, light and dark", "N/A(spa-only) on legacy"),
 ]
 
 
