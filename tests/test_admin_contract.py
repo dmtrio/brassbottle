@@ -959,12 +959,21 @@ class AdminContractTests(unittest.TestCase):
                 f"since={bare(day30 - timedelta(hours=1))}.900&until={bare(day30 + timedelta(hours=1))}.100",
                 f"since={bare(now - timedelta(days=40))}&until={bare(now - timedelta(days=1))}",
                 f"since={bare(day30).replace('T', '%20')}",
+                # A row sits exactly on `day30`. Dropping the fraction (the broker) keeps it, so
+                # since=day30.900 includes it; rounding .900 up to the next second would drop it.
+                f"since={bare(day30)}.900",
                 f"until={bare(day30 - timedelta(hours=1))}",
                 f"since={day30.strftime('%Y-%m-%d')}",
             )
             for query in (*queries, *offsetless):
                 with self.subTest(query=query):
                     real_pages, stub_pages = walk(query, real), walk(query, fake)
+                    if query == f"since={bare(day30)}.900":
+                        for label, pages in (("real broker", real_pages), ("stub", stub_pages)):
+                            self.assertTrue(
+                                any(r["host"] == stub.ARCHIVE_HOST for p in pages for r in p["rows"]),
+                                f"the {label} dropped the row on the second the fraction was cut from",
+                            )
                     self.assertEqual(
                         [(project(p), p["next"]) for p in real_pages],
                         [(project(p), p["next"]) for p in stub_pages],
