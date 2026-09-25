@@ -991,6 +991,43 @@ def banner_copy(browser, served: Served, broker: stub.StubBroker, viewport: str)
         expect(banner).to_be_visible()
         assert banner.inner_text().strip() == "Decision not sent: decide failed on the daemon", \
             f"decide-failure banner: {banner.inner_text().strip()!r}"
+
+        # The poll banner keeps its own clearing marker. A poll fails; the queue recovers, but the next poll is
+        # held in flight; a decide fails; the held poll succeeds. That poll made the list current, so the poll
+        # banner goes, and the decide's error, which the poll predates, takes its place.
+        with broker.lock:
+            broker.decide_outage = None
+        page.clock.run_for(5500)
+        expect(banner).to_be_hidden()
+        with broker.lock:
+            broker.outage = True
+        page.clock.run_for(5500)
+        expect(banner).to_be_visible()
+        assert banner.inner_text().strip().startswith("Showing data from "), \
+            f"poll-failure banner: {banner.inner_text().strip()!r}"
+        with broker.lock:
+            broker.outage = False
+        held: list = []
+        page.route("**/api/egress/queue", lambda route: held.append(route))
+        page.clock.run_for(5500)
+        drv._wait_until(lambda: len(held) >= 1, 5)
+        assert held, "no queue poll went in flight"
+        with broker.lock:
+            broker.decide_outage = 500
+        drv.button("Deny", "check18.example.com").click()
+        drv.wait_note("check18.example.com", "^Not sent: ")
+        assert banner.inner_text().strip().startswith("Showing data from "), \
+            f"banner changed before the poll landed: {banner.inner_text().strip()!r}"
+        reads = len(traffic.queue_statuses)
+        for route in held:
+            route.continue_()
+        held.clear()
+        drv._wait_until(lambda: len(traffic.queue_statuses) > reads, 5)
+        page.unroute("**/api/egress/queue")
+        expect(banner).to_have_text("Decision not sent: decide failed on the daemon")
+        # the decide banner clears on the next poll, which starts after the decide failed
+        page.clock.run_for(5500)
+        expect(banner).to_be_hidden()
     finally:
         with broker.lock:
             broker.outage = False
