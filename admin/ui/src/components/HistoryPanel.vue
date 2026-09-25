@@ -193,7 +193,11 @@ function clearRange(): void {
         data-testid="history-row"
       >
         <div class="flex items-start justify-between gap-inline">
-          <div class="row-title">
+          <div
+            class="row-title min-w-0 truncate"
+            data-testid="history-row-host"
+            :title="`${r.host}:${r.port}`"
+          >
             {{ r.host }}<span class="font-normal text-muted-foreground">:{{ r.port }}</span>
           </div>
           <span
@@ -214,13 +218,13 @@ function clearRange(): void {
               ><AlertTriangle class="size-icon-sm" />apply failed</span>
             </span>
             <span
-              class="meta-item flex min-w-0 items-center gap-tight font-medium text-foreground sm:flex-none"
+              class="meta-item flex min-w-0 items-center gap-tight font-medium text-foreground"
               data-testid="history-row-bottle"
             ><Box class="size-icon-sm flex-none" /><span class="truncate">{{ r.container }}</span></span>
             <span class="meta-item hidden flex-none sm:block">by {{ r.decided_by }}</span>
             <span
               v-if="r.deny_reason"
-              class="meta-item hidden min-w-0 truncate sm:block"
+              class="meta-item hidden min-w-0 flex-1 basis-0 truncate sm:block"
               data-testid="history-row-reason"
               :title="r.deny_reason"
             >{{ r.deny_reason }}</span>

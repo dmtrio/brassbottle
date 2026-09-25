@@ -1477,6 +1477,15 @@ def _h_row_layout(hist, page, traffic, broker) -> None:
     # The fixture page really holds the worst cases this budget is for.
     texts = [squash(row.inner_text()) for row in rows]
     assert any(stub.LONG_BOTTLE in t and "Denied permanently" in t for t in texts), "no long-bottle denied row on the page"
+    long_hosts = [row for row in rows if stub.LONG_HOST_SUFFIX in squash(row.inner_text())]
+    assert long_hosts, "no row with a long host on the page"
+    for row in long_hosts:
+        host = row.get_by_test_id("history-row-host")
+        full = squash(host.inner_text())
+        assert len(full.split(":")[0]) >= 63, f"the fixture host is not a long one: {full!r}"
+        _eq(host.get_attribute("title"), full)          # the whole host stays reachable, and in the row's name
+        _eq(host.evaluate("el => getComputedStyle(el).textOverflow"), "ellipsis")
+        assert full in squash(row.inner_text()), full
     # The date sits top-right, on the host's line.
     row = rows[0]
     head, when = row.locator(".row-title").bounding_box(), row.get_by_test_id("history-row-when").bounding_box()
@@ -1508,6 +1517,18 @@ def _h_reason_and_long_bottle(hist, page, traffic, broker) -> None:
         meta, bottle = reason.bounding_box(), row.get_by_test_id("history-row-bottle").bounding_box()
         assert abs((meta["y"] + meta["height"] / 2) - (bottle["y"] + bottle["height"] / 2)) < 4, \
             f"the reason is not on the bottle's line: {meta} {bottle}"
+    if not phone:
+        # A bottle name far wider than the line gives way to an ellipsis; "by ..." and the reason are not clipped.
+        xl_rows = [row for row in hist.rows().all() if stub.XL_BOTTLE in squash(row.inner_text())]
+        assert xl_rows, "no row with the 47 character bottle name"
+        for row in xl_rows:
+            line = row.locator(".meta-line").bounding_box()
+            by = row.locator(".meta-item", has_text=re.compile(r"^by ")).bounding_box()
+            assert by["x"] + by["width"] <= line["x"] + line["width"] + 0.5, f"'by ...' is clipped by the bottle name: {by} {line}"
+            name = row.get_by_test_id("history-row-bottle").locator(".truncate")
+            _eq(name.evaluate("el => getComputedStyle(el).textOverflow"), "ellipsis")
+            if name.evaluate("el => el.scrollWidth > el.clientWidth"):
+                assert page.viewport_size["width"] < 1024, "the 47 character bottle name is cut off on a desktop"
     long_rows = [row for row in hist.rows().all() if stub.LONG_BOTTLE in squash(row.inner_text())]
     assert long_rows, "no row with the long bottle name"
     for row in long_rows:
@@ -1628,10 +1649,10 @@ HISTORY_CHECKS = [
     ("37", "History has no horizontal overflow and no console errors", _h_overflow_and_console),
     ("38", "A failed fetch for a new filter shows no rows, no Older cursor and Page 1, not the old filter's", _h_filter_failure),
     ("39", "A slow reply for a superseded filter never replaces the current filter's rows", _h_stale_reply),
-    ("40", "Every row is two lines (host and date, pill and bottle) at every viewport, with by and relative time from sm up", _h_row_layout),
+    ("40", "Every row is two lines (host and date, pill and bottle) at every viewport, a 63+ character host ending in an ellipsis with the whole host in its title, with by and relative time from sm up", _h_row_layout),
     ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", _h_toolbar_layout),
     ("42", "The date trigger is named \"Date range: <label>\"", _h_date_trigger_name),
-    ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone", _h_reason_and_long_bottle),
+    ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", _h_reason_and_long_bottle),
 ]
 
 # ---- serving --------------------------------------------------------------------
@@ -1826,6 +1847,11 @@ def capture_history(browser, served, broker, out: Path, viewport: str, theme: st
         hist.older()
         capture(page, out, "spa", viewport, theme, "history-older")
         hist.open()
+        row = hist.rows().filter(has_text=stub.LONG_HOST_SUFFIX).first
+        row.scroll_into_view_if_needed()
+        page.wait_for_timeout(150)
+        row.screenshot(path=str(out / f"spa-{viewport}-{theme}-history-long-host.png"))
+        hist.open()
         hist.pick_day(30)
         from playwright.sync_api import expect
         expect(hist.rows()).to_have_count(1)
@@ -1891,14 +1917,14 @@ NEW_CHECKS = [
     ("37", "History has no horizontal overflow and no console errors", "N/A(spa-only) on legacy"),
     ("38", "A failed fetch for a new filter shows no rows, no Older cursor and Page 1, not the old filter's", "N/A(spa-only) on legacy"),
     ("39", "A slow reply for a superseded filter never replaces the current filter's rows", "N/A(spa-only) on legacy"),
-    ("40", "Every row is two lines (host and date, pill and bottle) at every viewport, with by and relative time from sm up", "N/A(spa-only) on legacy"),
+    ("40", "Every row is two lines (host and date, pill and bottle) at every viewport, a 63+ character host ending in an ellipsis with the whole host in its title, with by and relative time from sm up", "N/A(spa-only) on legacy"),
     ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", "N/A(spa-only) on legacy"),
     ("42", "The date trigger is named \"Date range: <label>\"", "N/A(spa-only) on legacy"),
     ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
     ("51", "The light theme paints no pure-red (#ff0000) pixel in any request row", "N/A(spa-only) on legacy"),
     ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
-    ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone", "N/A(spa-only) on legacy"),
+    ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
 ]
 
 
