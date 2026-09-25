@@ -7,7 +7,7 @@
     "dev": "vite",
     "gen:types": "tsx scripts/gen-types.ts",
     "prebuild": "npm run gen:types",
-    "build": "npm run check:tokens && vue-tsc -b && vite build",
+    "build": "npm run check:tokens && vue-tsc -b && vite build && python3 scripts/build_inputs.py write",
     "preview": "vite preview",
     "lint": "eslint .",
     "check:tokens": "python3 scripts/check_tokens.py",
