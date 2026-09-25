@@ -48,6 +48,10 @@ ERROR_SCHEMA = "error_response.schema.json"
 LONG_BOTTLE = "ci-runner-eu-west-1"   # wide enough to wrap a phone-width row
 LONG_REASON = ("denylist: telemetry and advertising hosts are blocked for every bottle by the operator "
                "policy, see the egress section of the bottle manifest")   # far wider than any viewport's row
+XL_BOTTLE = "build-farm-eu-west-1-production-canary-shard-07"   # 47 chars, valid to the broker; wider than a row's line from sm up on a tablet
+LONG_HOST_SUFFIX = ".d3k9x7q2m1abcdefghij.cloudfront-origin.eu-west-1.amazonaws.com"   # a realistic 60+ character host after "history-NNN"
+LONG_HOST_EVERY, LONG_HOST_AT = 12, 9    # history rows i % 12 == 9 (denied, with LONG_REASON) get the long host
+XL_BOTTLE_EVERY, XL_BOTTLE_AT = 12, 7    # history rows i % 12 == 7 (denied once) get the 48 character bottle
 BAD_REQUEST_HOST = "bad-request.example.com"
 ARCHIVE_HOST = "archive.example.com"      # decided exactly 30 days before the stub's clock
 HISTORY_ROWS = 240
@@ -155,9 +159,13 @@ def build_history(now: datetime | None = None) -> list[dict[str, Any]]:
         status, scope, by, applied, reason = kinds[i % len(kinds)]
         in_tie = TIE_FIRST <= i < TIE_FIRST + TIE_COUNT
         when = tie_at if in_tie else now - timedelta(hours=4, minutes=37 * i)
+        host = f"history-{i:03d}.example.com"
+        if i % LONG_HOST_EVERY == LONG_HOST_AT:
+            host = f"history-{i:03d}{LONG_HOST_SUFFIX}"
+        container = XL_BOTTLE if i % XL_BOTTLE_EVERY == XL_BOTTLE_AT else bottles[i % len(bottles)]
         rows.append({
-            "request_id": f"h{i:04d}", "container": bottles[i % len(bottles)],
-            "host": f"history-{i:03d}.example.com", "port": 443, "status": status,
+            "request_id": f"h{i:04d}", "container": container,
+            "host": host, "port": 443, "status": status,
             "scope": scope, "decided_at": _iso(when), "decided_by": by,
             "apply_status": applied, "deny_reason": reason,
         })
