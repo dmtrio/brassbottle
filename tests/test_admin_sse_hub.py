@@ -213,6 +213,13 @@ class HubTestCase(unittest.TestCase):
         self.assertTrue(wait_until(lambda: not self.leaked_threads(), 5.0),
                         f"threads still alive: {self.leaked_threads()}")
 
+    @staticmethod
+    def open_fds() -> int | None:
+        try:
+            return len(os.listdir("/proc/self/fd"))
+        except OSError:
+            return None
+
     def queue_polls(self) -> int:
         return self.broker.queue_gets
 
@@ -337,6 +344,19 @@ class StreamTests(HubTestCase):
         polls = self.queue_polls()
         time.sleep(POLL * 5)
         self.assertEqual(self.queue_polls(), polls, "the poller kept polling with no stream open")
+
+    def test_a_closed_stream_frees_its_slot_at_once_so_a_reloading_tab_is_never_refused(self):
+        """A page reload closes one stream and opens the next within milliseconds; the old one must not hold a slot."""
+        self.start_admin()   # the heartbeat is 30 s: only the close itself can free the slot
+        fds = self.open_fds()
+        for cycle in range(3 * admin.STREAM_MAX):
+            client = self.connect()
+            self.assertEqual(client.status, 200, f"cycle {cycle}: refused with the previous streams just closed")
+            client.queue_frame()
+            client.close()
+        self.assert_no_threads_leak()
+        if fds is not None:   # each stream holds a socket pair: none may outlive its stream
+            self.assertTrue(wait_until(lambda: self.open_fds() <= fds + 2), f"{self.open_fds()} fds, started at {fds}")
 
     def test_a_reset_client_is_a_write_error_that_ends_its_handler(self):
         self.start_admin(stream_poll_seconds=0.05, stream_heartbeat_seconds=30.0)

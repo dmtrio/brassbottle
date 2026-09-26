@@ -65,7 +65,6 @@ STREAM_MAX = 8                        # concurrent streams; the ninth gets 503
 STREAM_POLL_SECONDS = 2.0             # upstream /queue poll, only while a stream is open
 STREAM_HEARTBEAT_SECONDS = 15.0       # `: hb` comment on an idle stream
 STREAM_FAILURE_LIMIT = 2              # consecutive failed polls before the streams are ended
-STREAM_IDLE_CHECK_SECONDS = 1.0       # how often an idle handler looks for a closed client
 STREAM_WRITE_TIMEOUT_SECONDS = 10.0   # a client that stops reading is treated as gone
 STREAM_FULL_ERROR = "too many live streams"
 
@@ -492,12 +491,39 @@ _CLOSE = object()   # queued to a stream to tell its handler to end
 
 
 class _Stream:
-    """One open browser stream: a mailbox its handler thread drains."""
+    """One open browser stream: a mailbox its handler thread drains.
+
+    The handler sleeps in select() on its client socket and on `wake_r`, so a
+    frame reaches it at once and a client that goes away is noticed at once (a
+    tab that reloads must not keep its old stream's slot for a poll interval).
+    """
 
     def __init__(self) -> None:
         self.mailbox: queue.Queue[Any] = queue.Queue()
         self.ready = False   # set once its first frame is queued; only ready streams receive fan-out
         self.opened = time.monotonic()
+        self.wake_r, self.wake_w = socket.socketpair()
+        self.wake_r.setblocking(False)
+        self.wake_w.setblocking(False)
+
+    def push(self, item: Any) -> None:
+        self.mailbox.put(item)
+        try:
+            self.wake_w.send(b"x")
+        except BlockingIOError:
+            pass   # a wake-up is already pending
+        except OSError:
+            pass   # the handler has finished and closed its end
+
+    def drain_wake(self) -> None:
+        try:
+            self.wake_r.recv(4096)
+        except (BlockingIOError, OSError):
+            pass
+
+    def release(self) -> None:
+        self.wake_r.close()
+        self.wake_w.close()
 
 
 class QueueStreamHub:
@@ -544,13 +570,13 @@ class QueueStreamHub:
 
     def open(self) -> _Stream:
         """Reserve a slot, get the current snapshot, queue it as the stream's first frame."""
-        stream = _Stream()
         with self._lock:
             if self._closed:
                 raise StreamUnavailable(HTTPStatus.SERVICE_UNAVAILABLE, "admin shutting down")
             if len(self._streams) >= self.max_streams:
                 LOG.info("admin stream refused streams=%d max=%d", len(self._streams), self.max_streams)
                 raise StreamUnavailable(HTTPStatus.SERVICE_UNAVAILABLE, STREAM_FULL_ERROR)
+            stream = _Stream()
             self._streams.append(stream)
         try:
             self._ensure_fresh()
@@ -558,7 +584,7 @@ class QueueStreamHub:
                 if self._closed:
                     raise StreamUnavailable(HTTPStatus.SERVICE_UNAVAILABLE, "admin shutting down")
                 assert self._frame is not None
-                stream.mailbox.put(self._frame)
+                stream.push(self._frame)
                 stream.ready = True
                 if self._poller is None:
                     self._poller = threading.Thread(
@@ -567,6 +593,7 @@ class QueueStreamHub:
                     self._poller.start()
         except BaseException:
             self.close_stream(stream)
+            stream.release()
             raise
         return stream
 
@@ -591,7 +618,7 @@ class QueueStreamHub:
         ended = self._streams
         self._streams = []
         for stream in ended:
-            stream.mailbox.put(_CLOSE)
+            stream.push(_CLOSE)
         self._cond.notify_all()
         if ended:
             LOG.info("admin stream end streams=%d reason=%s", len(ended), reason)
@@ -630,7 +657,7 @@ class QueueStreamHub:
                 self._key, self._frame, self._fetched_at = key, frame, time.monotonic()
                 targets = [stream for stream in self._streams if stream.ready] if changed else []
             for stream in targets:
-                stream.mailbox.put(frame)
+                stream.push(frame)
             LOG.info(
                 "admin stream poll status=%d duration_ms=%d bytes=%d ok=true changed=%s fanout=%d",
                 status, duration_ms, size, str(changed).lower(), len(targets),
@@ -1081,7 +1108,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return
         self.close_connection = True
         heartbeat = self.server.stream_heartbeat_seconds
-        idle = min(STREAM_IDLE_CHECK_SECONDS, heartbeat)
         frames = sent = 0
         reason = "closed"
         try:
@@ -1094,40 +1120,42 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             LOG.info("admin stream open streams=%d", hub.stream_count())
             last_write = time.monotonic()
             while True:
-                try:
-                    item = stream.mailbox.get(timeout=idle)
-                except queue.Empty:
+                due = max(0.0, heartbeat - (time.monotonic() - last_write))
+                readable, _, _ = select.select([self.connection, stream.wake_r], [], [], due)
+                if self.connection in readable:
+                    # An EventSource sends nothing after its request: a read is the client closing (or noise to discard).
+                    if self.connection.recv(4096) == b"":
+                        reason = "client_closed"
+                        break
+                if stream.wake_r in readable:
+                    stream.drain_wake()
                     item = None
-                if item is _CLOSE:
-                    reason = "ended"
-                    break
-                if item is not None:
                     while True:   # a burst is one frame: every frame is the whole snapshot, so the last one wins
                         try:
                             later = stream.mailbox.get_nowait()
                         except queue.Empty:
                             break
                         if later is _CLOSE:
-                            item, reason = later, "ended"
+                            item = _CLOSE
                             break
                         item = later
                     if item is _CLOSE:
+                        reason = "ended"
                         break
-                    self.wfile.write(item)
-                    frames += 1
-                    sent += len(item)
-                    last_write = time.monotonic()
-                elif time.monotonic() - last_write >= heartbeat:
+                    if item is not None:
+                        self.wfile.write(item)
+                        frames += 1
+                        sent += len(item)
+                        last_write = time.monotonic()
+                elif not readable:
                     self.wfile.write(b": hb\n\n")
                     sent += 5
                     last_write = time.monotonic()
-                elif self._peer_closed():
-                    reason = "client_closed"
-                    break
-        except OSError as exc:   # BrokenPipeError, ConnectionResetError, write timeout
-            reason = f"write_error:{type(exc).__name__}"
+        except OSError as exc:   # BrokenPipeError, ConnectionResetError, a write that timed out
+            reason = f"socket_error:{type(exc).__name__}"
         finally:
             hub.close_stream(stream)
+            stream.release()
             LOG.info(
                 "admin stream close streams=%d duration_ms=%d frames=%d bytes=%d reason=%s",
                 hub.stream_count(),
@@ -1136,14 +1164,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 sent,
                 reason,
             )
-
-    def _peer_closed(self) -> bool:
-        """True when the client has closed its end (a readable socket that reads EOF)."""
-        try:
-            readable, _, _ = select.select([self.connection], [], [], 0)
-            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
-        except (OSError, ValueError):
-            return True
 
     def _proxy_egress_get(
         self, *, path: str, upstream_path: str, pass_400: bool = False
