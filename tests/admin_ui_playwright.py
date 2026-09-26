@@ -2414,6 +2414,15 @@ def new_page(browser, served: Served, viewport: str, theme: str):
     return context, page, traffic
 
 
+def release_held(held: list) -> None:
+    """Continue every route a check held back, and forget them; a page that is already gone is not an error."""
+    while held:
+        try:
+            held.pop().continue_()
+        except Exception:  # noqa: BLE001 - the page may already be gone
+            pass
+
+
 def close_page_context(context, page) -> None:
     """Close a context after unrouting its page: a route still installed holds a task that is pending when the
     context goes, and asyncio reports it as "Task was destroyed but it is pending" (check 164)."""
@@ -4784,7 +4793,8 @@ def _connecting_spinner_respects_reduced_motion(browser, served: Served, broker:
         assert animation() == "spin"
         assert not traffic.console_errors, traffic.console_errors
     finally:
-        context.close()
+        release_held(held)   # the held stream request is a pending task when the context closes (check 164)
+        close_page_context(context, page)
 
 
 # What every page of the context hears on the channel, beside the app: (kind, from, to) of each message.
@@ -4920,12 +4930,12 @@ def capture_one_stream(browser, served, broker, out: Path, viewport: str, theme:
         leader.page.close()
         wait_link(follower.page, "connecting", 5000)
         capture(follower.page, out, "spa", viewport, theme, "one-stream-follower-connecting")
-        for route in held:
-            route.continue_()
+        release_held(held)
         wait_link(follower.page, "live", 5000)
         capture(follower.page, out, "spa", viewport, theme, "one-stream-follower-live-again")
     finally:
-        context.close()
+        release_held(held)   # a failure before the release leaves the stream request pending (check 164)
+        close_page_context(context, tabs[1].page)
 
 
 LEGACY_MAP = [
