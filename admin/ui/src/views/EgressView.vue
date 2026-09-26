@@ -1,12 +1,22 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import HistoryPanel from '@/components/HistoryPanel.vue'
 import QueuePanel from '@/components/QueuePanel.vue'
+import { focusRequestId } from '@/composables/useNotifications'
 import { useQueue } from '@/composables/useQueue'
 
 const tab = ref('queue')
 const { openCount } = useQueue()
+
+// A notification click names a request in the queue; History has no such row.
+watch(
+  focusRequestId,
+  (id) => {
+    if (id) tab.value = 'queue'
+  },
+  { immediate: true },
+)
 </script>
 
 <template>

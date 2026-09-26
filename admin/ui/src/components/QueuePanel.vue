@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { Ban, Box, Check, ChevronDown, FilterX, Group, Rows3, X } from '@lucide/vue'
 import { useMediaQuery } from '@vueuse/core'
 import {
@@ -30,6 +30,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { decide as apiDecide, type DecideAction, type DecidePayload } from '@/api/egress'
+import { focusRequestId, focusRequestRow, hasRequestRow } from '@/composables/useNotifications'
 import { useQueue } from '@/composables/useQueue'
 import { outcomeLabel, outcomeTone, relTime } from '@/lib/decision'
 import {
@@ -98,6 +99,24 @@ function clearFilters(): void {
 }
 
 const openRows = computed(() => snapshot.value?.open ?? [])
+
+// A notification click lands here: bring the request's row into view and focus
+// it. A filter may be hiding it, and the notification is about that request,
+// so the filters give way. A request decided since has no row; the click still
+// lands on the queue.
+watch(
+  focusRequestId,
+  async (id) => {
+    if (!id) return
+    if (!hasRequestRow(id) && openRows.value.some((open) => open.request_id === id)) {
+      clearFilters()
+      await nextTick()
+    }
+    focusRequestRow(id)
+    focusRequestId.value = null
+  },
+  { immediate: true, flush: 'post' },
+)
 
 // Every bottle with an open request, plus any still selected after its last
 // request was decided, so a selection can always be undone.
@@ -587,6 +606,9 @@ function onDecide(row: OpenRow, action: DecideAction): void {
             <TableRow
               v-for="r in s.rows"
               :key="r.request_id"
+              class="request-target"
+              tabindex="-1"
+              :data-request-id="r.request_id"
               data-testid="request"
             >
               <TableCell :class="s.container && 'pl-indent'">
@@ -678,7 +700,9 @@ function onDecide(row: OpenRow, action: DecideAction): void {
         <article
           v-for="r in s.rows"
           :key="r.request_id"
-          class="item-card"
+          class="item-card request-target"
+          tabindex="-1"
+          :data-request-id="r.request_id"
           data-testid="request"
         >
           <RequestSummary

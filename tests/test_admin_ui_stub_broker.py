@@ -162,6 +162,30 @@ class StubBrokerTests(unittest.TestCase):
             broker.stop()
 
 
+class StubFiledRequestTests(unittest.TestCase):
+    def test_a_filed_request_is_served_contract_shaped_and_reset_drops_it(self):
+        broker = stub.StubBroker()
+        before = broker.queue["count"]
+        rid = broker.file_request("new.example.com", container="mid", port=8443)
+        row = broker.queue["open"][-1]
+        self.assertEqual((rid, row["container"], row["host"], row["port"]), (rid, "mid", "new.example.com", 8443))
+        self.assertEqual(broker.queue["count"], before + 1)
+        self.assertEqual(validate_document(broker.queue_body(), stub.QUEUE_SCHEMA), [])
+        broker.reset()
+        self.assertEqual(broker.queue["count"], before)
+
+    def test_a_withdrawn_request_can_be_filed_again_under_the_same_id(self):
+        broker = stub.StubBroker()
+        broker.file_request("back.example.com", request_id="back-1")
+        row = broker.withdraw_request("back-1")
+        self.assertEqual(row["request_id"], "back-1")
+        self.assertNotIn("back-1", [r["request_id"] for r in broker.queue["open"]])
+        self.assertEqual(broker.queue["count"], len(broker.queue["open"]))
+        self.assertEqual(broker.file_request("back.example.com", request_id="back-1"), "back-1")
+        with self.assertRaises(KeyError):
+            broker.withdraw_request("never-filed")
+
+
 class StubHistoryTests(unittest.TestCase):
     """`GET /recent` is real keyset paging over a fixture with a tie block."""
 
