@@ -53,7 +53,7 @@ const current = computed(() => copy[props.state])
     />
     <LoaderCircle
       v-else-if="state === 'connecting'"
-      class="size-icon"
+      class="size-icon motion-safe:animate-spin"
       aria-hidden="true"
     />
     <RefreshCw
