@@ -192,6 +192,18 @@ class PatternTests(unittest.TestCase):
                 self.assertTrue(
                     validate_document({"rows": [row], "next": bad_next}, "recent_page.schema.json")
                 )
+        no_hits = {k: v for k, v in row.items() if k != "hit_count"}
+        self.assertEqual(
+            validate_document({"rows": [no_hits], "next": None}, "recent_page.schema.json"),
+            ["$.rows[0]: missing required key 'hit_count'"],
+        )
+        self.assertEqual(
+            validate_document(
+                {"open": [], "count": 0, "generated_at": "2026-09-23T12:00:00Z", "recent": [no_hits]},
+                "queue_snapshot.schema.json",
+            ),
+            ["$.recent[0]: missing required key 'hit_count'"],
+        )
         bad_row = dict(row, decided_at="2026-09-23 12:00")
         self.assertTrue(
             validate_document({"rows": [bad_row], "next": None}, "recent_page.schema.json")
