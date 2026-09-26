@@ -24,3 +24,9 @@ deletes every cache it does not own, the legacy page's `djinn-admin-shell-v3`
 included. `src/main.ts` registers it in the production build only; the daemon serves
 these files from `dist/` through its ordinary asset allowlist (`sw.js` is `no-cache`).
 `tests/test_admin_sw_build.py` checks the generated worker.
+
+The queue arrives over `GET /api/egress/stream` (server-sent events; spa mode
+only) while it is up, and the tab does not poll then. If the stream is
+unavailable or drops, the tab polls `GET /api/egress/queue` every 5 s until the
+stream is back; the top bar shows which (Live, Reconnecting, Polling). The
+state machine is `src/lib/stream.ts`, wired in `src/composables/useQueue.ts`.
