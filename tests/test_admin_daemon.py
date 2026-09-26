@@ -28,6 +28,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(TESTS_DIR))
 
 import admin_daemon as admin  # noqa: E402
+from admin_contract_validator import validate_document  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
 
 
@@ -734,9 +735,10 @@ class AdminDaemonTests(unittest.TestCase):
                     "status": "denied",
                     "scope": "bottle",
                     "decided_at": "2026-08-31T12:05:00Z",
-                    "decided_by": "admin",
+                    "decided_by": "operator",
                     "apply_status": None,
                     "deny_reason": "not needed",
+                    "hit_count": 3,
                 },
                 {
                     "request_id": "req-2",
@@ -749,9 +751,12 @@ class AdminDaemonTests(unittest.TestCase):
                     "decided_by": "ntfy",
                     "apply_status": "ip_requires_cidr",
                     "deny_reason": None,
+                    "hit_count": 1,
                 },
             ],
         }
+        # The fixture is a contract-valid broker reply, so it cannot drift.
+        self.assertEqual(validate_document(state.queue_body, "queue_snapshot.schema.json"), [])
         stub, stub_thread = self._start_stub(state)
         with tempfile.TemporaryDirectory() as tmp:
             server, thread = self._start_admin(
