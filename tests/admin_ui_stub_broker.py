@@ -336,6 +336,7 @@ class StubBroker:
         self.history = build_history()
         self.recent_queries: list[str] = []
         self.recent_hold: HeldReply | None = None
+        self.filed = 0   # `file_request` calls so far: default ids come from it and never repeat
         self.decides: list[dict[str, Any]] = []
         self.failing_decide: int | None = None   # 1-based index into `decides` that answers 500
         self.outage = False
@@ -423,7 +424,8 @@ class StubBroker:
         its request_id.
         """
         with self.lock:
-            rid = request_id or f"filed-{len(self.queue['open']) + 1}-{host}"
+            self.filed += 1
+            rid = request_id or f"filed-{self.filed}-{host}"
             self.queue["open"].append({
                 "request_id": rid, "container": container, "host": host, "port": port,
                 "host_is_ip": host[0].isdigit(), "opened_at": _iso(datetime.now(timezone.utc)),
@@ -473,6 +475,7 @@ class StubBroker:
 
     def reset(self) -> None:
         with self.lock:
+            self.filed = 0
             self.queue = build_queue()
             self.history = build_history()
             self.recent_queries = []
