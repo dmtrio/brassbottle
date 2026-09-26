@@ -3015,27 +3015,53 @@ def notify_spy_script(*, permission: str = "default", answer: str = "granted", w
 
 
 class NotifyPage:
-    """A queue page with the Notification spy installed and the poll driven by a fake clock."""
+    """A queue page with the Notification spy installed.
+
+    By default the tab is held on the polling path and the poll is driven by a fake clock: the stream is
+    refused before load (the tab reads Polling and polls every 5 s), so a snapshot is one `poll()` call, not
+    a 5 s wait, and the checks do not depend on which source delivers it. `live` leaves the real path: no
+    fake clock, the stream open, snapshots arriving by it in real time.
+    """
 
     POLL_MS = 5000
 
     def __init__(self, browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str = "light", *,
                  permission: str = "default", answer: str = "granted", wrap: bool = False, remove: bool = False,
-                 throws: bool = False, insecure: bool = False, grant: bool = False):
+                 throws: bool = False, insecure: bool = False, grant: bool = False, live: bool = False):
         from playwright.sync_api import expect
         broker.reset()
         self.broker = broker
+        self.live = live
+        self.queue_reads_seen: list[float] = []
+        if live:
+            settle_hub(served)   # a stream of an earlier check would hand this tab a snapshot from before the reset
         self.context, self.page, self.traffic = new_page(browser, served, viewport, theme)
         try:
             if grant:
                 self.context.grant_permissions(["notifications"], origin=served.base)
             self.page.add_init_script(script=notify_spy_script(
                 permission=permission, answer=answer, wrap=wrap, remove=remove, throws=throws, insecure=insecure))
-            # A fake clock from before the first script runs: the app's 5 s poll only fires on `poll()`,
-            # so "a second snapshot with the same row" is one call, not a 5 s wait.
-            self.page.clock.install(time=datetime.now(timezone.utc))
+            if live:
+                self.queue_reads_seen = queue_requests(self.page)
+            else:
+                self.page.route(STREAM_ROUTE, lambda route: route.abort())
+                # A fake clock from before the first script runs: the poll only fires on `poll()`.
+                self.page.clock.install(time=datetime.now(timezone.utc))
             self.page.goto(served.base + "/")
             expect(self.page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
+            if live:
+                wait_link(self.page, "live", TIMEOUT_MS)
+                # The window of "no /api/egress/queue read with the stream open" starts at the first frame;
+                # the one read a connecting tab makes is set aside (as open_live_page does).
+                assert len(self.queue_reads_seen) == 1, f"{len(self.queue_reads_seen)} queue reads while the stream was opening"
+                deadline = time.monotonic() + 5
+                while self.traffic.queue_reads < 1 and time.monotonic() < deadline:
+                    self.page.wait_for_timeout(20)
+                assert self.traffic.queue_reads == 1, f"{self.traffic.queue_reads} queue responses while the stream was opening"
+                self.queue_reads_seen.clear()
+                self.traffic.queue_reads = 0
+            else:
+                wait_link(self.page, "polling", TIMEOUT_MS)
         except Exception:
             self.context.close()
             raise
@@ -3303,6 +3329,30 @@ def _n_permission_reread(n: NotifyPage) -> None:
     expect(n.bell).to_have_attribute("data-state", "on")
 
 
+def _n_arrives_by_stream(n: NotifyPage) -> None:
+    """The real path: the tab is Live, so a request filed at the broker arrives as a stream frame, not a poll."""
+    from playwright.sync_api import expect
+    expect(link_state(n.page)).to_have_attribute("data-state", "live")
+    assert_bell(n.bell, "on")
+    assert n.made() == [], f"the initial snapshot's rows notified: {n.made()}"
+    started = time.monotonic()
+    n.broker.file_request("stream.example.com", container="mid", port=8443, request_id="s1")
+    n.page.wait_for_function("() => window.__notifySpy.made.length > 0", timeout=LIVE_WITHIN_MS)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    assert elapsed_ms < LIVE_WITHIN_MS, f"the notification took {elapsed_ms} ms"
+    log(f"check 143 filed-to-notified_ms={elapsed_ms}")
+    assert n.made() == [_filed("mid", "stream.example.com", 8443, "s1")], n.made()
+    expect(n.page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS) + 1)
+    # Held past one 5 s poll interval: a tab that polled beside its stream would show, and a second frame of
+    # the same rows must not notify again.
+    n.page.wait_for_timeout(5500)
+    assert not n.queue_reads_seen, f"the tab read /api/egress/queue {len(n.queue_reads_seen)} time(s) with its stream open"
+    assert n.traffic.queue_reads == 0, f"{n.traffic.queue_reads} queue responses seen with the stream open"
+    assert n.made() == [_filed("mid", "stream.example.com", 8443, "s1")], f"a later frame notified again: {n.made()}"
+    wait_link(n.page, "live", 500)
+    assert not n.traffic.console_errors, n.traffic.console_errors
+
+
 def _n_insecure_wording(n: NotifyPage) -> None:
     assert_bell(n.bell, "unsupported", label=INSECURE_LABEL)
     n.bell.click()
@@ -3349,29 +3399,67 @@ def open_bell_state(browser, served: Served, broker: stub.StubBroker, viewport: 
     return n
 
 
+LINK_LABELS = ("Connecting", "Live", "Reconnecting", "Polling", "Paused")   # every state of the top-bar indicator
+
+BAR_BOXES_JS = """() => {
+  const box = (el) => { const r = el.getBoundingClientRect(); return {l: r.left, t: r.top, r: r.right, b: r.bottom}; };
+  const bell = document.querySelector('[data-testid=notify-bell]');
+  const link = document.querySelector('[data-testid=link-state]');
+  const bar = document.querySelector('header');
+  const theme = [...bar.querySelectorAll('button')].find((b) => b !== bell);
+  return {bell: box(bell), link: box(link), title: box(bar.querySelector('h1')), bar: box(bar), theme: box(theme),
+          width: innerWidth, scroll: document.documentElement.scrollWidth, icon: !!bell.querySelector('svg'),
+          linkName: link.getAttribute('aria-label')};
+}"""
+
+
+def _apart(a: dict, b: dict) -> bool:
+    return a["r"] <= b["l"] or b["r"] <= a["l"]
+
+
+def _inside(inner: dict, outer: dict) -> bool:
+    return outer["l"] <= inner["l"] and inner["r"] <= outer["r"] and outer["t"] <= inner["t"] and inner["b"] <= outer["b"]
+
+
 def _n_bell_layout(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """The bell and the link indicator share the top bar with the title and the theme button: all inside the bar
+    and the viewport, none over another, no horizontal overflow, whatever the bell's state and the indicator's word."""
     for state in BELL_STATES:
         n = open_bell_state(browser, served, broker, viewport, "light", state)
         try:
-            found = n.page.evaluate("""() => {
-              const box = (el) => { const r = el.getBoundingClientRect(); return {l: r.left, t: r.top, r: r.right, b: r.bottom}; };
-              const bell = document.querySelector('[data-testid=notify-bell]');
-              const bar = document.querySelector('header');
-              const theme = [...bar.querySelectorAll('button')].find((b) => b !== bell);
-              return {bell: box(bell), bar: box(bar), theme: box(theme), width: innerWidth,
-                      scroll: document.documentElement.scrollWidth, icon: !!bell.querySelector('svg')};
-            }""")
-            b, bar, theme = found["bell"], found["bar"], found["theme"]
+            found = n.page.evaluate(BAR_BOXES_JS)
+            b, link, bar, theme, title = found["bell"], found["link"], found["bar"], found["theme"], found["title"]
             assert found["icon"], f"{state}: the bell has no icon"
-            assert bar["l"] <= b["l"] and b["r"] <= bar["r"] and bar["t"] <= b["t"] and b["b"] <= bar["b"], f"{state}: bell outside the top bar {found}"
+            assert _inside(b, bar), f"{state}: bell outside the top bar {found}"
             assert b["r"] <= found["width"] and b["l"] >= 0, f"{state}: bell outside the viewport {found}"
-            assert b["r"] <= theme["l"] or theme["r"] <= b["l"], f"{state}: bell overlaps the theme button {found}"
+            assert _apart(b, theme), f"{state}: bell overlaps the theme button {found}"
             assert b["r"] - b["l"] >= 24 and b["b"] - b["t"] >= 24, f"{state}: bell smaller than a 24 px target {found}"
             assert found["scroll"] <= found["width"], f"{state}: horizontal overflow {found}"
+            assert _inside(link, bar) and link["r"] <= found["width"] and link["l"] >= 0, f"{state}: indicator outside the top bar or viewport {found}"
+            assert _apart(link, b) and _apart(link, theme) and _apart(link, title), f"{state}: indicator overlaps its neighbours {found}"
+            assert found["linkName"] == "Queue updates: Polling", f"{state}: indicator name {found['linkName']!r}"
             assert_bell(n.bell, state)
             assert not n.traffic.console_errors, n.traffic.console_errors
         finally:
             n.close()
+    # The indicator's widest word is not the one this tab happens to show (Polling): measure the bar with each
+    # of the five, set on the element itself (the text node only, its accessible name and icon stay the app's).
+    n = open_bell_state(browser, served, broker, viewport, "light", "on")
+    try:
+        for label in LINK_LABELS:
+            found = n.page.evaluate(f"""() => {{
+              const link = document.querySelector('[data-testid=link-state]');
+              const text = [...link.childNodes].reverse().find((c) => c.nodeType === Node.TEXT_NODE);
+              text.textContent = ' {label} ';
+              return ({BAR_BOXES_JS})();
+            }}""")
+            b, link, bar, theme, title = found["bell"], found["link"], found["bar"], found["theme"], found["title"]
+            assert _inside(link, bar) and link["r"] <= found["width"], f"indicator '{label}' outside the top bar {found}"
+            assert _apart(link, b) and _apart(link, theme) and _apart(link, title), f"indicator '{label}' overlaps a neighbour {found}"
+            assert _inside(b, bar) and _apart(b, theme), f"with '{label}' the bell left its place {found}"
+            assert found["scroll"] <= found["width"], f"indicator '{label}': horizontal overflow {found}"
+    finally:
+        n.close()
 
 
 NOTIFY_CHECKS = [
@@ -3400,13 +3488,15 @@ NOTIFY_CHECKS = [
      {"permission": "granted"}, _n_permission_reread),
     ("142", "On a page that is not a secure context the unsupported bell says it needs a secure connection (https or localhost), not that the browser lacks the API",
      {"remove": True, "insecure": True}, _n_insecure_wording),
+    ("143", "With the stream open (no polling, the top bar says Live) a request filed at the broker arrives by the stream and raises exactly one notification, with the literal title `New egress request from <bottle>`, body `<host>:<port>` and tag = request id, within 3 s, and the tab makes no /api/egress/queue read after the first frame",
+     {"permission": "granted", "live": True}, _n_arrives_by_stream),
 ]
-BELL_LAYOUT_CHECK = ("139", "The bell in every state (default, on, muted, denied, unsupported) sits inside the top bar and the viewport, clear of the theme button, at least 24 px, with its state's accessible name and no horizontal overflow",
+BELL_LAYOUT_CHECK = ("139", "The bell in every state (default, on, muted, denied, unsupported) sits inside the top bar and the viewport, clear of the theme button and of the link indicator (whichever of its five words it shows), at least 24 px, with its state's accessible name and no horizontal overflow",
                      _n_bell_layout)
 
 
 def run_notifications(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """Notification bell checks (130..142); the SPA only."""
+    """Notification bell checks (130..143); the SPA only."""
     suite = Suite(ui, viewport)
     if ui == "legacy":
         for number, name, _how, _fn in NOTIFY_CHECKS:
@@ -3480,20 +3570,27 @@ def wait_link(page, state: str, timeout_ms: int) -> None:
     expect(link_state(page)).to_have_attribute("data-state", state, timeout=timeout_ms)
 
 
+def settle_hub(served: Served) -> None:
+    """Let the stream hub empty and its cached snapshot age out, so a tab opened next starts from the queue as it is now.
+
+    A stream a moment ago (an earlier check's) leaves the hub a snapshot under one poll interval old, which a
+    new stream is handed as it is; that snapshot is of the queue before a reset and would arrive as a change.
+    """
+    hub = served.server.stream_hub
+    deadline = time.monotonic() + 5
+    while hub.stream_count() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert hub.stream_count() == 0, f"{hub.stream_count()} streams left open by an earlier check"
+    time.sleep(hub.poll_seconds + 0.1)
+
+
 def open_live_page(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str = "light"):
     """A fresh tab with its stream open: (context, page, traffic, driver, queue request times from the first frame on)."""
     from playwright.sync_api import expect
 
     broker.reset()
     hub = served.server.stream_hub
-    # A stream a moment ago (an earlier check's) leaves the hub a snapshot under one poll interval old,
-    # which a new stream is handed as it is; that snapshot is of the queue before this reset and would
-    # arrive as a change. Let the hub empty and the cache age out, so this tab starts from the reset queue.
-    deadline = time.monotonic() + 5
-    while hub.stream_count() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert hub.stream_count() == 0, f"{hub.stream_count()} streams left open by an earlier check"
-    time.sleep(hub.poll_seconds + 0.1)
+    settle_hub(served)
     context, page, traffic = new_page(browser, served, viewport, theme)
     try:
         seen = queue_requests(page)
@@ -4121,10 +4218,11 @@ NEW_CHECKS = [
     ("136", "With the real Notification API underneath a filed request constructs one real notification whose own `tag` is the request id", "N/A(spa-only) on legacy"),
     ("137", "Without the Notification API the bell is disabled and says so; the queue still works with no console error", "N/A(spa-only) on legacy"),
     ("138", "A request that leaves and comes back with the same id raises no second notification", "N/A(spa-only) on legacy"),
-    ("139", "The bell in every state sits inside the top bar and viewport, clear of the theme button, with its state's accessible name", "N/A(spa-only) on legacy"),
+    ("139", "The bell in every state sits inside the top bar and viewport, clear of the theme button and the link indicator, with its state's accessible name", "N/A(spa-only) on legacy"),
     ("140", "A notification constructor that throws moves the bell to unsupported, never on again, tried once, logged once", "N/A(spa-only) on legacy"),
     ("141", "The bell follows a permission changed under the open page, on focus and on visibility change", "N/A(spa-only) on legacy"),
     ("142", "The unsupported bell on an insecure page says it needs a secure connection", "N/A(spa-only) on legacy"),
+    ("143", "With the stream open a request filed at the broker arrives by the stream and raises exactly one notification with the literal title, body and tag within 3 s, and the tab reads no /api/egress/queue after the first frame", "N/A(spa-only) on legacy"),
 ]
 
 
