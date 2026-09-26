@@ -99,6 +99,9 @@ class AsyncioWarnings(logging.Handler):
         self.pending: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        # A handler on the asyncio logger turns off logging's last-resort stderr output for it,
+        # so every record is still written to stderr here; the dropped-task ones are also kept.
+        sys.stderr.write(self.format(record) + "\n")
         text = record.getMessage()
         if TASK_WARNING in text:
             self.pending.append(squash(text)[:300])
