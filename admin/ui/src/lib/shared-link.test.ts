@@ -9,6 +9,7 @@ import {
   type Election,
   type Message,
 } from './shared-link'
+import { watchFreeze } from './browser-link'
 import { HIDDEN_POLL_MS, POLL_MS, SILENCE_LIMIT_MS, type LinkState, type StreamSource } from './stream'
 
 class FakeSource implements StreamSource {
@@ -27,6 +28,7 @@ class FakeSource implements StreamSource {
 
 const snapshot = (count: number): QueueSnapshot => ({ open: [], count, recent: [], generated_at: 'now' })
 const frame = (count: number) => JSON.stringify(snapshot(count))
+const generated = (count: number, at: string): QueueSnapshot => ({ ...snapshot(count), generated_at: at })
 
 // The browser: one lock every tab queues for, and one channel every tab hears (except the sender).
 class Browser {
@@ -261,6 +263,177 @@ describe('createSharedLink: election', () => {
   })
 })
 
+describe('createSharedLink: a tab that starts again', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('a tab restored from the back-forward cache that leads starts over as Connecting, not as the Live it left', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const b = openTab(browser)
+    a.link.start()
+    b.link.start()
+    a.sources[0].emit('queue', frame(1))
+    expect(b.states).toEqual(['live'])
+    b.link.stop() // pagehide
+    a.link.stop() // the old leader is gone as well
+    b.link.start() // pageshow, persisted: nobody leads, so b does
+    expect(b.link.role()).toBe('leader')
+    expect(b.states).toEqual(['live', 'connecting'])
+    expect(b.link.state()).toBe('connecting')
+  })
+
+  it('a follower restored into a world with a leader says Connecting until the leader answers, then takes its state', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const b = openTab(browser)
+    a.link.start()
+    b.link.start()
+    a.sources[0].emit('queue', frame(1))
+    b.link.stop()
+    browser.muted.add(0) // a leader that does not answer just now
+    b.link.start()
+    expect(b.states).toEqual(['live', 'connecting'])
+    browser.muted.delete(0)
+    a.sources[0].emit('queue', frame(2))
+    expect(b.states).toEqual(['live', 'connecting', 'live'])
+  })
+
+  it('start while running does nothing: a second start makes no second stream, watch or lock request', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    a.link.start()
+    a.link.start()
+    expect(a.sources).toHaveLength(1)
+    expect(vi.getTimerCount()).toBe(1) // the one watchdog of the stream
+    a.link.stop()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('createSharedLink: a frozen tab', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  function wired(tab: ReturnType<typeof openTab>) {
+    const page = new EventTarget()
+    watchFreeze(page, () => tab.link.stop(), () => tab.link.start())
+    return page
+  }
+
+  it('a leader that freezes lets go of the lock: the next tab leads at once, and the frozen tab follows it when it resumes', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const b = openTab(browser)
+    const c = openTab(browser)
+    const pageA = wired(a)
+    a.link.start()
+    b.link.start()
+    c.link.start()
+    a.sources[0].emit('queue', frame(1))
+    pageA.dispatchEvent(new Event('freeze'))
+    expect(a.sources[0].closed).toBe(true)
+    expect(b.link.role()).toBe('leader')
+    expect(c.link.role()).toBe('follower')
+    expect(b.sources).toHaveLength(1)
+    b.sources[0].emit('queue', frame(2))
+    expect(c.snapshots).toEqual([1, 2])
+    pageA.dispatchEvent(new Event('resume'))
+    expect(a.link.role()).toBe('follower')
+    expect(a.sources).toHaveLength(1) // it opened no stream of its own
+    expect(a.link.state()).toBe('live') // b's answer to its hello
+    expect(a.snapshots).toEqual([1, 2])
+    b.sources[0].emit('queue', frame(3))
+    expect(a.snapshots).toEqual([1, 2, 3])
+  })
+
+  it('a follower that freezes while queued never takes the lock; on resume it queues again', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const b = openTab(browser)
+    const pageB = wired(b)
+    a.link.start()
+    b.link.start()
+    pageB.dispatchEvent(new Event('freeze'))
+    a.link.stop()
+    expect(b.link.role()).toBe('follower')
+    expect(b.sources).toHaveLength(0)
+    pageB.dispatchEvent(new Event('resume'))
+    expect(b.link.role()).toBe('leader') // nobody else held it
+    expect(b.sources).toHaveLength(1)
+  })
+
+  it('a resume that follows a restore from the back-forward cache and its pageshow start the link once', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const page = wired(a)
+    a.link.start()
+    a.link.stop() // pagehide
+    page.dispatchEvent(new Event('resume'))
+    a.link.start() // pageshow, persisted
+    expect(a.sources).toHaveLength(2) // the first stream and the one after the restore: not three
+    expect(a.link.role()).toBe('leader')
+  })
+})
+
+describe('createSharedLink: which snapshot is the newest', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('the answer to a hello goes to the asking tab alone', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const b = openTab(browser)
+    const c = openTab(browser)
+    a.link.start()
+    a.sources[0].emit('queue', frame(3))
+    b.link.start()
+    expect(b.snapshots).toEqual([3])
+    c.link.start()
+    expect(c.snapshots).toEqual([3])
+    expect(b.snapshots).toEqual([3]) // not handed the same snapshot a second time
+    const answers = browser.posted.filter((m) => m.kind !== 'hello' && 'to' in m && m.to !== undefined)
+    expect(answers.map((m) => [m.kind, 'to' in m ? m.to : null])).toEqual([
+      ['link', 'tab1'], // the answer to b
+      ['snapshot', 'tab1'],
+      ['link', 'tab2'], // and to c
+      ['snapshot', 'tab2'],
+    ])
+  })
+
+  it('a relayed snapshot older than the one the tab has is dropped, an equal or newer one is applied', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const b = openTab(browser)
+    a.link.start()
+    b.link.start()
+    // b read the queue itself (after a decide): generated at 10:00:05
+    b.link.publish(generated(1, '2026-09-26T10:00:05Z'))
+    a.link.publish(generated(2, '2026-09-26T10:00:04Z'))
+    expect(b.snapshots).toEqual([])
+    a.link.publish(generated(3, '2026-09-26T10:00:05Z'))
+    a.link.publish(generated(4, '2026-09-26T10:00:06Z'))
+    expect(b.snapshots).toEqual([3, 4])
+    a.link.publish(generated(5, '2026-09-26T10:00:05Z')) // older than the one just applied
+    expect(b.snapshots).toEqual([3, 4])
+  })
+
+  it('a snapshot with no readable generated_at is applied, and a tab that starts again forgets what it had', () => {
+    const browser = new Browser()
+    const a = openTab(browser)
+    const b = openTab(browser)
+    a.link.start()
+    b.link.start()
+    b.link.publish(generated(1, '2026-09-26T10:00:05Z'))
+    a.link.publish(generated(2, 'yesterday'))
+    expect(b.snapshots).toEqual([2])
+    b.link.stop()
+    b.link.start()
+    a.link.publish(generated(3, '2026-09-26T09:00:00Z'))
+    expect(b.snapshots).toEqual([2, 2, 3]) // the second 2: its new hello is answered, and the 10:00:05 it had is forgotten
+  })
+})
+
 describe('createSharedLink: a leader that goes quiet', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())
@@ -380,6 +553,9 @@ describe('parseMessage', () => {
     expect(parseMessage({ kind: 'link', from: 'x', state: 'live' })).toEqual({ kind: 'link', from: 'x', state: 'live' })
     expect(parseMessage({ kind: 'hb', from: 'x', state: 'polling' })).toEqual({ kind: 'hb', from: 'x', state: 'polling' })
     expect(parseMessage({ kind: 'snapshot', from: 'x', state: 'live', snapshot: snapshot(1) })?.kind).toBe('snapshot')
+    expect(parseMessage({ kind: 'link', from: 'x', to: 'y', state: 'live' })).toEqual({ kind: 'link', from: 'x', to: 'y', state: 'live' })
+    expect(parseMessage({ kind: 'snapshot', from: 'x', to: 'y', state: 'live', snapshot: snapshot(1) })).toMatchObject({ to: 'y' })
+    expect(parseMessage({ kind: 'link', from: 'x', to: 7, state: 'live' })).toEqual({ kind: 'link', from: 'x', state: 'live' })
     for (const bad of [
       null,
       'live',

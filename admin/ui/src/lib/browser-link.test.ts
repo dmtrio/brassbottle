@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { broadcastBus, webLocksElection } from './browser-link'
+import { broadcastBus, watchFreeze, webLocksElection } from './browser-link'
 import { CHANNEL_NAME, LOCK_NAME } from './shared-link'
 
 // Just enough of navigator.locks: exclusive, queued in order, held while the callback's promise is unsettled.
@@ -110,5 +110,19 @@ describe('broadcastBus', () => {
     expect(made[0].posted).toEqual([{ kind: 'hello', from: 'x' }])
     expect(heard).toEqual([{ kind: 'hello', from: 'y' }])
     expect(made[0].closed).toBe(true)
+  })
+})
+
+describe('watchFreeze', () => {
+  it('calls back on freeze and on resume, and stops when told', () => {
+    const page = new EventTarget()
+    const seen: string[] = []
+    const stop = watchFreeze(page, () => seen.push('freeze'), () => seen.push('resume'))
+    page.dispatchEvent(new Event('freeze'))
+    page.dispatchEvent(new Event('resume'))
+    page.dispatchEvent(new Event('visibilitychange'))
+    stop()
+    page.dispatchEvent(new Event('freeze'))
+    expect(seen).toEqual(['freeze', 'resume'])
   })
 })

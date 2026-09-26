@@ -44,7 +44,11 @@ throttled in a background tab, a timer is), and relays each snapshot, each
 heartbeat and each change of link state over a `BroadcastChannel`
 (`djinn-admin-queue`). The other tabs, the followers, open no stream and read
 nothing while they hear from the leader; they show its link state and apply its
-snapshots, and a tab that opens asks (`hello`) and is answered at once. When the
+snapshots, and a tab that opens asks (`hello`) and is answered at once, the answer
+addressed to that tab alone (`to`; the others ignore it). A follower also drops a relayed
+snapshot whose `generated_at` is older than the newest it has read or been relayed (it
+then keeps a fresher read of its own after a decide), though `generated_at` has
+whole-second resolution, so the addressing does the rest. When the
 leader's tab closes (or is reloaded) the lock passes to another tab, which opens
 the stream (Connecting, then Live) while the rest follow. A follower that hears
 nothing at all for 40 s (the stream's 35 s silence limit and a 5 s margin, so a
@@ -57,6 +61,21 @@ receives. The logic is `src/lib/shared-link.ts` (pure, unit-tested); the browser
 locks and channel are `src/lib/browser-link.ts`; both are wired in
 `src/composables/useQueue.ts`, which logs each leader change and broadcast
 (`[queue-link] stage=… sent=… received=…`, console debug).
+
+A tab lets go of its lock when the browser freezes it and asks again when it thaws: on
+Page Lifecycle `freeze` the tab stops its link (a leader closes its stream, says Connecting
+and releases the lock; a follower leaves the queue for the lock), on `resume` it starts
+over, as after a back-forward-cache restore (`pagehide` and `pageshow` do the same, and
+starting a link that is running does nothing, so a `resume` and a `pageshow` together start
+it once). A frozen tab that kept its lock would leave the others with no stream and no relay
+until it thawed. Limits: a tab the browser stops *without* a `freeze` event is not covered;
+and a follower's own fallback polling (after 40 s of silence from a leader that is quiet
+without having let go, or 3 s without an answer to its `hello`) is a timer, so a hidden
+follower under the browser's timer throttling reads at that throttled pace, up to about a
+minute, until a leader is heard again. Headless Chromium accepts
+`Page.setWebLifecycleState` and does not freeze (no `freeze` event, timers keep running),
+so check 170 dispatches the events by hand and pins the app's reaction, not the browser's
+freezing.
 
 Where `navigator.locks` (secure contexts only: https or localhost) or
 `BroadcastChannel` is missing, a tab is on its own, as it was before: it opens its
