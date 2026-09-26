@@ -2947,19 +2947,36 @@ def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: 
 
 # ---- notification bell ----------------------------------------------------------------
 
-BELL_LABELS = {
-    "unsupported": "Desktop notifications are not supported in this browser",
+BELL_LABELS = {   # the tooltip: what the bell is doing (and, for a toggle, what a click does)
+    "unsupported": "Desktop notifications are not available on this device or browser",
     "default": "Enable desktop notifications",
     "on": "Desktop notifications on. Click to mute",
     "muted": "Desktop notifications muted. Click to turn on",
     "denied": "Desktop notifications are blocked in browser settings",
 }
+INSECURE_LABEL = "Desktop notifications need a secure connection (https or localhost)"
+TOGGLE_NAME = "Desktop notifications"   # a toggle keeps one accessible name; aria-pressed carries on/muted
 BELL_STATES = list(BELL_LABELS)
+
+
+def bell_name(state: str) -> str:
+    return TOGGLE_NAME if state in ("on", "muted") else BELL_LABELS[state]
+
+
+def assert_bell(bell, state: str, *, label: str | None = None) -> None:
+    """The bell's state, accessible name, tooltip and (for a toggle) pressed state, all at once."""
+    label = label or BELL_LABELS[state]
+    name = TOGGLE_NAME if state in ("on", "muted") else label
+    got = {"state": bell.get_attribute("data-state"), "name": bell.get_attribute("aria-label"),
+           "title": bell.get_attribute("title"), "pressed": bell.get_attribute("aria-pressed")}
+    want = {"state": state, "name": name, "title": label,
+            "pressed": {"on": "true", "muted": "false"}.get(state)}
+    assert got == want, f"bell {got} != {want}"
 MUTE_STORAGE_KEY = "djinn-admin-notifications-muted"
 
 
 def notify_spy_script(*, permission: str = "default", answer: str = "granted", wrap: bool = False,
-                      remove: bool = False) -> str:
+                      remove: bool = False, throws: bool = False, insecure: bool = False) -> str:
     """An init script that replaces `window.Notification` with a recorder.
 
     `window.__notifySpy` holds `permission` (what the page reads), `answer` (what `requestPermission`
@@ -2967,15 +2984,20 @@ def notify_spy_script(*, permission: str = "default", answer: str = "granted", w
     construction: title, options, and the instance, whose `onclick` the test calls). `wrap` builds the
     real API underneath (a subclass, so the browser constructs and validates each notification) but still
     reports `permission` itself: headless Chromium reports `denied` whatever a context grants. `remove`
-    deletes the API.
+    deletes the API. `throws` makes the constructor throw `TypeError: Illegal constructor`, as Chrome for
+    Android does, while `requestPermission` still grants; `spy.attempts` counts the constructions tried.
+    `insecure` makes `window.isSecureContext` false.
     """
     return f"""(() => {{
   const spy = window.__notifySpy = {{permission: {json.dumps(permission)}, answer: {json.dumps(answer)},
-                                    requests: 0, made: []}};
+                                    requests: 0, attempts: 0, made: []}};
+  if ({json.dumps(insecure)}) Object.defineProperty(window, 'isSecureContext', {{value: false}});
   if ({json.dumps(remove)}) {{ delete window.Notification; return; }}
   const Base = {json.dumps(wrap)} ? window.Notification : class {{ close() {{ this.closed = true; }} }};
   class SpyNotification extends Base {{
     constructor(title, options) {{
+      spy.attempts += 1;
+      if ({json.dumps(throws)}) throw new TypeError("Failed to construct 'Notification': Illegal constructor");
       super(title, options);
       this.onclick = null;
       spy.made.push({{title, options: {{...(options || {{}})}}, instance: this}});
@@ -2999,7 +3021,7 @@ class NotifyPage:
 
     def __init__(self, browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str = "light", *,
                  permission: str = "default", answer: str = "granted", wrap: bool = False, remove: bool = False,
-                 grant: bool = False):
+                 throws: bool = False, insecure: bool = False, grant: bool = False):
         from playwright.sync_api import expect
         broker.reset()
         self.broker = broker
@@ -3008,7 +3030,7 @@ class NotifyPage:
             if grant:
                 self.context.grant_permissions(["notifications"], origin=served.base)
             self.page.add_init_script(script=notify_spy_script(
-                permission=permission, answer=answer, wrap=wrap, remove=remove))
+                permission=permission, answer=answer, wrap=wrap, remove=remove, throws=throws, insecure=insecure))
             # A fake clock from before the first script runs: the app's 5 s poll only fires on `poll()`,
             # so "a second snapshot with the same row" is one call, not a 5 s wait.
             self.page.clock.install(time=datetime.now(timezone.utc))
@@ -3063,8 +3085,7 @@ def _n_defaults_ask_nothing(n: NotifyPage) -> None:
         n.poll()
     assert n.permission_requests() == 0, f"the page asked for permission {n.permission_requests()} time(s) without a click"
     assert n.made() == [], n.made()
-    assert n.bell.get_attribute("data-state") == "default", n.bell.get_attribute("data-state")
-    assert n.bell.get_attribute("aria-label") == BELL_LABELS["default"]
+    assert_bell(n.bell, "default")
 
 
 def _n_click_asks_once(n: NotifyPage) -> None:
@@ -3072,7 +3093,7 @@ def _n_click_asks_once(n: NotifyPage) -> None:
     n.page.wait_for_function("() => window.__notifySpy.requests > 0")
     n.page.wait_for_selector("[data-testid=notify-bell][data-state=on]")
     assert n.permission_requests() == 1, n.permission_requests()
-    assert n.bell.get_attribute("aria-label") == BELL_LABELS["on"], n.bell.get_attribute("aria-label")
+    assert_bell(n.bell, "on")
     # The rows already open when permission was granted are not news, then or on the next snapshot.
     assert n.made() == [], n.made()
     n.poll()
@@ -3106,7 +3127,7 @@ def _n_mute(n: NotifyPage) -> None:
     served_page = n.page
     n.bell.click()
     served_page.wait_for_selector("[data-testid=notify-bell][data-state=muted]")
-    assert n.bell.get_attribute("aria-label") == BELL_LABELS["muted"]
+    assert_bell(n.bell, "muted")
     assert n.permission_requests() == 0, "muting asked for permission"
     n.broker.file_request("quiet.example.com", request_id="q1")
     n.poll(rows=len(stub.OPEN_ROWS) + 1)
@@ -3114,6 +3135,7 @@ def _n_mute(n: NotifyPage) -> None:
     # Unmuting shows nothing that arrived while muted, only what comes next.
     n.bell.click()
     served_page.wait_for_selector("[data-testid=notify-bell][data-state=on]")
+    assert_bell(n.bell, "on")
     n.poll()
     assert n.made() == [], f"unmuting replayed the requests that arrived muted: {n.made()}"
     n.bell.click()
@@ -3138,8 +3160,7 @@ def _n_mute(n: NotifyPage) -> None:
 
 def _n_denied(n: NotifyPage) -> None:
     from playwright.sync_api import expect
-    assert n.bell.get_attribute("data-state") == "denied"
-    assert n.bell.get_attribute("aria-label") == BELL_LABELS["denied"]
+    assert_bell(n.bell, "denied")
     n.bell.click()
     blocked = n.page.get_by_test_id("notify-blocked")
     expect(blocked).to_be_visible()
@@ -3172,14 +3193,25 @@ def _n_click_focuses_row(n: NotifyPage) -> None:
     n.click_notification(0)
     page.wait_for_url("**/egress")
     page.wait_for_function("() => document.activeElement && document.activeElement.getAttribute('data-request-id') === 'f1'")
-    # With a filter hiding it: the filters give way.
-    search = page.get_by_test_id("queue-filters").get_by_role("textbox")
-    search.fill("check18")
+    # With a filter that does NOT hide it: the filter stays, and nothing is announced.
     from playwright.sync_api import expect
+    search = page.get_by_test_id("queue-filters").get_by_role("textbox")
+    status = page.get_by_test_id("filters-cleared-status")
+    search.fill("focus.example")
+    expect(page.locator("[data-testid=request]")).to_have_count(1)
+    page.get_by_test_id("tab-history").click()
+    n.click_notification(0)
+    page.wait_for_function("() => document.activeElement && document.activeElement.getAttribute('data-request-id') === 'f1'")
+    assert search.input_value() == "focus.example", f"a filter that did not hide the row was cleared: {search.input_value()!r}"
+    assert (status.text_content() or "").strip() == "", status.text_content()
+    # With a filter hiding it: the filters give way, and the polite live region says so.
+    search.fill("check18")
     expect(page.locator("[data-testid=request]")).to_have_count(1)
     n.click_notification(0)
     page.wait_for_function("() => document.activeElement && document.activeElement.getAttribute('data-request-id') === 'f1'")
     assert search.input_value() == "", "the filter that hid the row was left on"
+    assert (status.text_content() or "").strip() == "Filters cleared to show focus.example.com", status.text_content()
+    assert status.get_attribute("role") == "status", status.get_attribute("role")
     # A request decided since: the click still lands on the queue, with no error.
     n.broker.withdraw_request("f1")
     n.poll(rows=len(stub.OPEN_ROWS))
@@ -3203,14 +3235,79 @@ def _n_real_api(n: NotifyPage) -> None:
 
 def _n_unsupported(n: NotifyPage) -> None:
     from playwright.sync_api import expect
-    assert n.bell.get_attribute("data-state") == "unsupported"
-    expect(n.bell).to_be_disabled()
-    assert n.bell.get_attribute("aria-label") == BELL_LABELS["unsupported"]
-    assert n.bell.get_attribute("title") == BELL_LABELS["unsupported"]
+    assert_bell(n.bell, "unsupported")
+    # Not disabled: a touch screen shows no tooltip, so a click has to say why.
+    expect(n.bell).to_be_enabled()
+    n.bell.focus()
+    n.bell.click()
+    explained = n.page.get_by_test_id("notify-unsupported")
+    expect(explained).to_be_visible()
+    assert BELL_LABELS["unsupported"] in squash(explained.inner_text()), explained.inner_text()
+    n.page.keyboard.press("Escape")
     n.broker.file_request("still.example.com", request_id="u1")
     n.page.clock.run_for(NotifyPage.POLL_MS)
     expect(n.page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS) + 1)
     assert not n.traffic.console_errors, n.traffic.console_errors
+
+
+def _n_constructor_throws(n: NotifyPage) -> None:
+    """Chrome for Android: the API, a permission, and a constructor that throws `Illegal constructor`."""
+    from playwright.sync_api import expect
+    warned: list[str] = []
+    n.page.on("console", lambda m: warned.append(m.text) if "stage=fire failed" in m.text else None)
+    n.bell.click()
+    n.page.wait_for_selector("[data-testid=notify-bell][data-state=on]")
+    assert_bell(n.bell, "on")
+    n.poll()
+    n.broker.file_request("droid.example.com", container="mid", request_id="t1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert n.page.evaluate("() => window.__notifySpy.attempts") == 1
+    # Nothing was shown, so the bell must not claim it will be: it says why instead.
+    n.page.wait_for_selector("[data-testid=notify-bell][data-state=unsupported]")
+    assert_bell(n.bell, "unsupported")
+    expect(n.bell).to_be_enabled()
+    n.bell.click()
+    assert BELL_LABELS["unsupported"] in squash(n.page.get_by_test_id("notify-unsupported").inner_text())
+    n.page.keyboard.press("Escape")
+    # Never "on" again this session, and the constructor is not tried again: two more requests, one attempt.
+    n.broker.file_request("droid2.example.com", request_id="t2")
+    n.broker.file_request("droid3.example.com", request_id="t3")
+    n.poll(rows=len(stub.OPEN_ROWS) + 3)
+    assert n.page.evaluate("() => window.__notifySpy.attempts") == 1, "the constructor was tried again after it threw"
+    assert n.made() == [], n.made()
+    assert n.bell.get_attribute("data-state") == "unsupported"
+    assert len(warned) == 1, f"the failure was logged {len(warned)} times: {warned}"
+    assert not n.traffic.console_errors, n.traffic.console_errors
+
+
+def _n_permission_reread(n: NotifyPage) -> None:
+    """The permission changes under the open page (browser site settings): the bell follows on focus."""
+    from playwright.sync_api import expect
+    n.poll()
+    assert_bell(n.bell, "on")
+    n.page.evaluate("() => { window.__notifySpy.permission = 'denied'; window.dispatchEvent(new Event('focus')); }")
+    n.page.wait_for_selector("[data-testid=notify-bell][data-state=denied]")
+    assert_bell(n.bell, "denied")
+    n.broker.file_request("revoked.example.com", request_id="p1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert n.made() == [], f"a tab whose permission was revoked notified: {n.made()}"
+    # And back: granted again (the tab was hidden while the setting changed), on the visibility change.
+    n.page.evaluate("() => { window.__notifySpy.permission = 'granted'; document.dispatchEvent(new Event('visibilitychange')); }")
+    n.page.wait_for_selector("[data-testid=notify-bell][data-state=on]")
+    assert_bell(n.bell, "on")
+    n.poll()
+    assert n.made() == [], f"regranting replayed what arrived while blocked: {n.made()}"
+    n.broker.file_request("granted.example.com", request_id="p2")
+    n.poll(rows=len(stub.OPEN_ROWS) + 2)
+    assert [m["tag"] for m in n.made()] == ["p2"], n.made()
+    expect(n.bell).to_have_attribute("data-state", "on")
+
+
+def _n_insecure_wording(n: NotifyPage) -> None:
+    assert_bell(n.bell, "unsupported", label=INSECURE_LABEL)
+    n.bell.click()
+    text = squash(n.page.get_by_test_id("notify-unsupported").inner_text())
+    assert INSECURE_LABEL in text and "not available on this device" not in text, text
 
 
 def _n_leaves_and_returns(n: NotifyPage) -> None:
@@ -3271,7 +3368,7 @@ def _n_bell_layout(browser, served: Served, broker: stub.StubBroker, viewport: s
             assert b["r"] <= theme["l"] or theme["r"] <= b["l"], f"{state}: bell overlaps the theme button {found}"
             assert b["r"] - b["l"] >= 24 and b["b"] - b["t"] >= 24, f"{state}: bell smaller than a 24 px target {found}"
             assert found["scroll"] <= found["width"], f"{state}: horizontal overflow {found}"
-            assert n.bell.get_attribute("aria-label") == BELL_LABELS[state]
+            assert_bell(n.bell, state)
             assert not n.traffic.console_errors, n.traffic.console_errors
         finally:
             n.close()
@@ -3293,17 +3390,23 @@ NOTIFY_CHECKS = [
      {"permission": "granted"}, _n_click_focuses_row),
     ("136", "With the real Notification API underneath (Playwright grant on the context) a filed request constructs one real notification whose own `tag` is the request id",
      {"permission": "granted", "wrap": True, "grant": True}, _n_real_api),
-    ("137", "Without the Notification API the bell is disabled, says it is not supported, and the queue still works with no console error",
+    ("137", "Without the Notification API the bell is a focusable, enabled button that says notifications are not available on this device or browser and explains it when clicked, and the queue still works with no console error",
      {"remove": True}, _n_unsupported),
     ("138", "A request that leaves and comes back with the same id raises no second notification, whether it was filed after load or open when the tab loaded",
      {"permission": "granted"}, _n_leaves_and_returns),
+    ("140", "When the notification constructor throws (`Illegal constructor`, as on Chrome for Android) though permission was granted, a filed request moves the bell from on to unsupported with a label that says notifications are not available on this device or browser, it never reads on again that session, the constructor is tried once, and the failure is logged once",
+     {"answer": "granted", "throws": True}, _n_constructor_throws),
+    ("141", "The bell follows a permission changed under the open page: granted to denied on `focus` (a request filed then raises none), and back to granted on `visibilitychange` (what arrived while blocked is not replayed)",
+     {"permission": "granted"}, _n_permission_reread),
+    ("142", "On a page that is not a secure context the unsupported bell says it needs a secure connection (https or localhost), not that the browser lacks the API",
+     {"remove": True, "insecure": True}, _n_insecure_wording),
 ]
 BELL_LAYOUT_CHECK = ("139", "The bell in every state (default, on, muted, denied, unsupported) sits inside the top bar and the viewport, clear of the theme button, at least 24 px, with its state's accessible name and no horizontal overflow",
                      _n_bell_layout)
 
 
 def run_notifications(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """Notification bell checks (130..139); the SPA only."""
+    """Notification bell checks (130..142); the SPA only."""
     suite = Suite(ui, viewport)
     if ui == "legacy":
         for number, name, _how, _fn in NOTIFY_CHECKS:
@@ -3325,19 +3428,27 @@ def run_notifications(ui: str, viewport: str, browser, served: Served, broker: s
 
 
 def capture_bell_states(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
-    """The bell in each state (and the blocked explanation open), whole page and top bar."""
+    """The bell in each state at rest (pointer away, focus blurred), and the explanations open."""
     for state in BELL_STATES:
         n = open_bell_state(browser, served, broker, viewport, theme, state)
         try:
+            # A click leaves the bell hovered and focused; a state is captured as it rests.
+            n.page.mouse.move(2, viewport_height(viewport) - 2)
+            n.page.evaluate("() => document.activeElement && document.activeElement.blur()")
+            n.page.wait_for_timeout(300)   # past the hover transition
             capture(n.page, out, "spa", viewport, theme, f"bell-{state}")
             n.page.locator("header").screenshot(path=str(out / f"spa-{viewport}-{theme}-bell-{state}-bar.png"))
-            if state == "denied":
+            if state in ("denied", "unsupported"):
                 n.bell.click()
-                n.page.get_by_test_id("notify-blocked").wait_for()
-                capture(n.page, out, "spa", viewport, theme, "bell-denied-open")
+                n.page.get_by_test_id("notify-blocked" if state == "denied" else "notify-unsupported").wait_for()
+                capture(n.page, out, "spa", viewport, theme, f"bell-{state}-open")
         finally:
             n.close()
     broker.reset()
+
+
+def viewport_height(viewport: str) -> int:
+    return VIEWPORTS[viewport]["height"]
 
 
 # ---- legacy → behaviour mapping ------------------------------------------------------
@@ -4011,6 +4122,9 @@ NEW_CHECKS = [
     ("137", "Without the Notification API the bell is disabled and says so; the queue still works with no console error", "N/A(spa-only) on legacy"),
     ("138", "A request that leaves and comes back with the same id raises no second notification", "N/A(spa-only) on legacy"),
     ("139", "The bell in every state sits inside the top bar and viewport, clear of the theme button, with its state's accessible name", "N/A(spa-only) on legacy"),
+    ("140", "A notification constructor that throws moves the bell to unsupported, never on again, tried once, logged once", "N/A(spa-only) on legacy"),
+    ("141", "The bell follows a permission changed under the open page, on focus and on visibility change", "N/A(spa-only) on legacy"),
+    ("142", "The unsupported bell on an insecure page says it needs a secure connection", "N/A(spa-only) on legacy"),
 ]
 
 

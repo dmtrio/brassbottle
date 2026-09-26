@@ -185,6 +185,15 @@ class StubFiledRequestTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             broker.withdraw_request("never-filed")
 
+    def test_default_ids_never_repeat_even_after_a_withdrawal_until_reset(self):
+        broker = stub.StubBroker()
+        first = broker.file_request("same.example.com")
+        broker.withdraw_request(first)
+        second = broker.file_request("same.example.com")   # the open list is back to the same length
+        self.assertEqual((first, second), ("filed-1-same.example.com", "filed-2-same.example.com"))
+        broker.reset()
+        self.assertEqual(broker.file_request("same.example.com"), "filed-1-same.example.com")
+
 
 class StubHistoryTests(unittest.TestCase):
     """`GET /recent` is real keyset paging over a fixture with a tie block."""
