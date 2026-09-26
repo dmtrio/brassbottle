@@ -149,8 +149,6 @@ def wait_until(condition, timeout: float = 5.0) -> bool:
 
 
 class HubTestCase(unittest.TestCase):
-    spa = True
-
     def setUp(self) -> None:
         self.broker = stub.StubBroker()
         broker_url = self.broker.start()
@@ -169,10 +167,6 @@ class HubTestCase(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, env, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)
-        if self.spa:
-            os.environ["DJINN_ADMIN_UI"] = "spa"
-        else:
-            os.environ.pop("DJINN_ADMIN_UI", None)
         self.root = root
         self.clients: list[Client] = []
         self.addCleanup(self._close_clients)
@@ -479,24 +473,6 @@ class StreamTests(HubTestCase):
         self.assertRegex(joined, r"admin stream poll status=200 duration_ms=\d+ bytes=\d+ ok=true changed=true fanout=1")
         self.assertRegex(joined, r"admin stream open streams=1")
         self.assertRegex(joined, r"admin stream close streams=0 duration_ms=\d+ frames=2 bytes=\d+ reason=")
-
-
-class LegacyModeTests(HubTestCase):
-    spa = False
-
-    def test_legacy_has_no_stream_and_answers_its_path_like_any_unknown_one(self):
-        server = self.start_admin()
-        self.assertIsNone(server.stream_hub)
-        replies = []
-        for path in (admin.STREAM_PATH, "/api/egress/nothing-here"):
-            conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
-            conn.request("GET", path, headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}={SECRET}"})
-            response = conn.getresponse()
-            replies.append((response.status, response.getheader("Content-Type"), response.read()))
-            conn.close()
-        self.assertEqual(replies[0], replies[1])
-        self.assertEqual(replies[0][0], 404)
-        self.assert_no_threads_leak()   # nothing but finished request threads
 
 
 class ContractTests(unittest.TestCase):

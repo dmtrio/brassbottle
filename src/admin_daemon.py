@@ -11,7 +11,6 @@ already read the same token files on disk.
 from __future__ import annotations
 
 import argparse
-import base64
 import errno
 import hmac
 import ipaddress
@@ -32,7 +31,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 from egress_broker_host import (
     OPERATOR_TOKEN_FILENAME,
@@ -54,12 +53,10 @@ TOKEN_REJECTED_ERROR = "operator token rejected by daemon; restart djinn admin"
 UNREACHABLE_ERROR = "egress daemon unreachable"
 RECENT_QUERY_PARAMS = frozenset({"before", "limit", "container", "since", "until"})
 CONTAINER_MARKER_ENV = "DJINN_CONTAINER"
-ADMIN_UI_ENV = "DJINN_ADMIN_UI"
-ADMIN_UI_SPA_VALUE = "spa"
-ADMIN_UI_DIST_ENV = "DJINN_ADMIN_UI_DIST"
+ADMIN_UI_DIST_ENV = "DJINN_ADMIN_UI_DIST"   # tests and dev point the daemon at another build; unset, it serves admin/ui/dist
 SPA_BUILD_MANIFEST = ".build-inputs.json"   # admin/ui/scripts/build_inputs.py writes it into dist/; never served
 
-# Live queue stream (spa mode only): GET /api/egress/stream.
+# Live queue stream: GET /api/egress/stream.
 STREAM_PATH = "/api/egress/stream"
 STREAM_MAX = 8                        # concurrent streams; the ninth gets 503
 STREAM_POLL_SECONDS = 2.0             # upstream /queue poll, only while a stream is open
@@ -104,169 +101,7 @@ POINTER_HTML = """<!doctype html>
 </html>
 """
 
-_ICON_192 = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAABMElEQVR4nO3SQQkAIADAQDW50a3gXiLcJRibYw8urdcB"
-    "XzOgM6AzQGdAZ4DOgM6AzgCdAZ0BOgM6A3QGdAboDOgM0BnQGaAzoDNAN0BngM6AzgCdAToDOgN0BnQG6AzoDNAN0Bm"
-    "gM6AzQGdAZ4DOgM4AnQGdAToDOgN0BmQG6AzQGdAZoDOgM0BnQGeAzoDOAJ0BnQE6AzoDdAZkBugM0BnQGaAzoDNAN0"
-    "BngM6AzgCdAZ0BOgM6A3QGZAboDNAN0BmQGaAzoDNAZ0BngM6AzgCdAZ0BOgM6A3QGZAboDNAN0BmQGaAzoDNAZ0Bng"
-    "M4AnQGdAToDOgN0BmQG6AzQGdAZkBmgM0BnQGeAzoDOAJ0BnQE6AzoDdAZkBugM0BnQGaAzoDNAN0BmgM4AnQGdAToD"
-    "OgN0BmQG6AzoDNAN0BmgM0BnQGeAzoDOgM4A3QFxSCMmB+1Z8QAAAABJRU5ErkJggg=="
-)
-_ICON_512 = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAIAAAB7GkOtAAAB7ElEQVR4nO3RMQEAIAzAMMC/5+GiPEgU9Lpn5gBA6fY"
-    "eAIBfAgCCAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAg"
-    "ACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACA"
-    "gACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgAC"
-    "AgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgA"
-    "CAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAg"
-    "ACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACA"
-    "gACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgAC"
-    "AgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgA"
-    "CAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAg"
-    "ACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACA"
-    "gACAgACAgACAgACAgACAgACAgACAgACAgACAgACAgACA4AsM5QIh1ZNQ0QAAAABJRU5ErkJggg=="
-)
-
 _SRC_DIR = Path(__file__).resolve().parent
-_APP_JS_BYTES = (_SRC_DIR / "admin_app.js").read_bytes()
-_VENDOR_JS_PATH = _SRC_DIR / "admin_vendor" / "htm-preact-standalone-3.1.1.module.js"
-_VENDOR_JS_BYTES = _VENDOR_JS_PATH.read_bytes()
-
-APP_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#1b3a4b">
-  <title>Egress queue - Djinn admin</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <style>
-    :root {
-      color-scheme: light dark;
-      --bg: #f4f6f8;
-      --panel: #ffffff;
-      --fg: #1c2630;
-      --muted: #5f6b76;
-      --accent: #0b6fa4;
-      --warn: #8a5a00;
-      --error: #9c1c1c;
-      --line: #c8d2db;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #11161b;
-        --panel: #182028;
-        --fg: #e4ecf3;
-        --muted: #9eb0c0;
-        --accent: #67b9e3;
-        --warn: #f2bc63;
-        --error: #ff8f8f;
-        --line: #2c3946;
-      }
-    }
-    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
-    header, footer, main { max-width: 1100px; margin: 0 auto; padding: 12px 16px; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-    nav button { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px; padding: 6px 10px; }
-    nav button[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
-    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .meta { color: var(--muted); margin-bottom: 8px; }
-    .banner { display:none; margin: 8px 0; padding: 8px; border-radius: 8px; border: 1px solid var(--warn); color: var(--warn); }
-    .banner.error { border-color: var(--error); color: var(--error); }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid var(--line); padding: 6px; text-align: left; vertical-align: top; }
-    .group-row { background: color-mix(in srgb, var(--panel) 70%, var(--line)); font-weight: 600; }
-    .recent-heading { font-size: 14px; margin: 0 0 8px; }
-    .badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-left: 6px; font-size: 12px; color: var(--muted); }
-    .chip { display: inline-block; margin-top: 4px; border-radius: 999px; padding: 2px 8px; border: 1px solid var(--line); font-size: 12px; }
-    .chip.error { border-color: var(--error); color: var(--error); }
-    .actions { display: flex; flex-wrap: wrap; gap: 6px; }
-    .actions button { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px; padding: 4px 8px; }
-    .actions button.warn { border-color: var(--warn); color: var(--warn); }
-    .actions button.error { border-color: var(--error); color: var(--error); }
-    .small { font-size: 12px; color: var(--muted); }
-    input[type=text] { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; background: var(--panel); color: var(--fg); }
-    .empty { color: var(--muted); padding: 8px 0; }
-    /* Phone width: a request row stacks its four cells so the actions never
-       push the table past the viewport; the column name becomes a label. */
-    @media (max-width: 640px) {
-      table thead { display: none; }
-      table tr { display: block; border-bottom: 1px solid var(--line); padding: 6px 0; }
-      table tr.group-row { padding: 6px; }
-      table td { display: block; border-bottom: none; padding: 3px 6px; }
-      table td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: 12px; }
-    }
-  </style>
-</head>
-<body>
-  <div id="appMount"></div>
-  <script type="module" src="/app.js"></script>
-</body>
-</html>
-"""
-
-MANIFEST = {
-    "name": "Djinn admin",
-    "short_name": "Djinn",
-    "display": "standalone",
-    "start_url": "/",
-    "theme_color": "#1b3a4b",
-    "background_color": "#11161b",
-    "icons": [
-        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
-        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
-    ],
-}
-
-SW_JS = """const CACHE_VERSION = "djinn-admin-shell-v3";
-const SHELL_PATHS = [
-  "/app.js",
-  "/vendor/htm-preact-standalone.module.js",
-  "/manifest.webmanifest",
-  "/icon-192.png",
-  "/icon-512.png"
-];
-
-self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_VERSION).then((cache) => cache.addAll(SHELL_PATHS)));
-  self.skipWaiting();
-});
-
-self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)))
-    )
-  );
-  self.clients.claim();
-});
-
-self.addEventListener("fetch", (event) => {
-  const req = event.request;
-  if (req.method !== "GET") return;
-  const url = new URL(req.url);
-  if (url.pathname.startsWith("/api/")) return;
-  const isShellPath = SHELL_PATHS.includes(url.pathname);
-
-  // "/" is NEVER cached: without a session cookie it is the pointer page, and
-  // a cached pointer page would masquerade as the app shell after a session
-  // expires. Only the asset routes below are cached.
-  if (url.pathname === "/") {
-    event.respondWith(fetch(req));
-    return;
-  }
-
-  if (!isShellPath) return;
-
-  event.respondWith(
-    caches.match(req).then((cached) => cached || fetch(req).then((resp) => {
-      const copy = resp.clone();
-      caches.open(CACHE_VERSION).then((cache) => cache.put(req, copy)).catch(() => {});
-      return resp;
-    }))
-  );
-});
-"""
 
 
 def _json_bytes(body: dict[str, Any]) -> bytes:
@@ -707,25 +542,18 @@ class AdminHTTPServer(ThreadingHTTPServer):
         self.session_secret = session_secret
         self.operator_token = operator_token
         self.admin_key = admin_key
-        self.app_js = _APP_JS_BYTES
-        self.vendor_js = _VENDOR_JS_BYTES
-        self.spa_mode = os.environ.get(ADMIN_UI_ENV) == ADMIN_UI_SPA_VALUE
         self.spa_dist = Path(os.environ.get(ADMIN_UI_DIST_ENV) or _default_spa_dist())
-        self.spa_index: bytes | None = None
+        self.spa_index: bytes = b""
         self.spa_allowlist: dict[str, tuple[Path, str]] = {}
-        if self.spa_mode:
-            self._load_spa()
+        # Nothing is bound or started until the build is known to be there: a daemon with no app to
+        # serve refuses to start (RuntimeError, which main() turns into a non-zero exit).
+        self._load_spa()
         self.stream_heartbeat_seconds = stream_heartbeat_seconds
-        # The live queue stream exists in spa mode only; legacy answers its path 404 like any unknown one.
-        self.stream_hub: QueueStreamHub | None = (
-            QueueStreamHub(
-                self._fetch_queue,
-                max_streams=stream_max,
-                poll_seconds=stream_poll_seconds,
-                failure_limit=stream_failure_limit,
-            )
-            if self.spa_mode
-            else None
+        self.stream_hub = QueueStreamHub(
+            self._fetch_queue,
+            max_streams=stream_max,
+            poll_seconds=stream_poll_seconds,
+            failure_limit=stream_failure_limit,
         )
         super().__init__(server_address, AdminRequestHandler)
 
@@ -740,29 +568,29 @@ class AdminHTTPServer(ThreadingHTTPServer):
         )
 
     def shutdown(self) -> None:
-        if self.stream_hub is not None:
-            self.stream_hub.close()
+        self.stream_hub.close()
         super().shutdown()
 
     def server_close(self) -> None:
-        if self.stream_hub is not None:
-            self.stream_hub.close()
+        self.stream_hub.close()
         super().server_close()
+
+    @staticmethod
+    def _refuse_to_start(reason: str, path: Path) -> NoReturn:
+        LOG.error("admin daemon refusing to start: %s path=%s", reason, path)
+        raise RuntimeError(f"{reason}: {path} (build it with `cd admin/ui && npm ci && npm run build`)")
 
     def _load_spa(self) -> None:
         if not self.spa_dist.is_dir():
-            LOG.error("admin spa dist missing path=%s", self.spa_dist)
-            return
+            self._refuse_to_start("admin UI build missing", self.spa_dist)
         dist = self.spa_dist.resolve()
         index_path = dist / "index.html"
         if index_path.is_symlink() or not index_path.is_file():
-            LOG.error("admin spa index missing or not a regular file path=%s", index_path)
-            return
+            self._refuse_to_start("admin UI build has no index.html (or it is not a regular file)", index_path)
         try:
             self.spa_index = index_path.read_bytes()
         except OSError as exc:
-            LOG.error("admin spa index unreadable path=%s error=%s", index_path, exc)
-            return
+            self._refuse_to_start(f"admin UI index.html unreadable ({exc})", index_path)
         total_bytes = 0
         skipped = 0
         for path in sorted(dist.rglob("*")):
@@ -792,7 +620,7 @@ class AdminHTTPServer(ThreadingHTTPServer):
             self.spa_allowlist[url_path] = (resolved, _content_type_for(url_path))
             total_bytes += resolved.stat().st_size
         LOG.info(
-            "admin spa mode enabled dist=%s files=%d bytes=%d skipped=%d",
+            "admin spa loaded dist=%s files=%d bytes=%d skipped=%d",
             dist,
             len(self.spa_allowlist),
             total_bytes,
@@ -828,12 +656,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         self._dispatch("GET")
 
     def do_HEAD(self) -> None:
-        # Legacy mode keeps BaseHTTPRequestHandler's answer for a method it
-        # never implemented; spa mode answers HEAD exactly like GET, minus
-        # the body, through the same routing and session gate.
-        if not self.server.spa_mode:
-            self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
-            return
+        # HEAD is answered exactly like GET, minus the body, through the same
+        # routing and session gate.
         self._suppress_body = True
         self._dispatch("GET")
 
@@ -842,30 +666,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         path = self.path.split("?", 1)[0]
-        if self.server.spa_mode:
-            self._dispatch_spa(method, path)
-            return
-        routes: dict[tuple[str, str], Callable[[], None]] = {
-            ("GET", "/"): self._handle_root,
-            ("GET", "/health"): self._handle_health,
-            ("GET", "/session"): self._handle_session_get,
-            ("GET", "/app.js"): self._handle_app_js,
-            ("GET", "/vendor/htm-preact-standalone.module.js"): self._handle_vendor_js,
-            ("GET", "/manifest.webmanifest"): self._handle_manifest,
-            ("GET", "/sw.js"): self._handle_sw,
-            ("GET", "/icon-192.png"): self._handle_icon_192,
-            ("GET", "/icon-512.png"): self._handle_icon_512,
-            ("GET", "/api/egress/queue"): self._handle_egress_queue_get,
-            ("GET", "/api/egress/recent"): self._handle_egress_recent_get,
-            ("POST", "/api/egress/decide"): self._handle_egress_decide_post,
-        }
-        handler = routes.get((method, path))
-        if handler is None:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-            return
-        handler()
-
-    def _dispatch_spa(self, method: str, path: str) -> None:
         if method == "GET":
             if path in self.server.spa_allowlist:
                 self._handle_spa_asset(path)
@@ -888,29 +688,12 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             if path == STREAM_PATH:
                 self._handle_egress_stream()
                 return
-            if path in (
-                "/app.js",
-                "/vendor/htm-preact-standalone.module.js",
-                "/manifest.webmanifest",
-                "/sw.js",
-                "/icon-192.png",
-                "/icon-512.png",
-            ):
-                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-                return
         elif method == "POST" and path == "/api/egress/decide":
             self._handle_egress_decide_post()
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def _handle_spa_app_route(self) -> None:
-        if self.server.spa_index is None:
-            self._send_bytes(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                b"admin UI not built",
-                content_type="text/plain; charset=utf-8",
-            )
-            return
         if self._cookie_matches():
             self._send_bytes(
                 HTTPStatus.OK,
@@ -981,23 +764,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return None, length
         return body, length
 
-    def _handle_root(self) -> None:
-        # No cookie is ever set here: a browser (or a bottle over the host
-        # gateway) landing on the bare page address gets either the app (a
-        # session it already holds) or the pointer page — never a session.
-        if self._cookie_matches():
-            self._send_bytes(
-                HTTPStatus.OK,
-                APP_HTML.encode("utf-8"),
-                content_type="text/html; charset=utf-8",
-            )
-            return
-        self._send_bytes(
-            HTTPStatus.OK,
-            POINTER_HTML.encode("utf-8"),
-            content_type="text/html; charset=utf-8",
-        )
-
     def _handle_session_get(self) -> None:
         # `djinn egress url` prints this route with the per-run key: one
         # page-load that mints the session cookie and lands on the app. The
@@ -1030,33 +796,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         # broker answers the same route; without this the status line read
         # "unreachable" for a perfectly healthy admin.
         self._send_json(HTTPStatus.OK, {"status": "ok"})
-
-    def _handle_manifest(self) -> None:
-        body = json.dumps(MANIFEST, separators=(",", ":")).encode("utf-8")
-        self._send_bytes(HTTPStatus.OK, body, content_type="application/manifest+json")
-
-    def _handle_app_js(self) -> None:
-        self._send_bytes(
-            HTTPStatus.OK,
-            self.server.app_js,
-            content_type="text/javascript; charset=utf-8",
-        )
-
-    def _handle_vendor_js(self) -> None:
-        self._send_bytes(
-            HTTPStatus.OK,
-            self.server.vendor_js,
-            content_type="text/javascript; charset=utf-8",
-        )
-
-    def _handle_sw(self) -> None:
-        self._send_bytes(HTTPStatus.OK, SW_JS.encode("utf-8"), content_type="application/javascript")
-
-    def _handle_icon_192(self) -> None:
-        self._send_bytes(HTTPStatus.OK, _ICON_192, content_type="image/png")
-
-    def _handle_icon_512(self) -> None:
-        self._send_bytes(HTTPStatus.OK, _ICON_512, content_type="image/png")
 
     # ---- Egress panel handlers -------------------------------------------------
 
@@ -1099,7 +838,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
             return
         hub = self.server.stream_hub
-        assert hub is not None
         if self._suppress_body:   # HEAD: the headers a GET would open with, no stream
             self._send_bytes(HTTPStatus.OK, b"", content_type="text/event-stream; charset=utf-8",
                              headers={"Cache-Control": "no-store"})

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Playwright test of the Vue admin shell in spa mode.
+"""Playwright test of the Vue admin shell.
 
 Run by hand: `python3 tests/admin_spa_playwright.py` (needs `playwright` and
 its Chromium: `playwright install chromium`). Set ADMIN_UI_SHOTS to a directory
 to keep the screenshots. Exits 0 when every check passes and prints one
 PASS/FAIL line per check.
 
-Serves the real built admin/ui/dist through the real admin daemon in spa mode
+Serves the real built admin/ui/dist through the real admin daemon
 (in-process, session key known), mints the session, then loads each app route
 at desktop, tablet and phone in light and dark.
 """
@@ -39,7 +39,6 @@ def _start_admin(broker_url: str) -> tuple[admin.AdminHTTPServer, threading.Thre
     admin_key = "admin-test-key"
     env = {
         "DJINN_HOME": str(home),
-        "DJINN_ADMIN_UI": "spa",
         # The egress route polls the queue; a contract-validated stub answers it.
         "EGRESS_BROKER_URL": broker_url,
     }

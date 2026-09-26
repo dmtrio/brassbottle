@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(TESTS_DIR))
 
 import admin_ui_stub_broker as stub  # noqa: E402
+from admin_ui_stub_dist import make_stub_dist  # noqa: E402
 import egress_broker_host as broker  # noqa: E402
 from admin_contract_validator import validate_document  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
@@ -426,6 +427,7 @@ class AdminContractTests(unittest.TestCase):
         env = {
             "DJINN_HOME": str(root),
             "EGRESS_BROKER_URL": f"http://{broker_host}:{broker_port}",
+            "DJINN_ADMIN_UI_DIST": str(make_stub_dist(root)),
         }
         patcher = mock.patch.dict(os.environ, env, clear=False)
         patcher.start()
