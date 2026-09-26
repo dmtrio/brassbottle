@@ -8,6 +8,7 @@ asserted is what a browser's EventSource would receive.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import sys
@@ -293,13 +294,18 @@ class StreamTests(HubTestCase):
         frame = client.queue_frame(timeout=2.0)
         self.assertEqual(frame.data["count"], len(stub.OPEN_ROWS) - 1)
 
-    def test_an_idle_stream_gets_a_heartbeat_comment(self):
+    def test_an_idle_stream_gets_a_heartbeat_event_the_page_can_see(self):
+        """`event: hb`, not a `: hb` comment: an EventSource never shows a comment to script, so the tab
+        could not tell a live stream from a half-open one."""
         self.start_admin(stream_heartbeat_seconds=0.2)
         client = self.connect()
         client.queue_frame()
         frames = client.frames_for(0.9)
         self.assertGreaterEqual(len(frames), 2)
-        self.assertTrue(all(f.comment == "hb" and f.event is None for f in frames), [f.raw for f in frames])
+        for frame in frames:
+            self.assertEqual((frame.event, frame.data, frame.comment), ("hb", {}, None), frame.raw)
+            self.assertEqual(frame.raw, b"event: hb\ndata: {}")
+            self.assertEqual(validate_document(frame.as_contract_event(), "sse_event.schema.json"), [])
 
     def test_eight_streams_open_and_the_ninth_is_refused_with_the_error_body(self):
         self.start_admin()
@@ -446,6 +452,20 @@ class StreamTests(HubTestCase):
         for secret in (SECRET, "operator-test-token", "admin-test-key"):
             self.assertNotIn(secret, text)
 
+    def test_an_unchanged_poll_logs_at_debug_not_info(self):
+        """A poll with nothing new repeats every interval while a tab is open: INFO would be ~43k lines a day."""
+        self.start_admin()
+        client = self.connect()
+        client.queue_frame()
+        polls = self.queue_polls()
+        with self.assertLogs(admin.LOG, level="DEBUG") as logs:
+            wait_until(lambda: self.queue_polls() - polls >= 4)
+        unchanged = [r for r in logs.records if "ok=true changed=false" in r.getMessage()]
+        self.assertGreaterEqual(len(unchanged), 3)
+        self.assertEqual({r.levelname for r in unchanged}, {"DEBUG"})
+        info = [r.getMessage() for r in logs.records if r.levelno >= logging.INFO]
+        self.assertEqual([m for m in info if "admin stream poll" in m], [], "an unchanged poll was logged at INFO")
+
     def test_boundary_logs_cover_the_poll_the_fanout_and_open_close(self):
         self.start_admin()
         with self.assertLogs(admin.LOG, level="INFO") as logs:
@@ -488,6 +508,19 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(validate_document({"event": "queue", "data": snapshot}, "sse_event.schema.json"), [])
         self.assertNotEqual(validate_document({"event": "error", "data": snapshot}, "sse_event.schema.json"), [])
         self.assertNotEqual(validate_document({"event": "queue", "data": {"open": []}}, "sse_event.schema.json"), [])
+
+    def test_the_event_schema_describes_the_heartbeat_and_keeps_each_event_to_its_own_data(self):
+        self.assertEqual(validate_document({"event": "hb", "data": {}}, "sse_event.schema.json"), [])
+        snapshot = stub.build_queue()
+        for bad in (
+            {"event": "hb", "data": snapshot},          # a heartbeat carries no snapshot
+            {"event": "hb", "data": {"x": 1}},
+            {"event": "hb"},
+            {"event": "queue", "data": {}},              # a queue event carries the whole snapshot
+            {"event": "ping", "data": {}},
+        ):
+            with self.subTest(frame=bad):
+                self.assertNotEqual(validate_document(bad, "sse_event.schema.json"), [])
 
     def test_change_key_ignores_only_the_per_poll_clock(self):
         base = stub.build_queue()

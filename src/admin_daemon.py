@@ -63,7 +63,8 @@ SPA_BUILD_MANIFEST = ".build-inputs.json"   # admin/ui/scripts/build_inputs.py w
 STREAM_PATH = "/api/egress/stream"
 STREAM_MAX = 8                        # concurrent streams; the ninth gets 503
 STREAM_POLL_SECONDS = 2.0             # upstream /queue poll, only while a stream is open
-STREAM_HEARTBEAT_SECONDS = 15.0       # `: hb` comment on an idle stream
+STREAM_HEARTBEAT_SECONDS = 15.0       # `event: hb` on an idle stream (a comment would never reach the page)
+STREAM_HEARTBEAT_FRAME = b"event: hb\ndata: {}\n\n"
 STREAM_FAILURE_LIMIT = 2              # consecutive failed polls before the streams are ended
 STREAM_WRITE_TIMEOUT_SECONDS = 10.0   # a client that stops reading is treated as gone
 STREAM_FULL_ERROR = "too many live streams"
@@ -658,7 +659,9 @@ class QueueStreamHub:
                 targets = [stream for stream in self._streams if stream.ready] if changed else []
             for stream in targets:
                 stream.push(frame)
-            LOG.info(
+            # An unchanged poll repeats every interval for as long as a tab is open: DEBUG. A change is INFO.
+            LOG.log(
+                logging.INFO if changed else logging.DEBUG,
                 "admin stream poll status=%d duration_ms=%d bytes=%d ok=true changed=%s fanout=%d",
                 status, duration_ms, size, str(changed).lower(), len(targets),
             )
@@ -1148,8 +1151,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                         sent += len(item)
                         last_write = time.monotonic()
                 elif not readable:
-                    self.wfile.write(b": hb\n\n")
-                    sent += 5
+                    self.wfile.write(STREAM_HEARTBEAT_FRAME)
+                    sent += len(STREAM_HEARTBEAT_FRAME)
                     last_write = time.monotonic()
         except OSError as exc:   # BrokenPipeError, ConnectionResetError, a write that timed out
             reason = f"socket_error:{type(exc).__name__}"
