@@ -3111,6 +3111,13 @@ def _n_mute(n: NotifyPage) -> None:
     n.broker.file_request("quiet.example.com", request_id="q1")
     n.poll(rows=len(stub.OPEN_ROWS) + 1)
     assert n.made() == [], f"a muted tab notified: {n.made()}"
+    # Unmuting shows nothing that arrived while muted, only what comes next.
+    n.bell.click()
+    served_page.wait_for_selector("[data-testid=notify-bell][data-state=on]")
+    n.poll()
+    assert n.made() == [], f"unmuting replayed the requests that arrived muted: {n.made()}"
+    n.bell.click()
+    served_page.wait_for_selector("[data-testid=notify-bell][data-state=muted]")
     # The mute is this viewer's, kept in localStorage: it survives a reload.
     assert served_page.evaluate("(k) => localStorage.getItem(k)", MUTE_STORAGE_KEY) == "1"
     served_page.reload()
