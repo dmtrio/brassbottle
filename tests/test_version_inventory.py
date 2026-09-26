@@ -143,7 +143,7 @@ def locations_doc():
             },
         },
         "exclusions": [
-            {"path": "src/admin_vendor",
+            {"path": "vendor",
              "reason": "vendored upstream file; no live selector executes here"},
         ],
         "discovery": {
@@ -183,7 +183,7 @@ class FixtureRepo:
         (self.root / "plugins/annotated-watch").mkdir(parents=True)
         (self.root / "plugins/archex").mkdir(parents=True)
         (self.root / "plugins/tinfoil").mkdir(parents=True)
-        (self.root / "src/admin_vendor").mkdir(parents=True)
+        (self.root / "vendor").mkdir(parents=True)
         (self.root / "agents/aider/agent.yml").write_text(self.AIDER)
         (self.root / "agents/pi/agent.yml").write_text(self.PI)
         (self.root / "plugins/annotated-watch/plugin.yml").write_text(self.ANNOTATED)

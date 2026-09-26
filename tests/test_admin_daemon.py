@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import logging
@@ -29,6 +28,7 @@ sys.path.insert(0, str(TESTS_DIR))
 
 import admin_daemon as admin  # noqa: E402
 from admin_contract_validator import validate_document  # noqa: E402
+from admin_ui_stub_dist import STUB_INDEX, make_stub_dist  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
 
 
@@ -163,6 +163,9 @@ class AdminDaemonTests(unittest.TestCase):
         env_map = {"DJINN_HOME": str(home)}
         if env:
             env_map.update(env)
+        if "DJINN_ADMIN_UI_DIST" not in env_map:
+            # The daemon will not start without a built app; most tests care about the API, not the build.
+            env_map["DJINN_ADMIN_UI_DIST"] = str(make_stub_dist(home))
         patcher = mock.patch.dict(os.environ, env_map, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -205,16 +208,6 @@ class AdminDaemonTests(unittest.TestCase):
         conn.close()
         return resp.status, payload, resp_headers, raw
 
-    def _session_cookie(self, host: str, port: int) -> str:
-        status, _payload, headers, _raw = self._request(host, port, "GET", "/")
-        self.assertEqual(status, HTTPStatus.OK)
-        cookie_raw = headers.get("Set-Cookie", "")
-        parsed = SimpleCookie()
-        parsed.load(cookie_raw)
-        morsel = parsed.get(admin.SESSION_COOKIE_NAME)
-        self.assertIsNotNone(morsel)
-        return morsel.value
-
     def test_host_must_be_loopback(self):
         err = io.StringIO()
         with mock.patch("sys.stderr", err):
@@ -250,7 +243,8 @@ class AdminDaemonTests(unittest.TestCase):
             sock.listen(1)
             port = sock.getsockname()[1]
             err = io.StringIO()
-            with mock.patch.dict(os.environ, {"DJINN_HOME": str(home)}):
+            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI_DIST": str(make_stub_dist(home))}
+            with mock.patch.dict(os.environ, env):
                 with mock.patch("sys.stderr", err):
                     rc = admin.main(["--port", str(port)])
             sock.close()
@@ -262,13 +256,14 @@ class AdminDaemonTests(unittest.TestCase):
             home = Path(tmp)
             egress_root = home / "run" / "egress"
             egress_root.mkdir(parents=True)
-            server = admin.AdminHTTPServer(
-                ("127.0.0.1", 0),
-                egress_root=egress_root,
-                session_secret="s",
-                operator_token="tok",
-                admin_key="k",
-            )
+            with mock.patch.dict(os.environ, {"DJINN_ADMIN_UI_DIST": str(make_stub_dist(home))}):
+                server = admin.AdminHTTPServer(
+                    ("127.0.0.1", 0),
+                    egress_root=egress_root,
+                    session_secret="s",
+                    operator_token="tok",
+                    admin_key="k",
+                )
             try:
                 with self.assertLogs(admin.LOG, level="INFO") as captured:
                     try:
@@ -285,13 +280,14 @@ class AdminDaemonTests(unittest.TestCase):
             home = Path(tmp)
             egress_root = home / "run" / "egress"
             egress_root.mkdir(parents=True)
-            server = admin.AdminHTTPServer(
-                ("127.0.0.1", 0),
-                egress_root=egress_root,
-                session_secret="s",
-                operator_token="tok",
-                admin_key="k",
-            )
+            with mock.patch.dict(os.environ, {"DJINN_ADMIN_UI_DIST": str(make_stub_dist(home))}):
+                server = admin.AdminHTTPServer(
+                    ("127.0.0.1", 0),
+                    egress_root=egress_root,
+                    session_secret="s",
+                    operator_token="tok",
+                    admin_key="k",
+                )
             try:
                 with mock.patch.object(ThreadingHTTPServer, "handle_error") as mocked_super:
                     try:
@@ -316,10 +312,9 @@ class AdminDaemonTests(unittest.TestCase):
                 self.assertEqual(status, HTTPStatus.OK)
                 self.assertNotIn("Set-Cookie", headers)
                 text = raw.decode("utf-8")
-                # the pointer page, not the app shell
+                # the pointer page, not the app
                 self.assertIn("./djinn egress url", text)
-                self.assertNotIn("appMount", text)
-                self.assertNotIn('<script type="module" src="/app.js">', text)
+                self.assertNotIn("SPA", text)
                 self.assertNotIn(token, text)
             finally:
                 server.shutdown()
@@ -347,47 +342,9 @@ class AdminDaemonTests(unittest.TestCase):
                 self.assertNotIn("Set-Cookie", headers)
                 text = raw.decode("utf-8")
                 self.assertNotIn(token, text)
-                self.assertIn("manifest.webmanifest", text)
-                self.assertIn('<script type="module" src="/app.js"></script>', text)
+                self.assertEqual(text, STUB_INDEX)
+                self.assertEqual(headers.get("Cache-Control"), "no-store")
                 self.assertNotIn("X-Admin-UI", text)
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
-    def test_app_js_served_as_module_text_javascript(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            server, thread = self._start_admin(Path(tmp))
-            host, port = server.server_address
-            try:
-                status, _payload, headers, raw = self._request(host, port, "GET", "/app.js")
-                self.assertEqual(status, HTTPStatus.OK)
-                self.assertEqual(headers.get("Content-Type"), "text/javascript; charset=utf-8")
-                text = raw.decode("utf-8")
-                self.assertIn('from "/vendor/htm-preact-standalone.module.js"', text)
-                self.assertIn('fetch("/api/egress/decide"', text)
-                self.assertIn('"X-Admin-UI": "1"', text)
-                self.assertIn("type exact host to arm global deny", text)
-                self.assertIn("recorded - add CIDR to manifest by hand", text)
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
-    def test_vendor_module_route_is_byte_identical(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            server, thread = self._start_admin(Path(tmp))
-            host, port = server.server_address
-            expected = (
-                REPO_ROOT / "src" / "admin_vendor" / "htm-preact-standalone-3.1.1.module.js"
-            ).read_bytes()
-            try:
-                status, _payload, headers, raw = self._request(
-                    host, port, "GET", "/vendor/htm-preact-standalone.module.js"
-                )
-                self.assertEqual(status, HTTPStatus.OK)
-                self.assertEqual(headers.get("Content-Type"), "text/javascript; charset=utf-8")
-                self.assertEqual(raw, expected)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -419,58 +376,6 @@ class AdminDaemonTests(unittest.TestCase):
         stub.shutdown()
         stub.server_close()
         join_thread_or_fail(stub_thread, label="stub")
-
-    def test_manifest_is_valid_json(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            server, thread = self._start_admin(Path(tmp))
-            host, port = server.server_address
-            try:
-                status, payload, _headers, _raw = self._request(host, port, "GET", "/manifest.webmanifest")
-                self.assertEqual(status, HTTPStatus.OK)
-                self.assertEqual(payload["name"], "Djinn admin")
-                self.assertEqual(payload["short_name"], "Djinn")
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
-    def test_sw_has_api_bypass_and_precache_entries(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            server, thread = self._start_admin(Path(tmp))
-            host, port = server.server_address
-            try:
-                status, _payload, _headers, raw = self._request(host, port, "GET", "/sw.js")
-                self.assertEqual(status, HTTPStatus.OK)
-                text = raw.decode("utf-8")
-                self.assertIn("/api/", text)
-                self.assertIn("startsWith(\"/api/\")", text)
-                self.assertIn('"/app.js"', text)
-                self.assertIn('"/vendor/htm-preact-standalone.module.js"', text)
-                # "/" is excluded from the shell cache (the array must open
-                # with /app.js, not with a "/" entry): without a session
-                # cookie / is the pointer page, and a cached pointer page
-                # would masquerade as the app shell after a session expires.
-                self.assertIn('const SHELL_PATHS = [\n  "/app.js",', text)
-                self.assertIn("url.pathname === \"/\"", text)
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
-    def test_icons_are_png(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            server, thread = self._start_admin(Path(tmp))
-            host, port = server.server_address
-            try:
-                for path in ("/icon-192.png", "/icon-512.png"):
-                    status, _payload, _headers, raw = self._request(host, port, "GET", path)
-                    self.assertEqual(status, HTTPStatus.OK)
-                    self.assertGreaterEqual(len(raw), 8)
-                    self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
 
     def test_get_queue_requires_session_cookie(self):
         # Inverts the pre-session-queue test: /api/egress/queue proxies only
@@ -1347,25 +1252,6 @@ class AdminDaemonTests(unittest.TestCase):
         stub.server_close()
         join_thread_or_fail(stub_thread, label="stub")
 
-    def test_app_js_structural_grouping_and_recent_markers(self):
-        """Structural checks only: the admin UI is client-side and there is no
-        browser in this suite, so the browser rig supplies the behavioural
-        Evidence for grouping, the recent move and the local-time render.
-        These assertions pin the source shape those steps depend on."""
-        text = (REPO_ROOT / "src" / "admin_app.js").read_text(encoding="utf-8")
-        # The typed-host arm moved to the request row; no host-group remains.
-        self.assertNotIn("HostGroup", text)
-        self.assertNotIn("host-group", text)
-        # Open rows group by container (the bottle), not by host.
-        self.assertIn("String(row.container || \"\")", text)
-        # The recent-decisions section is rendered below the table.
-        self.assertIn("Recent decisions (24 h)", text)
-        # Request and decision dates render through the local-time formatter.
-        self.assertIn("localTimestamp(row.opened_at)", text)
-        self.assertIn("localTimestamp(row.decided_at)", text)
-        # Apply failures surface as the attempt-counted chip.
-        self.assertIn("apply failed \\u00d7", text)
-
     # -- GET /api/egress/recent (History proxy) --------------------------------
 
     def _recent_env(self, stub):
@@ -1396,31 +1282,23 @@ class AdminDaemonTests(unittest.TestCase):
         return state, self._request(host, port, "GET", path, headers=headers)
 
     def test_get_recent_requires_session_cookie(self):
-        for env_extra in ({}, {"DJINN_ADMIN_UI": "spa"}):
-            with self.subTest(spa=bool(env_extra)):
-                state = _StubBrokerState()
-                state.recent_body = {"rows": [], "next": None}
-                _s, (status, payload, _h, _r) = self._recent_get(
-                    "/api/egress/recent", cookie=False, env_extra=env_extra, state=state
-                )
-                self.assertEqual(status, HTTPStatus.FORBIDDEN)
-                self.assertEqual(payload, {"error": "forbidden"})
-                self.assertEqual(state.snapshot_calls(), [])
+        state = _StubBrokerState()
+        state.recent_body = {"rows": [], "next": None}
+        _s, (status, payload, _h, _r) = self._recent_get("/api/egress/recent", cookie=False, state=state)
+        self.assertEqual(status, HTTPStatus.FORBIDDEN)
+        self.assertEqual(payload, {"error": "forbidden"})
+        self.assertEqual(state.snapshot_calls(), [])
 
-    def test_get_recent_proxies_in_legacy_and_spa_dispatch(self):
+    def test_get_recent_proxies_the_page(self):
         page = {"rows": [], "next": "2026-08-01T00:00:00Z,req-9"}
-        for env_extra in ({}, {"DJINN_ADMIN_UI": "spa"}):
-            with self.subTest(spa=bool(env_extra)):
-                state = _StubBrokerState()
-                state.recent_body = page
-                _s, (status, payload, _h, _r) = self._recent_get(
-                    "/api/egress/recent", env_extra=env_extra, state=state
-                )
-                self.assertEqual(status, HTTPStatus.OK)
-                self.assertEqual(payload, page)
-                calls = state.snapshot_calls()
-                self.assertEqual([c["path"] for c in calls], ["/recent"])
-                self.assertEqual(calls[0]["authorization"], "Bearer operator-test-token")
+        state = _StubBrokerState()
+        state.recent_body = page
+        _s, (status, payload, _h, _r) = self._recent_get("/api/egress/recent", state=state)
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(payload, page)
+        calls = state.snapshot_calls()
+        self.assertEqual([c["path"] for c in calls], ["/recent"])
+        self.assertEqual(calls[0]["authorization"], "Bearer operator-test-token")
 
     def test_get_recent_forwards_only_the_five_allowlisted_params(self):
         state = _StubBrokerState()
@@ -1486,58 +1364,6 @@ class AdminDaemonTests(unittest.TestCase):
         self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
         self.assertEqual(payload["error"], admin.UNREACHABLE_ERROR)
 
-    def test_legacy_routes_match_recorded_fixture(self):
-        """With DJINN_ADMIN_UI unset, every legacy route returns exactly the
-        status, headers and body that the pre-step code returned."""
-        fixture = json.loads(
-            (TESTS_DIR / "fixtures" / "admin_legacy_responses.json").read_text(encoding="utf-8")
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            server, thread = self._start_admin(Path(tmp))
-            host, port = server.server_address
-            try:
-                for entry in fixture:
-                    headers: dict[str, str] = {}
-                    if entry["with_session"]:
-                        headers["Cookie"] = f"{admin.SESSION_COOKIE_NAME}=session-secret"
-                    status, _payload, resp_headers, raw = self._request(
-                        host, port, "GET", entry["route"], headers=headers
-                    )
-                    self.assertEqual(
-                        status,
-                        entry["status"],
-                        f"{entry['route']} session={entry['with_session']}",
-                    )
-                    self.assertEqual(
-                        resp_headers.get("Content-Type"),
-                        entry["headers"].get("Content-Type"),
-                        f"{entry['route']} Content-Type",
-                    )
-                    self.assertEqual(
-                        resp_headers.get("Cache-Control"),
-                        entry["headers"].get("Cache-Control"),
-                        f"{entry['route']} Cache-Control",
-                    )
-                    self.assertEqual(
-                        resp_headers.get("Location"),
-                        entry["headers"].get("Location"),
-                        f"{entry['route']} Location",
-                    )
-                    self.assertEqual(
-                        "Set-Cookie" in resp_headers,
-                        entry["headers"].get("Set-Cookie", False),
-                        f"{entry['route']} Set-Cookie presence",
-                    )
-                    self.assertEqual(
-                        hashlib.sha256(raw).hexdigest(),
-                        entry["body_sha256"],
-                        f"{entry['route']} body sha256",
-                    )
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
     def _build_spa_dist(self, parent: Path, *, with_index: bool = True) -> Path:
         dist = parent / "dist"
         dist.mkdir(parents=True)
@@ -1552,17 +1378,17 @@ class AdminDaemonTests(unittest.TestCase):
         (dist / "favicon.svg").write_text("<svg/>", encoding="utf-8")
         return dist
 
-    def test_spa_mode_serves_app_routes_and_assets(self):
-        """With DJINN_ADMIN_UI=spa the daemon serves index.html at the five app
+    def test_serves_app_routes_and_assets(self):
+        """The daemon, with no flag set, serves index.html at the five app
         routes to session holders, the pointer page without a session, hashed
-        assets with the right content type and cache header, and 404 for legacy
-        assets and traversal attempts."""
+        assets with the right content type and cache header, and 404 for the
+        routes the retired legacy page had (unless dist provides the file) and
+        for traversal attempts."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             dist = self._build_spa_dist(home)
             env = {
                 "DJINN_HOME": str(home),
-                "DJINN_ADMIN_UI": "spa",
                 "DJINN_ADMIN_UI_DIST": str(dist),
             }
             server, thread = self._start_admin(home, env=env)
@@ -1618,7 +1444,7 @@ class AdminDaemonTests(unittest.TestCase):
                 self.assertEqual(headers.get("Content-Type"), "image/svg+xml")
                 self.assertEqual(headers.get("Cache-Control"), "no-cache")
 
-                # legacy assets 404
+                # the retired legacy page's routes are 404 (this dist has none of these files)
                 for route in (
                     "/app.js",
                     "/vendor/htm-preact-standalone.module.js",
@@ -1661,12 +1487,12 @@ class AdminDaemonTests(unittest.TestCase):
             (dist / name).write_bytes(body)
         return dist
 
-    def test_spa_mode_serves_the_built_service_worker_and_manifest(self):
-        """In spa mode the worker the build generates (sw.js, its workbox chunk,
+    def test_serves_the_built_service_worker_and_manifest(self):
+        """The worker the build generates (sw.js, its workbox chunk,
         the importScripts file), the manifest and the icons come from dist, byte
         for byte, with the right content type; sw.js is `no-cache` so a new
         worker is found on the next visit, and no session is needed for any of
-        them. The inline legacy SW_JS and MANIFEST are not what is served."""
+        them."""
         expected_types = {
             "sw.js": "text/javascript; charset=utf-8",
             "workbox-1a2b3c4d.js": "text/javascript; charset=utf-8",
@@ -1678,7 +1504,7 @@ class AdminDaemonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             dist = self._build_spa_dist_with_worker(home)
-            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI": "spa", "DJINN_ADMIN_UI_DIST": str(dist)}
+            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI_DIST": str(dist)}
             server, thread = self._start_admin(home, env=env)
             host, port = server.server_address
             try:
@@ -1691,7 +1517,6 @@ class AdminDaemonTests(unittest.TestCase):
                             self.assertEqual(headers.get("Content-Type"), expected_types[name])
                             self.assertEqual(headers.get("Cache-Control"), "no-cache")
                             self.assertEqual(headers.get("Content-Length"), str(len(body)))
-                self.assertNotIn(admin.SW_JS.encode("utf-8"), self._request(host, port, "GET", "/sw.js")[3])
                 # the app routes stay gated: no cookie, the pointer page, never the app
                 status, _payload, headers, raw = self._request(host, port, "GET", "/")
                 self.assertEqual(status, HTTPStatus.OK)
@@ -1702,7 +1527,7 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
-    def test_spa_mode_worker_paths_outside_the_allowlist_are_404(self):
+    def test_worker_paths_outside_the_allowlist_are_404(self):
         """Only the files that are in dist are served: a look-alike name, a path
         joined under the worker's name, an encoded traversal and a worker file
         the build did not emit all 404, and a symlinked sw.js is dropped."""
@@ -1713,7 +1538,7 @@ class AdminDaemonTests(unittest.TestCase):
             outside.write_text("secret", encoding="utf-8")
             (dist / "sw.js").unlink()
             (dist / "sw.js").symlink_to(outside)
-            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI": "spa", "DJINN_ADMIN_UI_DIST": str(dist)}
+            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI_DIST": str(dist)}
             server, thread = self._start_admin(home, env=env)
             host, port = server.server_address
             try:
@@ -1742,39 +1567,6 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
-    def test_legacy_mode_keeps_its_inline_worker_and_manifest_with_a_built_dist_present(self):
-        """With DJINN_ADMIN_UI unset the worker, manifest and icons are the inline
-        ones, byte for byte, whatever sits in dist."""
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            dist = self._build_spa_dist_with_worker(home)
-            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI_DIST": str(dist)}
-            patcher = mock.patch.dict(os.environ)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-            os.environ.pop("DJINN_ADMIN_UI", None)
-            server, thread = self._start_admin(home, env=env)
-            host, port = server.server_address
-            try:
-                self.assertFalse(server.spa_mode)
-                status, _payload, headers, raw = self._request(host, port, "GET", "/sw.js")
-                self.assertEqual(status, HTTPStatus.OK)
-                self.assertEqual(raw, admin.SW_JS.encode("utf-8"))
-                self.assertEqual(headers.get("Content-Type"), "application/javascript")
-                self.assertNotIn("Cache-Control", headers)
-                status, _payload, headers, raw = self._request(host, port, "GET", "/manifest.webmanifest")
-                self.assertEqual(status, HTTPStatus.OK)
-                self.assertEqual(raw, json.dumps(admin.MANIFEST, separators=(",", ":")).encode("utf-8"))
-                self.assertEqual(headers.get("Content-Type"), "application/manifest+json")
-                status, _payload, _headers, raw = self._request(host, port, "GET", "/icon-192.png")
-                self.assertEqual(raw, admin._ICON_192)
-                for route in ("/workbox-1a2b3c4d.js", "/sw-cleanup.js"):
-                    self.assertEqual(self._request(host, port, "GET", route)[0], HTTPStatus.NOT_FOUND)
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
     def test_spa_allowlist_drops_symlinks_and_hidden_files(self):
         """Only regular, non-hidden files under dist are served: a symlinked
         file or directory pointing outside dist, and a dotfile, are 404."""
@@ -1791,7 +1583,6 @@ class AdminDaemonTests(unittest.TestCase):
             (dist / "assets" / ".cache" / "x.js").write_text("x", encoding="utf-8")
             env = {
                 "DJINN_HOME": str(home),
-                "DJINN_ADMIN_UI": "spa",
                 "DJINN_ADMIN_UI_DIST": str(dist),
             }
             server, thread = self._start_admin(home, env=env)
@@ -1821,7 +1612,6 @@ class AdminDaemonTests(unittest.TestCase):
             (dist / ".env").write_text("hidden", encoding="utf-8")
             env = {
                 "DJINN_HOME": str(home),
-                "DJINN_ADMIN_UI": "spa",
                 "DJINN_ADMIN_UI_DIST": str(dist),
             }
             with self.assertLogs(admin.LOG, level="DEBUG") as captured:
@@ -1860,15 +1650,14 @@ class AdminDaemonTests(unittest.TestCase):
         return rest
 
     def test_spa_head_matches_get_without_body(self):
-        """HEAD in spa mode answers like GET (status, type, length, cache,
-        session gate) and sends no body; legacy mode keeps the 501."""
+        """HEAD answers like GET (status, type, length, cache, session gate)
+        and sends no body."""
         cookie = {"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"}
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             dist = self._build_spa_dist(home)
             env = {
                 "DJINN_HOME": str(home),
-                "DJINN_ADMIN_UI": "spa",
                 "DJINN_ADMIN_UI_DIST": str(dist),
             }
             server, thread = self._start_admin(home, env=env)
@@ -1902,72 +1691,124 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            # _start_admin's env patch from the spa server above is still
-            # active until test cleanup, so clear the flag explicitly.
-            server, thread = self._start_admin(home, env={"DJINN_ADMIN_UI": ""})
-            self.assertFalse(server.spa_mode)
-            host, port = server.server_address
-            try:
-                conn = HTTPConnection(host, port, timeout=5)
-                conn.request("HEAD", "/")
-                resp = conn.getresponse()
-                resp.read()
-                conn.close()
-                self.assertEqual(resp.status, HTTPStatus.NOT_IMPLEMENTED)
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
-    def test_spa_mode_missing_dist_returns_503_for_app_routes(self):
-        """If the configured dist directory is missing, app routes answer 503
-        'admin UI not built' while /health still works."""
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            env = {
-                "DJINN_HOME": str(home),
-                "DJINN_ADMIN_UI": "spa",
-                "DJINN_ADMIN_UI_DIST": str(home / "no-such-dist"),
-            }
-            server, thread = self._start_admin(home, env=env)
-            host, port = server.server_address
-            try:
-                status, _payload, _headers, raw = self._request(
-                    host,
-                    port,
-                    "GET",
-                    "/egress",
-                    headers={"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"},
-                )
-                self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
-                self.assertEqual(raw, b"admin UI not built")
-
-                status, _payload, _headers, _raw = self._request(host, port, "GET", "/health")
-                self.assertEqual(status, HTTPStatus.OK)
-            finally:
-                server.shutdown()
-                server.server_close()
-                join_thread_or_fail(thread, label="admin")
-
-    def test_spa_mode_logs_boundary_at_startup(self):
-        """The spa startup logs mode, dist path, file count and total bytes."""
+    def test_logs_boundary_at_startup(self):
+        """Startup logs the dist path, file count and total bytes."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             dist = self._build_spa_dist(home)
             env = {
                 "DJINN_HOME": str(home),
-                "DJINN_ADMIN_UI": "spa",
                 "DJINN_ADMIN_UI_DIST": str(dist),
             }
             with self.assertLogs(admin.LOG, level="INFO") as captured:
                 server, thread = self._start_admin(home, env=env)
                 try:
                     joined = "\n".join(captured.output)
-                    self.assertIn("admin spa mode enabled", joined)
+                    self.assertIn("admin spa loaded", joined)
                     self.assertIn(str(dist), joined)
                     self.assertIn("files=3", joined)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    join_thread_or_fail(thread, label="admin")
+
+    # -- the daemon refuses to start without a build -----------------------------------
+
+    def _refusal(self, dist: Path, home: Path) -> tuple[int, str, list[str]]:
+        """Run main() against `dist`; return its exit code, stderr, and the ERROR log lines."""
+        err = io.StringIO()
+        env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI_DIST": str(dist)}
+        with mock.patch.dict(os.environ, env), mock.patch("sys.stderr", err):
+            with self.assertLogs(admin.LOG, level="ERROR") as captured:
+                rc = admin.main(["--port", "0"])
+        return rc, err.getvalue(), [r.getMessage() for r in captured.records]
+
+    def test_a_missing_dist_stops_the_daemon_with_a_logged_error_and_exit_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = home / "no-such-dist"
+            rc, stderr, errors = self._refusal(dist, home)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"admin UI build missing: {dist}", stderr)
+        self.assertIn("npm run build", stderr)
+        self.assertEqual(errors, [f"admin daemon refusing to start: admin UI build missing path={dist}"])
+
+    def test_a_dist_without_index_html_stops_the_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = home / "dist"
+            (dist / "assets").mkdir(parents=True)
+            (dist / "assets" / "app-abc123.js").write_text("x", encoding="utf-8")
+            rc, stderr, errors = self._refusal(dist, home)
+        self.assertEqual(rc, 1)
+        self.assertIn("no index.html", stderr)
+        self.assertEqual(len(errors), 1)
+        self.assertIn(str(dist.resolve() / "index.html"), errors[0])
+
+    def test_a_symlinked_index_html_stops_the_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = home / "dist"
+            dist.mkdir()
+            (home / "elsewhere.html").write_text("x", encoding="utf-8")
+            (dist / "index.html").symlink_to(home / "elsewhere.html")
+            rc, stderr, _errors = self._refusal(dist, home)
+        self.assertEqual(rc, 1)
+        self.assertIn("no index.html", stderr)
+
+    def test_a_refused_start_binds_no_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            egress_root = home / "run" / "egress"
+            egress_root.mkdir(parents=True)
+            with mock.patch.dict(os.environ, {"DJINN_ADMIN_UI_DIST": str(home / "no-such-dist")}):
+                with self.assertLogs(admin.LOG, level="ERROR"), mock.patch.object(
+                    ThreadingHTTPServer, "__init__"
+                ) as bound:
+                    with self.assertRaises(RuntimeError):
+                        admin.AdminHTTPServer(
+                            ("127.0.0.1", 0), egress_root=egress_root, session_secret="s",
+                            operator_token="tok", admin_key="k",
+                        )
+        bound.assert_not_called()
+
+    def test_the_default_dist_is_the_repo_build_when_no_override_is_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = make_stub_dist(home)
+            egress_root = home / "run" / "egress"
+            egress_root.mkdir(parents=True)
+            env = {k: v for k, v in os.environ.items() if k != "DJINN_ADMIN_UI_DIST"}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                admin, "_default_spa_dist", return_value=dist
+            ):
+                server = admin.AdminHTTPServer(
+                    ("127.0.0.1", 0), egress_root=egress_root, session_secret="s",
+                    operator_token="tok", admin_key="k",
+                )
+            try:
+                self.assertEqual(server.spa_dist, dist)
+                self.assertEqual(server.spa_index, STUB_INDEX.encode("utf-8"))
+            finally:
+                server.server_close()
+        self.assertEqual(admin._default_spa_dist(), REPO_ROOT / "admin" / "ui" / "dist")
+
+    def test_the_legacy_page_routes_are_404_and_no_env_flag_switches_the_app_back(self):
+        """No DJINN_ADMIN_UI value brings the retired page back: every route it had answers 404
+        unless the build provides that file, and `/` is the app for a session holder."""
+        cookie = {"Cookie": f"{admin.SESSION_COOKIE_NAME}=session-secret"}
+        for flag in ("", "spa", "legacy", "0"):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                server, thread = self._start_admin(home, env={"DJINN_ADMIN_UI": flag})
+                host, port = server.server_address
+                try:
+                    status, _p, _h, raw = self._request(host, port, "GET", "/", headers=cookie)
+                    self.assertEqual((status, raw), (HTTPStatus.OK, STUB_INDEX.encode("utf-8")))
+                    for route in ("/app.js", "/vendor/htm-preact-standalone.module.js", "/manifest.webmanifest",
+                                  "/sw.js", "/icon-192.png", "/icon-512.png"):
+                        with self.subTest(route=route):
+                            self.assertEqual(self._request(host, port, "GET", route)[0], HTTPStatus.NOT_FOUND)
                 finally:
                     server.shutdown()
                     server.server_close()

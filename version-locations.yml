@@ -437,9 +437,6 @@ locations:
 # Explicitly NOT selectors — excluded from pattern discovery as whole files.
 # Each states why it cannot hide a selector.
 exclusions:
-  - path: src/admin_vendor
-    reason: vendored upstream file (htm/preact standalone), committed at a
-      pinned version in its filename; no live selector executes here
   - path: tests
     reason: test fixtures, goldens and suites — never installer surfaces
   - path: docs
