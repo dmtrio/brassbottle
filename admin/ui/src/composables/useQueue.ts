@@ -1,9 +1,7 @@
 import { computed, onMounted, onUnmounted, reactive } from 'vue'
 import type { QueueSnapshot } from '@/contract'
 import { fetchQueue } from '@/api/egress'
-import { STREAM_URL, createLiveLink, type LinkState } from '@/lib/stream'
-
-const POLL_INTERVAL_MS = 5000
+import { POLL_MS, STREAM_URL, createLiveLink, type LinkState } from '@/lib/stream'
 
 // What raised the banner: a failed poll means the list may be out of date, a
 // failed decide means only that the decision was not sent.
@@ -23,10 +21,11 @@ const state = reactive<QueueState>({
   snapshot: null,
   stale: null,
   staleSource: 'poll',
-  link: 'reconnecting',
+  link: 'connecting',
 })
 
 let intervalId: ReturnType<typeof setInterval> | null = null
+let intervalMs = 0
 let consumers = 0
 let seq = 0
 // Each banner has its own clearing marker. A poll banner clears on the first
@@ -47,11 +46,17 @@ async function refresh(): Promise<void> {
   if (mine !== seq) return // a newer poll is in flight or landed; drop this one
   if (result.ok) {
     accept(result.data, mine)
+    // A read that failed while the stream was up started a poll to recover; it has done that.
+    if (state.link === 'live') stopPolling()
   } else {
     state.stale = result.error
     state.staleSource = 'poll'
     pollFailedAt = mine
     pendingDecide = null
+    // With the stream up nothing polls, and it sends a frame only when the queue changes: a
+    // failed read (after a decide, or the read that clears a decide banner) would leave the
+    // banner over a list nothing refreshes. Poll until one read succeeds.
+    if (state.link === 'live') startPolling(POLL_MS, false)
   }
 }
 
@@ -77,12 +82,15 @@ function accept(data: QueueSnapshot, mine: number): void {
 }
 
 // The stream needs no polling while it is up. Polling is the fallback: it
-// starts (with a read at once) when the stream is not delivering and stops with
-// the first frame of a stream that is.
-function startPolling(): void {
-  if (intervalId !== null) return
-  void refresh()
-  intervalId = setInterval(() => void refresh(), POLL_INTERVAL_MS)
+// starts (with a read at once, unless `readNow` is off) when the stream is not
+// delivering and stops with the first frame of a stream that is. Asked again at the
+// interval it already runs at it does nothing; at another, it re-arms at that one.
+function startPolling(ms: number, readNow = true): void {
+  if (intervalId !== null && intervalMs === ms) return
+  if (intervalId !== null) clearInterval(intervalId)
+  intervalMs = ms
+  intervalId = setInterval(() => void refresh(), ms)
+  if (readNow) void refresh()
 }
 
 function stopPolling(): void {
@@ -93,13 +101,18 @@ function stopPolling(): void {
 
 const link = createLiveLink({
   open: () => (typeof EventSource === 'undefined' ? null : new EventSource(STREAM_URL)),
+  hidden: () => document.visibilityState === 'hidden',
   onSnapshot: (data) => accept(data, ++seq),
   onState: (next) => {
     state.link = next
   },
-  startPolling,
+  startPolling: (ms) => startPolling(ms),
   stopPolling,
 })
+
+function onVisibilityChange(): void {
+  link.visibilityChanged()
+}
 
 // A failed decide raises the banner too. When a failed poll already raised it,
 // that one stays (it says more: the list is out of date) and the decide's
@@ -113,7 +126,7 @@ function setStale(message: string): void {
     decideClearId = setTimeout(() => {
       decideClearId = null
       void refresh()
-    }, POLL_INTERVAL_MS)
+    }, POLL_MS)
   }
   if (state.stale && state.staleSource === 'poll') {
     pendingDecide = message
@@ -127,12 +140,16 @@ function setStale(message: string): void {
 export function useQueue() {
   onMounted(() => {
     consumers++
-    if (consumers === 1) link.start()
+    if (consumers === 1) {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+      link.start()
+    }
   })
 
   onUnmounted(() => {
     consumers--
     if (consumers === 0) {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       link.stop()
       stopPolling()
       if (decideClearId !== null) clearTimeout(decideClearId)

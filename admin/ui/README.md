@@ -26,7 +26,13 @@ these files from `dist/` through its ordinary asset allowlist (`sw.js` is `no-ca
 `tests/test_admin_sw_build.py` checks the generated worker.
 
 The queue arrives over `GET /api/egress/stream` (server-sent events; spa mode
-only) while it is up, and the tab does not poll then. If the stream is
-unavailable or drops, the tab polls `GET /api/egress/queue` every 5 s until the
-stream is back; the top bar shows which (Live, Reconnecting, Polling). The
-state machine is `src/lib/stream.ts`, wired in `src/composables/useQueue.ts`.
+only) while it is up, and the tab does not poll then. While the stream opens the
+tab reads `GET /api/egress/queue` once at once (Connecting), so the list is
+never empty, and keeps reading every 5 s until the first frame. If the stream is
+unavailable, drops, or goes silent for about two of the daemon's `hb`
+heartbeats, the tab polls every 5 s until the stream is back (Reconnecting, then
+Polling). A hidden tab closes its stream, because a browser allows about six
+connections to one origin and each open tab's stream would take one: it reads
+the queue every 30 s (Paused) and opens a stream again, with one read, when it
+is shown. A failed read while Live polls until one succeeds. The state machine
+is `src/lib/stream.ts`, wired in `src/composables/useQueue.ts`.

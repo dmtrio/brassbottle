@@ -22,6 +22,10 @@ export default tseslint.config(
     // Generated shadcn-vue components may use conventions this project does
     // not enforce (numeric spacing, stock type scale). They are owned by the
     // shadcn layer, not app code, so lint skips them.
-    ignores: ['dist/', 'node_modules/', 'src/components/ui/**/*'],
+    //
+    // src/contract.ts is generated from admin/contract/ by `npm run gen:types`
+    // (and gitignored): its shapes are the schemas', e.g. `{}` for the stream's
+    // empty heartbeat data, so lint does not judge them.
+    ignores: ['dist/', 'node_modules/', 'src/components/ui/**/*', 'src/contract.ts'],
   },
 )
