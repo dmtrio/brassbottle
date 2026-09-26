@@ -18,9 +18,12 @@ import ipaddress
 import json
 import logging
 import os
+import queue
 import secrets
+import select
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -55,6 +58,16 @@ ADMIN_UI_ENV = "DJINN_ADMIN_UI"
 ADMIN_UI_SPA_VALUE = "spa"
 ADMIN_UI_DIST_ENV = "DJINN_ADMIN_UI_DIST"
 SPA_BUILD_MANIFEST = ".build-inputs.json"   # admin/ui/scripts/build_inputs.py writes it into dist/; never served
+
+# Live queue stream (spa mode only): GET /api/egress/stream.
+STREAM_PATH = "/api/egress/stream"
+STREAM_MAX = 8                        # concurrent streams; the ninth gets 503
+STREAM_POLL_SECONDS = 2.0             # upstream /queue poll, only while a stream is open
+STREAM_HEARTBEAT_SECONDS = 15.0       # `: hb` comment on an idle stream
+STREAM_FAILURE_LIMIT = 2              # consecutive failed polls before the streams are ended
+STREAM_IDLE_CHECK_SECONDS = 1.0       # how often an idle handler looks for a closed client
+STREAM_WRITE_TIMEOUT_SECONDS = 10.0   # a client that stops reading is treated as gone
+STREAM_FULL_ERROR = "too many live streams"
 
 # Per-run session secret, created host-side by `djinn egress start` (never in
 # secrets.env, never mounted into a bottle). GET /session?key=<secret> is the
@@ -442,6 +455,207 @@ def _upstream_json(
     return status, parsed, len(raw)
 
 
+def _queue_change_key(snapshot: dict[str, Any]) -> str:
+    """What makes one queue snapshot differ from the last, for the live stream.
+
+    `generated_at` is the poll's own clock and each open row's `age_seconds`
+    grows with it: both change on every poll, and the app derives a row's age
+    from `opened_at`, so neither is news. Everything else is: rows opening or
+    closing, hit counts, apply attempts and errors, the recent list.
+    """
+    stripped = {name: value for name, value in snapshot.items() if name != "generated_at"}
+    rows = snapshot.get("open")
+    if isinstance(rows, list):
+        stripped["open"] = [
+            {name: value for name, value in row.items() if name != "age_seconds"}
+            if isinstance(row, dict) else row
+            for row in rows
+        ]
+    return json.dumps(stripped, sort_keys=True, separators=(",", ":"))
+
+
+def _queue_frame(snapshot: dict[str, Any]) -> bytes:
+    """One `queue` event: the whole snapshot as a single data line (the JSON is compact, so it has no newline)."""
+    return b"event: queue\ndata: " + _json_bytes(snapshot) + b"\n\n"
+
+
+class StreamUnavailable(Exception):
+    """A stream could not be opened: `status` and the `error_response` message to answer with."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+_CLOSE = object()   # queued to a stream to tell its handler to end
+
+
+class _Stream:
+    """One open browser stream: a mailbox its handler thread drains."""
+
+    def __init__(self) -> None:
+        self.mailbox: queue.Queue[Any] = queue.Queue()
+        self.ready = False   # set once its first frame is queued; only ready streams receive fan-out
+        self.opened = time.monotonic()
+
+
+class QueueStreamHub:
+    """Fans the broker's queue out to every open browser stream.
+
+    ONE poller thread asks the broker for /queue every `poll_seconds`, only while
+    a stream is open, and hands each stream the whole snapshot when it changed
+    (see `_queue_change_key`). A stream that connects gets the current snapshot
+    at once: the cached one when it is under a poll interval old, else a fresh
+    fetch. `max_streams` caps the open streams; `open()` raises
+    StreamUnavailable(503) beyond it. A poll that fails leaves the streams open
+    and emits nothing; after `failure_limit` in a row the streams are ended, so
+    each tab falls back to polling `/api/egress/queue` and its stale banner
+    tells the operator the list is out of date. A connect while the broker is
+    unreachable is refused with 503 for the same reason.
+    """
+
+    def __init__(
+        self,
+        fetch: Callable[[], tuple[int, dict[str, Any], int]],
+        *,
+        max_streams: int = STREAM_MAX,
+        poll_seconds: float = STREAM_POLL_SECONDS,
+        failure_limit: int = STREAM_FAILURE_LIMIT,
+    ) -> None:
+        self._fetch = fetch
+        self.max_streams = max_streams
+        self.poll_seconds = poll_seconds
+        self.failure_limit = failure_limit
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._fetch_lock = threading.Lock()   # one upstream fetch at a time, poller or connect
+        self._streams: list[_Stream] = []
+        self._poller: threading.Thread | None = None
+        self._closed = False
+        self._key: str | None = None
+        self._frame: bytes | None = None
+        self._fetched_at = 0.0
+        self._failures = 0
+
+    def stream_count(self) -> int:
+        with self._lock:
+            return len(self._streams)
+
+    def open(self) -> _Stream:
+        """Reserve a slot, get the current snapshot, queue it as the stream's first frame."""
+        stream = _Stream()
+        with self._lock:
+            if self._closed:
+                raise StreamUnavailable(HTTPStatus.SERVICE_UNAVAILABLE, "admin shutting down")
+            if len(self._streams) >= self.max_streams:
+                LOG.info("admin stream refused streams=%d max=%d", len(self._streams), self.max_streams)
+                raise StreamUnavailable(HTTPStatus.SERVICE_UNAVAILABLE, STREAM_FULL_ERROR)
+            self._streams.append(stream)
+        try:
+            self._ensure_fresh()
+            with self._lock:
+                if self._closed:
+                    raise StreamUnavailable(HTTPStatus.SERVICE_UNAVAILABLE, "admin shutting down")
+                assert self._frame is not None
+                stream.mailbox.put(self._frame)
+                stream.ready = True
+                if self._poller is None:
+                    self._poller = threading.Thread(
+                        target=self._poll_loop, name="admin-sse-poller", daemon=True
+                    )
+                    self._poller.start()
+        except BaseException:
+            self.close_stream(stream)
+            raise
+        return stream
+
+    def close_stream(self, stream: _Stream) -> None:
+        with self._lock:
+            if stream in self._streams:
+                self._streams.remove(stream)
+            self._cond.notify_all()
+
+    def end_streams(self, reason: str) -> None:
+        """End every open stream (its client sees the connection close and reopens); the hub stays usable."""
+        with self._lock:
+            self._end_all_locked(reason)
+
+    def close(self) -> None:
+        """Daemon shutdown: end every stream and stop the poller."""
+        with self._lock:
+            self._closed = True
+            self._end_all_locked("shutdown")
+
+    def _end_all_locked(self, reason: str) -> None:
+        ended = self._streams
+        self._streams = []
+        for stream in ended:
+            stream.mailbox.put(_CLOSE)
+        self._cond.notify_all()
+        if ended:
+            LOG.info("admin stream end streams=%d reason=%s", len(ended), reason)
+
+    def _ensure_fresh(self) -> None:
+        with self._lock:
+            fresh = self._frame is not None and time.monotonic() - self._fetched_at < self.poll_seconds
+        if fresh:
+            return
+        if not self._refresh():
+            raise StreamUnavailable(HTTPStatus.SERVICE_UNAVAILABLE, UNREACHABLE_ERROR)
+
+    def _refresh(self) -> bool:
+        """One upstream poll; fan the snapshot out to the ready streams when it changed."""
+        with self._fetch_lock:
+            started = time.monotonic()
+            status, snapshot, size = 0, {}, 0
+            try:
+                status, snapshot, size = self._fetch()
+            except Exception as exc:  # noqa: BLE001 - any failure of the poll is a failed poll, never a dead poller
+                LOG.info("admin stream poll failed error=%s", type(exc).__name__)
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if status != HTTPStatus.OK or not isinstance(snapshot.get("open"), list):
+                with self._lock:
+                    self._failures += 1
+                    failures = self._failures
+                LOG.info(
+                    "admin stream poll status=%d duration_ms=%d bytes=%d ok=false consecutive_failures=%d",
+                    status, duration_ms, size, failures,
+                )
+                return False
+            key, frame = _queue_change_key(snapshot), _queue_frame(snapshot)
+            with self._lock:
+                self._failures = 0
+                changed = key != self._key
+                self._key, self._frame, self._fetched_at = key, frame, time.monotonic()
+                targets = [stream for stream in self._streams if stream.ready] if changed else []
+            for stream in targets:
+                stream.mailbox.put(frame)
+            LOG.info(
+                "admin stream poll status=%d duration_ms=%d bytes=%d ok=true changed=%s fanout=%d",
+                status, duration_ms, size, str(changed).lower(), len(targets),
+            )
+            return True
+
+    def _poll_loop(self) -> None:
+        me = threading.current_thread()
+        LOG.info("admin stream poller start interval_s=%s", self.poll_seconds)
+        while True:
+            deadline = time.monotonic() + self.poll_seconds
+            with self._lock:
+                while not self._closed and self._streams and time.monotonic() < deadline:
+                    self._cond.wait(timeout=max(0.0, deadline - time.monotonic()))
+                if self._closed or not self._streams:
+                    if self._poller is me:
+                        self._poller = None
+                    LOG.info("admin stream poller stop")
+                    return
+            if not self._refresh():
+                with self._lock:
+                    if self._failures >= self.failure_limit:
+                        self._end_all_locked("upstream unreachable")
+
+
 class AdminHTTPServer(ThreadingHTTPServer):
     """HTTP server carrying admin-plane state."""
 
@@ -453,6 +667,10 @@ class AdminHTTPServer(ThreadingHTTPServer):
         session_secret: str,
         operator_token: str,
         admin_key: str,
+        stream_max: int = STREAM_MAX,
+        stream_poll_seconds: float = STREAM_POLL_SECONDS,
+        stream_heartbeat_seconds: float = STREAM_HEARTBEAT_SECONDS,
+        stream_failure_limit: int = STREAM_FAILURE_LIMIT,
     ):
         self.address_family = address_family_for_host(server_address[0])
         self.egress_root = egress_root
@@ -467,7 +685,39 @@ class AdminHTTPServer(ThreadingHTTPServer):
         self.spa_allowlist: dict[str, tuple[Path, str]] = {}
         if self.spa_mode:
             self._load_spa()
+        self.stream_heartbeat_seconds = stream_heartbeat_seconds
+        # The live queue stream exists in spa mode only; legacy answers its path 404 like any unknown one.
+        self.stream_hub: QueueStreamHub | None = (
+            QueueStreamHub(
+                self._fetch_queue,
+                max_streams=stream_max,
+                poll_seconds=stream_poll_seconds,
+                failure_limit=stream_failure_limit,
+            )
+            if self.spa_mode
+            else None
+        )
         super().__init__(server_address, AdminRequestHandler)
+
+    def _fetch_queue(self) -> tuple[int, dict[str, Any], int]:
+        return _upstream_json(
+            base_url=daemon_base_url(self.egress_root),
+            method="GET",
+            path="/queue",
+            token=self.operator_token,
+            body=None,
+            timeout=UPSTREAM_TIMEOUT_SECONDS,
+        )
+
+    def shutdown(self) -> None:
+        if self.stream_hub is not None:
+            self.stream_hub.close()
+        super().shutdown()
+
+    def server_close(self) -> None:
+        if self.stream_hub is not None:
+            self.stream_hub.close()
+        super().server_close()
 
     def _load_spa(self) -> None:
         if not self.spa_dist.is_dir():
@@ -604,6 +854,9 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/egress/recent":
                 self._handle_egress_recent_get()
+                return
+            if path == STREAM_PATH:
+                self._handle_egress_stream()
                 return
             if path in (
                 "/app.js",
@@ -804,6 +1057,93 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             upstream_path="/recent" + (f"?{query}" if query else ""),
             pass_400=True,
         )
+
+    def _handle_egress_stream(self) -> None:
+        """Server-sent events: the queue snapshot on connect and on every change (see QueueStreamHub)."""
+        LOG.info("admin request enter method=GET path=%s bytes=0", STREAM_PATH)
+        if not self._cookie_matches():
+            LOG.info(
+                "admin session gate failed check=%s",
+                "cookie_missing" if not self._read_session_cookie() else "cookie_mismatch",
+            )
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+            return
+        hub = self.server.stream_hub
+        assert hub is not None
+        if self._suppress_body:   # HEAD: the headers a GET would open with, no stream
+            self._send_bytes(HTTPStatus.OK, b"", content_type="text/event-stream; charset=utf-8",
+                             headers={"Cache-Control": "no-store"})
+            return
+        try:
+            stream = hub.open()
+        except StreamUnavailable as exc:
+            self._send_json(exc.status, {"error": exc.message})
+            return
+        self.close_connection = True
+        heartbeat = self.server.stream_heartbeat_seconds
+        idle = min(STREAM_IDLE_CHECK_SECONDS, heartbeat)
+        frames = sent = 0
+        reason = "closed"
+        try:
+            self.connection.settimeout(STREAM_WRITE_TIMEOUT_SECONDS)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            LOG.info("admin stream open streams=%d", hub.stream_count())
+            last_write = time.monotonic()
+            while True:
+                try:
+                    item = stream.mailbox.get(timeout=idle)
+                except queue.Empty:
+                    item = None
+                if item is _CLOSE:
+                    reason = "ended"
+                    break
+                if item is not None:
+                    while True:   # a burst is one frame: every frame is the whole snapshot, so the last one wins
+                        try:
+                            later = stream.mailbox.get_nowait()
+                        except queue.Empty:
+                            break
+                        if later is _CLOSE:
+                            item, reason = later, "ended"
+                            break
+                        item = later
+                    if item is _CLOSE:
+                        break
+                    self.wfile.write(item)
+                    frames += 1
+                    sent += len(item)
+                    last_write = time.monotonic()
+                elif time.monotonic() - last_write >= heartbeat:
+                    self.wfile.write(b": hb\n\n")
+                    sent += 5
+                    last_write = time.monotonic()
+                elif self._peer_closed():
+                    reason = "client_closed"
+                    break
+        except OSError as exc:   # BrokenPipeError, ConnectionResetError, write timeout
+            reason = f"write_error:{type(exc).__name__}"
+        finally:
+            hub.close_stream(stream)
+            LOG.info(
+                "admin stream close streams=%d duration_ms=%d frames=%d bytes=%d reason=%s",
+                hub.stream_count(),
+                int((time.monotonic() - stream.opened) * 1000),
+                frames,
+                sent,
+                reason,
+            )
+
+    def _peer_closed(self) -> bool:
+        """True when the client has closed its end (a readable socket that reads EOF)."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
 
     def _proxy_egress_get(
         self, *, path: str, upstream_path: str, pass_400: bool = False
@@ -1062,7 +1402,10 @@ def run_daemon(*, host: str, port: int, egress_root: Path) -> None:
         server.server_address[1],
         "AF_INET6" if server.address_family == socket.AF_INET6 else "AF_INET",
     )
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 def build_parser() -> argparse.ArgumentParser:

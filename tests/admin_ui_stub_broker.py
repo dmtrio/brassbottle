@@ -342,6 +342,7 @@ class StubBroker:
         self.decide_outage: int | None = None
         self.violations: list[str] = []
         self.served = 0
+        self.queue_gets = 0                      # every GET /queue received, healthy or not
         broker = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -386,6 +387,7 @@ class StubBroker:
                 if self.path != "/queue":
                     return self._send(404, {"error": "not found"})
                 with broker.lock:
+                    broker.queue_gets += 1
                     if broker.outage:
                         return self._serve(500, {"error": "broker down"}, ERROR_SCHEMA)
                     self._serve(200, broker.queue_body(), QUEUE_SCHEMA)
@@ -412,6 +414,25 @@ class StubBroker:
     def queue_body(self) -> dict[str, Any]:
         """The /queue reply. The one place a snapshot is built for serving."""
         return self.queue
+
+    def file_request(self, host: str, *, container: str = "alpha", port: int = 443,
+                     request_id: str | None = None, comm: str | None = "curl") -> str:
+        """File a new open request at runtime, as the broker does when a bottle hits a blocked host.
+
+        The row is contract-shaped (opened now, one hit) and the next `GET /queue` serves it. Returns
+        its request_id.
+        """
+        with self.lock:
+            rid = request_id or f"filed-{len(self.queue['open']) + 1}-{host}"
+            self.queue["open"].append({
+                "request_id": rid, "container": container, "host": host, "port": port,
+                "host_is_ip": host[0].isdigit(), "opened_at": _iso(datetime.now(timezone.utc)),
+                "age_seconds": 0, "hit_count": 1, "uid": 1000, "comm": comm, "reason": None,
+                "attempt": 0, "last_error": None,
+            })
+            self.queue["count"] = len(self.queue["open"])
+            _checked(self.queue, QUEUE_SCHEMA)
+            return rid
 
     def hold_next_recent(self) -> HeldReply:
         """Hold the reply to the next `GET /recent` until `.release()`; later ones are not held."""

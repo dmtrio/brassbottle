@@ -228,6 +228,35 @@ class StubHistoryTests(unittest.TestCase):
         with self.assertRaises(stub.ContractViolation):
             broker.preflight()
 
+    def test_a_request_filed_at_runtime_is_a_contract_valid_open_row_the_next_queue_read_serves(self):
+        broker = stub.StubBroker()
+        base = broker.start()
+        try:
+            before = len(broker.queue["open"])
+            rid = broker.file_request("late.example.com", container="mid", port=8443)
+            conn = HTTPConnection(base.split("//")[1].split(":")[0], broker.server.server_address[1], timeout=5)
+            conn.request("GET", "/queue")
+            served = json.loads(conn.getresponse().read())
+            conn.close()
+            self.assertEqual(validate_document(served, stub.QUEUE_SCHEMA), [])
+            self.assertEqual((served["count"], len(served["open"])), (before + 1, before + 1))
+            row = next(r for r in served["open"] if r["request_id"] == rid)
+            self.assertEqual((row["host"], row["container"], row["port"], row["hit_count"], row["last_error"]),
+                             ("late.example.com", "mid", 8443, 1, None))
+            self.assertEqual(broker.queue_gets, 1)
+            self.assertEqual(broker.violations, [])
+            broker.reset()
+            self.assertEqual(len(broker.queue["open"]), before)   # reset returns to the fixture
+        finally:
+            broker.stop()
+
+    def test_a_filed_request_ids_do_not_collide(self):
+        broker = stub.StubBroker()
+        first = broker.file_request("one.example.com")
+        second = broker.file_request("two.example.com")
+        self.assertNotEqual(first, second)
+        self.assertEqual(len({r["request_id"] for r in broker.queue["open"]}), len(broker.queue["open"]))
+
 
 if __name__ == "__main__":
     unittest.main()
