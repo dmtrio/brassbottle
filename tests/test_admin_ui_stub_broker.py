@@ -123,6 +123,44 @@ class StubBrokerTests(unittest.TestCase):
         finally:
             broker.stop()
 
+    def test_queue_features_fixture_is_twelve_rows_over_three_bottles_with_four_failed_applies(self):
+        queue = stub.build_queue(fixture="queue-features")
+        self.assertEqual(validate_document(queue, stub.QUEUE_SCHEMA), [])
+        self.assertEqual(queue["count"], 12)
+        per_bottle = {}
+        for row in queue["open"]:
+            per_bottle.setdefault(row["container"], []).append(row["request_id"])
+        self.assertEqual({b: len(ids) for b, ids in per_bottle.items()}, {"alpha": 5, "mid": 4, "zeta": 3})
+        failed = sorted(row["request_id"] for row in queue["open"] if row["last_error"])
+        self.assertEqual(failed, ["fa2", "fa4", "fm2", "fz2"])
+        denylist = [row for row in queue["recent"] if row["decided_by"] == "denylist"]
+        self.assertEqual(sorted(row["hit_count"] for row in denylist), [2, 4, 7])
+
+    def test_failing_nth_decide_answers_500_once_and_records_every_body(self):
+        broker = stub.StubBroker()
+        broker.use_fixture("queue-features")
+        broker.fail_nth_decide(2)
+        base = broker.start()
+        try:
+            conn = HTTPConnection(base.split("//")[1].split(":")[0], broker.server.server_address[1], timeout=5)
+            statuses = []
+            for host in ("fa1.example.com", "fa3.example.com", "fa5.example.com"):
+                payload = {"decision": "deny", "scope": "once", "host": host, "container": "alpha"}
+                conn.request("POST", "/decide", body=json.dumps(payload), headers={"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                resp.read()
+                statuses.append(resp.status)
+            conn.close()
+            self.assertEqual(statuses, [200, 500, 200])
+            self.assertEqual([b["host"] for b in broker.decides], ["fa1.example.com", "fa3.example.com", "fa5.example.com"])
+            self.assertEqual(sorted(r["request_id"] for r in broker.queue["open"] if r["container"] == "alpha"), ["fa2", "fa3", "fa4"])
+            self.assertEqual(broker.violations, [])
+            broker.reset()
+            self.assertIsNone(broker.failing_decide)
+            self.assertEqual(broker.queue["count"], 11)  # reset restores the default fixture
+        finally:
+            broker.stop()
+
 
 class StubHistoryTests(unittest.TestCase):
     """`GET /recent` is real keyset paging over a fixture with a tie block."""

@@ -17,6 +17,14 @@ Scripted outcomes (by host):
                                 for it did so because the decide failed
   * everything else          -> the row is decided and moves to `recent`
 
+Fixtures: the default (OPEN_ROWS) serves every check that predates the queue
+features. `StubBroker.use_fixture("queue-features")` swaps in FEATURE_ROWS: 12
+open rows over 3 bottles (4 failed applies, ages spread over the age
+buckets) and 3 denylist-decided recent rows; `reset()` returns to the default.
+`fail_nth_decide(n)` makes the nth `POST /decide` from now answer 500 (the
+others behave as scripted), and every decide body received is kept in
+`decides`.
+
 `GET /recent` serves the whole History store (HISTORY_ROWS older rows plus the
 live `recent` list, so a row decided during a run shows up at the top) with
 real keyset paging over `decided_at DESC, request_id DESC`. The fixture has a
@@ -93,16 +101,43 @@ OPEN_ROWS = [
     ("z1", "zeta", "z1.example.com", 443, 330, 3, "curl", "npm install", None),
 ]
 
+# The queue-features fixture: 12 open rows over 3 bottles. Ages sit well clear of
+# the 5 minute and 1 hour age-bucket edges. Failed applies: fa2, fa4 (alpha),
+# fm2 (mid), fz2 (zeta). Same columns as OPEN_ROWS.
+FEATURE_ROWS = [
+    ("fa1", "alpha", "fa1.example.com", 443, 60, 1, "node", None, None),
+    ("fa2", "alpha", "fa2.example.com", 443, 120, 1, "ruby", None, ("apply_failed", 3)),
+    ("fa3", "alpha", "fa3.example.com", 443, 1200, 2, "go", "cache warmup", None),
+    ("fa4", "alpha", "192.0.2.77", 5432, 7200, 1, "psql", "db:migrate", ("ip_requires_cidr", 1)),
+    ("fa5", "alpha", "fa5.example.com", 443, 10800, 1, "pip", None, None),
+    ("fm1", "mid", "fm1.example.com", 443, 30, 1, "curl", None, None),
+    ("fm2", "mid", "fm2.example.com", 443, 3000, 1, "python", None, ("apply_failed", 2)),
+    ("fm3", "mid", "fm3.example.com", 443, 9000, 3, "wget", "npm install", None),
+    ("fm4", "mid", "fm4.example.com", 8443, 18000, 1, "node", None, None),
+    ("fz1", "zeta", "fz1.example.com", 443, 45, 1, "curl", None, None),
+    ("fz2", "zeta", "fz2.example.com", 443, 90, 1, "wget", None, ("apply_failed", 1)),
+    ("fz3", "zeta", "fz3.example.com", 443, 14400, 1, "pip", None, None),
+]
+# (request_id, container, host, hit_count) of the denylist-decided recent rows of that fixture: 4 + 7 + 2 hits.
+FEATURE_DENYLIST = [
+    ("fd1", "zeta", "ads.example.com", 4),
+    ("fd2", "alpha", "track.example.net", 7),
+    ("fd3", "mid", "metrics.example.org", 2),
+]
+FIXTURES = ("default", "queue-features")
+
 
 def _iso(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_queue(now: datetime | None = None) -> dict[str, Any]:
+def build_queue(now: datetime | None = None, fixture: str = "default") -> dict[str, Any]:
     """The initial snapshot, in the broker's order (oldest open request first)."""
+    assert fixture in FIXTURES, fixture
     now = now or datetime.now(timezone.utc)
     open_rows = []
-    for rid, container, host, port, age, hits, comm, reason, error in OPEN_ROWS:
+    for rid, container, host, port, age, hits, comm, reason, error in (
+            FEATURE_ROWS if fixture == "queue-features" else OPEN_ROWS):
         opened = now - timedelta(seconds=age)
         open_rows.append({
             "request_id": rid, "container": container, "host": host, "port": port,
@@ -116,24 +151,28 @@ def build_queue(now: datetime | None = None) -> dict[str, Any]:
         })
     open_rows.sort(key=lambda row: row["opened_at"])
 
-    def recent(rid, container, host, status, scope, ago, by, apply_status, reason):
+    def recent(rid, container, host, status, scope, ago, by, apply_status, reason, hits=1):
         return {
             "request_id": rid, "container": container, "host": host, "port": 443, "status": status,
             "scope": scope, "decided_at": _iso(now - timedelta(seconds=ago)), "decided_by": by,
-            "apply_status": apply_status, "deny_reason": reason, "hit_count": 1,
+            "apply_status": apply_status, "deny_reason": reason, "hit_count": hits,
         }
 
-    return {
-        "open": open_rows,
-        "count": len(open_rows),
-        "generated_at": _iso(now),
-        "recent": [
+    if fixture == "queue-features":
+        recent_rows = [
+            recent("fr1", "mid", "registry.npmjs.org", "allowed", "live", 900, "operator", "applied", None),
+            *(recent(rid, container, host, "denied", "global", 1200 + 600 * i, "denylist", None,
+                     "denylist: telemetry", hits)
+              for i, (rid, container, host, hits) in enumerate(FEATURE_DENYLIST)),
+        ]
+    else:
+        recent_rows = [
             recent("r2", "alpha", "denied.example.com", "denied", "global", 600, "operator", None, "telemetry"),
             recent("r1", "mid", "registry.npmjs.org", "allowed", "live", 1800, "operator", "applied", None),
             recent("r3", "zeta", "ads.example.com", "denied", "global", 3600, "denylist", None, "denylist: telemetry"),
             recent("r4", LONG_BOTTLE, "telemetry.example.net", "denied", "global", 7200, "operator", None, None),
-        ],
-    }
+        ]
+    return {"open": open_rows, "count": len(open_rows), "generated_at": _iso(now), "recent": recent_rows}
 
 
 def build_history(now: datetime | None = None) -> list[dict[str, Any]]:
@@ -298,6 +337,7 @@ class StubBroker:
         self.recent_queries: list[str] = []
         self.recent_hold: HeldReply | None = None
         self.decides: list[dict[str, Any]] = []
+        self.failing_decide: int | None = None   # 1-based index into `decides` that answers 500
         self.outage = False
         self.decide_outage: int | None = None
         self.violations: list[str] = []
@@ -357,6 +397,8 @@ class StubBroker:
                     return self._send(404, {"error": "not found"})
                 with broker.lock:
                     broker.decides.append(body)
+                    if broker.failing_decide == len(broker.decides):
+                        return self._serve(500, {"error": "decide failed on the broker"}, ERROR_SCHEMA)
                     if broker.outage:
                         return self._serve(500, {"error": "broker down"}, ERROR_SCHEMA)
                     if broker.decide_outage is not None:
@@ -378,6 +420,16 @@ class StubBroker:
             self.recent_hold = held
         return held
 
+    def use_fixture(self, name: str) -> None:
+        """Replace the queue with a named fixture (until the next `reset()`)."""
+        with self.lock:
+            self.queue = build_queue(fixture=name)
+
+    def fail_nth_decide(self, n: int) -> None:
+        """The nth `POST /decide` received from now answers 500; every other one is scripted as usual."""
+        with self.lock:
+            self.failing_decide = len(self.decides) + n
+
     def history_rows(self) -> list[dict[str, Any]]:
         """Every decided row: the live `recent` list (decided during the run
         included) plus the fixed older store, each request once."""
@@ -393,6 +445,7 @@ class StubBroker:
                 self.recent_hold.release()
             self.recent_hold = None
             self.decides = []
+            self.failing_decide = None
             self.outage = False
             self.decide_outage = None
 
@@ -400,6 +453,8 @@ class StubBroker:
         """Validate every reply shape the stub can produce; raise before serving."""
         with self.lock:
             _checked(self.queue_body(), QUEUE_SCHEMA)
+            for fixture in FIXTURES:
+                _checked(build_queue(fixture=fixture), QUEUE_SCHEMA)
             for query in ("", "limit=50", "limit=500&container=alpha", "before=x", "since=nope"):
                 status, reply = recent_reply(self.history_rows(), query)
                 _checked(reply, ERROR_SCHEMA if status >= 400 else RECENT_SCHEMA)
