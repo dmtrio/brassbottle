@@ -4281,15 +4281,20 @@ def capture_stream_states(browser, served, broker, out: Path, viewport: str, the
 
     broker.reset()
     slow_context, slow_page, slow_traffic = new_page(browser, served, viewport, theme)
+    held: list = []
     try:
-        held: list = []
         slow_page.route(STREAM_ROUTE, lambda route: held.append(route))   # a stream slow to open
         slow_page.goto(served.base + "/")
         expect(SpaDriver(slow_page, slow_traffic).requests()).to_have_count(len(stub.OPEN_ROWS))
         wait_link(slow_page, "connecting", 1000)
         capture(slow_page, out, "spa", viewport, theme, "stream-connecting")
     finally:
-        slow_context.close()
+        for route in held:   # a stream request still held is a task pending when the context closes (check 164)
+            try:
+                route.abort()
+            except Exception:  # noqa: BLE001 - the page may already be gone
+                pass
+        close_page_context(slow_context, slow_page)
     context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport, theme)
     try:
         capture(page, out, "spa", viewport, theme, "stream-live")
@@ -4311,7 +4316,7 @@ def capture_stream_states(browser, served, broker, out: Path, viewport: str, the
         wait_link(page, "polling", 8000)
         capture(page, out, "spa", viewport, theme, "stream-polling")
     finally:
-        context.close()
+        close_page_context(context, page)
 
 
 LEGACY_MAP = [
