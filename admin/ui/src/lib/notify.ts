@@ -32,19 +32,46 @@ export class SeenRequests {
   }
 }
 
-export function bellState(permission: Permission | null, muted: boolean): BellState {
-  if (permission === null) return 'unsupported'
+// Why the bell is `unsupported`: the page is not a secure context (the
+// Notification API does not exist there, even in a browser that has it), or the
+// browser or device cannot show them (no API, or a constructor that throws, as on
+// Chrome for Android).
+export type UnsupportedReason = 'insecure' | 'browser'
+
+// `unavailable`: the constructor threw this session, so the bell must not claim
+// "on" again whatever the permission says.
+export function bellState(permission: Permission | null, muted: boolean, unavailable = false): BellState {
+  if (permission === null || unavailable) return 'unsupported'
   if (permission === 'denied') return 'denied'
   if (permission === 'default') return 'default'
   return muted ? 'muted' : 'on'
 }
 
+export function unsupportedReason(secure: boolean, permission: Permission | null): UnsupportedReason {
+  return permission === null && !secure ? 'insecure' : 'browser'
+}
+
 export const BELL_LABELS: Record<BellState, string> = {
-  unsupported: 'Desktop notifications are not supported in this browser',
+  unsupported: 'Desktop notifications are not available on this device or browser',
   default: 'Enable desktop notifications',
   on: 'Desktop notifications on. Click to mute',
   muted: 'Desktop notifications muted. Click to turn on',
   denied: 'Desktop notifications are blocked in browser settings',
+}
+
+export const INSECURE_LABEL = 'Desktop notifications need a secure connection (https or localhost)'
+
+// The tooltip and the popover's heading: what the bell is doing right now.
+export function bellLabel(state: BellState, reason: UnsupportedReason): string {
+  return state === 'unsupported' && reason === 'insecure' ? INSECURE_LABEL : BELL_LABELS[state]
+}
+
+// The accessible name. A toggle keeps one name and `aria-pressed` carries the
+// state; the wording that changes with it lives in the title.
+export const TOGGLE_NAME = 'Desktop notifications'
+
+export function bellName(state: BellState, reason: UnsupportedReason): string {
+  return state === 'on' || state === 'muted' ? TOGGLE_NAME : bellLabel(state, reason)
 }
 
 // `tag` is the request id: a second notification with the same tag replaces the

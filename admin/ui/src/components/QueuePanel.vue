@@ -100,16 +100,23 @@ function clearFilters(): void {
 
 const openRows = computed(() => snapshot.value?.open ?? [])
 
+// Said in the queue's polite live region when a notification click had to
+// reset the filters, so the reset is not silent. Cleared by the next click.
+const filtersClearedNote = ref('')
+
 // A notification click lands here: bring the request's row into view and focus
 // it. A filter may be hiding it, and the notification is about that request,
-// so the filters give way. A request decided since has no row; the click still
-// lands on the queue.
+// so the filters give way, and only then. A request decided since has no row;
+// the click still lands on the queue.
 watch(
   focusRequestId,
   async (id) => {
     if (!id) return
-    if (!hasRequestRow(id) && openRows.value.some((open) => open.request_id === id)) {
+    filtersClearedNote.value = ''
+    const open = openRows.value.find((row) => row.request_id === id)
+    if (open && !hasRequestRow(id)) {
       clearFilters()
+      filtersClearedNote.value = `Filters cleared to show ${open.host}`
       await nextTick()
     }
     focusRequestRow(id)
@@ -494,6 +501,23 @@ function onDecide(row: OpenRow, action: DecideAction): void {
       data-testid="stale-banner"
     >
       <span class="pill pill-warn">{{ staleText }}</span>
+    </p>
+
+    <!-- Always rendered, so a screen reader is already watching it when the text
+         arrives; the pill shows the same words to everyone else. -->
+    <p
+      class="sr-only"
+      role="status"
+      data-testid="filters-cleared-status"
+    >
+      {{ filtersClearedNote }}
+    </p>
+    <p
+      v-if="filtersClearedNote"
+      class="inline-row"
+      aria-hidden="true"
+    >
+      <span class="pill pill-neutral">{{ filtersClearedNote }}</span>
     </p>
 
     <p

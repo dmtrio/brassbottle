@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OpenRow } from '@/types'
-import { bellState, notificationFor, SeenRequests } from './notify'
+import { bellLabel, bellName, bellState, notificationFor, SeenRequests, unsupportedReason } from './notify'
 
 function row(id: string, container = 'alpha', host = `${id}.example.com`, port = 443): OpenRow {
   return {
@@ -63,6 +63,33 @@ describe('bellState', () => {
     expect(bellState('denied', true)).toBe('denied')
     expect(bellState('granted', false)).toBe('on')
     expect(bellState('granted', true)).toBe('muted')
+  })
+
+  it('a constructor that threw makes any permission unsupported', () => {
+    expect(bellState('granted', false, true)).toBe('unsupported')
+    expect(bellState('granted', true, true)).toBe('unsupported')
+    expect(bellState('default', false, true)).toBe('unsupported')
+  })
+})
+
+describe('bell wording', () => {
+  it('names the toggle once and keeps the changing words in the title', () => {
+    expect(bellName('on', 'browser')).toBe('Desktop notifications')
+    expect(bellName('muted', 'browser')).toBe('Desktop notifications')
+    expect(bellLabel('on', 'browser')).toBe('Desktop notifications on. Click to mute')
+    expect(bellLabel('muted', 'browser')).toBe('Desktop notifications muted. Click to turn on')
+  })
+
+  it('words unsupported for an insecure page differently from a browser that cannot', () => {
+    expect(unsupportedReason(false, null)).toBe('insecure')
+    expect(unsupportedReason(true, null)).toBe('browser')
+    expect(unsupportedReason(false, 'granted')).toBe('browser')
+    expect(bellName('unsupported', 'insecure')).toBe(
+      'Desktop notifications need a secure connection (https or localhost)',
+    )
+    expect(bellName('unsupported', 'browser')).toBe(
+      'Desktop notifications are not available on this device or browser',
+    )
   })
 })
 

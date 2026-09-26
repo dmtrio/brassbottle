@@ -1,47 +1,67 @@
 <script setup lang="ts">
-import { Bell, BellOff, BellRing } from '@lucide/vue'
+import { computed } from 'vue'
+import { Bell, BellMinus, BellOff, BellRing } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { useBell } from '@/composables/useNotifications'
 
-const { state, label, press } = useBell()
+const { state, label, name, press } = useBell()
+
+// A bell that cannot be pressed still answers a click: it says why, which a
+// disabled button cannot do on touch or in a browser without tooltips.
+const explains = computed(() => state.value === 'denied' || state.value === 'unsupported')
 </script>
 
 <template>
-  <!-- Blocked: the browser will not ask again, so a click explains instead of prompting. -->
-  <Popover v-if="state === 'denied'">
+  <Popover v-if="explains">
     <PopoverTrigger as-child>
       <Button
         variant="ghost"
         size="icon"
         :title="label"
-        :aria-label="label"
+        :aria-label="name"
         data-testid="notify-bell"
-        data-state="denied"
+        :data-state="state"
       >
-        <BellOff class="size-icon text-warn-text" />
+        <BellOff
+          v-if="state === 'denied'"
+          class="size-icon text-warn-text"
+        />
+        <BellMinus
+          v-else
+          class="size-icon text-warn-text"
+        />
       </Button>
     </PopoverTrigger>
     <PopoverContent
       align="end"
-      data-testid="notify-blocked"
+      :data-testid="state === 'denied' ? 'notify-blocked' : 'notify-unsupported'"
     >
-      <p class="text-body font-medium">
-        Notifications are blocked
-      </p>
-      <p class="row-meta">
-        Your browser is blocking notifications for this site. Allow them in the browser's
-        site settings, then reload this page.
-      </p>
+      <template v-if="state === 'denied'">
+        <p class="text-body font-medium">
+          Notifications are blocked
+        </p>
+        <p class="row-meta">
+          Your browser is blocking notifications for this site. Allow them in the browser's
+          site settings, then reload this page.
+        </p>
+      </template>
+      <template v-else>
+        <p class="text-body font-medium">
+          Notifications are not available
+        </p>
+        <p class="row-meta">
+          {{ label }}.
+        </p>
+      </template>
     </PopoverContent>
   </Popover>
   <Button
     v-else
     variant="ghost"
     size="icon"
-    :disabled="state === 'unsupported'"
     :title="label"
-    :aria-label="label"
+    :aria-label="name"
     :aria-pressed="state === 'on' ? 'true' : state === 'muted' ? 'false' : undefined"
     data-testid="notify-bell"
     :data-state="state"
