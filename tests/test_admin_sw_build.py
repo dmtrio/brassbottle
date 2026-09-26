@@ -31,7 +31,10 @@ def imported_scripts(sw_js: str) -> list[str]:
 
 
 def fetch_handling(script: str) -> list[str]:
-    """The ways a script can answer a request: a fetch listener, a respondWith, a workbox route."""
+    """The ways a script can answer a request: a fetch listener, a respondWith, a workbox route.
+
+    A source-text tripwire only: computed property names evade it. The Gate for "never serves `/` or
+    `/api/*` from cache" is the browser checks 121-124 and 127 in tests/admin_ui_playwright.py."""
     patterns = (r"addEventListener\(\s*[\"']fetch[\"']", r"\bonfetch\b", r"respondWith", r"registerRoute",
                 r"setDefaultHandler", r"setCatchHandler", r"NavigationRoute")
     return [pattern for pattern in patterns if re.search(pattern, script)]
