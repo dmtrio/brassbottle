@@ -39,6 +39,7 @@ CASES = {
     "admin/ui/scripts": ("admin/ui/scripts/gen-types.ts", "admin/ui/scripts/check_tokens.py"),
     "admin/ui/index.html": ("admin/ui/index.html",),
     "admin/ui/vite.config.ts": ("admin/ui/vite.config.ts",),
+    "admin/ui/pwa.ts": ("admin/ui/pwa.ts",),
     "admin/ui/package.json": ("admin/ui/package.json",),
     "admin/ui/package-lock.json": ("admin/ui/package-lock.json",),
     "admin/ui/tsconfig*.json": ("admin/ui/tsconfig.json", "admin/ui/tsconfig.app.json",
@@ -240,7 +241,7 @@ class TailwindScopeTests(unittest.TestCase):
             self.assertIn(Path(resolved).relative_to(REPO).as_posix(), build_inputs.INPUTS)
 
     # INPUTS the build reads that hold no markup or scripts, so no class can live in them.
-    NO_CLASSES = ("admin/ui/vite.config.ts", "admin/ui/package.json", "admin/ui/package-lock.json",
+    NO_CLASSES = ("admin/ui/vite.config.ts", "admin/ui/pwa.ts", "admin/ui/package.json", "admin/ui/package-lock.json",
                   "admin/ui/tsconfig*.json", "admin/contract/*.schema.json")
 
     def test_every_input_that_can_hold_a_class_is_scanned(self):

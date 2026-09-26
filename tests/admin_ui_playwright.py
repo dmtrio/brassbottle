@@ -2576,6 +2576,296 @@ def capture_history(browser, served, broker, out: Path, viewport: str, theme: st
     finally:
         context.close()
 
+# ---- Service worker (120..126) --------------------------------------------------------------
+
+LEGACY_SHELL_CACHE = "djinn-admin-shell-v3"     # the legacy page's cache; the new worker deletes it
+OTHER_FOREIGN_CACHE = "some-other-app-cache"    # any cache that is not the worker's own goes too
+OWN_CACHE_PREFIX = "djinn-admin-precache-"      # pwa.ts CACHE_ID + workbox's precache name
+POISON = "POISONED-BY-THE-TEST"
+
+# Plants pages in caches the worker must never consult, before any worker exists.
+SEED_CACHES_JS = """async ([legacy, other, poison]) => {
+  for (const name of [legacy, other]) {
+    const cache = await caches.open(name);
+    for (const path of ['/', '/egress', '/app.js', '/api/egress/queue']) await cache.put(path, new Response(poison));
+  }
+  return await caches.keys();
+}"""
+
+# Waits for the worker to be active, controlling this page, and to have pruned every foreign cache.
+SETTLED_JS = """async ([legacy, other]) => {
+  const reg = await navigator.serviceWorker.ready;
+  if (!reg.active || !navigator.serviceWorker.controller) return false;
+  const keys = await caches.keys();
+  return !keys.includes(legacy) && !keys.includes(other);
+}"""
+
+# Plants the same pages in the worker's OWN cache: were `/` or `/api/*` ever answered from a
+# cache the worker owns, this is what it would answer with.
+PLANT_OWN_CACHE_JS = """async ([prefix, poison]) => {
+  const own = (await caches.keys()).find((name) => name.startsWith(prefix));
+  const cache = await caches.open(own);
+  for (const path of ['/', '/egress', '/api/egress/queue']) await cache.put(path, new Response(poison));
+  return own;
+}"""
+
+CACHE_STORAGE_JS = """async () => {
+  const out = {};
+  for (const name of await caches.keys()) {
+    out[name] = (await (await caches.open(name)).keys()).map((req) => new URL(req.url).pathname);
+  }
+  return out;
+}"""
+
+
+class DaemonRequestLog:
+    """Every request the admin daemon answers, as (method, path with query, status, has cookie).
+
+    A request the service worker answered from a cache never reaches the daemon, so
+    a request in this log went to the network and one missing from it did not.
+    """
+
+    def __init__(self):
+        self.entries: list[dict] = []
+        self._patch = None
+
+    def __enter__(self):
+        original = admin.AdminRequestHandler.log_request
+        entries = self.entries
+
+        def record(handler, code="-", size="-"):
+            entries.append({"method": handler.command, "path": handler.path,
+                            "status": int(code) if str(code).isdigit() else 0,
+                            "cookie": bool(handler.headers.get("Cookie"))})
+            original(handler, code, size)
+
+        self._patch = mock.patch.object(admin.AdminRequestHandler, "log_request", record)
+        self._patch.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._patch.stop()
+
+    def count(self, path: str, since: int = 0, *, method: str = "GET") -> int:
+        return sum(1 for e in self.entries[since:] if e["path"] == path and e["method"] == method)
+
+
+@dataclass
+class SwObservations:
+    seeded: list = field(default_factory=list)          # cache names before the worker existed
+    registration: dict = field(default_factory=dict)    # scope, script URL, state
+    caches_before: dict = field(default_factory=dict)   # Cache Storage once the worker is active
+    own_cache: str = ""
+    reload: dict = field(default_factory=dict)          # what a reload, and a fresh open of `/`, got
+    api: list = field(default_factory=list)             # each /api/egress/queue probe: url, status, body, daemon count
+    no_cookie: list = field(default_factory=list)       # `/`, `/egress`: the page the browser was shown
+    manifest: dict = field(default_factory=dict)
+    sw_headers: dict = field(default_factory=dict)
+    caches_after: dict = field(default_factory=dict)    # Cache Storage at the very end
+
+
+def service_worker_scenario(browser, served: Served, broker: stub.StubBroker, viewport: str) -> SwObservations:
+    """Install the worker in a fresh context, then probe what it does and does not serve."""
+    from playwright.sync_api import expect
+
+    started = time.monotonic()
+    broker.reset()
+    obs = SwObservations()
+    context = browser.new_context(
+        viewport=VIEWPORTS[viewport], color_scheme="light", locale="en-US", timezone_id="UTC",
+        service_workers="allow", device_scale_factor=2 if viewport == "phone" else 1)
+    cookie = {"name": admin.SESSION_COOKIE_NAME, "value": served.cookie, "domain": served.host,
+              "path": "/", "httpOnly": True, "sameSite": "Strict"}
+    context.add_cookies([cookie])
+    page = context.new_page()
+    page.set_default_timeout(TIMEOUT_MS)
+    try:
+        with DaemonRequestLog() as daemon:
+            # Before any worker exists: a page that is not the app registers nothing, so the legacy
+            # and foreign caches can be planted first.
+            page.goto(served.base + "/favicon.svg")
+            obs.seeded = page.evaluate(SEED_CACHES_JS, [LEGACY_SHELL_CACHE, OTHER_FOREIGN_CACHE, POISON])
+            log(f"stage=sw seed viewport={viewport} caches={sorted(obs.seeded)}")
+
+            page.goto(served.base + "/")
+            expect(page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
+            page.wait_for_function(SETTLED_JS, arg=[LEGACY_SHELL_CACHE, OTHER_FOREIGN_CACHE], timeout=TIMEOUT_MS * 2)
+            obs.registration = page.evaluate("""async () => {
+                const reg = await navigator.serviceWorker.ready;
+                return {scope: reg.scope, script: reg.active.scriptURL, state: reg.active.state,
+                        controlled: navigator.serviceWorker.controller !== null,
+                        controllerScript: navigator.serviceWorker.controller && navigator.serviceWorker.controller.scriptURL};
+            }""")
+            obs.caches_before = page.evaluate(CACHE_STORAGE_JS)
+            log(f"stage=sw active viewport={viewport} scope={obs.registration['scope']} "
+                f"script={obs.registration['script']} caches={ {k: len(v) for k, v in obs.caches_before.items()} }")
+
+            obs.own_cache = page.evaluate(PLANT_OWN_CACHE_JS, [OWN_CACHE_PREFIX, POISON])
+
+            # (121) reloading the page, and opening `/` afresh, go to the network, not the planted copy.
+            # The app's router lands `/` on /egress, so a reload asks for /egress: both are probed.
+            here = urlsplit(page.url).path
+            for label, load in (("reload", lambda: page.reload()), ("root", lambda: page.goto(served.base + "/"))):
+                path = here if label == "reload" else "/"
+                mark = len(daemon.entries)
+                response = load()
+                expect(page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
+                obs.reload[label] = {
+                    "path": path, "status": response.status, "from_worker": response.from_service_worker,
+                    "cache_control": response.headers.get("cache-control"), "poisoned": POISON in page.content(),
+                    "daemon_gets": daemon.count(path, mark),
+                    "controlled": page.evaluate("navigator.serviceWorker.controller !== null")}
+
+            # (122) API reads from the controlled page: each unique URL must reach the daemon
+            # The same URL three times: a cache that answers the second read shows as a missing daemon hit.
+            for _ in range(3):
+                url = f"/api/egress/queue?probe={viewport}"
+                mark = len(daemon.entries)
+                got = page.evaluate("""async (url) => {
+                    const r = await fetch(url, {cache: 'no-store'});
+                    return {status: r.status, text: await r.text()};
+                }""", url)
+                obs.api.append({"url": url, "status": got["status"], "poisoned": POISON in got["text"],
+                                "daemon": daemon.count(url, mark)})
+
+            # (126) the worker script itself and the manifest, as the browser fetches them
+            obs.sw_headers = page.evaluate("""async () => {
+                const r = await fetch('/sw.js', {cache: 'no-store'});
+                return {status: r.status, type: r.headers.get('content-type'), cache: r.headers.get('cache-control'),
+                        precaches: (await r.text()).includes('precacheAndRoute')};
+            }""")
+            # (125) the manifest the page links
+            obs.manifest = page.evaluate("""async () => {
+                const link = document.querySelector('link[rel=manifest]');
+                if (!link) return {linked: false};
+                const r = await fetch(link.href);
+                const json = await r.json();
+                const icons = [];
+                for (const icon of json.icons) {
+                    const ir = await fetch(new URL(icon.src, link.href));
+                    icons.push({src: icon.src, sizes: icon.sizes, status: ir.status, type: ir.headers.get('content-type')});
+                }
+                return {linked: true, href: new URL(link.href).pathname, status: r.status,
+                        type: r.headers.get('content-type'), json, icons};
+            }""")
+
+            # (123) no session cookie: the pointer page, on `/` and on an app route, worker active
+            context.clear_cookies()
+            for route in ("/", "/egress"):
+                mark = len(daemon.entries)
+                response = page.goto(served.base + route)
+                obs.no_cookie.append({
+                    "route": route, "status": response.status, "from_worker": response.from_service_worker,
+                    "text": squash(page.locator("body").inner_text()), "poisoned": POISON in page.content(),
+                    "app_mounted": page.locator("[data-testid=request], #app *").count() > 0,
+                    "daemon": daemon.count(route, mark), "cookie_sent": any(
+                        e["cookie"] for e in daemon.entries[mark:] if e["path"] == route),
+                    "controlled": page.evaluate("navigator.serviceWorker.controller !== null")})
+            obs.caches_after = page.evaluate(CACHE_STORAGE_JS)
+            log(f"stage=sw probes viewport={viewport} daemon_requests={len(daemon.entries)} "
+                f"caches_after={ {k: len(v) for k, v in obs.caches_after.items()} } "
+                f"ms={int((time.monotonic() - started) * 1000)}")
+    finally:
+        context.close()
+    return obs
+
+
+def _own_cache_only(caches: dict, own: str) -> None:
+    assert list(caches) == [own], f"Cache Storage holds {sorted(caches)}, expected only {own}"
+    assert own.startswith(OWN_CACHE_PREFIX), f"{own} is not the worker's own precache"
+
+
+def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(ui, viewport)
+    obs, failure = None, None
+    if ui == "spa":
+        try:
+            obs = service_worker_scenario(browser, served, broker, viewport)
+        except Exception as exc:  # noqa: BLE001 - every check below then reports it
+            failure = squash(str(exc))[:200]
+
+    def check(number: str, name: str, assertion: Callable[[SwObservations], None]) -> None:
+        def run() -> None:
+            if failure is not None:
+                raise AssertionError(f"the service-worker scenario failed: {failure}")
+            assertion(obs)
+        suite.check(number, name, run, spa_only=True)
+
+    def registered(o: SwObservations) -> None:
+        reg = o.registration
+        assert reg["scope"] == served.base + "/", f"scope {reg['scope']}"
+        assert reg["script"] == served.base + "/sw.js", f"script {reg['script']}"
+        assert reg["state"] == "activated", f"state {reg['state']}"
+        assert reg["controlled"] and reg["controllerScript"] == reg["script"], f"the page is not controlled: {reg}"
+        assert o.sw_headers["precaches"], "the worker at /sw.js is not the generated precache worker"
+
+    def reload_hits_network(o: SwObservations) -> None:
+        assert set(o.reload) == {"reload", "root"}
+        for label, r in o.reload.items():
+            assert r["controlled"], f"{label}: the page was not controlled by the worker"
+            assert r["status"] == 200 and not r["from_worker"], f"{label}: answered by the worker: {r}"
+            assert not r["poisoned"], f"{label}: showed the page planted in the worker's own cache"
+            assert r["cache_control"] == "no-store", f"{label}: cache-control {r['cache_control']!r}"
+            assert r["daemon_gets"] == 1, f"{label}: the daemon saw {r['daemon_gets']} GET {r['path']}, expected 1"
+
+    def api_hits_network(o: SwObservations) -> None:
+        assert len(o.api) == 3
+        for probe in o.api:
+            assert probe["status"] == 200 and not probe["poisoned"], f"{probe['url']} answered from a cache: {probe}"
+            assert probe["daemon"] == 1, f"the daemon saw {probe['daemon']} request(s) for {probe['url']}, expected 1"
+
+    def pointer_without_cookie(o: SwObservations) -> None:
+        assert [p["route"] for p in o.no_cookie] == ["/", "/egress"]
+        for page_seen in o.no_cookie:
+            where = page_seen["route"]
+            assert page_seen["controlled"], f"{where}: the page was not controlled by the worker"
+            assert page_seen["status"] == 200 and not page_seen["from_worker"], f"{where}: {page_seen}"
+            assert "./djinn egress url" in page_seen["text"], f"{where} is not the pointer page: {page_seen['text'][:80]!r}"
+            assert not page_seen["poisoned"] and not page_seen["app_mounted"], f"{where} showed the app or a cached page"
+            assert page_seen["daemon"] == 1 and not page_seen["cookie_sent"], \
+                f"{where}: the daemon saw {page_seen['daemon']} cookie-less request(s), cookie_sent={page_seen['cookie_sent']}"
+
+    def caches_pruned(o: SwObservations) -> None:
+        assert LEGACY_SHELL_CACHE in o.seeded and OTHER_FOREIGN_CACHE in o.seeded, f"not seeded: {o.seeded}"
+        assert LEGACY_SHELL_CACHE not in o.caches_before and OTHER_FOREIGN_CACHE not in o.caches_before
+        own = [name for name in o.caches_before if name.startswith(OWN_CACHE_PREFIX)]
+        assert len(own) == 1, f"expected one precache, found {sorted(o.caches_before)}"
+        _own_cache_only(o.caches_before, own[0])
+        _own_cache_only(o.caches_after, own[0])
+        assert o.own_cache == own[0]
+        urls = o.caches_before[own[0]]
+        assert urls and all(path.startswith("/assets/") for path in urls), f"the precache holds {urls}"
+
+    def manifest_installable(o: SwObservations) -> None:
+        m = o.manifest
+        assert m["linked"] and m["href"] == "/manifest.webmanifest", f"manifest link: {m}"
+        assert m["status"] == 200 and m["type"] == "application/manifest+json", f"manifest served as {m['type']}"
+        assert m["json"]["display"] == "standalone" and m["json"]["start_url"] == "/" and m["json"]["scope"] == "/"
+        assert m["json"]["name"] == "Djinn admin" and m["json"]["theme_color"] == "#fafafb"
+        assert sorted(i["sizes"] for i in m["icons"]) == ["192x192", "512x512"], m["icons"]
+        assert all(i["status"] == 200 and i["type"] == "image/png" for i in m["icons"]), m["icons"]
+
+    def worker_script_never_cached(o: SwObservations) -> None:
+        h = o.sw_headers
+        assert h["status"] == 200 and h["type"].startswith("text/javascript"), h
+        assert h["cache"] == "no-cache", f"sw.js is served with cache-control {h['cache']!r}"
+
+    check("120", "The service worker registers from the app at scope `/`, activates and controls the page; "
+                 "/sw.js is the generated precache worker", registered)
+    check("121", "With the worker active, reloading the page and opening `/` afresh go to the network (the daemon sees "
+                 "each GET, cache-control no-store), not a copy planted in the worker's own cache", reload_hits_network)
+    check("122", "With the worker active, every /api/egress/queue read from the page, the same URL again and again, "
+                 "reaches the daemon", api_hits_network)
+    check("123", "With the worker active and the session cookie cleared, `/` and an app route show the pointer page "
+                 "from the network, not the app", pointer_without_cookie)
+    check("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it; a pre-seeded "
+                 "`djinn-admin-shell-v3` and another foreign cache are deleted after activation", caches_pruned)
+    check("125", "The page links a web manifest: standalone, start `/`, tokens' canvas colour, 192 and 512 png icons "
+                 "that load", manifest_installable)
+    check("126", "/sw.js is served as JavaScript with cache-control no-cache", worker_script_never_cached)
+    return suite.results
+
+
 # ---- legacy → behaviour mapping ------------------------------------------------------
 
 LEGACY_MAP = [
@@ -2658,6 +2948,13 @@ NEW_CHECKS = [
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
     ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
     ("62", "The selected day, a range's end and its start in the History date picker have at least 4.5:1 text contrast, hovered or not, focused or not, light and dark", "N/A(spa-only) on legacy"),
+    ("120", "The service worker registers from the app at scope `/`, activates and controls the page; /sw.js is the generated precache worker", "N/A(spa-only) on legacy: the legacy page keeps its inline worker (PLN step 6)"),
+    ("121", "With the worker active, reloading the page and opening `/` afresh go to the network (the daemon sees each GET, cache-control no-store), not a copy planted in the worker's own cache", "N/A(spa-only) on legacy"),
+    ("122", "With the worker active, every /api/egress/queue read from the page, the same URL again and again, reaches the daemon", "N/A(spa-only) on legacy"),
+    ("123", "With the worker active and the session cookie cleared, `/` and an app route show the pointer page from the network, not the app", "N/A(spa-only) on legacy"),
+    ("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it; a pre-seeded `djinn-admin-shell-v3` and another foreign cache are deleted after activation", "N/A(spa-only) on legacy"),
+    ("125", "The page links a web manifest: standalone, start `/`, the tokens' canvas colour, 192 and 512 png icons that load", "N/A(spa-only) on legacy"),
+    ("126", "/sw.js is served as JavaScript with cache-control no-cache", "N/A(spa-only) on legacy"),
 ]
 
 
@@ -2727,6 +3024,7 @@ def main() -> int:
                 results += run_dedicated(ui, viewport, browser, served, broker)
                 results += run_history(ui, viewport, browser, served, broker)
                 results += run_queue_features(ui, viewport, browser, served, broker)
+                results += run_service_worker(ui, viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):

@@ -1646,6 +1646,135 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    SW_FILES = {
+        "sw.js": b'importScripts("sw-cleanup.js");define(["./workbox-1a2b3c4d"],function(e){});',
+        "workbox-1a2b3c4d.js": b"define(['exports'],function(e){});",
+        "sw-cleanup.js": b"self.addEventListener('activate',function(){});",
+        "manifest.webmanifest": b'{"name":"Djinn admin","display":"standalone"}',
+        "icon-192.png": b"\x89PNG\r\n\x1a\n192",
+        "icon-512.png": b"\x89PNG\r\n\x1a\n512",
+    }
+
+    def _build_spa_dist_with_worker(self, parent: Path) -> Path:
+        dist = self._build_spa_dist(parent)
+        for name, body in self.SW_FILES.items():
+            (dist / name).write_bytes(body)
+        return dist
+
+    def test_spa_mode_serves_the_built_service_worker_and_manifest(self):
+        """In spa mode the worker the build generates (sw.js, its workbox chunk,
+        the importScripts file), the manifest and the icons come from dist, byte
+        for byte, with the right content type; sw.js is `no-cache` so a new
+        worker is found on the next visit, and no session is needed for any of
+        them. The inline legacy SW_JS and MANIFEST are not what is served."""
+        expected_types = {
+            "sw.js": "text/javascript; charset=utf-8",
+            "workbox-1a2b3c4d.js": "text/javascript; charset=utf-8",
+            "sw-cleanup.js": "text/javascript; charset=utf-8",
+            "manifest.webmanifest": "application/manifest+json",
+            "icon-192.png": "image/png",
+            "icon-512.png": "image/png",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist_with_worker(home)
+            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI": "spa", "DJINN_ADMIN_UI_DIST": str(dist)}
+            server, thread = self._start_admin(home, env=env)
+            host, port = server.server_address
+            try:
+                for name, body in self.SW_FILES.items():
+                    for target in (f"/{name}", f"/{name}?v=1"):
+                        with self.subTest(route=target):
+                            status, _payload, headers, raw = self._request(host, port, "GET", target)
+                            self.assertEqual(status, HTTPStatus.OK)
+                            self.assertEqual(raw, body)
+                            self.assertEqual(headers.get("Content-Type"), expected_types[name])
+                            self.assertEqual(headers.get("Cache-Control"), "no-cache")
+                            self.assertEqual(headers.get("Content-Length"), str(len(body)))
+                self.assertNotIn(admin.SW_JS.encode("utf-8"), self._request(host, port, "GET", "/sw.js")[3])
+                # the app routes stay gated: no cookie, the pointer page, never the app
+                status, _payload, headers, raw = self._request(host, port, "GET", "/")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertIn(b"./djinn egress url", raw)
+                self.assertNotEqual(headers.get("Cache-Control"), "public, max-age=31536000, immutable")
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_spa_mode_worker_paths_outside_the_allowlist_are_404(self):
+        """Only the files that are in dist are served: a look-alike name, a path
+        joined under the worker's name, an encoded traversal and a worker file
+        the build did not emit all 404, and a symlinked sw.js is dropped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist_with_worker(home)
+            outside = home / "outside.js"
+            outside.write_text("secret", encoding="utf-8")
+            (dist / "sw.js").unlink()
+            (dist / "sw.js").symlink_to(outside)
+            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI": "spa", "DJINN_ADMIN_UI_DIST": str(dist)}
+            server, thread = self._start_admin(home, env=env)
+            host, port = server.server_address
+            try:
+                self.assertNotIn("/sw.js", server.spa_allowlist)
+                for route in (
+                    "/sw.js",                          # a symlink: dropped
+                    "/SW.js",
+                    "/sw.js/",
+                    "/sw.js/../secret",
+                    "/sw.js%2f..%2foutside.js",
+                    "/sw.js.map",
+                    "/workbox-deadbeef.js",            # a chunk this build did not emit
+                    "/workbox-1a2b3c4d.js/x",
+                    "/../outside.js",
+                    "/%2e%2e/outside.js",
+                    "/assets/../sw-cleanup.js%00",
+                    "/service-worker.js",
+                    "/registerSW.js",
+                ):
+                    with self.subTest(route=route):
+                        status, _payload, _headers, raw = self._request(host, port, "GET", route)
+                        self.assertEqual(status, HTTPStatus.NOT_FOUND)
+                        self.assertNotIn(b"secret", raw)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_legacy_mode_keeps_its_inline_worker_and_manifest_with_a_built_dist_present(self):
+        """With DJINN_ADMIN_UI unset the worker, manifest and icons are the inline
+        ones, byte for byte, whatever sits in dist."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = self._build_spa_dist_with_worker(home)
+            env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI_DIST": str(dist)}
+            patcher = mock.patch.dict(os.environ)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            os.environ.pop("DJINN_ADMIN_UI", None)
+            server, thread = self._start_admin(home, env=env)
+            host, port = server.server_address
+            try:
+                self.assertFalse(server.spa_mode)
+                status, _payload, headers, raw = self._request(host, port, "GET", "/sw.js")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(raw, admin.SW_JS.encode("utf-8"))
+                self.assertEqual(headers.get("Content-Type"), "application/javascript")
+                self.assertNotIn("Cache-Control", headers)
+                status, _payload, headers, raw = self._request(host, port, "GET", "/manifest.webmanifest")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(raw, json.dumps(admin.MANIFEST, separators=(",", ":")).encode("utf-8"))
+                self.assertEqual(headers.get("Content-Type"), "application/manifest+json")
+                status, _payload, _headers, raw = self._request(host, port, "GET", "/icon-192.png")
+                self.assertEqual(raw, admin._ICON_192)
+                for route in ("/workbox-1a2b3c4d.js", "/sw-cleanup.js"):
+                    self.assertEqual(self._request(host, port, "GET", route)[0], HTTPStatus.NOT_FOUND)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
     def test_spa_allowlist_drops_symlinks_and_hidden_files(self):
         """Only regular, non-hidden files under dist are served: a symlinked
         file or directory pointing outside dist, and a dotfile, are 404."""

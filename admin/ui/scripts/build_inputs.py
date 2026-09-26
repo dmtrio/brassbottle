@@ -33,6 +33,7 @@ INPUTS = (
     "admin/ui/scripts",
     "admin/ui/index.html",
     "admin/ui/vite.config.ts",
+    "admin/ui/pwa.ts",
     "admin/ui/package.json",
     "admin/ui/package-lock.json",
     "admin/ui/tsconfig*.json",
