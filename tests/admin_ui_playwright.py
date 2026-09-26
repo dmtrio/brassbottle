@@ -2272,6 +2272,13 @@ class Served:
         self.patcher.stop()
 
 
+FIRST_VISIT_PERMISSION = """
+if (window.Notification) {
+  Object.defineProperty(window.Notification, 'permission', {get: () => 'default', configurable: true});
+}
+"""
+
+
 def new_page(browser, served: Served, viewport: str, theme: str):
     # A fixed locale and zone: check 50 reads the banner's 12-hour clock, and the date picker checks
     # count local days (UTC has no DST day to shift a row across midnight), so the runner's own
@@ -2282,6 +2289,10 @@ def new_page(browser, served: Served, viewport: str, theme: str):
     context.add_cookies([{
         "name": admin.SESSION_COOKIE_NAME, "value": served.cookie, "domain": served.host,
         "path": "/", "httpOnly": True, "sameSite": "Strict"}])
+    # Headless Chromium reports Notification.permission `denied` whatever the context grants; a real
+    # browser on a first visit reports `default`. Pages start from that, so the bell (and every capture)
+    # shows its first-visit state. A check that needs another state installs its own spy after this.
+    context.add_init_script(script=FIRST_VISIT_PERMISSION)
     page = context.new_page()
     page.set_default_timeout(TIMEOUT_MS)
     traffic = Traffic()
