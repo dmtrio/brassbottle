@@ -2595,7 +2595,8 @@ SEED_CACHES_JS = """async ([legacy, other, poison]) => {
 # Waits for the worker to be active, controlling this page, and to have pruned every foreign cache.
 SETTLED_JS = """async ([legacy, other]) => {
   const reg = await navigator.serviceWorker.ready;
-  if (!reg.active || !navigator.serviceWorker.controller) return false;
+  // `ready` resolves while the worker may still be `activating`; wait for `activated`.
+  if (!reg.active || reg.active.state !== 'activated' || !navigator.serviceWorker.controller) return false;
   const keys = await caches.keys();
   return !keys.includes(legacy) && !keys.includes(other);
 }"""
@@ -2764,6 +2765,9 @@ def service_worker_scenario(browser, served: Served, broker: stub.StubBroker, vi
             try:
                 obs.offline["api"] = page.evaluate(OFFLINE_FETCH_JS, f"/api/egress/queue?probe={nonce}")
                 obs.offline["api"]["url"] = f"/api/egress/queue?probe={nonce}"
+                # The app's own URL, already read online: a fallback keyed on it shows here, not on a fresh probe.
+                obs.offline["app_api"] = page.evaluate(OFFLINE_FETCH_JS, "/api/egress/queue")
+                obs.offline["app_api"]["url"] = "/api/egress/queue"
                 try:
                     response = page.goto(served.base + "/")
                     obs.offline["root"] = {"failed": False, "status": response.status if response else None,
@@ -2891,11 +2895,17 @@ def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: 
             planted = entry["url"] in PLANTED_PATHS and entry["poisoned"]
             assert planted or entry["url"].startswith("/assets/"), \
                 f"the worker's own cache holds {entry['url']}, which is neither under /assets/ nor a page this test planted"
+        # ...and the /assets/ entries are exactly the precache: nothing was stored under an /assets/ key since.
+        assets_after = sorted(e["url"] for e in o.entries_after[own[0]] if e["url"].startswith("/assets/"))
+        assert assets_after == sorted(urls), f"the worker's /assets/ entries changed: {sorted(set(assets_after) ^ set(urls))}"
 
     def offline_fails(o: SwObservations) -> None:
-        api, root = o.offline["api"], o.offline["root"]
-        assert api["failed"], f"{api['url']} with the daemon unreachable was answered: {api}"
+        api, app_api, root = o.offline["api"], o.offline["app_api"], o.offline["root"]
+        for probe in (api, app_api):
+            assert probe["failed"], f"{probe['url']} with the daemon unreachable was answered: {probe}"
+            assert "Failed to fetch" in probe["error"], f"{probe['url']} failed, but not with a network error: {probe['error']}"
         assert root["failed"], f"navigating to / with the daemon unreachable was answered: {root}"
+        assert "ERR_INTERNET_DISCONNECTED" in root["error"], f"navigating to / failed, but not with a network error: {root['error']}"
 
     def manifest_installable(o: SwObservations) -> None:
         m = o.manifest
