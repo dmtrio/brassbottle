@@ -40,6 +40,8 @@ export type LinkDeps = {
   // Read the queue every `intervalMs`, once at once unless already polling at that interval.
   startPolling: (intervalMs: number) => void
   stopPolling: () => void
+  // Every `hb` heartbeat of the live stream, so a leader tab can tell the tabs following it the stream is alive.
+  onHeartbeat?: () => void
 }
 
 export type LinkOptions = {
@@ -64,7 +66,8 @@ function parseSnapshot(raw: unknown): QueueSnapshot | null {
 // time, or after the tab was hidden) the queue is read once so the list is never
 // empty. Any error, or silence past the limit, closes the source (the browser's own
 // retry is not used, so the timing is ours), polls at once, and schedules a reopen.
-// A hidden tab holds no stream at all.
+// A hidden tab holds no stream at all (unless the caller says it is never hidden: the leader tab of
+// shared-link.ts holds the browser's one stream whatever its visibility).
 export function createLiveLink(deps: LinkDeps, options: LinkOptions = {}) {
   const silenceLimitMs = options.silenceLimitMs ?? SILENCE_LIMIT_MS
   let source: StreamSource | null = null
@@ -139,7 +142,9 @@ export function createLiveLink(deps: LinkDeps, options: LinkOptions = {}) {
       deps.onSnapshot(snapshot)
     })
     next.addEventListener('hb', () => {
-      if (next === source) armWatchdog(next)
+      if (next !== source) return
+      armWatchdog(next)
+      deps.onHeartbeat?.()
     })
     next.addEventListener('error', () => drop(next))
   }
