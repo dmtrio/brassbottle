@@ -4,12 +4,13 @@ import { useRoute } from 'vue-router'
 import { useColorMode, useMediaQuery } from '@vueuse/core'
 import { Ban, Box, Database, Globe, Moon, ShieldCheck, Sun } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import LinkIndicator from '@/components/LinkIndicator.vue'
 import { useQueue } from '@/composables/useQueue'
 
 const route = useRoute()
 const phone = useMediaQuery('(max-width: 639px)')
 const mode = useColorMode()
-const { openCount } = useQueue()
+const { openCount, link } = useQueue()
 
 const nav = [
   { to: '/egress', label: 'Egress', icon: Globe, showCaption: false },
@@ -72,6 +73,7 @@ watch(
           {{ activeLabel }}
         </h1>
         <div class="flex-1" />
+        <LinkIndicator :state="link" />
         <Button
           variant="ghost"
           size="icon"

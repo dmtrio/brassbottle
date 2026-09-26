@@ -27,6 +27,7 @@ import calendar
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -165,7 +166,7 @@ class Traffic:
             url = (message.location or {}).get("url", "")
             # The browser logs every scripted 4xx/5xx from the admin API; those
             # are the outcomes under test, not page errors.
-            if message.text.startswith("Failed to load resource") and re.search(r"/api/egress/(decide|queue|recent)(\?.*)?$", url):
+            if message.text.startswith("Failed to load resource") and re.search(r"/api/egress/(decide|queue|recent|stream)(\?.*)?$", url):
                 self.expected_failures += 1
                 return
             self.console_errors.append(message.text)
@@ -961,6 +962,9 @@ def banner_copy(browser, served: Served, broker: stub.StubBroker, viewport: str)
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
         drv = SpaDriver(page, traffic)
+        # This check is about which poll clears which banner, so the tab must be polling: no live stream
+        # (with one open the tab does not poll; check 104 covers the banner when the stream ends).
+        page.route(STREAM_ROUTE, lambda route: route.abort())
         # frozen before the load, so only the explicit run_for below starts a poll
         start = datetime(2026, 1, 1, 12, 0, 0)
         page.clock.install(time=start)
@@ -2442,6 +2446,7 @@ def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, view
         capture_empty(browser, served, broker, out, viewport, theme)
         capture_history(browser, served, broker, out, viewport, theme)
         capture_queue_features(browser, served, broker, out, viewport, theme)
+        capture_stream_states(browser, served, broker, out, viewport, theme)
 
 
 def capture_long_comm(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
@@ -2942,6 +2947,314 @@ def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: 
 
 # ---- legacy → behaviour mapping ------------------------------------------------------
 
+# ---- Live stream: GET /api/egress/stream in the tab (100..104) ----------------------------
+
+STREAM_ROUTE = "**/api/egress/stream"
+QUEUE_ROUTE_PATH = "/api/egress/queue"
+LIVE_WITHIN_MS = 3000          # the Claim: a filed request shows in an open tab within 3 s
+POLL_GAP_S = (4.0, 6.5)        # the fallback polls every 5 s
+STREAM_FULL = {"error": "too many live streams"}
+
+
+def queue_requests(page) -> list[float]:
+    """The time (monotonic seconds) of every GET /api/egress/queue the page sends, by its request event."""
+    seen: list[float] = []
+    page.on("request", lambda request: seen.append(time.monotonic())
+            if request.method == "GET" and urlsplit(request.url).path == QUEUE_ROUTE_PATH else None)
+    return seen
+
+
+def link_state(page):
+    return page.locator("[data-testid=link-state]")
+
+
+def wait_link(page, state: str, timeout_ms: int) -> None:
+    from playwright.sync_api import expect
+
+    expect(link_state(page)).to_have_attribute("data-state", state, timeout=timeout_ms)
+
+
+def open_live_page(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str = "light"):
+    """A fresh tab with its stream open: (context, page, traffic, driver, queue request times)."""
+    from playwright.sync_api import expect
+
+    broker.reset()
+    hub = served.server.stream_hub
+    # A stream a moment ago (an earlier check's) leaves the hub a snapshot under one poll interval old,
+    # which a new stream is handed as it is; that snapshot is of the queue before this reset and would
+    # arrive as a change. Let the hub empty and the cache age out, so this tab starts from the reset queue.
+    deadline = time.monotonic() + 5
+    while hub.stream_count() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert hub.stream_count() == 0, f"{hub.stream_count()} streams left open by an earlier check"
+    time.sleep(hub.poll_seconds + 0.1)
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    seen = queue_requests(page)
+    drv = SpaDriver(page, traffic)
+    page.goto(served.base + "/")
+    expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
+    wait_link(page, "live", TIMEOUT_MS)
+    assert hub.stream_count() == 1, f"{hub.stream_count()} streams open for one tab"
+    return context, page, traffic, drv, seen
+
+
+def _live_request_arrives(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    from playwright.sync_api import expect
+
+    context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport)
+    live_at = time.monotonic()
+    try:
+        indicator = link_state(page)
+        expect(indicator).to_have_text("Live")
+        assert indicator.get_attribute("aria-label") == "Queue updates: Live", indicator.get_attribute("aria-label")
+        host = "live-arrival.example.com"
+        started = time.monotonic()
+        broker.file_request(host, container="alpha")
+        drv.row(host).wait_for(state="visible", timeout=LIVE_WITHIN_MS)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        assert elapsed_ms < LIVE_WITHIN_MS, f"the request took {elapsed_ms} ms to appear"
+        log(f"check 100 viewport={viewport} filed-to-visible_ms={elapsed_ms}")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 1)
+        assert drv.title_count() == len(stub.OPEN_ROWS) + 1, f"tab title {page.title()!r}"
+        # hold the window open past one 5 s poll interval, so a tab that polled beside its stream would show
+        page.wait_for_timeout(max(0, int((live_at + 5.5 - time.monotonic()) * 1000)))
+        assert not seen, f"the tab read /api/egress/queue {len(seen)} time(s) while its stream was open"
+        assert traffic.queue_reads == 0, f"{traffic.queue_reads} queue responses seen"
+        wait_link(page, "live", 500)
+    finally:
+        context.close()
+
+
+def _stream_lost_then_back(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """Stream killed and its reopen refused: Reconnecting, then Polling with a 5 s poll; stream back: Live, no polling."""
+    from playwright.sync_api import expect
+
+    context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport)
+    try:
+        assert not seen
+        page.route(STREAM_ROUTE, lambda route: route.abort())
+        served.server.stream_hub.end_streams("check 101")
+        wait_link(page, "reconnecting", 2500)
+        expect(link_state(page)).to_have_text("Reconnecting")
+        wait_link(page, "polling", 8000)
+        expect(link_state(page)).to_have_text("Polling")
+        assert link_state(page).get_attribute("aria-label") == "Queue updates: Polling"
+        drv._wait_until(lambda: len(seen) >= 3, 14)
+        assert len(seen) >= 3, f"only {len(seen)} queue reads while polling"
+        gaps = [round(b - a, 2) for a, b in zip(seen, seen[1:])]
+        assert all(POLL_GAP_S[0] <= gap <= POLL_GAP_S[1] for gap in gaps[-2:]), f"poll gaps {gaps}, expected about 5 s"
+        host = "polled-in.example.com"
+        broker.file_request(host, container="mid")
+        drv.row(host).wait_for(state="visible", timeout=7000)   # by the next poll
+        page.unroute(STREAM_ROUTE)
+        wait_link(page, "live", 13000)
+        expect(link_state(page)).to_have_text("Live")
+        settled = len(seen)
+        page.wait_for_timeout(6000)   # longer than a poll interval
+        assert len(seen) == settled, f"{len(seen) - settled} queue read(s) after the stream came back"
+        host = "streamed-again.example.com"
+        started = time.monotonic()
+        broker.file_request(host, container="zeta")
+        drv.row(host).wait_for(state="visible", timeout=LIVE_WITHIN_MS)
+        assert len(seen) == settled, "a request arrived by polling, not by the stream"
+        log(f"check 101 viewport={viewport} back-on-stream filed-to-visible_ms={int((time.monotonic() - started) * 1000)}")
+    finally:
+        context.close()
+
+
+class RawStreams:
+    """Extra streams held open by raw sockets carrying the session cookie.
+
+    Not by the page: Chromium allows six connections per origin, so a page cannot hold eight streams of
+    its own (the seventh would wait for a free connection and never reach the daemon).
+    """
+
+    def __init__(self, served: Served, count: int):
+        self.socks = []
+        for _ in range(count):
+            sock = socket.create_connection((served.host, served.port), timeout=5)
+            sock.sendall((f"GET /api/egress/stream HTTP/1.1\r\nHost: {served.host}:{served.port}\r\n"
+                          f"Cookie: {admin.SESSION_COOKIE_NAME}={served.cookie}\r\n\r\n").encode("ascii"))
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = sock.recv(4096)
+                assert chunk, "the daemon closed a stream while it was being opened"
+                head += chunk
+            assert head.startswith(b"HTTP/1.0 200"), head[:60]
+            self.socks.append(sock)
+
+    def close(self) -> None:
+        for sock in self.socks:
+            sock.close()
+        self.socks = []
+
+
+FETCH_STREAM_JS = """async () => {
+  const controller = new AbortController();
+  const response = await fetch('/api/egress/stream', { signal: controller.signal });
+  const out = { status: response.status, type: response.headers.get('content-type') };
+  if (response.status !== 200) out.body = await response.json();
+  controller.abort();
+  return out;
+}"""
+
+
+def _ninth_stream_refused(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport)
+    extra = None
+    try:
+        # the tab holds one stream; seven more make eight, and the ninth is refused
+        extra = RawStreams(served, 7)
+        assert served.server.stream_hub.stream_count() == 8
+        refused = page.evaluate(FETCH_STREAM_JS)
+        assert refused == {"status": 503, "type": "application/json", "body": STREAM_FULL}, refused
+        # without the session cookie the stream is refused like the other API routes
+        anonymous = context.browser.new_context()
+        try:
+            reply = anonymous.request.get(served.base + "/api/egress/stream")
+            assert (reply.status, reply.json()) == (403, {"error": "forbidden"}), (reply.status, reply.text())
+        finally:
+            anonymous.close()
+        wait_link(page, "live", 500)   # the tab's own stream is untouched
+        extra.close()
+        drv._wait_until(lambda: served.server.stream_hub.stream_count() == 1, 5)
+        assert served.server.stream_hub.stream_count() == 1
+        again = page.evaluate(FETCH_STREAM_JS)
+        assert again["status"] == 200 and again["type"].startswith("text/event-stream"), again
+        assert not seen
+    finally:
+        if extra is not None:
+            extra.close()
+        context.close()
+
+
+def _ninth_tab_polls_then_goes_live(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """A tab that gets no stream slot degrades to polling, and takes a stream when one frees."""
+    from playwright.sync_api import expect
+
+    context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport)
+    other = extra = None
+    try:
+        extra = RawStreams(served, 7)
+        other = context.new_page()
+        other_traffic = Traffic()
+        other_traffic.attach(other)
+        other_seen = queue_requests(other)
+        other.goto(served.base + "/")
+        other_drv = SpaDriver(other, other_traffic)
+        expect(other_drv.requests()).to_have_count(len(stub.OPEN_ROWS))   # the rows came from polling
+        wait_link(other, "polling", TIMEOUT_MS)
+        assert other_seen, "the refused tab never polled"
+        assert not seen, "the tab that holds a stream polled"
+        extra.close()
+        wait_link(other, "live", 13000)
+        settled = len(other_seen)
+        other.wait_for_timeout(6000)
+        assert len(other_seen) == settled, "the tab kept polling after its stream opened"
+        assert not other_traffic.console_errors, other_traffic.console_errors
+    finally:
+        if extra is not None:
+            extra.close()
+        if other is not None:
+            other.close()
+        context.close()
+
+
+def _outage_ends_streams_and_the_banner_holds(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """A lasting broker outage ends the streams; the tab polls, its banner says the data is old, and it recovers on its own."""
+    from playwright.sync_api import expect
+
+    context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport)
+    try:
+        banner = drv.stale_banner()
+        expect(banner).to_be_hidden()
+        with broker.lock:
+            broker.outage = True
+        expect(banner).to_be_visible(timeout=10_000)
+        text = banner.inner_text().strip()
+        assert re.fullmatch(r"Showing data from \d{1,2}:\d{2}:\d{2}\s[AP]M: .+", text), f"banner {text!r}"
+        assert link_state(page).get_attribute("data-state") in ("reconnecting", "polling")
+        expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))   # the last good list stays on screen
+        with broker.lock:
+            broker.outage = False
+        expect(banner).to_be_hidden(timeout=BANNER_CLEAR_MS)
+        wait_link(page, "live", 13000)
+    finally:
+        with broker.lock:
+            broker.outage = False
+        context.close()
+
+
+def _decide_failure_banner_while_live(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """With the stream open nothing polls, so a decide banner clears by one read a poll interval after the failure."""
+    from playwright.sync_api import expect
+
+    context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport)
+    try:
+        banner = drv.stale_banner()
+        with broker.lock:
+            broker.decide_outage = 500
+        drv.button("Deny", "check18.example.com").click()
+        expect(banner).to_have_text("Decision not sent: decide failed on the daemon")
+        failed_at = time.monotonic()
+        assert not seen, "the failed decide re-read the queue at once"
+        with broker.lock:
+            broker.decide_outage = None
+        expect(banner).to_be_hidden(timeout=8000)
+        waited = time.monotonic() - failed_at
+        assert 4.0 <= waited <= 7.5, f"the banner cleared after {waited:.1f} s, expected about 5 s"
+        assert len(seen) == 1, f"{len(seen)} queue reads to clear it, expected 1"
+        wait_link(page, "live", 500)
+    finally:
+        with broker.lock:
+            broker.decide_outage = None
+        context.close()
+
+
+def run_live_stream(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(ui, viewport)
+    suite.check("100", "A request filed at the broker appears in an open tab within 3 s with no /api/egress/queue "
+                       "request from the tab; the top bar says Live",
+                lambda: _live_request_arrives(browser, served, broker, viewport), spa_only=True)
+    suite.check("101", "A lost stream reads Reconnecting, then Polling with a 5 s poll of /api/egress/queue; when the "
+                       "stream returns it reads Live and the polling stops",
+                lambda: _stream_lost_then_back(browser, served, broker, viewport), spa_only=True)
+    suite.check("102", "A ninth concurrent stream gets 503 with the error body, a request without the session is "
+                       "refused 403, and the open streams are untouched",
+                lambda: _ninth_stream_refused(browser, served, broker, viewport), spa_only=True)
+    suite.check("103", "A tab that gets no stream slot polls (indicator Polling) and goes Live, polling stopped, "
+                       "when a slot frees",
+                lambda: _ninth_tab_polls_then_goes_live(browser, served, broker, viewport), spa_only=True)
+    suite.check("104", "A lasting broker outage ends the streams: the tab polls, the banner says `Showing data from "
+                       "<time>`, and both clear when the broker returns",
+                lambda: _outage_ends_streams_and_the_banner_holds(browser, served, broker, viewport), spa_only=True)
+    suite.check("105", "A decide that fails while the stream is open raises `Decision not sent: <error>` and it clears "
+                       "by one queue read about 5 s later, the stream still open",
+                lambda: _decide_failure_banner_while_live(browser, served, broker, viewport), spa_only=True)
+    return suite.results
+
+
+def capture_stream_states(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """The top-bar indicator in Live, Reconnecting and Polling, and a request arriving in an open tab."""
+    context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport, theme)
+    try:
+        capture(page, out, "spa", viewport, theme, "stream-live")
+        capture(page, out, "spa", viewport, theme, "stream-arrival-before")
+        host = "live-arrival.example.com"
+        broker.file_request(host, container="alpha")
+        drv.row(host).wait_for(state="visible", timeout=LIVE_WITHIN_MS)
+        capture(page, out, "spa", viewport, theme, "stream-arrival-after")
+        capture(page, out, "spa", viewport, theme, "stream-arrival-row", scroll_to=drv.row(host))
+        page.route(STREAM_ROUTE, lambda route: route.abort())
+        served.server.stream_hub.end_streams("capture")
+        wait_link(page, "reconnecting", 2500)
+        capture(page, out, "spa", viewport, theme, "stream-reconnecting")
+        wait_link(page, "polling", 8000)
+        capture(page, out, "spa", viewport, theme, "stream-polling")
+    finally:
+        context.close()
+
+
 LEGACY_MAP = [
     # (original check in the legacy suite, behaviour check(s), note)
     ("`{light,dark}/mobile: no horizontal overflow` (1 site, 2 lines)", "(20)", "now at desktop, tablet and phone, before and after decisions"),
@@ -3022,6 +3335,12 @@ NEW_CHECKS = [
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
     ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
     ("62", "The selected day, a range's end and its start in the History date picker have at least 4.5:1 text contrast, hovered or not, focused or not, light and dark", "N/A(spa-only) on legacy"),
+    ("100", "A request filed at the broker appears in an open tab within 3 s with no `/api/egress/queue` request from the tab; the top bar says Live", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
+    ("101", "A lost stream reads Reconnecting, then Polling with a 5 s poll of `/api/egress/queue`; when the stream returns it reads Live and the polling stops", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
+    ("102", "A ninth concurrent stream gets 503 with the error body, a request without the session is refused 403, and the open streams are untouched", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
+    ("103", "A tab that gets no stream slot polls (indicator Polling) and goes Live, polling stopped, when a slot frees", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
+    ("104", "A lasting broker outage ends the streams: the tab polls, the banner says `Showing data from <time>`, and both clear when the broker returns", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
+    ("105", "A decide that fails while the stream is open raises `Decision not sent: <error>` and it clears by one queue read about 5 s later, the stream still open", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
     ("120", "The service worker registers from the app at scope `/`, activates and controls the page; /sw.js is the generated precache worker", "N/A(spa-only) on legacy: the legacy page keeps its inline worker (PLN step 6)"),
     ("121", "With the worker active, reloading the page and opening `/` afresh go to the network (the daemon sees each GET, cache-control no-store), not a copy planted in the worker's own cache", "N/A(spa-only) on legacy"),
     ("122", "With the worker active, every /api/egress/queue read from the page, the same URL again and again, reaches the daemon", "N/A(spa-only) on legacy"),
@@ -3099,6 +3418,7 @@ def main() -> int:
                 results += run_dedicated(ui, viewport, browser, served, broker)
                 results += run_history(ui, viewport, browser, served, broker)
                 results += run_queue_features(ui, viewport, browser, served, broker)
+                results += run_live_stream(ui, viewport, browser, served, broker)
                 results += run_service_worker(ui, viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
