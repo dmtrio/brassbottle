@@ -1132,7 +1132,7 @@ def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.
 
 
 
-# ---- Queue features: filters, per-bottle bulk decide, denylist group (80..93) --------------
+# ---- Queue features: filters, per-bottle bulk decide, denylist group (80..96) --------------
 
 FEATURE_HOSTS = {   # bottle -> its open hosts, newest first (stub.FEATURE_ROWS)
     "alpha": ["fa1.example.com", "fa2.example.com", "fa3.example.com", "192.0.2.77", "fa5.example.com"],
@@ -1222,6 +1222,10 @@ class QueuePage:
 
     def status(self):
         return self.page.get_by_test_id("bulk-status")
+
+    def result(self):
+        """The finished run's result line alone (the status row also holds Dismiss)."""
+        return self.status().locator(".pill")
 
     def broker_decides(self) -> list[dict]:
         with self.broker.lock:
@@ -1549,6 +1553,50 @@ def _f_reach(q: QueuePage) -> None:
     _eq(q.traffic.console_errors, [])
 
 
+def _f_allow_all_ip(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    dialog = q.ask("Allow", "alpha")
+    _in("Allow all 5 open requests for alpha?", squash(dialog.inner_text()))
+    q.confirm(dialog, "Allow")
+    # the IP-literal allow is recorded but leaves its row open: the result line must not count it as allowed
+    expect(q.result()).to_have_text("Allowed 4 of 5 in alpha · 1 needs a CIDR in the manifest")
+    allow = [{"decision": "allow", "scope": "live", "host": h, "container": "alpha"} for h in FEATURE_HOSTS["alpha"]]
+    _eq(q.broker_decides(), allow)
+    _eq(q.sent_bodies(), [{"action": "allow_live", "host": h, "container": "alpha"} for h in FEATURE_HOSTS["alpha"]])
+    q.expect_hosts([hp("192.0.2.77")] + hps("mid", "zeta"))
+    _eq(q.groups(), [("alpha", 1), ("mid", 4), ("zeta", 3)])
+    q.drv.wait_note("192.0.2.77", "^Recorded — add the CIDR to the manifest by hand")
+    assert q.drv.stale_banner().count() == 0, "an IP allow raised the banner"
+    # the state toggle names itself for assistive tech
+    _eq(q.page.get_by_test_id("queue-state").get_attribute("aria-label"), "Request state")
+
+
+def _f_swept(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    held, release_next, button = _held_decides(q.page, q.traffic, q.drv)
+    dialog = q.ask("Deny", "mid")
+    q.confirm(dialog, "Deny")
+    q.drv._wait_until(lambda: len(held) == 1, 5)
+    # the running decide's spinner sits on the button that was pressed
+    spin = {label: button(label, "fm1.example.com", 443, "mid").locator("svg.animate-spin").count()
+            for label in ("Allow", "Deny")}
+    # fm3 is decided elsewhere (as a zone decide would sweep it) while the first decide is in flight
+    with q.broker.lock:
+        q.broker.queue["open"] = [r for r in q.broker.queue["open"] if r["request_id"] != "fm3"]
+        q.broker.queue["count"] = len(q.broker.queue["open"])
+    release_next()
+    for _ in range(2):
+        q.drv._wait_until(lambda: len(held) == 1, 5)
+        release_next()
+    expect(q.result()).to_have_text("Denied 4 of 4 in mid")
+    hosts = [h for h in FEATURE_HOSTS["mid"] if h != "fm3.example.com"]
+    _eq(q.sent_bodies(), [{"action": "deny", "host": h, "container": "mid"} for h in hosts])
+    _eq(q.broker_decides(), [_deny_body(h, "mid") for h in hosts])
+    assert not held, f"{len(held)} decide(s) still held"
+    q.expect_hosts(hps("alpha", "zeta"))
+    _eq(spin, {"Allow": 0, "Deny": 1})
+
+
 QUEUE_SHARED_CHECKS = [   # one page, in order; each leaves the filters cleared
     ("80", "The bottle multi-select narrows the queue to the chosen bottles and the count line follows", _f_bottle),
     ("81", "The Failed apply state shows only requests with a last_error", _f_state),
@@ -1575,6 +1623,10 @@ QUEUE_OWN_CHECKS = [   # each on a fresh page: they decide rows
      _f_reach),
     ("94", "The collapsed denylist group is a card of its own with no row elements in it, and the ordinary recent rows "
            "sit in a separate card clearly below it", _f_denylist_card),
+    ("95", "Allow all on a bottle with an IP-literal request reports it apart (Allowed 4 of 5 · 1 needs a CIDR in the "
+           "manifest), sends the literal allow bodies and leaves that row open with its note", _f_allow_all_ip),
+    ("96", "A request swept by an earlier decide of a bulk run is skipped, not sent, and the run still reports every "
+           "request; the running decide's spinner sits on the pressed button", _f_swept),
 ]
 
 
@@ -1594,7 +1646,7 @@ def with_features_page(browser, served: Served, broker: stub.StubBroker, viewpor
 
 
 def run_queue_features(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """Queue-feature checks (80..94); the SPA only."""
+    """Queue-feature checks (80..96); the SPA only."""
     suite = Suite(ui, viewport)
     if ui == "legacy":
         for number, name, _fn in QUEUE_SHARED_CHECKS + QUEUE_OWN_CHECKS:
@@ -2449,7 +2501,7 @@ def capture_empty(browser, served, broker, out: Path, viewport: str, theme: str)
 
 
 def capture_queue_features(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
-    """Queue features: filtered, bulk dialog, bulk in progress, partial failure, expanded denylist group."""
+    """Queue features: filtered, bulk dialog, bulk in progress, partial failure, expanded denylist group, Allow all with an IP row left open."""
     from playwright.sync_api import expect
 
     def filtered(q: QueuePage) -> None:
@@ -2486,7 +2538,13 @@ def capture_queue_features(browser, served, broker, out: Path, viewport: str, th
         capture(q.page, out, "spa", viewport, theme, "queue-denylist-expanded",
                 scroll_to=q.page.get_by_test_id("denylist-group"))
 
-    for fn in (filtered, in_progress, partial, denylist):
+    def allow_all_ip(q: QueuePage) -> None:
+        q.confirm(q.ask("Allow", "alpha"), "Allow")
+        expect(q.result()).to_have_text("Allowed 4 of 5 in alpha · 1 needs a CIDR in the manifest")
+        q.drv.wait_note("192.0.2.77", "^Recorded")
+        capture(q.page, out, "spa", viewport, theme, "queue-allow-all-ip")
+
+    for fn in (filtered, in_progress, partial, denylist, allow_all_ip):
         with_features_page(browser, served, broker, viewport, theme, fn)
 
 
@@ -2595,6 +2653,8 @@ NEW_CHECKS = [
     ("92", "Denylist hits are one group, collapsed by default, headed by the summed hits, expanding to a row with `N×` each", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
     ("93", "Filters, bulk buttons, menus and the bulk dialog stay inside the viewport at every viewport, with no console errors", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
     ("94", "The collapsed denylist group is a card of its own with no row elements in it; the ordinary recent rows sit in a separate card clearly below", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("95", "Allow all on a bottle with an IP-literal request reports it apart (`Allowed 4 of 5 in alpha · 1 needs a CIDR in the manifest`), sends the literal Allow bodies and leaves that row open with its note; the state toggle is named `Request state`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("96", "A request swept by an earlier decide of a bulk run is skipped, not sent, and the run still reports every request; the running decide's spinner sits on the pressed button", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
     ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
     ("62", "The selected day, a range's end and its start in the History date picker have at least 4.5:1 text contrast, hovered or not, focused or not, light and dark", "N/A(spa-only) on legacy"),

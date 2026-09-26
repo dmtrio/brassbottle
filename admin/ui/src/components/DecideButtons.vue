@@ -24,6 +24,8 @@ const ACTION_LABEL: Record<DecideAction, string> = {
 const props = defineProps<{
   row: OpenRow
   busy: boolean
+  // The action of the decide holding the row: the spinner goes on that button.
+  pending?: DecideAction
   stretch?: boolean
 }>()
 
@@ -31,6 +33,8 @@ const emit = defineEmits<{
   decide: [action: DecideAction]
   permanentDeny: [action: 'deny_bottle' | 'deny_global']
 }>()
+
+const denying = computed(() => props.busy && props.pending?.startsWith('deny') === true)
 
 const allowLabel = computed(() => (props.row.last_error ? 'Retry allow' : ACTION_LABEL.allow_live))
 
@@ -59,7 +63,7 @@ const target = computed(() => `${props.row.host}:${props.row.port} in ${props.ro
         @click="emit('decide', 'allow_live')"
       >
         <Loader2
-          v-if="busy"
+          v-if="busy && !denying"
           class="size-icon animate-spin"
         />
         <RotateCw
@@ -118,7 +122,14 @@ const target = computed(() => `${props.row.host}:${props.row.port} in ${props.ro
         :aria-label="`Deny ${target}`"
         @click="emit('decide', 'deny')"
       >
-        <X class="size-icon" /> Deny
+        <Loader2
+          v-if="denying"
+          class="size-icon animate-spin"
+        />
+        <X
+          v-else
+          class="size-icon"
+        /> Deny
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger as-child>

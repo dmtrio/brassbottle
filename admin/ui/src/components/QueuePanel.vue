@@ -70,6 +70,9 @@ function chooseView(next: unknown): void {
 // still holds.
 const busy = reactive(new Map<string, number>())
 const isBusy = (id: string): boolean => (busy.get(id) ?? 0) > 0
+// Request id -> the action of the latest decide holding it, so the spinner sits
+// on the button that was pressed (an Allow run must not spin the Deny button).
+const busyAction = reactive(new Map<string, DecideAction>())
 const notes = reactive<Record<string, RowNote | undefined>>({})
 
 function byNewest(a: OpenRow, b: OpenRow): number {
@@ -195,15 +198,21 @@ function affectedIds(row: OpenRow, action: DecideAction): string[] {
   return ids.includes(row.request_id) ? ids : [...ids, row.request_id]
 }
 
-function lockRows(ids: string[]): void {
-  for (const id of ids) busy.set(id, (busy.get(id) ?? 0) + 1)
+function lockRows(ids: string[], action: DecideAction): void {
+  for (const id of ids) {
+    busy.set(id, (busy.get(id) ?? 0) + 1)
+    busyAction.set(id, action)
+  }
 }
 
 function unlockRows(ids: string[]): void {
   for (const id of ids) {
     const left = (busy.get(id) ?? 1) - 1
     if (left > 0) busy.set(id, left)
-    else busy.delete(id)
+    else {
+      busy.delete(id)
+      busyAction.delete(id)
+    }
   }
 }
 
@@ -215,15 +224,18 @@ function payloadFor(row: OpenRow, action: DecideAction, reason = ''): DecidePayl
 }
 
 // What a decide's answer means for its row: the outcome note, and the queue
-// re-read that drops the rows the broker decided. Returns false when the
-// request stays queued with a failure marked on it. Legacy semantics for each
-// outcome; see PLN "Decide outcomes". `bulk` keeps a failed decide off the
-// banner: a bulk run reports its failures once, in its own result line.
+// re-read that drops the rows the broker decided. Returns how the request
+// ended: 'decided' (it leaves the queue), 'needs-cidr' (an IP-literal allow:
+// recorded, but the row stays open until the CIDR is added by hand) or
+// 'failed' (it stays queued with a failure marked on it). Legacy semantics for
+// each outcome; see PLN "Decide outcomes". `bulk` keeps a failed decide off
+// the banner: a bulk run reports its failures once, in its own result line.
+type Settled = 'decided' | 'needs-cidr' | 'failed'
 async function settle(
   row: OpenRow,
   result: Awaited<ReturnType<typeof apiDecide>>,
   bulk: boolean,
-): Promise<boolean> {
+): Promise<Settled> {
   const key = row.request_id
   if (!result.ok) {
     if (result.status === 400) {
@@ -236,26 +248,27 @@ async function settle(
       notes[key] = { tone: 'deny', text: `Not sent: ${result.error}` }
       if (!bulk) setStale(result.error)
     }
-    return false
+    return 'failed'
   }
 
   const failure = (result.data.apply_failures ?? []).find((f) => f.request_id === key)
-  let stays = false
+  let settled: Settled = 'decided'
   if (!failure) {
     notes[key] = { tone: 'neutral', text: 'Decision recorded' }
   } else if (failure.reason === 'ip_requires_cidr') {
     notes[key] = { tone: 'neutral', text: 'Recorded — add the CIDR to the manifest by hand' }
+    settled = 'needs-cidr'
   } else {
     notes[key] = { tone: 'deny', text: 'Decision recorded but the rule install failed — the request stays queued' }
-    stays = true
+    settled = 'failed'
   }
   await refresh()
-  return !stays
+  return settled
 }
 
 async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Promise<void> {
   const locked = affectedIds(row, action)
-  lockRows(locked)
+  lockRows(locked, action)
   notes[row.request_id] = undefined
   const result = await apiDecide(payloadFor(row, action, reason))
   unlockRows(locked)
@@ -267,7 +280,7 @@ async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Pro
 // open request of the bottle when the dialog opened, not only the ones the
 // filters show: the dialog says so and lists them all.
 type BulkAction = 'allow_live' | 'deny'
-type BulkRun = { container: string; action: BulkAction; total: number; done: number; failed: number; running: boolean }
+type BulkRun = { container: string; action: BulkAction; total: number; done: number; failed: number; needsCidr: number; running: boolean }
 
 const bulkAsk = reactive({
   open: false,
@@ -309,17 +322,28 @@ async function runBulk(): Promise<void> {
   const rows = bulkAsk.rows.filter((row) => stillOpen.has(row.request_id) && !isBusy(row.request_id))
   if (rows.length === 0) return
 
-  const run: BulkRun = reactive({ container, action, total: rows.length, done: 0, failed: 0, running: true })
+  const run: BulkRun = reactive({ container, action, total: rows.length, done: 0, failed: 0, needsCidr: 0, running: true })
   bulk.value = run
   const pending = rows.map((row) => row.request_id)
-  lockRows(pending)
+  lockRows(pending, action)
   try {
     for (const row of rows) {
-      notes[row.request_id] = undefined
+      const id = row.request_id
+      // Swept by an earlier decide of this run (a zone decide takes its
+      // subdomains with it): nothing left to decide, so nothing is sent.
+      if (!openRows.value.some((open) => open.request_id === id)) {
+        unlockRows([id])
+        pending.splice(pending.indexOf(id), 1)
+        run.done += 1
+        continue
+      }
+      notes[id] = undefined
       const result = await apiDecide(payloadFor(row, action))
-      unlockRows([row.request_id])
-      pending.splice(pending.indexOf(row.request_id), 1)
-      if (!(await settle(row, result, true))) run.failed += 1
+      unlockRows([id])
+      pending.splice(pending.indexOf(id), 1)
+      const settled = await settle(row, result, true)
+      if (settled === 'failed') run.failed += 1
+      else if (settled === 'needs-cidr') run.needsCidr += 1
       run.done += 1
     }
   } finally {
@@ -333,10 +357,13 @@ const bulkVerb = (action: BulkAction): string => (action === 'allow_live' ? 'All
 const bulkResult = computed(() => {
   const run = bulk.value
   if (!run || run.running) return null
-  const done = run.total - run.failed
+  const done = run.total - run.failed - run.needsCidr
   const verb = run.action === 'allow_live' ? 'Allowed' : 'Denied'
-  const tail = run.failed ? ` · ${run.failed} failed and stay${run.failed === 1 ? 's' : ''} open, marked in the list` : ''
-  return `${verb} ${done} of ${run.total} in ${run.container}${tail}`
+  // An IP-literal allow leaves its row open with a note: counting it as done
+  // would say "Allowed 5 of 5" while the request still sits in the queue.
+  const cidr = run.needsCidr ? ` · ${run.needsCidr} needs a CIDR in the manifest` : ''
+  const failed = run.failed ? ` · ${run.failed} failed and stay${run.failed === 1 ? 's' : ''} open, marked in the list` : ''
+  return `${verb} ${done} of ${run.total} in ${run.container}${cidr}${failed}`
 })
 
 function onDecide(row: OpenRow, action: DecideAction): void {
@@ -368,6 +395,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
         variant="outline"
         class="bg-background"
         data-testid="queue-state"
+        aria-label="Request state"
         @update:model-value="chooseState"
       >
         <ToggleGroupItem
@@ -582,6 +610,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
                 <DecideButtons
                   :row="r"
                   :busy="isBusy(r.request_id)"
+                  :pending="busyAction.get(r.request_id)"
                   @decide="(a) => onDecide(r, a)"
                   @permanent-deny="(a) => openPermanentDeny(r, a)"
                 />
@@ -661,6 +690,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
           <DecideButtons
             :row="r"
             :busy="isBusy(r.request_id)"
+            :pending="busyAction.get(r.request_id)"
             stretch
             @decide="(a) => onDecide(r, a)"
             @permanent-deny="(a) => openPermanentDeny(r, a)"
