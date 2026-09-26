@@ -183,6 +183,7 @@ class PatternTests(unittest.TestCase):
             "request_id": "r1", "container": "c", "host": "h.example.com", "port": 443,
             "status": "allowed", "scope": "live", "decided_at": "2026-09-23T12:00:00Z",
             "decided_by": "operator", "apply_status": None, "deny_reason": None,
+            "hit_count": 1,
         }
         good = {"rows": [row], "next": "2026-09-23T12:00:00Z,r1"}
         self.assertEqual(validate_document(good, "recent_page.schema.json"), [])

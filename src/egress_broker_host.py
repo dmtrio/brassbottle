@@ -608,6 +608,7 @@ def decided_row_json(row: RequestRow) -> dict[str, Any]:
         "decided_by": row.decided_by,
         "apply_status": row.apply_status,
         "deny_reason": row.deny_reason,
+        "hit_count": row.hit_count,
     }
 
 

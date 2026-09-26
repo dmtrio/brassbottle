@@ -72,11 +72,15 @@
             "enum": ["applied", "apply_failed", "ip_requires_cidr", null],
             "$comment": "APPLY_OUTCOMES in src/egress_store.py; null when no allow was attempted."
           },
-          "deny_reason": { "type": ["string", "null"] }
+          "deny_reason": { "type": ["string", "null"] },
+          "hit_count": {
+            "type": "integer",
+            "$comment": "Requests folded into this row before it was decided. For a decided_by 'denylist' row the operator UI sums it per host: repeats inside the coalesce window bump it (suppressed_hit in src/egress_store.py)."
+          }
         },
         "required": [
           "request_id", "container", "host", "port", "status", "scope",
-          "decided_at", "decided_by", "apply_status", "deny_reason"
+          "decided_at", "decided_by", "apply_status", "deny_reason", "hit_count"
         ],
         "additionalProperties": false
       }
