@@ -1,7 +1,7 @@
 import { computed, onMounted, onUnmounted, reactive } from 'vue'
 import type { QueueSnapshot } from '@/contract'
 import { fetchQueue } from '@/api/egress'
-import { broadcastBus, webLocksElection } from '@/lib/browser-link'
+import { broadcastBus, watchFreeze, webLocksElection } from '@/lib/browser-link'
 import { createSharedLink } from '@/lib/shared-link'
 import { POLL_MS, STREAM_URL, type LinkState } from '@/lib/stream'
 
@@ -143,6 +143,15 @@ function onPageShow(event: PageTransitionEvent): void {
   if (event.persisted && consumers > 0) link.start()
 }
 
+// A frozen tab keeps its lock but runs no script: it lets go of the lock (and its stream) so another
+// tab leads, and starts over when it thaws. `start` does nothing while the link is running, so the
+// resume that follows a bfcache restore and its pageshow do not start it twice.
+function onResume(): void {
+  if (consumers > 0) link.start()
+}
+
+let stopWatchingFreeze: (() => void) | null = null
+
 // A failed decide raises the banner too. When a failed poll already raised it,
 // that one stays (it says more: the list is out of date) and the decide's
 // message waits behind it.
@@ -173,6 +182,7 @@ export function useQueue() {
       document.addEventListener('visibilitychange', onVisibilityChange)
       window.addEventListener('pagehide', onPageHide)
       window.addEventListener('pageshow', onPageShow)
+      stopWatchingFreeze = watchFreeze(document, onPageHide, onResume)
       link.start()
     }
   })
@@ -183,6 +193,8 @@ export function useQueue() {
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pagehide', onPageHide)
       window.removeEventListener('pageshow', onPageShow)
+      stopWatchingFreeze?.()
+      stopWatchingFreeze = null
       link.stop()
       stopPolling()
       if (decideClearId !== null) clearTimeout(decideClearId)

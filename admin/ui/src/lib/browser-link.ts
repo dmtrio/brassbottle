@@ -54,3 +54,16 @@ export function broadcastBus(
     return null
   }
 }
+
+// Page Lifecycle: a frozen tab keeps its lock but runs no script, so a frozen leader would leave the
+// others with no stream and no relay until it thaws (and a frozen follower still queued for the lock
+// could be handed it). A tab lets go of the lock when it freezes and asks for it again on resume.
+// Returns the function that removes the listeners.
+export function watchFreeze(target: EventTarget, onFreeze: () => void, onResume: () => void): () => void {
+  target.addEventListener('freeze', onFreeze)
+  target.addEventListener('resume', onResume)
+  return () => {
+    target.removeEventListener('freeze', onFreeze)
+    target.removeEventListener('resume', onResume)
+  }
+}

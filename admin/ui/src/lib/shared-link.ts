@@ -33,12 +33,13 @@ export const HELLO_WAIT_MS = 3000
 export type Role = 'solo' | 'follower' | 'leader'
 
 // What travels on the channel. Everything but `hello` comes from the leader and carries its link
-// state, so a follower that missed a change is corrected by the next message of any kind.
+// state, so a follower that missed a change is corrected by the next message of any kind. A message
+// with `to` is the leader's answer to that one tab's `hello`: every other tab ignores it.
 export type Message =
   | { kind: 'hello'; from: string }
-  | { kind: 'link'; from: string; state: LinkState }
+  | { kind: 'link'; from: string; to?: string; state: LinkState }
   | { kind: 'hb'; from: string; state: LinkState }
-  | { kind: 'snapshot'; from: string; state: LinkState; snapshot: QueueSnapshot }
+  | { kind: 'snapshot'; from: string; to?: string; state: LinkState; snapshot: QueueSnapshot }
 
 const STATES: readonly string[] = ['connecting', 'live', 'reconnecting', 'polling', 'paused']
 
@@ -50,12 +51,13 @@ export function parseMessage(raw: unknown): Message | null {
   if (m.kind === 'hello') return { kind: 'hello', from: m.from }
   if (typeof m.state !== 'string' || !STATES.includes(m.state)) return null
   const state = m.state as LinkState
-  if (m.kind === 'link') return { kind: 'link', from: m.from, state }
+  const to = typeof m.to === 'string' ? { to: m.to } : {}
+  if (m.kind === 'link') return { kind: 'link', from: m.from, ...to, state }
   if (m.kind === 'hb') return { kind: 'hb', from: m.from, state }
   if (m.kind === 'snapshot') {
     const snapshot = m.snapshot as QueueSnapshot | null
     if (typeof snapshot === 'object' && snapshot !== null && Array.isArray(snapshot.open)) {
-      return { kind: 'snapshot', from: m.from, state, snapshot }
+      return { kind: 'snapshot', from: m.from, ...to, state, snapshot }
     }
   }
   return null
@@ -103,6 +105,8 @@ export function createSharedLink(deps: SharedDeps) {
   let last: QueueSnapshot | null = null
   let lastHeard = 0
   let heard = false
+  // When the newest snapshot this tab has read or been relayed was generated: an older relayed one is dropped.
+  let newestAt: number | null = null
   let watch: ReturnType<typeof setTimeout> | null = null
   let ownPolling = false
   const counts = { sent: 0, received: 0 }
@@ -152,14 +156,26 @@ export function createSharedLink(deps: SharedDeps) {
     deps.startPolling(POLL_MS)
   }
 
+  function noteGenerated(snapshot: QueueSnapshot): void {
+    const at = Date.parse(snapshot.generated_at)
+    if (!Number.isNaN(at) && (newestAt === null || at > newestAt)) newestAt = at
+  }
+
+  function isOlder(snapshot: QueueSnapshot): boolean {
+    const at = Date.parse(snapshot.generated_at)
+    return !Number.isNaN(at) && newestAt !== null && at < newestAt
+  }
+
   function receive(raw: unknown): void {
     const message = parseMessage(raw)
     if (message === null || message.from === deps.id) return
+    if ('to' in message && message.to !== undefined && message.to !== deps.id) return
     counts.received++
     if (message.kind === 'hello') {
       if (role !== 'leader') return
-      send({ kind: 'link', from: deps.id, state })
-      if (last !== null) send({ kind: 'snapshot', from: deps.id, state, snapshot: last })
+      // to the asking tab alone: to the rest it could be an older snapshot than one they have just read
+      send({ kind: 'link', from: deps.id, to: message.from, state })
+      if (last !== null) send({ kind: 'snapshot', from: deps.id, to: message.from, state, snapshot: last })
       return
     }
     if (role !== 'follower') return
@@ -175,6 +191,11 @@ export function createSharedLink(deps: SharedDeps) {
     }
     setState(message.state)
     if (message.kind === 'snapshot') {
+      if (isOlder(message.snapshot)) {
+        deps.log(`stage=broadcast-in kind=snapshot dropped=older generated_at=${message.snapshot.generated_at}`)
+        return
+      }
+      noteGenerated(message.snapshot)
       deps.log(`stage=broadcast-in kind=snapshot rows=${message.snapshot.open.length} received=${counts.received}`)
       deps.onSnapshot(message.snapshot)
     }
@@ -215,8 +236,11 @@ export function createSharedLink(deps: SharedDeps) {
     role: () => role,
     state: () => state,
     start(): void {
+      if (running) return
       running = true
-      state = 'connecting'
+      // a tab restored from the back-forward cache, or thawed, shows the old state until it says otherwise
+      setState('connecting')
+      newestAt = null
       const opened = deps.election === null ? null : deps.openBus()
       if (deps.election === null || opened === null) {
         opened?.close()
@@ -253,6 +277,7 @@ export function createSharedLink(deps: SharedDeps) {
     // The leader's own reads of the queue (a poll, or the read after a decide) are as good as a
     // frame: hand them to the tabs following it.
     publish(snapshot: QueueSnapshot): void {
+      noteGenerated(snapshot) // a follower's own read too: what the leader relays later must not be older
       if (role !== 'leader') return
       last = snapshot
       send({ kind: 'snapshot', from: deps.id, state, snapshot })
@@ -272,7 +297,6 @@ export function createSharedLink(deps: SharedDeps) {
       bus = null
       ownPolling = false
       role = 'follower'
-      state = 'connecting'
     },
   }
 }
