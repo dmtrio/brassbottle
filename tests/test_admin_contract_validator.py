@@ -148,19 +148,27 @@ class RefTests(unittest.TestCase):
 
     def test_validate_document_resolves_contract_ref_chain(self):
         """$ref in sse_event.schema.json resolves to the real sibling schema."""
+        row = {
+            "container": "c", "host": "h.example.com", "port": 443,
+            "status": "allowed", "scope": "live", "decided_at": "2026-09-23T12:00:00Z",
+            "decided_by": "operator", "apply_status": None, "deny_reason": None,
+            "hit_count": 1,
+        }   # a valid recent row but for the missing request_id
         instance = {
             "event": "queue",
             "data": {
                 "open": [],
                 "count": 0,
-                "recent": [{"bogus": True}],
+                "recent": [row],
                 "generated_at": "2026-09-23T12:00:00+00:00",
             },
         }
         errors = validate_document(instance, "sse_event.schema.json")
-        self.assertIn(
-            "$.data.recent[0]: missing required key 'request_id'", errors
-        )
+        # The event schema is an anyOf of the queue and heartbeat events: the one error names the closest
+        # branch's errors, which come through the $ref from the real sibling schema.
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("failed all 2 anyOf branches", errors[0])
+        self.assertIn("$.data.recent[0]: missing required key 'request_id'", errors[0])
 
 
 class PatternTests(unittest.TestCase):

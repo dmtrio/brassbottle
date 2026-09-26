@@ -27,12 +27,16 @@ and the admin; a missing session is a 403 from the admin.
 
 `sse_event.schema.json` describes one event of `GET /api/egress/stream` on the
 admin (spa mode only; session cookie required, refused 403 like the other
-`/api/*` routes). On the wire an event is `event: queue` plus one `data:` line
-holding the whole `queue_snapshot()` as compact JSON; the schema is that event
-as an object, `{event, data}`. A stream gets the current snapshot the moment it
-opens and another whenever the queue changes; a change ignores `generated_at`
-and each open row's `age_seconds`, which move on every poll. `: hb` comment
-lines every 15 s keep an idle stream open. At most 8 streams are open; a ninth,
-or an open while the broker is unreachable, is a 503 with an `error_response`
-body. There is no error event: when the broker stays unreachable the admin ends
-its streams, and the app falls back to polling `GET /api/egress/queue`.
+`/api/*` routes). On the wire an event is `event: <name>` plus one `data:` line
+of compact JSON; the schema is that event as an object, `{event, data}`, and is
+one of two. `queue` holds the whole `queue_snapshot()`: a stream gets the
+current one the moment it opens and another whenever the queue changes; a
+change ignores `generated_at` and each open row's `age_seconds`, which move on
+every poll. `hb` is the heartbeat every 15 s on an idle stream, with `{}` as its
+data (a `data:` line must not be empty or the browser dispatches nothing). It
+is an event rather than a `: hb` comment because an `EventSource` never shows a
+comment to script: the app treats about two missed heartbeats as a dead stream
+and reconnects. At most 8 streams are open; a ninth, or an open while the
+broker is unreachable, is a 503 with an `error_response` body. There is no
+error event: when the broker stays unreachable the admin ends its streams, and
+the app falls back to polling `GET /api/egress/queue`.
