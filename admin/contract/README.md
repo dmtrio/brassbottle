@@ -26,7 +26,7 @@ and the admin; a missing session is a 403 from the admin.
 ## Queue stream
 
 `sse_event.schema.json` describes one event of `GET /api/egress/stream` on the
-admin (spa mode only; session cookie required, refused 403 like the other
+admin (session cookie required, refused 403 like the other
 `/api/*` routes). On the wire an event is `event: <name>` plus one `data:` line
 of compact JSON; the schema is that event as an object, `{event, data}`, and is
 one of two. `queue` holds the whole `queue_snapshot()`: a stream gets the

@@ -12,22 +12,27 @@ Styling rule: every spacing, size, type and status colour in app code must
 come from `src/styles/tokens.css`; see the header comment there. The Gate
 (`scripts/check_tokens.py`) enforces it and runs in the image build.
 
-`DJINN_ADMIN_UI=spa` switches `src/admin_daemon.py` from the legacy Preact
-page to this app; `DJINN_ADMIN_UI_DIST` overrides the dist directory.
+`src/admin_daemon.py` serves this app from `dist/` and from nothing else; it
+refuses to start (logged error, exit 1) when `dist/index.html` is missing, so
+run `npm run build` first. `DJINN_ADMIN_UI_DIST` points the daemon at another
+build directory (the tests use it).
 
 Service worker: `npm run build` also emits `dist/sw.js`, its workbox chunk,
 `dist/sw-cleanup.js` and `dist/manifest.webmanifest` (vite-plugin-pwa, configured
 in `pwa.ts`). The worker precaches the hashed files under `/assets/` and nothing
 else: no navigation fallback and no runtime caching, so `/` (the app, or the pointer
 page without a session) and `/api/*` always come from the network. On activation it
-deletes every cache it does not own, the legacy page's `djinn-admin-shell-v3`
-included. `src/main.ts` registers it in the production build only; the daemon serves
-these files from `dist/` through its ordinary asset allowlist (`sw.js` is `no-cache`).
+deletes every cache it does not own, so a browser that still holds the
+`djinn-admin-shell-v3` cache of an earlier admin page loses it on the first visit
+(the worker at `/sw.js` replaces the earlier page's, and activates at once).
+`src/main.ts` registers it in the production build only; the daemon serves these
+files from `dist/` through its ordinary asset allowlist (`sw.js` is `no-cache`).
+Check 180 of `tests/admin_ui_playwright.py` installs a copy of that earlier page's
+worker (`tests/fixtures/admin_legacy_sw.js`) and pins the upgrade.
 `tests/test_admin_sw_build.py` checks the generated worker.
 
-The queue arrives over `GET /api/egress/stream` (server-sent events; spa mode
-only) while it is up, and the tab does not poll then. While the stream opens the
-tab reads `GET /api/egress/queue` once at once (Connecting), so the list is
+The queue arrives over `GET /api/egress/stream` (server-sent events) while it is
+up, and the tab does not poll then. While the stream opens the tab reads `GET /api/egress/queue` once at once (Connecting), so the list is
 never empty, and keeps reading every 5 s until the first frame. If the stream is
 unavailable, drops, or goes silent for about two of the daemon's `hb`
 heartbeats, the tab polls every 5 s until the stream is back (Reconnecting, then

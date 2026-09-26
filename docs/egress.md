@@ -67,8 +67,9 @@ at that live address.
 
 `./djinn egress start` is the primary decision surface for open egress
 requests: it runs the admin page as a service (above). `./djinn admin` still
-runs the same UI as a host-side loopback daemon (`http://127.0.0.1:8817` by
-default) when you want it outside docker.
+runs the same app as a host-side loopback daemon (`http://127.0.0.1:8817` by
+default) when you want it outside docker; it needs `admin/ui/dist` built (see
+*The Egress page*).
 
 The browser session gate on `POST /api/egress/decide` is intentionally narrow:
 it defends against hostile web pages (CSRF and DNS-rebinding style requests)
@@ -77,42 +78,80 @@ against local processes running as the same user. Local processes can already
 read the operator token file from disk, so loopback binding is the real trust
 boundary.
 
-### The open-requests table
+### The Egress page
 
-The queue panel renders open requests in one table grouped by bottle (the
-`container` field). A group header row per bottle shows the bottle name and its
-open count; bottles appear in first-seen order of `opened_at`, and each
-bottle's requests follow in `opened_at` order. Each request row has four
-columns:
+The admin is a Vue app (`admin/ui/`, built into `admin/ui/dist/`, which the
+daemon serves and nothing else: `/` opens the Egress page). The egress image
+builds it. Under `./djinn admin` on the host, build it once first with
+`cd admin/ui && npm ci && npm run build`; the daemon logs an error and exits 1
+when `dist/index.html` is missing. The page shows the open requests and, below
+them, the recent decisions.
 
-- **Requested** — `opened_at` rendered in the browser's local time as
-  `YYYY-MM-DD HH:MM:SS`; hovering shows the raw UTC timestamp.
-- **Destination** — `host:port`, with an `IP` badge on IP-literal hosts and the
-  hit count alongside; `uid` and `comm` are shown on hover.
-- **Reason** — the operator-visible filing reason, or an em-dash when none.
-- **Actions** — the five decision buttons: allow live, allow + manifest, deny
-  once, deny always (bottle), deny always (global), plus the optional deny
-  reason input. Denying globally requires typing the exact host in the input
-  beside the buttons (confirmed on the same row); a mismatched name is refused
-  with an inline chip. When the broker reports `attempt`/`last_error` for a
-  row, a chip on this cell shows `apply failed ×N: <reason>`.
+- **Views** — *By bottle* groups requests under a header per bottle (the
+  `container` field) with its open count, bottles alphabetical and each
+  bottle's requests newest first; *All* lists every request newest first with
+  the bottle on the second line. The tab title carries the open count.
+- **A request row** — `host:port` with its hit count, the bottle, the filing
+  reason (or "No reason given"), the time it opened, an *IP address* marker on
+  IP-literal hosts, and, when the broker reports `attempt`/`last_error`, the
+  failed-apply text (for example "Apply failed after 1 attempt: an IP address
+  needs a CIDR in the manifest").
+- **Actions** — *Allow* (live) and *Deny* (once) are buttons on the row. The
+  menus beside them offer *Allow permanently · bottle* (manifest) and
+  *Deny permanently · bottle* or *· global*. A permanent deny opens a dialog
+  with an optional reason (up to 200 characters); the global one asks for the
+  exact host to be typed and refuses anything else. A row's controls lock
+  while its decision is in flight, and its outcome (recorded, applied, failed,
+  or an IP that needs a CIDR by hand) stays on the row.
+- **Filters** — a destination search, a bottle multi-select, a *Request state*
+  toggle (all, or only *Failed apply*) and an age bucket (under 5 minutes,
+  under an hour, older). *Clear* resets them; the count line reads
+  `N of M open`.
+- **Bulk** — *Allow all* and *Deny all* on a bottle send one decide per open
+  request of that bottle, one at a time, whatever the filters hide, and report
+  every request when done.
+- **Live queue** — the page holds one `GET /api/egress/stream` (server-sent
+  events) per browser, however many admin tabs are open, and the top bar says
+  *Live*, *Connecting*, *Reconnecting*, *Polling* or *Paused*. Without the
+  stream it polls `GET /api/egress/queue` every 5 s. A failed read or decide
+  raises a banner and the last good data stays on screen.
+- **Alerts** — the bell asks for the browser's Notification permission only when
+  clicked, then raises one notification per request that is new to the tab
+  (clicking it focuses the row); a second click mutes it.
+- **Install** — a manifest and a service worker let Chromium and Safari install
+  the page ("Add to home screen"). The worker caches only the hashed files
+  under `/assets/`; `/` and `/api/*` always come from the network.
 
-Every row keeps the honesty chips from `POST /api/egress/decide`
-(`apply_failed`, `ip_requires_cidr`, the "decision recorded" fallback) and
-disables its buttons while a decision is in flight.
+The Denylist, Bottles and Backup entries in the navigation are placeholders.
 
-### Recent decisions
+| Desktop, light | Desktop, dark | Phone, light | Phone, dark |
+|---|---|---|---|
+| ![Queue, desktop, light](screenshots/admin-queue-desktop-light.png) | ![Queue, desktop, dark](screenshots/admin-queue-desktop-dark.png) | ![Queue, phone, light](screenshots/admin-queue-mobile-light.png) | ![Queue, phone, dark](screenshots/admin-queue-mobile-dark.png) |
 
-Below the table, a second section "Recent decisions (24 h)" lists rows the
-broker decided in the last 24 hours, newest first: decided time (local, UTC on
-hover), bottle, destination, outcome (status and scope, plus the apply status
-when it is not `applied`, plus the deny reason when set) and who decided it
-(`decided_by`). A broker that does not report a `recent` list renders nothing
-for this section.
+Every decision uses the same `POST /api/egress/decide` (below); the row keeps
+the broker's honesty fields (`apply_failed`, `ip_requires_cidr`, the "decision
+recorded" fallback) on screen.
+
+### Recent decisions and History
+
+*Recent decisions (24 h)* lists what the broker decided in the last 24 hours,
+newest first: the destination, the bottle, the outcome (status and scope, the
+apply status when it is not `applied`, and the deny reason when set) and the
+time. Hits on the denylist are not decisions anyone made, so they sit in one
+collapsed group with a summed count. A broker that does not report a `recent`
+list shows none.
+
+The *History* tab pages the whole decision store newest first, 50 to a page
+(*Older* / *Newer*), and filters by day or date range, by bottle, by outcome
+(*All*, *Allowed*, *Denied*) and by a search over the loaded page.
+
+| Desktop, light | Desktop, dark | Phone, light | Phone, dark |
+|---|---|---|---|
+| ![History, desktop, light](screenshots/admin-history-desktop-light.png) | ![History, desktop, dark](screenshots/admin-history-desktop-dark.png) | ![History, phone, light](screenshots/admin-history-mobile-light.png) | ![History, phone, dark](screenshots/admin-history-mobile-dark.png) |
 
 ### Decision action mapping
 
-The admin UI posts one of five actions, mapped to broker `/decide`:
+The admin posts one of five actions, mapped to broker `/decide`:
 
 - `allow_live` -> `decision=allow`, `scope=live`
 - `allow_manifest` -> `decision=allow`, `scope=manifest`
@@ -121,13 +160,6 @@ The admin UI posts one of five actions, mapped to broker `/decide`:
 - `deny_global` -> `decision=deny`, `scope=global`
 
 `deny_global` intentionally omits `container`; other actions require it.
-
-### PWA install and alerts
-
-The admin page is a small PWA (manifest + service worker). It supports install
-from Chromium/Safari "Add to home screen" flows and can request Notification
-permission when the operator clicks "Enable alerts". New unseen requests can
-raise a local notification when the page is in the background.
 
 ### Decisions, not current state
 
