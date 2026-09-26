@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Clock, Radio, RefreshCw } from '@lucide/vue'
+import { Clock, LoaderCircle, Pause, Radio, RefreshCw } from '@lucide/vue'
 import type { LinkState } from '@/lib/stream'
 
 const props = defineProps<{ state: LinkState }>()
 
 const copy = {
+  connecting: {
+    label: 'Connecting',
+    tone: 'pill-neutral',
+    hint: 'Opening the live connection. Reading the queue meanwhile.',
+  },
   live: {
     label: 'Live',
     tone: 'pill-allow',
@@ -20,6 +25,11 @@ const copy = {
     label: 'Polling',
     tone: 'pill-neutral',
     hint: 'Live updates are unavailable. Checking the queue every 5 seconds.',
+  },
+  paused: {
+    label: 'Paused',
+    tone: 'pill-neutral',
+    hint: 'This tab is in the background, so its live connection is closed. Checking the queue every 30 seconds; live updates resume when you return.',
   },
 } as const
 
@@ -41,8 +51,18 @@ const current = computed(() => copy[props.state])
       class="size-icon"
       aria-hidden="true"
     />
+    <LoaderCircle
+      v-else-if="state === 'connecting'"
+      class="size-icon"
+      aria-hidden="true"
+    />
     <RefreshCw
       v-else-if="state === 'reconnecting'"
+      class="size-icon"
+      aria-hidden="true"
+    />
+    <Pause
+      v-else-if="state === 'paused'"
       class="size-icon"
       aria-hidden="true"
     />
