@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { OpenRow } from '@/types'
-import { bellLabel, bellName, bellState, notificationFor, SeenRequests, unsupportedReason } from './notify'
+import {
+  BROWSER_NEXT_STEP,
+  bellLabel,
+  bellName,
+  bellState,
+  INSECURE_NEXT_STEP,
+  notificationFor,
+  SeenRequests,
+  unsupportedReason,
+} from './notify'
 
 function row(id: string, container = 'alpha', host = `${id}.example.com`, port = 443): OpenRow {
   return {
@@ -90,6 +99,20 @@ describe('bell wording', () => {
     expect(bellName('unsupported', 'browser')).toBe(
       'Desktop notifications are not available on this device or browser',
     )
+  })
+})
+
+describe('the unsupported popover body', () => {
+  it('gives a reason and a next step, and neither repeats the heading', () => {
+    expect(BROWSER_NEXT_STEP).toBe(
+      'This browser or device cannot show them. Open the admin in a desktop browser such as Chrome or Firefox.',
+    )
+    expect(INSECURE_NEXT_STEP).toBe(
+      'Desktop notifications need a secure connection (https or localhost). Open the admin that way.',
+    )
+    for (const body of [BROWSER_NEXT_STEP, INSECURE_NEXT_STEP]) {
+      expect(body).not.toContain('not available')
+    }
   })
 })
 

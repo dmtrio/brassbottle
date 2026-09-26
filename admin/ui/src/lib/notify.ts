@@ -61,6 +61,11 @@ export const BELL_LABELS: Record<BellState, string> = {
 
 export const INSECURE_LABEL = 'Desktop notifications need a secure connection (https or localhost)'
 
+// The unsupported popover's body: a reason and a next step, not the heading again.
+export const BROWSER_NEXT_STEP =
+  'This browser or device cannot show them. Open the admin in a desktop browser such as Chrome or Firefox.'
+export const INSECURE_NEXT_STEP = `${INSECURE_LABEL}. Open the admin that way.`
+
 // The tooltip and the popover's heading: what the bell is doing right now.
 export function bellLabel(state: BellState, reason: UnsupportedReason): string {
   return state === 'unsupported' && reason === 'insecure' ? INSECURE_LABEL : BELL_LABELS[state]
