@@ -2945,6 +2945,394 @@ def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: 
     return suite.results
 
 
+# ---- notification bell ----------------------------------------------------------------
+
+BELL_LABELS = {
+    "unsupported": "Desktop notifications are not supported in this browser",
+    "default": "Enable desktop notifications",
+    "on": "Desktop notifications on. Click to mute",
+    "muted": "Desktop notifications muted. Click to turn on",
+    "denied": "Desktop notifications are blocked in browser settings",
+}
+BELL_STATES = list(BELL_LABELS)
+MUTE_STORAGE_KEY = "djinn-admin-notifications-muted"
+
+
+def notify_spy_script(*, permission: str = "default", answer: str = "granted", wrap: bool = False,
+                      remove: bool = False) -> str:
+    """An init script that replaces `window.Notification` with a recorder.
+
+    `window.__notifySpy` holds `permission` (what the page reads), `answer` (what `requestPermission`
+    resolves with and then reports), `requests` (how many times the page asked) and `made` (every
+    construction: title, options, and the instance, whose `onclick` the test calls). `wrap` builds the
+    real API underneath (a subclass, so the browser constructs and validates each notification) but still
+    reports `permission` itself: headless Chromium reports `denied` whatever a context grants. `remove`
+    deletes the API.
+    """
+    return f"""(() => {{
+  const spy = window.__notifySpy = {{permission: {json.dumps(permission)}, answer: {json.dumps(answer)},
+                                    requests: 0, made: []}};
+  if ({json.dumps(remove)}) {{ delete window.Notification; return; }}
+  const Base = {json.dumps(wrap)} ? window.Notification : class {{ close() {{ this.closed = true; }} }};
+  class SpyNotification extends Base {{
+    constructor(title, options) {{
+      super(title, options);
+      this.onclick = null;
+      spy.made.push({{title, options: {{...(options || {{}})}}, instance: this}});
+    }}
+    static requestPermission(cb) {{
+      spy.requests += 1;
+      spy.permission = spy.answer;
+      if (cb) cb(spy.answer);
+      return Promise.resolve(spy.answer);
+    }}
+  }}
+  Object.defineProperty(SpyNotification, 'permission', {{get: () => spy.permission}});
+  window.Notification = SpyNotification;
+}})();"""
+
+
+class NotifyPage:
+    """A queue page with the Notification spy installed and the poll driven by a fake clock."""
+
+    POLL_MS = 5000
+
+    def __init__(self, browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str = "light", *,
+                 permission: str = "default", answer: str = "granted", wrap: bool = False, remove: bool = False,
+                 grant: bool = False):
+        from playwright.sync_api import expect
+        broker.reset()
+        self.broker = broker
+        self.context, self.page, self.traffic = new_page(browser, served, viewport, theme)
+        try:
+            if grant:
+                self.context.grant_permissions(["notifications"], origin=served.base)
+            self.page.add_init_script(script=notify_spy_script(
+                permission=permission, answer=answer, wrap=wrap, remove=remove))
+            # A fake clock from before the first script runs: the app's 5 s poll only fires on `poll()`,
+            # so "a second snapshot with the same row" is one call, not a 5 s wait.
+            self.page.clock.install(time=datetime.now(timezone.utc))
+            self.page.goto(served.base + "/")
+            expect(self.page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
+        except Exception:
+            self.context.close()
+            raise
+
+    def close(self) -> None:
+        self.context.close()
+
+    @property
+    def bell(self):
+        return self.page.get_by_test_id("notify-bell")
+
+    def poll(self, *, rows: int | None = None) -> None:
+        """One queue poll, waited out until the page has rendered its reply."""
+        from playwright.sync_api import expect
+        reads = self.traffic.queue_reads
+        self.page.clock.run_for(self.POLL_MS)
+        deadline = time.monotonic() + TIMEOUT_MS / 1000
+        while self.traffic.queue_reads <= reads and time.monotonic() < deadline:
+            self.page.wait_for_timeout(20)
+        assert self.traffic.queue_reads > reads, "the poll never reached the daemon"
+        if rows is not None:
+            expect(self.page.locator("[data-testid=request]")).to_have_count(rows)
+        self.page.wait_for_timeout(100)   # the notification is fired in the same tick as the render
+
+    def made(self) -> list[dict]:
+        return self.page.evaluate(
+            "() => window.__notifySpy.made.map(n => ({title: n.title, body: n.options.body, tag: n.options.tag}))")
+
+    def permission_requests(self) -> int:
+        return self.page.evaluate("() => window.__notifySpy.requests")
+
+    def click_notification(self, index: int = 0) -> None:
+        """What the OS does when the user clicks a notification: call the recorded handler."""
+        self.page.evaluate("(i) => window.__notifySpy.made[i].instance.onclick(new Event('click'))", index)
+
+    def focused_request(self) -> str | None:
+        return self.page.evaluate(
+            "() => document.activeElement && document.activeElement.getAttribute('data-request-id')")
+
+
+def _filed(title_bottle: str, host: str, port: int, rid: str) -> dict:
+    return {"title": f"New egress request from {title_bottle}", "body": f"{host}:{port}", "tag": rid}
+
+
+def _n_defaults_ask_nothing(n: NotifyPage) -> None:
+    for _ in range(2):
+        n.poll()
+    assert n.permission_requests() == 0, f"the page asked for permission {n.permission_requests()} time(s) without a click"
+    assert n.made() == [], n.made()
+    assert n.bell.get_attribute("data-state") == "default", n.bell.get_attribute("data-state")
+    assert n.bell.get_attribute("aria-label") == BELL_LABELS["default"]
+
+
+def _n_click_asks_once(n: NotifyPage) -> None:
+    n.bell.click()
+    n.page.wait_for_function("() => window.__notifySpy.requests > 0")
+    n.page.wait_for_selector("[data-testid=notify-bell][data-state=on]")
+    assert n.permission_requests() == 1, n.permission_requests()
+    assert n.bell.get_attribute("aria-label") == BELL_LABELS["on"], n.bell.get_attribute("aria-label")
+    # The rows already open when permission was granted are not news, then or on the next snapshot.
+    assert n.made() == [], n.made()
+    n.poll()
+    assert n.made() == [], n.made()
+
+
+def _n_one_per_new_request(n: NotifyPage) -> None:
+    from playwright.sync_api import expect
+    assert n.bell.get_attribute("data-state") == "on"
+    n.poll()
+    assert n.made() == [], f"the initial snapshot's rows notified: {n.made()}"
+    n.broker.file_request("new.example.com", container="mid", request_id="n1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert n.made() == [_filed("mid", "new.example.com", 443, "n1")], n.made()
+    n.poll()
+    n.poll()
+    assert n.made() == [_filed("mid", "new.example.com", 443, "n1")], f"the same row notified again: {n.made()}"
+    # Two at once: one each, and the earlier one still counted once.
+    n.broker.file_request("two.example.com", container="alpha", port=8443, request_id="n2")
+    n.broker.file_request("192.0.2.9", container="zeta", port=5432, request_id="n3")
+    n.poll(rows=len(stub.OPEN_ROWS) + 3)
+    assert n.made() == [
+        _filed("mid", "new.example.com", 443, "n1"),
+        _filed("alpha", "two.example.com", 8443, "n2"),
+        _filed("zeta", "192.0.2.9", 5432, "n3"),
+    ], n.made()
+    expect(n.page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS) + 3)
+
+
+def _n_mute(n: NotifyPage) -> None:
+    served_page = n.page
+    n.bell.click()
+    served_page.wait_for_selector("[data-testid=notify-bell][data-state=muted]")
+    assert n.bell.get_attribute("aria-label") == BELL_LABELS["muted"]
+    assert n.permission_requests() == 0, "muting asked for permission"
+    n.broker.file_request("quiet.example.com", request_id="q1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert n.made() == [], f"a muted tab notified: {n.made()}"
+    # The mute is this viewer's, kept in localStorage: it survives a reload.
+    assert served_page.evaluate("(k) => localStorage.getItem(k)", MUTE_STORAGE_KEY) == "1"
+    served_page.reload()
+    served_page.wait_for_selector("[data-testid=notify-bell][data-state=muted]")
+    n.broker.file_request("quiet2.example.com", request_id="q2")
+    n.poll(rows=len(stub.OPEN_ROWS) + 2)
+    assert n.made() == [], f"a reloaded muted tab notified: {n.made()}"
+    # Unmuting shows nothing that arrived while muted, only what comes next.
+    n.bell.click()
+    served_page.wait_for_selector("[data-testid=notify-bell][data-state=on]")
+    n.poll()
+    assert n.made() == [], f"unmuting replayed the requests that arrived muted: {n.made()}"
+    n.broker.file_request("loud.example.com", request_id="l1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 3)
+    assert n.made() == [_filed("alpha", "loud.example.com", 443, "l1")], n.made()
+    assert served_page.evaluate("(k) => localStorage.getItem(k)", MUTE_STORAGE_KEY) is None
+
+
+def _n_denied(n: NotifyPage) -> None:
+    from playwright.sync_api import expect
+    assert n.bell.get_attribute("data-state") == "denied"
+    assert n.bell.get_attribute("aria-label") == BELL_LABELS["denied"]
+    n.bell.click()
+    blocked = n.page.get_by_test_id("notify-blocked")
+    expect(blocked).to_be_visible()
+    text = squash(blocked.inner_text())
+    assert "blocked" in text and "browser" in text and "settings" in text, text
+    assert n.permission_requests() == 0, "a blocked bell prompted anyway"
+    n.broker.file_request("nope.example.com", request_id="d1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert n.made() == [], f"a blocked tab notified: {n.made()}"
+
+
+def _n_click_focuses_row(n: NotifyPage) -> None:
+    page = n.page
+    n.poll()
+    n.broker.file_request("focus.example.com", container="zeta", request_id="f1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert [m["tag"] for m in n.made()] == ["f1"], n.made()
+    # From the History tab: the queue tab comes back and the row has focus.
+    page.get_by_test_id("tab-history").click()
+    page.wait_for_selector("[data-testid=request]", state="hidden")
+    n.click_notification(0)
+    page.wait_for_function("() => document.activeElement && document.activeElement.getAttribute('data-request-id') === 'f1'")
+    box = page.evaluate("() => { const r = document.activeElement.getBoundingClientRect(); return {top: r.top, bottom: r.bottom, h: innerHeight}; }")
+    assert 0 <= box["top"] and box["bottom"] <= box["h"], f"the focused row is not in view: {box}"
+    assert n.focused_request() == "f1"
+    # From another route.
+    page.locator("a[href='/denylist']").first.click()
+    page.wait_for_url("**/denylist")
+    assert page.locator("[data-testid=request]").count() == 0
+    n.click_notification(0)
+    page.wait_for_url("**/egress")
+    page.wait_for_function("() => document.activeElement && document.activeElement.getAttribute('data-request-id') === 'f1'")
+    # With a filter hiding it: the filters give way.
+    search = page.get_by_test_id("queue-filters").get_by_role("textbox")
+    search.fill("check18")
+    from playwright.sync_api import expect
+    expect(page.locator("[data-testid=request]")).to_have_count(1)
+    n.click_notification(0)
+    page.wait_for_function("() => document.activeElement && document.activeElement.getAttribute('data-request-id') === 'f1'")
+    assert search.input_value() == "", "the filter that hid the row was left on"
+    # A request decided since: the click still lands on the queue, with no error.
+    n.broker.withdraw_request("f1")
+    n.poll(rows=len(stub.OPEN_ROWS))
+    page.get_by_test_id("tab-history").click()
+    n.click_notification(0)
+    expect(page.get_by_test_id("tab-queue")).to_have_attribute("data-state", "active")
+    assert not n.traffic.console_errors, n.traffic.console_errors
+
+
+def _n_real_api(n: NotifyPage) -> None:
+    assert n.bell.get_attribute("data-state") == "on", n.bell.get_attribute("data-state")
+    granted = n.page.evaluate("() => navigator.permissions.query({name: 'notifications'}).then((s) => s.state)")
+    assert granted == "granted", f"the context's own grant did not take: {granted}"
+    n.broker.file_request("real.example.com", container="mid", port=8443, request_id="real1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert n.made() == [_filed("mid", "real.example.com", 8443, "real1")], n.made()
+    assert n.permission_requests() == 0
+    tag = n.page.evaluate("() => window.__notifySpy.made[0].instance.tag")
+    assert tag == "real1", f"the real Notification's own tag: {tag!r}"
+
+
+def _n_unsupported(n: NotifyPage) -> None:
+    from playwright.sync_api import expect
+    assert n.bell.get_attribute("data-state") == "unsupported"
+    expect(n.bell).to_be_disabled()
+    assert n.bell.get_attribute("aria-label") == BELL_LABELS["unsupported"]
+    assert n.bell.get_attribute("title") == BELL_LABELS["unsupported"]
+    n.broker.file_request("still.example.com", request_id="u1")
+    n.page.clock.run_for(NotifyPage.POLL_MS)
+    expect(n.page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS) + 1)
+    assert not n.traffic.console_errors, n.traffic.console_errors
+
+
+def _n_leaves_and_returns(n: NotifyPage) -> None:
+    n.poll()
+    n.broker.file_request("again.example.com", request_id="r1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert [m["tag"] for m in n.made()] == ["r1"], n.made()
+    n.broker.withdraw_request("r1")
+    n.poll(rows=len(stub.OPEN_ROWS))
+    n.broker.file_request("again.example.com", request_id="r1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert [m["tag"] for m in n.made()] == ["r1"], f"a request that left and came back notified again: {n.made()}"
+    # One that was already open when the tab loaded, and went and came back.
+    n.broker.withdraw_request("a1")
+    n.poll(rows=len(stub.OPEN_ROWS))
+    n.broker.file_request("a1.example.com", request_id="a1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert [m["tag"] for m in n.made()] == ["r1"], f"an initial row that left and came back notified: {n.made()}"
+
+
+BELL_PAGE = {   # how each bell state is reached, as NotifyPage arguments (a click follows for `muted`)
+    "default": {},
+    "on": {"permission": "granted"},
+    "muted": {"permission": "granted"},
+    "denied": {"permission": "denied"},
+    "unsupported": {"remove": True},
+}
+
+
+def open_bell_state(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str, state: str) -> NotifyPage:
+    n = NotifyPage(browser, served, broker, viewport, theme, **BELL_PAGE[state])
+    try:
+        if state == "muted":
+            n.bell.click()
+        n.page.wait_for_selector(f"[data-testid=notify-bell][data-state={state}]")
+    except Exception:
+        n.close()
+        raise
+    return n
+
+
+def _n_bell_layout(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    for state in BELL_STATES:
+        n = open_bell_state(browser, served, broker, viewport, "light", state)
+        try:
+            found = n.page.evaluate("""() => {
+              const box = (el) => { const r = el.getBoundingClientRect(); return {l: r.left, t: r.top, r: r.right, b: r.bottom}; };
+              const bell = document.querySelector('[data-testid=notify-bell]');
+              const bar = document.querySelector('header');
+              const theme = [...bar.querySelectorAll('button')].find((b) => b !== bell);
+              return {bell: box(bell), bar: box(bar), theme: box(theme), width: innerWidth,
+                      scroll: document.documentElement.scrollWidth, icon: !!bell.querySelector('svg')};
+            }""")
+            b, bar, theme = found["bell"], found["bar"], found["theme"]
+            assert found["icon"], f"{state}: the bell has no icon"
+            assert bar["l"] <= b["l"] and b["r"] <= bar["r"] and bar["t"] <= b["t"] and b["b"] <= bar["b"], f"{state}: bell outside the top bar {found}"
+            assert b["r"] <= found["width"] and b["l"] >= 0, f"{state}: bell outside the viewport {found}"
+            assert b["r"] <= theme["l"] or theme["r"] <= b["l"], f"{state}: bell overlaps the theme button {found}"
+            assert b["r"] - b["l"] >= 24 and b["b"] - b["t"] >= 24, f"{state}: bell smaller than a 24 px target {found}"
+            assert found["scroll"] <= found["width"], f"{state}: horizontal overflow {found}"
+            assert n.bell.get_attribute("aria-label") == BELL_LABELS[state]
+            assert not n.traffic.console_errors, n.traffic.console_errors
+        finally:
+            n.close()
+
+
+NOTIFY_CHECKS = [
+    # (number, name, how the page is opened, assertion)
+    ("130", "The page never asks for notification permission on load: with rows open and two polls, `requestPermission` is called zero times and the bell reads `Enable desktop notifications`",
+     {}, _n_defaults_ask_nothing),
+    ("131", "Clicking the bell in the default state calls `requestPermission` exactly once and, granted, the bell reads on; the rows open at that moment raise no notification, then or on the next snapshot",
+     {}, _n_click_asks_once),
+    ("132", "A request filed after load raises exactly one notification, with the literal title `New egress request from <bottle>`, body `<host>:<port>` and tag = request id; the initial snapshot's rows raise none, and later snapshots of the same rows raise no second",
+     {"permission": "granted"}, _n_one_per_new_request),
+    ("133", "Muted (the bell's second click, kept in localStorage across a reload) raises zero notifications, and unmuting does not replay what arrived while muted",
+     {"permission": "granted"}, _n_mute),
+    ("134", "With permission denied the bell explains the browser blocks notifications (no prompt) and a new request raises zero notifications",
+     {"permission": "denied"}, _n_denied),
+    ("135", "Calling the notification's `onclick` focuses that request's row, in view: from History, from another route and with a filter hiding it; for a request decided since it still lands on the queue without an error",
+     {"permission": "granted"}, _n_click_focuses_row),
+    ("136", "With the real Notification API underneath (Playwright grant on the context) a filed request constructs one real notification whose own `tag` is the request id",
+     {"permission": "granted", "wrap": True, "grant": True}, _n_real_api),
+    ("137", "Without the Notification API the bell is disabled, says it is not supported, and the queue still works with no console error",
+     {"remove": True}, _n_unsupported),
+    ("138", "A request that leaves and comes back with the same id raises no second notification, whether it was filed after load or open when the tab loaded",
+     {"permission": "granted"}, _n_leaves_and_returns),
+]
+BELL_LAYOUT_CHECK = ("139", "The bell in every state (default, on, muted, denied, unsupported) sits inside the top bar and the viewport, clear of the theme button, at least 24 px, with its state's accessible name and no horizontal overflow",
+                     _n_bell_layout)
+
+
+def run_notifications(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    """Notification bell checks (130..139); the SPA only."""
+    suite = Suite(ui, viewport)
+    if ui == "legacy":
+        for number, name, _how, _fn in NOTIFY_CHECKS:
+            suite.check(number, name, lambda: None, spa_only=True)
+        suite.check(BELL_LAYOUT_CHECK[0], BELL_LAYOUT_CHECK[1], lambda: None, spa_only=True)
+        return suite.results
+    for number, name, how, fn in NOTIFY_CHECKS:
+        def run(how=how, fn=fn):
+            n = NotifyPage(browser, served, broker, viewport, "light", **how)
+            try:
+                fn(n)
+            finally:
+                n.close()
+        suite.check(number, name, run)
+    number, name, fn = BELL_LAYOUT_CHECK
+    suite.check(number, name, lambda: fn(browser, served, broker, viewport))
+    broker.reset()
+    return suite.results
+
+
+def capture_bell_states(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """The bell in each state (and the blocked explanation open), whole page and top bar."""
+    for state in BELL_STATES:
+        n = open_bell_state(browser, served, broker, viewport, theme, state)
+        try:
+            capture(n.page, out, "spa", viewport, theme, f"bell-{state}")
+            n.page.locator("header").screenshot(path=str(out / f"spa-{viewport}-{theme}-bell-{state}-bar.png"))
+            if state == "denied":
+                n.bell.click()
+                n.page.get_by_test_id("notify-blocked").wait_for()
+                capture(n.page, out, "spa", viewport, theme, "bell-denied-open")
+        finally:
+            n.close()
+    broker.reset()
+
+
 # ---- legacy → behaviour mapping ------------------------------------------------------
 
 # ---- Live stream: GET /api/egress/stream in the tab (100..104) ----------------------------
@@ -3606,6 +3994,16 @@ NEW_CHECKS = [
     ("125", "The page links a web manifest: standalone, start `/`, the tokens' canvas colour, 192 and 512 png icons that load", "N/A(spa-only) on legacy"),
     ("126", "/sw.js is served as JavaScript with cache-control no-cache", "N/A(spa-only) on legacy"),
     ("127", "With the daemon unreachable (context offline) an /api/egress/queue fetch and a navigation to `/` fail with a network error instead of being answered from a cache", "N/A(spa-only) on legacy"),
+    ("130", "The page never asks for notification permission on load; the bell reads `Enable desktop notifications`", "N/A(spa-only) on legacy: notifications are new SPA behaviour (PLN step 6)"),
+    ("131", "Clicking the bell in the default state calls `requestPermission` exactly once and, granted, the bell reads on; rows open at that moment raise no notification", "N/A(spa-only) on legacy"),
+    ("132", "A request filed after load raises exactly one notification with the literal title, body and tag; the initial snapshot's rows and repeat snapshots raise none", "N/A(spa-only) on legacy"),
+    ("133", "Muted (kept in localStorage across a reload) raises zero notifications; unmuting does not replay what arrived while muted", "N/A(spa-only) on legacy"),
+    ("134", "With permission denied the bell explains the browser blocks notifications, sends no prompt, and nothing is raised", "N/A(spa-only) on legacy"),
+    ("135", "The notification's `onclick` focuses that request's row, in view, from History, from another route and past a hiding filter; a decided request still lands on the queue", "N/A(spa-only) on legacy"),
+    ("136", "With the real Notification API underneath a filed request constructs one real notification whose own `tag` is the request id", "N/A(spa-only) on legacy"),
+    ("137", "Without the Notification API the bell is disabled and says so; the queue still works with no console error", "N/A(spa-only) on legacy"),
+    ("138", "A request that leaves and comes back with the same id raises no second notification", "N/A(spa-only) on legacy"),
+    ("139", "The bell in every state sits inside the top bar and viewport, clear of the theme button, with its state's accessible name", "N/A(spa-only) on legacy"),
 ]
 
 
@@ -3677,6 +4075,7 @@ def main() -> int:
                 results += run_queue_features(ui, viewport, browser, served, broker)
                 results += run_live_stream(ui, viewport, browser, served, broker)
                 results += run_service_worker(ui, viewport, browser, served, broker)
+                results += run_notifications(ui, viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):
@@ -3684,6 +4083,11 @@ def main() -> int:
                         capture_states(browser, served, broker, driver_cls, out, ui, viewport, theme)
                     except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
                         results.append(Result("FAIL", viewport, "0", f"captures ({theme})", squash(str(exc))[:300]))
+                    if ui == "spa":
+                        try:
+                            capture_bell_states(browser, served, broker, out, viewport, theme)
+                        except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
+                            results.append(Result("FAIL", viewport, "0", f"bell captures ({theme})", squash(str(exc))[:300]))
             browser.close()
     finally:
         served.stop()

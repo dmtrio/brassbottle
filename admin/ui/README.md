@@ -36,3 +36,11 @@ connections to one origin and each open tab's stream would take one: it reads
 the queue every 30 s (Paused) and opens a stream again, with one read, when it
 is shown. A failed read while Live polls until one succeeds. The state machine
 is `src/lib/stream.ts`, wired in `src/composables/useQueue.ts`.
+
+Notification bell: the top bar's bell raises an OS notification (the Notification API,
+while the page is open; no push) for each request new to the tab. It asks for permission
+only when clicked. Granted, a click mutes and unmutes (kept per viewer in `localStorage`);
+denied, it explains the block is in the browser's site settings. The requests in the first
+snapshot a tab loads, and any id it has shown before, never notify. A notification's tag
+is the request id; clicking one focuses that request's row. The logic is `src/lib/notify.ts`
+(unit-tested) and `src/composables/useNotifications.ts`.

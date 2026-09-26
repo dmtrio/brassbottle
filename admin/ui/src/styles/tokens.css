@@ -201,6 +201,12 @@
   margin-left: calc(-1 * var(--spacing-sep));
 }
 
+/* The row a notification click asked for: focus is programmatic, so :focus (not :focus-visible) marks it. */
+@utility request-target {
+  outline: none;
+  &:focus { outline: 2px solid var(--ring); outline-offset: -2px; }
+}
+
 /* Phone card: one request. */
 @utility item-card {
   display: flex; flex-direction: column; gap: var(--spacing-card);

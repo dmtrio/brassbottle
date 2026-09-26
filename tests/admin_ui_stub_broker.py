@@ -434,6 +434,20 @@ class StubBroker:
             _checked(self.queue, QUEUE_SCHEMA)
             return rid
 
+    def withdraw_request(self, request_id: str) -> dict[str, Any]:
+        """Take an open request out of the queue without deciding it (the broker sweeping or dropping it).
+
+        Returns the row, so a test can `file_request` the same id again. Raises KeyError when it is not open.
+        """
+        with self.lock:
+            for index, row in enumerate(self.queue["open"]):
+                if row["request_id"] == request_id:
+                    del self.queue["open"][index]
+                    self.queue["count"] = len(self.queue["open"])
+                    _checked(self.queue, QUEUE_SCHEMA)
+                    return row
+        raise KeyError(request_id)
+
     def hold_next_recent(self) -> HeldReply:
         """Hold the reply to the next `GET /recent` until `.release()`; later ones are not held."""
         held = HeldReply()
