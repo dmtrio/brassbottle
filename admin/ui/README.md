@@ -43,4 +43,8 @@ only when clicked. Granted, a click mutes and unmutes (kept per viewer in `local
 denied, it explains the block is in the browser's site settings. The requests in the first
 snapshot a tab loads, and any id it has shown before, never notify. A notification's tag
 is the request id; clicking one focuses that request's row. The logic is `src/lib/notify.ts`
-(unit-tested) and `src/composables/useNotifications.ts`.
+(unit-tested) and `src/composables/useNotifications.ts`. If the browser's constructor throws
+(Chrome for Android has the API but not the constructor), the bell moves to unavailable for
+the session instead of saying on; there are no service-worker notifications. While a tab is
+hidden, notifications arrive as fast as that tab's snapshots do (browser timer throttling
+applies), so the latency can reach a minute in a long-hidden tab.

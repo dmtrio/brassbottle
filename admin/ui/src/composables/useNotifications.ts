@@ -2,11 +2,13 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter, type Router } from 'vue-router'
 import { useQueue } from '@/composables/useQueue'
 import {
+  bellLabel,
+  bellName,
   bellState,
-  BELL_LABELS,
   notificationFor,
   readPermission,
   SeenRequests,
+  unsupportedReason,
   type Permission,
 } from '@/lib/notify'
 
@@ -35,6 +37,10 @@ function writeMuted(muted: boolean): void {
 // One notifier for the whole app, like the queue it watches.
 const permission = ref<Permission | null>(readPermission())
 const muted = ref(readMuted())
+// Set when `new Notification` throws (Chrome for Android has the API and a
+// permission but an illegal constructor): from then on this session the bell
+// says notifications are unavailable rather than "on".
+const unavailable = ref(false)
 const seen = new SeenRequests()
 let router: Router | null = null
 
@@ -92,7 +98,7 @@ async function askPermission(): Promise<void> {
 }
 
 function press(): void {
-  const state = bellState(permission.value, muted.value)
+  const state = bellState(permission.value, muted.value, unavailable.value)
   if (state === 'default') {
     void askPermission()
   } else if (state === 'on' || state === 'muted') {
@@ -110,15 +116,19 @@ function openRequest(id: string): void {
 }
 
 function fire(requestId: string, title: string, body: string): void {
+  let shown: Notification
   try {
-    const shown = new Notification(title, { body, tag: requestId })
-    shown.onclick = () => {
-      shown.close()
-      openRequest(requestId)
-    }
+    shown = new Notification(title, { body, tag: requestId })
   } catch (error) {
-    // e.g. permission revoked between the check and the call
-    console.warn(`[notify] stage=fire failed request_id=${requestId}`, error)
+    // The constructor is illegal on this device: nothing will ever show, so stop
+    // saying "on". Logged once, here, because `fire` is not called again.
+    unavailable.value = true
+    console.warn(`[notify] stage=fire failed request_id=${requestId} unavailable=true`, error)
+    return
+  }
+  shown.onclick = () => {
+    shown.close()
+    openRequest(requestId)
   }
 }
 
@@ -135,12 +145,13 @@ export function useNotifications() {
       if (!snap) return
       const first = !seen.seeded
       const fresh = seen.take(snap.open)
-      const active = bellState(permission.value, muted.value) === 'on'
+      const active = bellState(permission.value, muted.value, unavailable.value) === 'on'
       if (first || fresh.length > 0) {
         log(`stage=snapshot rows=${snap.open.length} new=${fresh.length} first=${first} notify=${active}`)
       }
       if (!active) return
       for (const row of fresh) {
+        if (unavailable.value) break
         const { title, body, tag } = notificationFor(row)
         fire(tag, title, body)
       }
@@ -171,6 +182,13 @@ export function useNotifications() {
 
 // The bell reads and drives the same state from any component.
 export function useBell() {
-  const state = computed(() => bellState(permission.value, muted.value))
-  return { state, label: computed(() => BELL_LABELS[state.value]), press }
+  const state = computed(() => bellState(permission.value, muted.value, unavailable.value))
+  const reason = computed(() => unsupportedReason(window.isSecureContext !== false, permission.value))
+  return {
+    state,
+    // The tooltip; and the accessible name, which a toggle keeps stable.
+    label: computed(() => bellLabel(state.value, reason.value)),
+    name: computed(() => bellName(state.value, reason.value)),
+    press,
+  }
 }
