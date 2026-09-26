@@ -4354,7 +4354,7 @@ def capture_stream_states(browser, served, broker, out: Path, viewport: str, the
         close_page_context(context, page)
 
 
-# ---- One live stream per browser: leader election over Web Locks (150..159) ----------------------
+# ---- One live stream per browser: leader election over Web Locks (150..159, 170..171) ----------------------
 #
 # Every check here uses REAL pages of ONE browser context (same origin, so the pages share Web Locks and
 # BroadcastChannel as the tabs of one browser do). The first page to load holds the lock and the daemon's one
@@ -4787,6 +4787,86 @@ def _connecting_spinner_respects_reduced_motion(browser, served: Served, broker:
         context.close()
 
 
+# What every page of the context hears on the channel, beside the app: (kind, from, to) of each message.
+BUS_SPY_JS = """(() => {
+  const seen = window.__busSeen = [];
+  const channel = new BroadcastChannel('djinn-admin-queue');
+  channel.onmessage = (e) => seen.push({kind: e.data.kind, from: e.data.from, to: e.data.to ?? null});
+})();"""
+
+
+def _frozen_leader_hands_over(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """The leader's page gets Page Lifecycle `freeze` (as the browser's memory or energy saver sends it before it stops the
+    page's script, the lock staying held unless the page lets go): another tab leads within 5 s, one stream, and a filed
+    request reaches the tabs still running within 3 s; on `resume` the tab follows without a stream of its own.
+
+    The event is dispatched by hand: Chromium's `Page.setWebLifecycleState` accepts `frozen` in headless and does
+    nothing (no `freeze` event, the page's timers keep running), so the page is never really frozen here. This pins the
+    app's reaction to the event, not the browser's freezing."""
+    context, tabs = open_tabs(browser, served, broker, viewport, 3, RECORD_LINK_STATES_JS)
+    try:
+        assert_one_stream(served, tabs)
+        frozen, rest = tabs[0], tabs[1:]
+        for tab in rest:
+            tab.page.evaluate("() => { window.__linkStates.length = 0; window.__linkStates.push('live'); }")
+            tab.seen.clear()
+        started = time.monotonic()
+        frozen.page.evaluate("() => document.dispatchEvent(new Event('freeze'))")
+
+        def took_over() -> bool:
+            return all(tab.page.evaluate("() => window.__linkStates").count("live") >= 2 for tab in rest)
+
+        try:
+            rest[0].drv._wait_until(took_over, TAKEOVER_WITHIN_S)
+        finally:
+            recorded = [tab.page.evaluate("() => window.__linkStates") for tab in rest]
+        took_ms = int((time.monotonic() - started) * 1000)
+        log(f"check 170 viewport={viewport} freeze-to-takeover_ms={took_ms} link states {recorded}")
+        assert recorded == [["live", "connecting", "live"]] * 2, \
+            f"link states of the running tabs {took_ms} ms after the leader froze: {recorded}, expected Live, " \
+            "Connecting, Live in both: the freezing tab says Connecting as it lets go, and the next leader is " \
+            "Connecting until its first frame"
+        assert took_ms < TAKEOVER_WITHIN_S * 1000, f"{took_ms} ms"
+        assert_one_stream(served, rest, " after the leader froze")
+        slowest = arrives_in_every_tab(rest, broker, "frozen-leader.example.com", "check 170", container="zeta")
+        log(f"check 170 viewport={viewport} filed-to-running-tabs_ms={slowest}")
+        assert slowest < LIVE_WITHIN_MS
+        reads = [len(tab.seen) for tab in rest]
+        assert sum(reads) <= 1, f"the tabs read the queue {reads} times: only the new leader's one while it connects"
+        frozen.page.evaluate("() => document.dispatchEvent(new Event('resume'))")
+        wait_link(frozen.page, "live", TIMEOUT_MS)
+        frozen.drv.row("frozen-leader.example.com").wait_for(state="visible", timeout=LIVE_WITHIN_MS)
+        assert_one_stream(served, tabs, " after the frozen tab thawed")
+        slowest = arrives_in_every_tab(tabs, broker, "thawed.example.com", "check 170 after the thaw", container="zeta")
+        log(f"check 170 viewport={viewport} filed-to-all-three_ms={slowest}")
+        assert all(not tab.traffic.console_errors for tab in tabs), [tab.traffic.console_errors for tab in tabs]
+    finally:
+        context.close()
+
+
+def _hello_is_answered_to_the_asking_tab(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """A tab that opens asks the leader; the answer is addressed to it, and the tabs already open hear no answer meant
+    for the newcomer (an older snapshot in it could replace a fresher read of their own)."""
+    context, tabs = open_tabs(browser, served, broker, viewport, 2, BUS_SPY_JS)
+    try:
+        follower = tabs[1]
+        follower.page.evaluate("() => { window.__busSeen.length = 0 }")
+        tabs.append(next_tab(context, served))
+        follower.page.wait_for_timeout(500)
+        heard = follower.page.evaluate("() => window.__busSeen")
+        hellos = [m for m in heard if m["kind"] == "hello"]
+        answers = [m for m in heard if m["kind"] in ("link", "snapshot")]
+        log(f"check 171 viewport={viewport} heard {[(m['kind'], m['to'] is not None) for m in heard]}")
+        assert len(hellos) == 1, f"the follower heard {len(hellos)} hellos: {heard}"
+        assert answers, f"the follower heard no answer to the newcomer's hello: {heard}"
+        assert all(m["to"] == hellos[0]["from"] for m in answers), \
+            f"an answer to the newcomer's hello was not addressed to it: {answers} (hello from {hellos[0]['from']})"
+        assert tabs[2].state() == "live"
+        assert_one_stream(served, tabs)
+    finally:
+        context.close()
+
+
 ONE_STREAM_CHECKS = [
     ("150", "In one browser context, 6 visible tabs and 3 hidden ones hold one stream at the daemon (all Live, hidden "
             "included); a decide from a follower and one from the leader each complete in under 1 s, and the leader's "
@@ -4810,11 +4890,16 @@ ONE_STREAM_CHECKS = [
             "though every read of the queue still fails", _frame_ends_the_recovery_polling),
     ("159", "Connecting's spinner turns (`animation-name: spin`) and holds still under `prefers-reduced-motion: reduce`",
      _connecting_spinner_respects_reduced_motion),
+    ("170", "A leader that gets Page Lifecycle `freeze` (dispatched by hand: headless Chromium does not freeze) lets go of "
+            "the lock: another tab leads within 5 s with one stream at the daemon, a filed request reaches the running "
+            "tabs within 3 s, and on `resume` the tab follows without a stream of its own", _frozen_leader_hands_over),
+    ("171", "A new tab's hello is answered to that tab alone: every link and snapshot message a tab already open hears "
+            "meanwhile is addressed to the newcomer", _hello_is_answered_to_the_asking_tab),
 ]
 
 
 def run_one_stream(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """One live stream per browser (150..159); the SPA only."""
+    """One live stream per browser (150..159, 170..171); the SPA only."""
     suite = Suite(ui, viewport)
     for number, name, fn in ONE_STREAM_CHECKS:
         suite.check(number, name, lambda fn=fn: fn(browser, served, broker, viewport), spa_only=True)
@@ -4970,6 +5055,8 @@ NEW_CHECKS = [
     ("162", "Each bell state has its own glyph, so muted and denied differ by shape and not by colour alone", "N/A(spa-only) on legacy"),
     ("163", "The blocked and unsupported popovers give a reason and a next step in their body, without repeating the heading or asking for a reload", "N/A(spa-only) on legacy"),
     ("164", "The spa suite's log has no `Task was destroyed but it is pending` line", "N/A(spa-only) on legacy"),
+    ("170", "A leader that gets Page Lifecycle `freeze` (dispatched by hand: headless Chromium does not freeze) lets go of the lock: another tab leads within 5 s with one stream at the daemon, a filed request reaches the running tabs within 3 s, and on `resume` the tab follows without a stream of its own", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
+    ("171", "A new tab's hello is answered to that tab alone: every link and snapshot message a tab already open hears meanwhile is addressed to the newcomer", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
 ]
 
 
