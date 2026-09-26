@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
-"""Behaviour suite for the admin UI, runnable against either UI.
+"""Behaviour suite for the admin UI (the Vue app the admin daemon serves).
 
-    python3 tests/admin_ui_playwright.py [--ui legacy|spa]      (default: legacy)
+    python3 tests/admin_ui_playwright.py
 
-Needs `playwright` and its Chromium (`playwright install chromium`); the spa
-run needs a built admin/ui/dist (`cd admin/ui && npm ci && npm run build`).
+Needs `playwright` and its Chromium (`playwright install chromium`) and a built
+admin/ui/dist (`cd admin/ui && npm ci && npm run build`).
 Set ADMIN_UI_SHOTS to keep the captures and REPORT.md (default: a temp dir).
 
-The page is served by the REAL admin daemon (legacy Preact page, or the Vue app
-from admin/ui/dist) in front of a stub broker (tests/admin_ui_stub_broker.py)
-whose every reply is validated against admin/contract/ before it is served; a
-stub that drifts from the contract refuses to start the suite. The browser's own
-`POST /api/egress/decide` requests are captured and their JSON bodies asserted
-literally. One PASS/FAIL line per behaviour check, per viewport. A check tagged
-`design-change` asserts a deliberate difference from the legacy page and names
-the PLN Architecture decision that makes it deliberate; `--ui legacy` reports it
-as SKIP(design-change: <decision>) instead of running it. A check of behaviour
-that only exists in the new app (`spa-only`) reports N/A(spa-only) on legacy.
+The page is served by the REAL admin daemon (the app from admin/ui/dist) in front
+of a stub broker (tests/admin_ui_stub_broker.py) whose every reply is validated
+against admin/contract/ before it is served; a stub that drifts from the
+contract refuses to start the suite. The browser's own `POST /api/egress/decide`
+requests are captured and their JSON bodies asserted literally. One PASS/FAIL
+line per behaviour check, per viewport.
 
 Exit status: 0 with no FAIL, 1 with any FAIL, 2 when the stub violates the contract.
 """
 from __future__ import annotations
 
-import argparse
 import calendar
 import gc
 import json
@@ -64,17 +59,12 @@ BOTTLES_ALPHABETICAL = [("alpha", 5), ("mid", 3), ("zeta", 3)]
 KNOWN_HOSTS = [row[2] for row in stub.OPEN_ROWS]
 FIXTURE_ROW = {row[2]: row for row in stub.OPEN_ROWS}   # host -> (id, bottle, host, port, ...)
 
-# The PLN Architecture decisions a design-change check may cite, by exact name.
-D_ORDERING = "Queue ordering and views"
-D_ACTIONS = "Action labels map onto the existing decide API unchanged"
-D_TITLE = "Tab title carries the open count"
-
 # Records every stale-banner text the page renders, so a banner that flashes and
-# clears is still seen. Works on both UIs (the SPA's test id, legacy's class).
+# clears is still seen.
 BANNER_OBSERVER = """() => {
   window.__banners = [];
   const read = () => {
-    const el = document.querySelector('[data-testid=stale-banner], .banner.error');
+    const el = document.querySelector('[data-testid=stale-banner]');
     const text = el ? (el.innerText || '').trim() : '';
     if (text) window.__banners.push(text);
   };
@@ -204,18 +194,13 @@ class Traffic:
 
 
 class Driver:
-    """Everything the checks need from a page, hiding each UI's DOM."""
-
-    ui = ""
+    """Everything the checks need from a page, hiding its DOM."""
 
     def __init__(self, page, traffic: Traffic):
         self.page = page
         self.traffic = traffic
 
     # -- reading
-    def requests(self):
-        raise NotImplementedError
-
     def row(self, host: str):
         return self.requests().filter(has_text=f"{host}:").first
 
@@ -225,25 +210,9 @@ class Driver:
             found.append(next(host for host in KNOWN_HOSTS if f"{host}:" in text))
         return found
 
-    def groups(self) -> list[tuple[str, int]]:
-        raise NotImplementedError
-
     def title_count(self) -> int:
         match = re.match(r"\((\d+)\)", self.page.title())
         return int(match.group(1)) if match else 0
-
-    def recent_text(self) -> str:
-        raise NotImplementedError
-
-    def recent_rows(self) -> list[str]:
-        raise NotImplementedError
-
-    def stale_banner(self):
-        raise NotImplementedError
-
-    def note(self, host: str) -> str:
-        """Inline outcome text on a row, apart from the row's own facts."""
-        raise NotImplementedError
 
     def wait_note(self, host: str, pattern: str) -> str:
         """The row's outcome text once it matches `pattern` (case-insensitive)."""
@@ -271,8 +240,7 @@ class Driver:
         self._wait_until(lambda: len(self.traffic.decides) > before, 2)
         sent = self.traffic.decides[-1] if len(self.traffic.decides) > before else {}
         # Let the queue re-read that follows a decide land and render before the
-        # next action: the legacy table has unkeyed rows, so a click aimed while
-        # rows shift can hit the row that moved into place.
+        # next action: a click aimed while rows shift can hit the row that moved into place.
         if reread:
             reads = self.traffic.queue_reads
             self._wait_until(lambda: self.traffic.queue_reads > reads, 3)
@@ -284,66 +252,11 @@ class Driver:
         while not condition() and time.monotonic() < deadline:
             self.page.wait_for_timeout(20)
 
-    def _click_action(self, host, action, reason, typed):
-        raise NotImplementedError
-
     def sent_nothing_after(self, action: Callable[[], None]) -> bool:
         before = len(self.traffic.decides)
         action()
         self.page.wait_for_timeout(400)  # a negative has to be waited out
         return len(self.traffic.decides) == before
-
-
-class LegacyDriver(Driver):
-    ui = "legacy"
-
-    def requests(self):
-        # the first panel is the queue; the second is the recent list
-        return self.page.locator("section.panel").first.locator("tbody tr:not(.group-row)")
-
-    def groups(self):
-        parsed = []
-        for text in self.page.locator("tr.group-row").all_inner_texts():
-            name, count = re.match(r"(\S+) - (\d+) request", squash(text)).groups()
-            parsed.append((name, int(count)))
-        return parsed
-
-    def recent_text(self):
-        return self.page.locator("section.panel").filter(has_text="Recent decisions").inner_text()
-
-    def recent_rows(self):
-        panel = self.page.locator("section.panel").filter(has_text="Recent decisions")
-        return [squash(text) for text in panel.locator("tbody tr").all_inner_texts()]
-
-    def stale_banner(self):
-        return self.page.locator(".banner.error")
-
-    def note(self, host):
-        return squash(" ".join(self.row(host).locator(".chip").all_inner_texts()))
-
-    def _click_action(self, host, action, reason, typed):
-        row = self.row(host)
-        if reason:
-            row.get_by_placeholder("Optional deny reason").fill(reason)
-        if typed is not None:
-            row.get_by_placeholder("Type host for global deny").fill(typed)
-        label = {
-            "allow_live": "Allow", "allow_manifest": "Allow+manifest", "deny": "Deny",
-            "deny_bottle": "Deny always (bottle)", "deny_global": "Deny always (global)",
-        }[action]
-        row.get_by_role("button", name=label, exact=True).click()
-
-    def refuse_global(self, host: str, typed: str) -> tuple[bool, str]:
-        row = self.row(host)
-        sent = self.sent_nothing_after(lambda: (
-            row.get_by_placeholder("Type host for global deny").fill(typed),
-            row.get_by_role("button", name="Deny always (global)", exact=True).click(),
-        ))
-        return sent, self.note(host)
-
-
-class SpaDriver(Driver):
-    ui = "spa"
 
     def requests(self):
         return self.page.locator("[data-testid=request]")
@@ -433,42 +346,24 @@ class SpaDriver(Driver):
 
 @dataclass
 class Result:
-    status: str          # PASS | FAIL | SKIP | N/A
+    status: str          # PASS | FAIL
     viewport: str
     number: str
     name: str
-    detail: str = ""     # FAIL: what failed. SKIP: the PLN decision. N/A: why.
+    detail: str = ""     # FAIL: what failed
 
     def line(self) -> str:
-        tag = ""
-        if self.status == "SKIP":
-            tag = f"(design-change: {self.detail})"
-        elif self.status == "N/A":
-            tag = f"({self.detail})"
         detail = f": {self.detail}" if self.detail and self.status == "FAIL" else ""
-        return f"{self.status}{tag} [{self.viewport}] ({self.number}) {self.name}{detail}"
+        return f"{self.status} [{self.viewport}] ({self.number}) {self.name}{detail}"
 
 
 class Suite:
-    def __init__(self, ui: str, viewport: str):
-        self.ui, self.viewport = ui, viewport
+    def __init__(self, viewport: str):
+        self.viewport = viewport
         self.results: list[Result] = []
 
-    def check(self, number: str, name: str, fn: Callable[[], None], *,
-              decision: str | None = None, spa_only: bool = False) -> None:
-        """Run `fn` (asserting inside).
-
-        `decision`: the PLN Architecture decision that makes this check assert a
-        deliberate difference from legacy; skipped (SKIP) on legacy.
-        `spa_only`: behaviour that only exists in the new app; N/A on legacy.
-        """
-        assert not (decision and spa_only), "a check is design-change or spa-only, not both"
-        if decision and self.ui == "legacy":
-            self.results.append(Result("SKIP", self.viewport, number, name, decision))
-            return
-        if spa_only and self.ui == "legacy":
-            self.results.append(Result("N/A", self.viewport, number, name, "spa-only"))
-            return
+    def check(self, number: str, name: str, fn: Callable[[], None]) -> None:
+        """Run `fn` (asserting inside)."""
         try:
             fn()
             self.results.append(Result("PASS", self.viewport, number, name))
@@ -481,10 +376,10 @@ def expect_body(traffic_entry: dict, expected: dict) -> None:
     assert traffic_entry["body"] == expected, f"sent {traffic_entry['body']}, expected {expected}"
 
 
-def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, broker: stub.StubBroker) -> list[Result]:
+def run_scenario(viewport: str, page, drv: Driver, traffic: Traffic, broker: stub.StubBroker) -> list[Result]:
     from playwright.sync_api import expect
 
-    suite = Suite(ui, viewport)
+    suite = Suite(viewport)
     check = suite.check
     expect.set_options(timeout=TIMEOUT_MS)
     total = len(stub.OPEN_ROWS)
@@ -503,10 +398,9 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
     check("1", "Rows are grouped by bottle with the right open counts (any bottle order)",
           lambda: _eq(sorted(drv.groups()), BOTTLES_ALPHABETICAL))
     check("1", "By-bottle grouping: bottles alphabetical",
-          lambda: _eq(drv.groups(), BOTTLES_ALPHABETICAL), decision=D_ORDERING)
+          lambda: _eq(drv.groups(), BOTTLES_ALPHABETICAL))
     check("2", "By-bottle: rows newest first within each bottle",
-          lambda: _eq(drv.hosts(), [h for bottle in ("alpha", "mid", "zeta") for h in by_bottle[bottle]]),
-          decision=D_ORDERING)
+          lambda: _eq(drv.hosts(), [h for bottle in ("alpha", "mid", "zeta") for h in by_bottle[bottle]]))
 
     def all_view():
         drv.set_view("All")
@@ -517,21 +411,17 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
         assert "alpha" in drv.row("check18.example.com").inner_text(), "the bottle is not on line 2"
         drv.set_view("By bottle")
         expect(page.locator("[data-testid=group]")).to_have_count(3)
-    check("3", "All view: newest first across bottles, bottle shown on line 2", all_view, decision=D_ORDERING)
+    check("3", "All view: newest first across bottles, bottle shown on line 2", all_view)
 
     def facts():
         text = drv.row("z1.example.com").inner_text()
         for needle in ("z1.example.com:443", "3 hits", "npm install"):
             assert needle in text, f"{needle!r} missing from {squash(text)!r}"
     check("4", "Row shows host:port, hit count and reason", facts)
-    no_reason = {"spa": "No reason given", "legacy": "—"}[ui]
     check("4", "Row without a reason says so",
-          lambda: _in(no_reason, drv.row("a1.example.com").inner_text()))
-    apply_text = {
-        "spa": ("IP address", "Apply failed after 1 attempt: an IP address needs a CIDR in the manifest",
-                "Apply failed after 2 attempts: rule install failed"),
-        "legacy": ("IP", "apply failed ×1: ip_requires_cidr", "apply failed ×2: apply_failed"),
-    }[ui]
+          lambda: _in("No reason given", drv.row("a1.example.com").inner_text()))
+    apply_text = ("IP address", "Apply failed after 1 attempt: an IP address needs a CIDR in the manifest",
+                  "Apply failed after 2 attempts: rule install failed")
 
     def apply_facts():
         ip_text = squash(drv.row("192.0.2.55").inner_text())
@@ -547,11 +437,11 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
 
     check("5", "Title carries the open count", lambda: title_is(rf"^\({total}\) "))
     check("5", "Title format is '(N) Egress · Djinn admin'",
-          lambda: title_is(rf"^\({total}\) Egress · Djinn admin$"), decision=D_TITLE)
+          lambda: title_is(rf"^\({total}\) Egress · Djinn admin$"))
 
     def badge():
         expect(page.locator(".count-badge").first).to_have_text(str(total))
-    check("5b", "The Egress nav entry carries the count badge", badge, spa_only=True)
+    check("5b", "The Egress nav entry carries the count badge", badge)
     check("20", "No horizontal overflow (initial state)", overflow)
 
     def layout():
@@ -572,7 +462,7 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
             assert r["hostHeight"] <= r["line"] * 1.05, \
                 f"{r['host']}: host text wraps ({r['hostHeight']:.0f}px tall for a {r['line']:.0f}px line)"
     check("26", "Every row's action group sits inside its panel and no host breaks across lines",
-          layout, spa_only=True)
+          layout)
 
     def accessible_names():
         names = page.evaluate("""() => [...document.querySelectorAll('[data-testid=request]')].flatMap(
@@ -584,14 +474,14 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
                      "Retry allow m2.example.com:443 in mid"):
             assert name in names, f"{name!r} not among the row buttons"
     check("24", "Every row button has its own accessible name (action, destination, bottle)",
-          accessible_names, spa_only=True)
+          accessible_names)
 
     def live_regions():
         regions = page.locator("[data-testid=request] [role=status]")
         assert regions.count() == total, f"{regions.count()} status regions for {total} rows"
         assert all(not text.strip() for text in regions.all_inner_texts()), "a status region is not empty before any decision"
     check("25", "Each row's status live region is rendered before any outcome and starts empty",
-          live_regions, spa_only=True)
+          live_regions)
 
     # ---- the five actions and their exact bodies ------------------------------
     sent: dict[str, dict] = {}
@@ -620,7 +510,7 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
         assert "reason" not in sent["8"]["body"], "plain Deny sent a reason"
         # a1 was decided; check a fresh row still open
         assert drv.row("z1.example.com").get_by_role("textbox").count() == 0, "a reason field is offered"
-    check("11", "Plain Deny offers and sends no reason", plain_deny_offers_no_reason, decision=D_ACTIONS)
+    check("11", "Plain Deny offers and sends no reason", plain_deny_offers_no_reason)
 
     def wrong_host_refused():
         refused, text = drv.refuse_global("z1.example.com", "wrong.example.com")
@@ -684,10 +574,9 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
             assert set(traffic.queue_statuses[reads:]) <= {200}, \
                 f"a queue poll failed ({traffic.queue_statuses[reads:]}): the banner may not come from the decide"
             assert drv.row(row).is_visible(), "the row left despite the failed decide"
-            if ui == "spa":
-                assert all(text.startswith("Decision not sent: ") for text in seen), \
-                    f"a decide-only failure must not read as stale data: {seen}"
-                drv.wait_note(row, "^Not sent: " + re.escape(banner))
+            assert all(text.startswith("Decision not sent: ") for text in seen), \
+                f"a decide-only failure must not read as stale data: {seen}"
+            drv.wait_note(row, "^Not sent: " + re.escape(banner))
             if clears:
                 expect(drv.stale_banner()).to_be_hidden(timeout=BANNER_CLEAR_MS)
         check(number, name, run)
@@ -738,7 +627,7 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
         for needle in ("registry.npmjs.org", "Allowed", "ads.example.com", "Denylist", "denied.example.com",
                        "Denied permanently · global", "z1.example.com", "Denied"):
             assert needle in text, f"{needle!r} missing from recent: {squash(text)[:300]}"
-    check("22b", "Recent rows carry the decision labels", recent_labels, spa_only=True)
+    check("22b", "Recent rows carry the decision labels", recent_labels)
 
     def recent_separators():
         flows = page.evaluate("""() => [...document.querySelectorAll('[data-testid=recent-row] .meta-flow')].map((flow) => {
@@ -762,7 +651,7 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
         assert not any(f["bad"] for f in flows), f"a separator starts a wrapped line: {flows}"
         if viewport == "phone":
             assert sum(f["wraps"] for f in flows) >= 1, "no recent row wraps at phone width, so this check proves nothing"
-    check("27", "A recent row that wraps leaves no dangling separator", recent_separators, spa_only=True)
+    check("27", "A recent row that wraps leaves no dangling separator", recent_separators)
 
     def reason_limit():
         dialog = drv.open_permanent_deny("m2.example.com", "deny_bottle")
@@ -772,8 +661,7 @@ def run_scenario(ui: str, viewport: str, page, drv: Driver, traffic: Traffic, br
         assert "(optional, shown to the agent)" in dialog.inner_text(), "the reason label is not the design's"
         dialog.get_by_role("button", name="Cancel").click()
         dialog.wait_for(state="hidden")
-    check("23", "Permanent-deny dialog caps the reason at 200 characters with a counter", reason_limit,
-          decision=D_ACTIONS)
+    check("23", "Permanent-deny dialog caps the reason at 200 characters with a counter", reason_limit)
 
     # ---- request headers, overflow, console ---------------------------------------
     def headers_ok():
@@ -794,7 +682,7 @@ def _eq(actual, expected) -> None:
 
 
 def _loose(text: str) -> str:
-    """Text without whitespace: legacy chips render `x:y` where the SPA renders `x: y`."""
+    """Text without whitespace, for comparing copy whatever the spacing after a colon."""
     return "".join(text.split())
 
 
@@ -822,7 +710,7 @@ def add_siblings(broker: stub.StubBroker) -> None:
         broker.queue["count"] = len(broker.queue["open"])
 
 
-def _held_decides(page, traffic: Traffic, drv: "SpaDriver"):
+def _held_decides(page, traffic: Traffic, drv: "Driver"):
     """Hold every decide POST at the page's network layer. Returns (held routes, release_next(), button(...))."""
     held: list = []
     page.route("**/api/egress/decide", lambda route: held.append(route))
@@ -847,7 +735,7 @@ def sibling_rows_lock(browser, served: Served, broker: stub.StubBroker, viewport
     add_siblings(broker)
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 4)
         held, release_next, button = _held_decides(page, traffic, drv)
@@ -892,7 +780,7 @@ def overlapping_decides_lock(browser, served: Served, broker: stub.StubBroker, v
     add_siblings(broker)
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 4)
         held, release_next, button = _held_decides(page, traffic, drv)
@@ -936,7 +824,7 @@ def inflight_poll_keeps_banner(browser, served: Served, broker: stub.StubBroker,
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         start = datetime(2026, 1, 1, 12, 0, 0)
         page.clock.install(time=start)
         page.clock.pause_at(start + timedelta(seconds=1))
@@ -983,7 +871,7 @@ def banner_copy(browser, served: Served, broker: stub.StubBroker, viewport: str)
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         # This check is about which poll clears which banner, so the tab must be polling: no live stream
         # (with one open the tab does not poll; check 104 covers the banner when the stream ends).
         page.route(STREAM_ROUTE, lambda route: route.abort())
@@ -1078,7 +966,7 @@ def light_rows_have_no_red_pixels(browser, served: Served, broker: stub.StubBrok
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
         red = {}
@@ -1113,7 +1001,7 @@ def long_meta_string_wraps(browser, served: Served, broker: stub.StubBroker, vie
     add_long_comm_row(broker)
     context, page, traffic = new_page(browser, served, viewport, "light")
     try:
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 1)
         found = drv.requests().filter(has_text="lc.example.com").first.evaluate("""(row) => {
@@ -1137,23 +1025,23 @@ def long_meta_string_wraps(browser, served: Served, broker: stub.StubBroker, vie
         context.close()
 
 
-def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    suite = Suite(ui, viewport)
+def run_dedicated(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(viewport)
     suite.check("28", "A decide in flight locks every request it acts on (the host or a subzone of it in the same "
                       "bottle; all bottles on a global deny) and no other",
-                lambda: sibling_rows_lock(browser, served, broker, viewport), spa_only=True)
+                lambda: sibling_rows_lock(browser, served, broker, viewport))
     suite.check("28b", "A row stays locked until every in-flight decide that covers it has finished",
-                lambda: overlapping_decides_lock(browser, served, broker, viewport), spa_only=True)
+                lambda: overlapping_decides_lock(browser, served, broker, viewport))
     suite.check("29", "A poll already in flight when a decide fails does not clear the banner; the next poll does",
-                lambda: inflight_poll_keeps_banner(browser, served, broker, viewport), spa_only=True)
+                lambda: inflight_poll_keeps_banner(browser, served, broker, viewport))
     suite.check("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure "
                       "with healthy polls reads `Decision not sent: <error>`",
-                lambda: banner_copy(browser, served, broker, viewport), spa_only=True)
+                lambda: banner_copy(browser, served, broker, viewport))
     suite.check("51", "The light theme paints no pure-red (#ff0000) pixel in any request row, on the compact "
                       "layout included",
-                lambda: light_rows_have_no_red_pixels(browser, served, broker, viewport), spa_only=True)
+                lambda: light_rows_have_no_red_pixels(browser, served, broker, viewport))
     suite.check("52", "An unbreakable meta string (a 120-character comm) wraps inside its row instead of being clipped",
-                lambda: long_meta_string_wraps(browser, served, broker, viewport), spa_only=True)
+                lambda: long_meta_string_wraps(browser, served, broker, viewport))
     return suite.results
 
 
@@ -1184,7 +1072,7 @@ class QueuePage:
 
     def __init__(self, page, traffic: Traffic, broker: stub.StubBroker):
         self.page, self.traffic, self.broker = page, traffic, broker
-        self.drv = SpaDriver(page, traffic)
+        self.drv = Driver(page, traffic)
 
     @property
     def bar(self):
@@ -1671,14 +1559,9 @@ def with_features_page(browser, served: Served, broker: stub.StubBroker, viewpor
         context.close()
 
 
-def run_queue_features(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """Queue-feature checks (80..96); the SPA only."""
-    suite = Suite(ui, viewport)
-    if ui == "legacy":
-        for number, name, _fn in QUEUE_SHARED_CHECKS + QUEUE_OWN_CHECKS:
-            suite.check(number, name, lambda: None, spa_only=True)
-        return suite.results
-
+def run_queue_features(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    """Queue-feature checks (80..96)."""
+    suite = Suite(viewport)
     def shared(q: QueuePage) -> None:
         for number, name, fn in QUEUE_SHARED_CHECKS:
             suite.check(number, name, lambda fn=fn: fn(q))
@@ -1779,15 +1662,11 @@ class HistoryPage:
         self.page.locator("[data-slot=range-calendar]").wait_for(state="hidden")
 
 
-def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """History-tab checks (30..42, 60, 61, 62). One page per viewport, checked in order; the SPA only."""
+def run_history(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    """History-tab checks (30..42, 60, 61, 62). One page per viewport, checked in order."""
     from playwright.sync_api import expect
 
-    suite = Suite(ui, viewport)
-    if ui == "legacy":
-        for number, name, _fn in HISTORY_CHECKS + [RELTIME_CHECK, CONTRAST_CHECK]:
-            suite.check(number, name, lambda: None, spa_only=True)
-        return suite.results
+    suite = Suite(viewport)
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, "light")
     hist = HistoryPage(page, served, traffic, broker)
@@ -2354,19 +2233,15 @@ HISTORY_CHECKS = [
 class Served:
     """The real admin daemon in front of the stub broker."""
 
-    def __init__(self, ui: str, broker_url: str):
+    def __init__(self, broker_url: str):
         self.home = Path(tempfile.mkdtemp(prefix="admin-ui-home-"))
         root = self.home / "run" / "egress"
         root.mkdir(parents=True)
         (root / admin.OPERATOR_TOKEN_FILENAME).write_text("operator-test-token\n", encoding="utf-8")
         env = {"DJINN_HOME": str(self.home), "EGRESS_BROKER_URL": broker_url}
-        if ui == "spa":
-            env["DJINN_ADMIN_UI"] = "spa"
-            env["DJINN_ADMIN_UI_DIST"] = str(WORKTREE / "admin" / "ui" / "dist")
+        env["DJINN_ADMIN_UI_DIST"] = str(WORKTREE / "admin" / "ui" / "dist")
         self.patcher = mock.patch.dict(os.environ, env, clear=False)
         self.patcher.start()
-        if ui == "legacy":
-            os.environ.pop("DJINN_ADMIN_UI", None)  # the flag unset is the legacy page
         self.server = admin.AdminHTTPServer(
             ("127.0.0.1", 0), egress_root=root, session_secret="session-secret",
             operator_token="operator-test-token", admin_key="admin-test-key")
@@ -2433,22 +2308,22 @@ def close_page_context(context, page) -> None:
     context.close()
 
 
-def open_queue(page, served: Served, driver_cls, traffic: Traffic) -> Driver:
+def open_queue(page, served: Served, traffic: Traffic) -> Driver:
     from playwright.sync_api import expect
 
     page.goto(served.base + "/")
-    drv = driver_cls(page, traffic)
+    drv = Driver(page, traffic)
     expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
     return drv
 
 
-def capture(page, out: Path, ui: str, viewport: str, theme: str, state: str, *, scroll_to=None) -> None:
+def capture(page, out: Path, viewport: str, theme: str, state: str, *, scroll_to=None) -> None:
     """Screenshot at scroll 0 (the whole page), or with `scroll_to` in view (the viewport only).
 
     A full-page capture of a scrolled page shows the sticky header over ghosted
     content, so every capture starts from the top.
     """
-    path = out / f"{ui}-{viewport}-{theme}-{state}.png"
+    path = out / f"{viewport}-{theme}-{state}.png"
     if scroll_to is not None:
         scroll_to.scroll_into_view_if_needed()
         page.wait_for_timeout(150)
@@ -2460,40 +2335,37 @@ def capture(page, out: Path, ui: str, viewport: str, theme: str, state: str, *, 
     log(f"capture path={path.name} bytes={path.stat().st_size}")
 
 
-def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, viewport: str, theme: str) -> None:
-    """Initial queue, then (spa) the dialog, All view, stale banner, empty queue; the outcome notes."""
+def capture_states(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """Initial queue, then the dialog, All view, stale banner, empty queue; the outcome notes."""
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, theme)
     try:
-        drv = open_queue(page, served, driver_cls, traffic)
-        capture(page, out, ui, viewport, theme, "initial")
-        if ui == "spa":
-            drv.set_view("All")
-            page.wait_for_timeout(200)
-            capture(page, out, ui, viewport, theme, "all-view")
-            drv.set_view("By bottle")
-            drv.open_permanent_deny("z1.example.com", "deny_global")
-            page.get_by_role("dialog").locator("#confirm-host").fill("z1.example")
-            capture(page, out, ui, viewport, theme, "dialog")
-            page.get_by_role("button", name="Cancel").click()
-            page.get_by_role("dialog").wait_for(state="hidden")
+        drv = open_queue(page, served, traffic)
+        capture(page, out, viewport, theme, "initial")
+        drv.set_view("All")
+        page.wait_for_timeout(200)
+        capture(page, out, viewport, theme, "all-view")
+        drv.set_view("By bottle")
+        drv.open_permanent_deny("z1.example.com", "deny_global")
+        page.get_by_role("dialog").locator("#confirm-host").fill("z1.example")
+        capture(page, out, viewport, theme, "dialog")
+        page.get_by_role("button", name="Cancel").click()
+        page.get_by_role("dialog").wait_for(state="hidden")
         drv.act("192.0.2.55", "allow_live")
         drv.act("m2.example.com", "allow_live")
         drv.act("bad-request.example.com", "deny")
         page.wait_for_timeout(500)
-        capture(page, out, ui, viewport, theme, "outcomes")
-        if ui == "spa":
-            capture(page, out, ui, viewport, theme, "failed-apply", scroll_to=drv.row("m2.example.com"))
+        capture(page, out, viewport, theme, "outcomes")
+        capture(page, out, viewport, theme, "failed-apply", scroll_to=drv.row("m2.example.com"))
     finally:
         context.close()
-    if ui == "spa":
-        if theme == "light" and viewport != "desktop":
-            capture_long_comm(browser, served, broker, out, viewport, theme)
-        capture_stale_banner(browser, served, broker, driver_cls, out, viewport, theme)
-        capture_empty(browser, served, broker, out, viewport, theme)
-        capture_history(browser, served, broker, out, viewport, theme)
-        capture_queue_features(browser, served, broker, out, viewport, theme)
-        capture_stream_states(browser, served, broker, out, viewport, theme)
+    if theme == "light" and viewport != "desktop":
+        capture_long_comm(browser, served, broker, out, viewport, theme)
+    capture_stale_banner(browser, served, broker, out, viewport, theme)
+    capture_empty(browser, served, broker, out, viewport, theme)
+    capture_history(browser, served, broker, out, viewport, theme)
+    capture_queue_features(browser, served, broker, out, viewport, theme)
+    capture_stream_states(browser, served, broker, out, viewport, theme)
 
 
 def capture_long_comm(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
@@ -2504,29 +2376,29 @@ def capture_long_comm(browser, served, broker, out: Path, viewport: str, theme: 
     add_long_comm_row(broker)
     context, page, traffic = new_page(browser, served, viewport, theme)
     try:
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS) + 1)
-        capture(page, out, "spa", viewport, theme, "long-comm", scroll_to=drv.row("lc.example.com"))
+        capture(page, out, viewport, theme, "long-comm", scroll_to=drv.row("lc.example.com"))
     finally:
         broker.reset()
         context.close()
 
 
-def capture_stale_banner(browser, served, broker, driver_cls, out: Path, viewport: str, theme: str) -> None:
+def capture_stale_banner(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
     """A decide fails on the broker while polls succeed; later polls are held so the banner stays for the capture."""
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, theme)
     held: list = []
     try:
-        drv = open_queue(page, served, driver_cls, traffic)
+        drv = open_queue(page, served, traffic)
         page.route("**/api/egress/queue", lambda route: held.append(route))
         with broker.lock:
             broker.decide_outage = 500
         drv.act("a1.example.com", "deny", reread=False)
         from playwright.sync_api import expect
         expect(drv.stale_banner()).to_be_visible()
-        capture(page, out, "spa", viewport, theme, "stale-banner")
+        capture(page, out, viewport, theme, "stale-banner")
     finally:
         with broker.lock:
             broker.decide_outage = None
@@ -2550,7 +2422,7 @@ def capture_empty(browser, served, broker, out: Path, viewport: str, theme: str)
     try:
         page.goto(served.base + "/")
         expect(page.get_by_text("No open requests.")).to_be_visible()
-        capture(page, out, "spa", viewport, theme, "empty")
+        capture(page, out, viewport, theme, "empty")
     finally:
         broker.reset()
         context.close()
@@ -2565,18 +2437,18 @@ def capture_queue_features(browser, served, broker, out: Path, viewport: str, th
         q.pick_bottles("alpha")
         q.state("Failed apply")
         q.expect_hosts([hp("fa2.example.com"), hp("192.0.2.77")])
-        capture(q.page, out, "spa", viewport, theme, "queue-filtered")
+        capture(q.page, out, viewport, theme, "queue-filtered")
 
     def in_progress(q: QueuePage) -> None:
         held, release_next, _button = _held_decides(q.page, q.traffic, q.drv)
         dialog = q.ask("Deny", "mid")
-        capture(q.page, out, "spa", viewport, theme, "queue-bulk-dialog")
+        capture(q.page, out, viewport, theme, "queue-bulk-dialog")
         q.confirm(dialog, "Deny")
         q.drv._wait_until(lambda: len(held) == 1, 5)
         release_next()
         q.drv._wait_until(lambda: len(held) == 1, 5)
         expect(q.page.get_by_test_id("bulk-count")).to_have_text("1/4")
-        capture(q.page, out, "spa", viewport, theme, "queue-bulk-in-progress")
+        capture(q.page, out, viewport, theme, "queue-bulk-in-progress")
         for _ in range(3):
             release_next()
             q.drv._wait_until(lambda: len(held) == 1, 2)
@@ -2587,19 +2459,19 @@ def capture_queue_features(browser, served, broker, out: Path, viewport: str, th
         q.confirm(q.ask("Deny", "mid"), "Deny")
         expect(q.status()).to_contain_text("1 failed and stays open")
         q.drv.wait_note("fm2.example.com", "^Not sent: ")
-        capture(q.page, out, "spa", viewport, theme, "queue-partial-failure")
+        capture(q.page, out, viewport, theme, "queue-partial-failure")
 
     def denylist(q: QueuePage) -> None:
         q.page.get_by_test_id("denylist-toggle").click()
         expect(q.page.get_by_test_id("denylist-row-hits")).to_have_count(3)
-        capture(q.page, out, "spa", viewport, theme, "queue-denylist-expanded",
+        capture(q.page, out, viewport, theme, "queue-denylist-expanded",
                 scroll_to=q.page.get_by_test_id("denylist-group"))
 
     def allow_all_ip(q: QueuePage) -> None:
         q.confirm(q.ask("Allow", "alpha"), "Allow")
         expect(q.result()).to_have_text("Allowed 4 of 5 in alpha · 1 needs a CIDR in the manifest")
         q.drv.wait_note("192.0.2.77", "^Recorded")
-        capture(q.page, out, "spa", viewport, theme, "queue-allow-all-ip")
+        capture(q.page, out, viewport, theme, "queue-allow-all-ip")
 
     for fn in (filtered, in_progress, partial, denylist, allow_all_ip):
         with_features_page(browser, served, broker, viewport, theme, fn)
@@ -2612,24 +2484,24 @@ def capture_history(browser, served, broker, out: Path, viewport: str, theme: st
     try:
         hist = HistoryPage(page, served, traffic, broker)
         hist.open()
-        capture(page, out, "spa", viewport, theme, "history-first")
+        capture(page, out, viewport, theme, "history-first")
         hist.older()
         hist.older()
-        capture(page, out, "spa", viewport, theme, "history-older")
+        capture(page, out, viewport, theme, "history-older")
         hist.open()
         row = hist.rows().filter(has_text=stub.LONG_HOST_SUFFIX).first
         row.scroll_into_view_if_needed()
         page.wait_for_timeout(150)
-        row.screenshot(path=str(out / f"spa-{viewport}-{theme}-history-long-host.png"))
+        row.screenshot(path=str(out / f"{viewport}-{theme}-history-long-host.png"))
         hist.open()
         hist.pick_day(30)
         from playwright.sync_api import expect
         expect(hist.rows()).to_have_count(1)
         page.locator("[data-slot=range-calendar-trigger][data-selected]").first.evaluate(
             "el => Promise.all(el.getAnimations().map((a) => a.finished))")   # a settled selected day, mouse over it
-        capture(page, out, "spa", viewport, theme, "history-filtered-open")
+        capture(page, out, viewport, theme, "history-filtered-open")
         hist.close_popover()
-        capture(page, out, "spa", viewport, theme, "history-filtered")
+        capture(page, out, viewport, theme, "history-filtered")
     finally:
         context.close()
 
@@ -2886,21 +2758,20 @@ def _own_cache_only(caches: dict, own: str) -> None:
     assert own.startswith(OWN_CACHE_PREFIX), f"{own} is not the worker's own precache"
 
 
-def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    suite = Suite(ui, viewport)
+def run_service_worker(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(viewport)
     obs, failure = None, None
-    if ui == "spa":
-        try:
-            obs = service_worker_scenario(browser, served, broker, viewport)
-        except Exception as exc:  # noqa: BLE001 - every check below then reports it
-            failure = squash(str(exc))[:200]
+    try:
+        obs = service_worker_scenario(browser, served, broker, viewport)
+    except Exception as exc:  # noqa: BLE001 - every check below then reports it
+        failure = squash(str(exc))[:200]
 
     def check(number: str, name: str, assertion: Callable[[SwObservations], None]) -> None:
         def run() -> None:
             if failure is not None:
                 raise AssertionError(f"the service-worker scenario failed: {failure}")
             assertion(obs)
-        suite.check(number, name, run, spa_only=True)
+        suite.check(number, name, run)
 
     def registered(o: SwObservations) -> None:
         reg = o.registration
@@ -2994,6 +2865,99 @@ def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: 
     check("126", "/sw.js is served as JavaScript with cache-control no-cache", worker_script_never_cached)
     check("127", "With the daemon unreachable (context offline) an /api/egress/queue fetch and a navigation to `/` "
                  "fail with a network error instead of being answered from a cache", offline_fails)
+    return suite.results
+
+
+# ---- Upgrade from the retired page's worker (180) -----------------------------------------
+
+# The worker the retired page installed, byte for byte from the last commit that served it. It precaches
+# the page's own shell into `djinn-admin-shell-v3`, which nothing but the generated worker's cleanup deletes.
+LEGACY_WORKER = WORKTREE / "tests" / "fixtures" / "admin_legacy_sw.js"
+LEGACY_ROUTES = re.compile(r"/(sw\.js|app\.js|vendor/htm-preact-standalone\.module\.js)$")   # its worker, and the two shell files no longer served
+
+UPGRADE_CHECK = ("180", "A browser that had the retired page's worker at /sw.js, on one navigation to `/`, shows the app and "
+                        "ends with the generated worker active and no `djinn-admin-shell-v3` in Cache Storage")
+
+LEGACY_INSTALLED_JS = """async () => {
+  const reg = await navigator.serviceWorker.register('/sw.js');
+  await navigator.serviceWorker.ready;
+  for (let i = 0; i < 100; i++) {
+    if (reg.active && reg.active.state === 'activated' && navigator.serviceWorker.controller) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const cache = await caches.open('djinn-admin-shell-v3');
+  return {active: reg.active && reg.active.state, controlled: navigator.serviceWorker.controller !== null,
+          caches: await caches.keys(), shell: (await cache.keys()).map((req) => new URL(req.url).pathname)};
+}"""
+
+# The new worker has taken over once nothing is installing or waiting, the active one is activated, and its own
+# precache exists (only the generated worker makes one); its activation, cleanup included, has then finished.
+UPGRADED_JS = """async (prefix) => {
+  const reg = await navigator.serviceWorker.getRegistration('/');
+  if (!reg || reg.installing || reg.waiting || !reg.active || reg.active.state !== 'activated') return null;
+  const keys = await caches.keys();
+  if (!keys.some((key) => key.startsWith(prefix))) return null;
+  return {keys, scope: reg.scope, script: reg.active.scriptURL};
+}"""
+
+
+def upgrade_from_legacy_worker(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    from playwright.sync_api import expect
+
+    broker.reset()
+    legacy_source = LEGACY_WORKER.read_text(encoding="utf-8")
+    assert "djinn-admin-shell-v3" in legacy_source and "SHELL_PATHS" in legacy_source, "not the retired page's worker"
+    context = browser.new_context(
+        viewport=VIEWPORTS[viewport], color_scheme="light", locale="en-US", timezone_id="UTC",
+        service_workers="allow", device_scale_factor=2 if viewport == "phone" else 1)
+    context.add_cookies([{"name": admin.SESSION_COOKIE_NAME, "value": served.cookie, "domain": served.host,
+                          "path": "/", "httpOnly": True, "sameSite": "Strict"}])
+    page = context.new_page()
+    page.set_default_timeout(TIMEOUT_MS)
+    served_by_the_test: list[str] = []
+
+    def legacy_daemon(route) -> None:
+        """What the retired daemon answered: its worker at /sw.js and the two shell files it served."""
+        path = urlsplit(route.request.url).path
+        served_by_the_test.append(path)
+        body = legacy_source if path == "/sw.js" else "// retired page shell file\n"
+        route.fulfill(status=200, content_type="application/javascript", body=body)
+
+    try:
+        # First visit: the retired daemon's answers, on a page that is not the app (which would register its own worker).
+        context.route(LEGACY_ROUTES, legacy_daemon)
+        page.goto(served.base + "/favicon.svg")
+        before = page.evaluate(LEGACY_INSTALLED_JS)
+        log(f"stage=upgrade legacy installed viewport={viewport} caches={before['caches']} shell={before['shell']}")
+        assert before["active"] == "activated" and before["controlled"], f"the retired worker did not take over: {before}"
+        assert "djinn-admin-shell-v3" in before["caches"], f"the retired worker made no shell cache: {before['caches']}"
+        assert len(before["shell"]) == 5, f"the retired worker's shell is not the five files it lists: {before['shell']}"
+        assert "/sw.js" in served_by_the_test, "the retired worker was not the one installed"
+
+        # The daemon of this change answers from here on; the browser goes to `/` once.
+        context.unroute(LEGACY_ROUTES, legacy_daemon)
+        page.goto(served.base + "/")
+        expect(page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
+        deadline = time.monotonic() + TIMEOUT_MS * 2 / 1000
+        after = page.evaluate(UPGRADED_JS, OWN_CACHE_PREFIX)
+        while after is None and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+            after = page.evaluate(UPGRADED_JS, OWN_CACHE_PREFIX)
+        assert after is not None, "the generated worker did not take over from the retired one"
+        log(f"stage=upgrade done viewport={viewport} caches={after['keys']} script={after['script']}")
+        assert after["script"] == served.base + "/sw.js" and after["scope"] == served.base + "/", after
+        assert "djinn-admin-shell-v3" not in after["keys"], f"the retired shell cache is still there: {after['keys']}"
+        assert all(key.startswith(OWN_CACHE_PREFIX) for key in after["keys"]), f"a foreign cache is left: {after['keys']}"
+        sw_text = page.evaluate("async () => await (await fetch('/sw.js', {cache: 'no-store'})).text()")
+        assert "precacheAndRoute" in sw_text and "djinn-admin-shell-v3" not in sw_text, "/sw.js is not the generated worker"
+    finally:
+        close_page_context(context, page)
+        broker.reset()
+
+
+def run_upgrade(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(viewport)
+    suite.check(*UPGRADE_CHECK, lambda: upgrade_from_legacy_worker(browser, served, broker, viewport))
     return suite.results
 
 
@@ -3656,7 +3620,7 @@ NOTIFY_CHECKS = [
      {"permission": "granted", "live": True}, _n_arrives_by_stream),
 ]
 BELL_DETAIL_CHECKS = [   # 160..164: the round-2 polish; those that open their own pages take (browser, served, broker, viewport)
-    ("160", "In spa mode the `Filters cleared to show <host>` note, in the pill and in the polite live region, is gone as soon as a filter changes (the search box, the state toggle)",
+    ("160", "The `Filters cleared to show <host>` note, in the pill and in the polite live region, is gone as soon as a filter changes (the search box, the state toggle)",
      {"permission": "granted"}, _n_note_goes_on_filter_change),
     ("161", "The `Filters cleared to show <host>` note is gone, pill and live region, once that request is decided from its row, or leaves the queue without our click",
      {"permission": "granted"}, _n_note_goes_when_decided),
@@ -3671,16 +3635,9 @@ BELL_LAYOUT_CHECK = ("139", "The bell in every state (default, on, muted, denied
                      _n_bell_layout)
 
 
-def run_notifications(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """Notification bell checks (130..143); the SPA only."""
-    suite = Suite(ui, viewport)
-    if ui == "legacy":
-        for number, name, _how, _fn in NOTIFY_CHECKS:
-            suite.check(number, name, lambda: None, spa_only=True)
-        suite.check(BELL_LAYOUT_CHECK[0], BELL_LAYOUT_CHECK[1], lambda: None, spa_only=True)
-        for number, name, *_rest in BELL_DETAIL_CHECKS + BELL_OWN_PAGE_CHECKS:
-            suite.check(number, name, lambda: None, spa_only=True)
-        return suite.results
+def run_notifications(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    """Notification bell checks (130..143)."""
+    suite = Suite(viewport)
     for number, name, how, fn in NOTIFY_CHECKS:
         def run(how=how, fn=fn):
             n = NotifyPage(browser, served, broker, viewport, "light", **how)
@@ -3714,12 +3671,12 @@ def capture_bell_states(browser, served, broker, out: Path, viewport: str, theme
             n.page.mouse.move(2, viewport_height(viewport) - 2)
             n.page.evaluate("() => document.activeElement && document.activeElement.blur()")
             n.page.wait_for_timeout(300)   # past the hover transition
-            capture(n.page, out, "spa", viewport, theme, f"bell-{state}")
-            n.page.locator("header").screenshot(path=str(out / f"spa-{viewport}-{theme}-bell-{state}-bar.png"))
+            capture(n.page, out, viewport, theme, f"bell-{state}")
+            n.page.locator("header").screenshot(path=str(out / f"{viewport}-{theme}-bell-{state}-bar.png"))
             if state in ("denied", "unsupported"):
                 n.bell.click()
                 n.page.get_by_test_id("notify-blocked" if state == "denied" else "notify-unsupported").wait_for()
-                capture(n.page, out, "spa", viewport, theme, f"bell-{state}-open")
+                capture(n.page, out, viewport, theme, f"bell-{state}-open")
         finally:
             n.close()
     broker.reset()
@@ -3733,8 +3690,8 @@ def capture_bell_live(browser, served, broker, out: Path, viewport: str, theme: 
         n.page.evaluate("() => document.activeElement && document.activeElement.blur()")
         n.page.wait_for_timeout(300)
         assert_bell(n.bell, "on")
-        capture(n.page, out, "spa", viewport, theme, "bell-on-live")
-        n.page.locator("header").screenshot(path=str(out / f"spa-{viewport}-{theme}-bell-on-live-bar.png"))
+        capture(n.page, out, viewport, theme, "bell-on-live")
+        n.page.locator("header").screenshot(path=str(out / f"{viewport}-{theme}-bell-on-live-bar.png"))
     finally:
         n.close()
     broker.reset()
@@ -3746,7 +3703,7 @@ def capture_filters_cleared(browser, served, broker, out: Path, viewport: str, t
     try:
         _cleared_note_raised(n)
         n.page.wait_for_timeout(300)
-        capture(n.page, out, "spa", viewport, theme, "filters-cleared-note")
+        capture(n.page, out, viewport, theme, "filters-cleared-note")
     finally:
         n.close()
     broker.reset()
@@ -3755,8 +3712,6 @@ def capture_filters_cleared(browser, served, broker, out: Path, viewport: str, t
 def viewport_height(viewport: str) -> int:
     return VIEWPORTS[viewport]["height"]
 
-
-# ---- legacy → behaviour mapping ------------------------------------------------------
 
 # ---- Live stream: GET /api/egress/stream in the tab (100..104) ----------------------------
 
@@ -3819,7 +3774,7 @@ def open_live_page(browser, served: Served, broker: stub.StubBroker, viewport: s
         if init_script:
             context.add_init_script(script=init_script)
         seen = queue_requests(page)
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))
         wait_link(page, "live", TIMEOUT_MS)
@@ -3989,7 +3944,7 @@ def _ninth_tab_polls_then_goes_live(browser, served: Served, broker: stub.StubBr
         other_context, other, other_traffic = new_page(browser, served, viewport, "light")
         other_seen = queue_requests(other)
         other.goto(served.base + "/")
-        other_drv = SpaDriver(other, other_traffic)
+        other_drv = Driver(other, other_traffic)
         expect(other_drv.requests()).to_have_count(len(stub.OPEN_ROWS))   # the rows came from polling
         wait_link(other, "polling", TIMEOUT_MS)
         assert other_seen, "the refused tab never polled"
@@ -4093,7 +4048,7 @@ def open_background_tab(context, served: Served, rows: int = len(stub.OPEN_ROWS)
     traffic.attach(tab)
     tab_seen = queue_requests(tab)
     tab.goto(served.base + "/")
-    expect(SpaDriver(tab, traffic).requests()).to_have_count(rows)
+    expect(Driver(tab, traffic).requests()).to_have_count(rows)
     wait_link(tab, "live", TIMEOUT_MS)
     return tab, tab_seen
 
@@ -4185,7 +4140,7 @@ def _connecting_reads_once_and_keeps_reading_until_the_first_frame(browser, serv
     try:
         page.route(STREAM_ROUTE, lambda route: held.append(route))   # the stream request waits until released
         seen = queue_requests(page)
-        drv = SpaDriver(page, traffic)
+        drv = Driver(page, traffic)
         page.goto(served.base + "/")
         expect(drv.requests()).to_have_count(len(stub.OPEN_ROWS))   # the list is the read's: no stream yet
         wait_link(page, "connecting", 500)
@@ -4274,40 +4229,39 @@ def _heartbeat_reaches_page_script(browser, served: Served, broker: stub.StubBro
             context.close()
 
 
-def run_live_stream(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    suite = Suite(ui, viewport)
+def run_live_stream(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(viewport)
     suite.check("100", "A request filed at the broker appears in an open tab within 3 s with no /api/egress/queue "
                        "request from the tab once its stream is open (from the first frame); the top bar says Live",
-                lambda: _live_request_arrives(browser, served, broker, viewport), spa_only=True)
+                lambda: _live_request_arrives(browser, served, broker, viewport))
     suite.check("101", "A lost stream reads Reconnecting and reads the queue at once, then Polling with a 5 s poll of "
                        "/api/egress/queue; when the stream returns it reads Live and the polling stops",
-                lambda: _stream_lost_then_back(browser, served, broker, viewport), spa_only=True)
+                lambda: _stream_lost_then_back(browser, served, broker, viewport))
     suite.check("102", "A ninth concurrent stream gets 503 with the error body, a request without the session is "
                        "refused 403, and the open streams are untouched",
-                lambda: _ninth_stream_refused(browser, served, broker, viewport), spa_only=True)
+                lambda: _ninth_stream_refused(browser, served, broker, viewport))
     suite.check("103", "A tab that gets no stream slot polls (indicator Polling) and goes Live, polling stopped, "
                        "when a slot frees",
-                lambda: _ninth_tab_polls_then_goes_live(browser, served, broker, viewport), spa_only=True)
+                lambda: _ninth_tab_polls_then_goes_live(browser, served, broker, viewport))
     suite.check("104", "A lasting broker outage ends the streams: the tab polls, the banner says `Showing data from "
                        "<time>`, and both clear when the broker returns",
-                lambda: _outage_ends_streams_and_the_banner_holds(browser, served, broker, viewport), spa_only=True)
+                lambda: _outage_ends_streams_and_the_banner_holds(browser, served, broker, viewport))
     suite.check("105", "A decide that fails while the stream is open raises `Decision not sent: <error>` and it clears "
                        "by one queue read about 5 s later, the stream still open",
-                lambda: _decide_failure_banner_while_live(browser, served, broker, viewport), spa_only=True)
+                lambda: _decide_failure_banner_while_live(browser, served, broker, viewport))
     suite.check("106", "Fallback without Web Locks: with six tabs of the app open and five of them hidden, the visible tab's "
                        "decide completes within 3 s; hidden tabs hold no stream (Paused) and read the queue once, a slow "
                        "poll after; a tab shown again reopens its stream; without BroadcastChannel two tabs hold two streams",
-                lambda: _hidden_tabs_free_the_connection_pool(browser, served, broker, viewport), spa_only=True)
+                lambda: _hidden_tabs_free_the_connection_pool(browser, served, broker, viewport))
     suite.check("107", "A tab whose stream is slow to open reads Connecting, shows the queue from one read at once and "
                        "polls until the first frame; then Live, polling stopped",
-                lambda: _connecting_reads_once_and_keeps_reading_until_the_first_frame(browser, served, broker, viewport),
-                spa_only=True)
+                lambda: _connecting_reads_once_and_keeps_reading_until_the_first_frame(browser, served, broker, viewport))
     suite.check("108", "A queue read that fails while the stream is Live raises the banner and polls every 5 s until a "
                        "read succeeds, then stops; the stream stays Live",
-                lambda: _failed_read_while_live_polls_until_one_succeeds(browser, served, broker, viewport), spa_only=True)
+                lambda: _failed_read_while_live_polls_until_one_succeeds(browser, served, broker, viewport))
     suite.check("109", "The stream's heartbeat is an `hb` event with `{}` as its data that a real EventSource dispatches "
                        "to page script; the app's tab receiving them stays Live",
-                lambda: _heartbeat_reaches_page_script(browser, served, broker, viewport), spa_only=True)
+                lambda: _heartbeat_reaches_page_script(browser, served, broker, viewport))
     return suite.results
 
 
@@ -4321,9 +4275,9 @@ def capture_stream_states(browser, served, broker, out: Path, viewport: str, the
     try:
         slow_page.route(STREAM_ROUTE, lambda route: held.append(route))   # a stream slow to open
         slow_page.goto(served.base + "/")
-        expect(SpaDriver(slow_page, slow_traffic).requests()).to_have_count(len(stub.OPEN_ROWS))
+        expect(Driver(slow_page, slow_traffic).requests()).to_have_count(len(stub.OPEN_ROWS))
         wait_link(slow_page, "connecting", 1000)
-        capture(slow_page, out, "spa", viewport, theme, "stream-connecting")
+        capture(slow_page, out, viewport, theme, "stream-connecting")
     finally:
         for route in held:   # a stream request still held is a task pending when the context closes (check 164)
             try:
@@ -4333,32 +4287,32 @@ def capture_stream_states(browser, served, broker, out: Path, viewport: str, the
         close_page_context(slow_context, slow_page)
     context, page, traffic, drv, seen = open_live_page(browser, served, broker, viewport, theme)
     try:
-        capture(page, out, "spa", viewport, theme, "stream-live")
+        capture(page, out, viewport, theme, "stream-live")
         # Paused is the fallback's state: a tab that leads keeps its stream when hidden, so this one is a
         # tab of a browser without Web Locks (its own context, as its own browser).
         solo_context, solo_page, solo_traffic = new_page(browser, served, viewport, theme)
         try:
             solo_context.add_init_script(script=NO_LOCKS_JS)
             solo_page.goto(served.base + "/")
-            expect(SpaDriver(solo_page, solo_traffic).requests()).to_have_count(len(stub.OPEN_ROWS))
+            expect(Driver(solo_page, solo_traffic).requests()).to_have_count(len(stub.OPEN_ROWS))
             wait_link(solo_page, "live", TIMEOUT_MS)
             set_tab_hidden(solo_page, True)
             wait_link(solo_page, "paused", 2500)
-            capture(solo_page, out, "spa", viewport, theme, "stream-paused")
+            capture(solo_page, out, viewport, theme, "stream-paused")
         finally:
             solo_context.close()
-        capture(page, out, "spa", viewport, theme, "stream-arrival-before")
+        capture(page, out, viewport, theme, "stream-arrival-before")
         host = "live-arrival.example.com"
         broker.file_request(host, container="alpha")
         drv.row(host).wait_for(state="visible", timeout=LIVE_WITHIN_MS)
-        capture(page, out, "spa", viewport, theme, "stream-arrival-after")
-        capture(page, out, "spa", viewport, theme, "stream-arrival-row", scroll_to=drv.row(host))
+        capture(page, out, viewport, theme, "stream-arrival-after")
+        capture(page, out, viewport, theme, "stream-arrival-row", scroll_to=drv.row(host))
         page.route(STREAM_ROUTE, lambda route: route.abort())
         served.server.stream_hub.end_streams("capture")
         wait_link(page, "reconnecting", 2500)
-        capture(page, out, "spa", viewport, theme, "stream-reconnecting")
+        capture(page, out, viewport, theme, "stream-reconnecting")
         wait_link(page, "polling", 8000)
-        capture(page, out, "spa", viewport, theme, "stream-polling")
+        capture(page, out, viewport, theme, "stream-polling")
     finally:
         close_page_context(context, page)
 
@@ -4393,7 +4347,7 @@ class Tab:
     page: object
     traffic: Traffic
     seen: list
-    drv: SpaDriver
+    drv: Driver
 
     def state(self) -> str | None:
         return link_state(self.page).get_attribute("data-state")
@@ -4423,7 +4377,7 @@ def load_tab(page, traffic: Traffic, served: Served, rows: int = len(stub.OPEN_R
     from playwright.sync_api import expect
 
     seen = queue_requests(page)
-    drv = SpaDriver(page, traffic)
+    drv = Driver(page, traffic)
     page.goto(served.base + "/")
     expect(drv.requests()).to_have_count(rows)
     wait_link(page, "live", TIMEOUT_MS)
@@ -4908,11 +4862,11 @@ ONE_STREAM_CHECKS = [
 ]
 
 
-def run_one_stream(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
-    """One live stream per browser (150..159, 170..171); the SPA only."""
-    suite = Suite(ui, viewport)
+def run_one_stream(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    """One live stream per browser (150..159, 170..171)."""
+    suite = Suite(viewport)
     for number, name, fn in ONE_STREAM_CHECKS:
-        suite.check(number, name, lambda fn=fn: fn(browser, served, broker, viewport), spa_only=True)
+        suite.check(number, name, lambda fn=fn: fn(browser, served, broker, viewport))
     broker.reset()
     return suite.results
 
@@ -4924,185 +4878,35 @@ def capture_one_stream(browser, served, broker, out: Path, viewport: str, theme:
     context, tabs = open_tabs(browser, served, broker, viewport, 3, theme=theme)
     try:
         leader, next_leader, follower = tabs
-        capture(leader.page, out, "spa", viewport, theme, "one-stream-leader-live")
-        capture(follower.page, out, "spa", viewport, theme, "one-stream-follower-live")
+        capture(leader.page, out, viewport, theme, "one-stream-leader-live")
+        capture(follower.page, out, viewport, theme, "one-stream-follower-live")
         next_leader.page.route(STREAM_ROUTE, lambda route: held.append(route))   # its stream is slow to open, once it leads
         leader.page.close()
         wait_link(follower.page, "connecting", 5000)
-        capture(follower.page, out, "spa", viewport, theme, "one-stream-follower-connecting")
+        capture(follower.page, out, viewport, theme, "one-stream-follower-connecting")
         release_held(held)
         wait_link(follower.page, "live", 5000)
-        capture(follower.page, out, "spa", viewport, theme, "one-stream-follower-live-again")
+        capture(follower.page, out, viewport, theme, "one-stream-follower-live-again")
     finally:
         release_held(held)   # a failure before the release leaves the stream request pending (check 164)
         close_page_context(context, tabs[1].page)
 
 
-LEGACY_MAP = [
-    # (original check in the legacy suite, behaviour check(s), note)
-    ("`{light,dark}/mobile: no horizontal overflow` (1 site, 2 lines)", "(20)", "now at desktop, tablet and phone, before and after decisions"),
-    ("`tab title carries the count`", "(5) count; (5) format SKIP(design-change: Tab title carries the open count)", "the count assertion runs on both UIs; the format `(N) Egress · Djinn admin` is the PLN decision \"Tab title carries the open count\""),
-    ("`group headers by bottle in first-seen order`", "(1) SKIP(design-change: Queue ordering and views)", "PLN decision \"Queue ordering and views\" (2026-09-23): bottles alphabetical, replacing legacy's first-seen order; (1) any-order grouping and counts still run on both UIs"),
-    ("`bottle-a's two rows stay together ahead of bottle-b`", "(1) any-order grouping; (2) SKIP(design-change: Queue ordering and views)", "contiguity is asserted by the grouped host order; the order itself is the PLN decision \"Queue ordering and views\" (newest first within a bottle)"),
-    ("`four columns per request row`", "retired: asserts legacy DOM", "the SPA row is two lines in three columns; the facts it carried are covered by (4)"),
-    ("`destination cell: host:port and hits`", "(4)", ""),
-    ("`reason cell`", "(4)", ""),
-    ("`requested cell carries raw UTC in title`", "retired: asserts legacy DOM", "a tooltip attribute on a legacy cell; the SPA shows relative time and the clock time instead"),
-    ("`missing reason renders an em-dash`", "(4) runs on both UIs", "each UI asserts its own no-reason text: legacy `—`, SPA `No reason given`; no PLN decision is involved"),
-    ("`IP badge and apply-failed chip on the IP row`", "(4)", "text differs per UI (legacy `apply failed ×1: ip_requires_cidr`, SPA `Apply failed after 1 attempt: an IP address needs a CIDR in the manifest`); each UI asserts its own text from the `last_error` object, on both `ip_requires_cidr` and `apply_failed` rows"),
-    ("`recent list renders decided time, bottle, destination, outcome, by`", "(18), (22)", "(18) asserts a decided row appears in recent on both UIs; (22) asserts on both UIs that each recent row shows its destination, bottle, outcome and deny reason (legacy `denied / global`, SPA `Denied permanently · global`), which legacy's original check asserted only for the host; the legacy decided-time and `by` cells are retired with the legacy table, and (22b) checks the SPA's labels (N/A(spa-only) on legacy)"),
-    ("`deny global with a wrong typed host is refused inline`", "(12)", "legacy shows an inline chip; the SPA disables the dialog button and shows a mismatch message, and also refuses Enter and a forced click"),
-    ("`no decide POST was sent on the refusal`", "(12)", ""),
-    ("`deny global body omits container and carries the reason`", "(13), (10)", "(10) adds the reason-less body"),
-    ("`decide carries the UI header and JSON content type`", "(19)", "asserted for every decide the page sent"),
-    ("`Allow` / `Allow+manifest` / `Deny` / `Deny always (bottle)` post exactly `{action, host, container}` (1 site, 4 lines)", "(6), (7), (8), (9)", "(9) also carries the reason legacy offered"),
-    ("`IP-literal allow shows the CIDR-by-hand chip`", "(14)", ""),
-    ("`group header decremented after the decision`", "(18)", "both UIs assert the alpha count 5 → 4 (legacy header `alpha - 4 request(s)`)"),
-    ("`the decided row moved to the recent list with its outcome`", "(18)", ""),
-    ("`tab title count follows`", "(5)", ""),
-    ("`bottle-a's header disappears after its last request is decided`", "(18)", "asserted on zeta"),
-]
-
-# New behaviour checks with no legacy original: (number, name, decision or N/A).
-NEW_CHECKS = [
-    ("1", "By-bottle grouping as a full-order assertion (bottles alphabetical)", "SKIP(design-change: Queue ordering and views) on legacy"),
-    ("3", "All view: newest first across bottles, bottle on line 2", "SKIP(design-change: Queue ordering and views) on legacy"),
-    ("5b", "The Egress nav entry carries the count badge", "N/A(spa-only) on legacy: the badge is new SPA behaviour, no PLN decision"),
-    ("11", "Plain Deny offers and sends no reason", "SKIP(design-change: Action labels map onto the existing decide API unchanged) on legacy"),
-    ("15", "`apply_failed` outcome: the note is added by the decide and the row stays queued", "runs on both UIs"),
-    ("16", "A 400 shows the server's error text on the row", "runs on both UIs"),
-    ("17, 17b, 17c", "A decide fails alone (broker 500 → admin 502, broker 401 → admin 503, request aborted) while polls succeed: a banner from the decide, and on the SPA the row note `Not sent: …`", "runs on both UIs"),
-    ("21", "No console errors", "runs on both UIs"),
-    ("22b", "Recent rows carry the SPA's decision labels", "N/A(spa-only) on legacy: SPA labels, no PLN decision"),
-    ("23", "Permanent-deny dialog caps the reason at 200 characters, with a counter and the design's label", "SKIP(design-change: Action labels map onto the existing decide API unchanged) on legacy"),
-    ("24", "Every row button has its own accessible name", "N/A(spa-only) on legacy"),
-    ("25", "Each row's status live region is rendered before any outcome", "N/A(spa-only) on legacy"),
-    ("26", "Every row's action group sits inside its panel and no host breaks across lines", "N/A(spa-only) on legacy"),
-    ("27", "A recent row that wraps leaves no dangling separator", "N/A(spa-only) on legacy"),
-    ("28", "A decide in flight locks every request it acts on and no other", "N/A(spa-only) on legacy"),
-    ("28b", "A row stays locked until every in-flight decide that covers it has finished", "N/A(spa-only) on legacy"),
-    ("29", "A poll already in flight when a decide fails does not clear the banner", "N/A(spa-only) on legacy"),
-    ("30", "History lists the whole store newest first, 50 to a page, in keyset order", "N/A(spa-only) on legacy: the History tab is new (PLN step 4)"),
-    ("31", "Older then Newer walk every page with no row repeated (across a tie in decided_at) and back", "N/A(spa-only) on legacy"),
-    ("32", "The row decided 30 days ago is reachable by paging", "N/A(spa-only) on legacy"),
-    ("33", "Picking a day sends the local day as since and until; Clear drops both", "N/A(spa-only) on legacy"),
-    ("34", "The bottle filter sends container, keeps it while paging and drops it for All bottles", "N/A(spa-only) on legacy"),
-    ("35", "Search and the status toggle filter the loaded page without asking the broker", "N/A(spa-only) on legacy"),
-    ("36", "A failed page keeps the list and the page number, shows a banner, and Retry recovers", "N/A(spa-only) on legacy"),
-    ("37", "History has no horizontal overflow and no console errors", "N/A(spa-only) on legacy"),
-    ("38", "A failed fetch for a new filter shows no rows, no Older cursor and Page 1, not the old filter's", "N/A(spa-only) on legacy"),
-    ("39", "A slow reply for a superseded filter never replaces the current filter's rows", "N/A(spa-only) on legacy"),
-    ("40", "Every row is two lines (host and date, pill and bottle) at every viewport, a 63+ character host ending in an ellipsis with the whole host in its title, with by and relative time from sm up", "N/A(spa-only) on legacy"),
-    ("41", "Search, date and bottle share a row on tablet and desktop, the bottle label sits by its icon", "N/A(spa-only) on legacy"),
-    ("42", "The date trigger is named \"Date range: <label>\"", "N/A(spa-only) on legacy"),
-    ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
-    ("51", "The light theme paints no pure-red (#ff0000) pixel in any request row", "N/A(spa-only) on legacy"),
-    ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
-    ("80", "The bottle multi-select narrows the queue to the chosen bottles; the count line reads `N of M open`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("81", "The Failed apply state shows only requests with a `last_error`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("82", "The age filter buckets requests: under 5 minutes, under 1 hour, older than 1 hour", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("83", "The destination search narrows by host:port, ignoring case", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("84", "Clear shows only while a filter is active and resets every filter; a filter matching nothing shows `Nothing matches these filters.`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("85", "One bottle plus Failed apply shows exactly that bottle's failed requests with their `last_error` reason and attempt", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("86", "Deny all for one bottle sends exactly one `deny` decide per open request of that bottle (literal bodies) and none for another bottle; those rows leave", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("87", "Deny all decides every open request of the bottle even when filters hide some, and the dialog says so", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("88", "Allow all sends exactly the Allow body per open request of the bottle (literal bodies)", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("89", "Cancel in the bulk dialog sends nothing", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("90", "When the mock fails the second decide of a bulk run that request stays open and marked while the others leave; decides run one at a time; the run reports every request", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("91", "A request mid-decide keeps its bottle's bulk buttons off; a bulk run locks its requests and other bulk buttons; a poll does not bring a decided row back", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("92", "Denylist hits are one group, collapsed by default, headed by the summed hits, expanding to a row with `N×` each", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("93", "Filters, bulk buttons, menus and the bulk dialog stay inside the viewport at every viewport, with no console errors", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("94", "The collapsed denylist group is a card of its own with no row elements in it; the ordinary recent rows sit in a separate card clearly below", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("95", "Allow all on a bottle with an IP-literal request reports it apart (`Allowed 4 of 5 in alpha · 1 needs a CIDR in the manifest`), sends the literal Allow bodies and leaves that row open with its note; the state toggle is named `Request state`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("96", "A request swept by an earlier decide of a bulk run is skipped, not sent, and the run still reports every request; the running decide's spinner sits on the pressed button", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
-    ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
-    ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
-    ("62", "The selected day, a range's end and its start in the History date picker have at least 4.5:1 text contrast, hovered or not, focused or not, light and dark", "N/A(spa-only) on legacy"),
-    ("100", "A request filed at the broker appears in an open tab within 3 s with no `/api/egress/queue` request from the tab once its stream is open (from the first frame); the top bar says Live", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("101", "A lost stream reads Reconnecting and reads the queue at once, then Polling with a 5 s poll of `/api/egress/queue`; when the stream returns it reads Live and the polling stops", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("102", "A ninth concurrent stream gets 503 with the error body, a request without the session is refused 403, and the open streams are untouched", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("103", "A tab that gets no stream slot polls (indicator Polling) and goes Live, polling stopped, when a slot frees", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("104", "A lasting broker outage ends the streams: the tab polls, the banner says `Showing data from <time>`, and both clear when the broker returns", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("105", "A decide that fails while the stream is open raises `Decision not sent: <error>` and it clears by one queue read about 5 s later, the stream still open", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("106", "Fallback without Web Locks: with six tabs of the app open and five of them hidden, the visible tab's decide completes within 3 s; hidden tabs hold no stream (Paused) and read the queue once, a slow poll after; a tab shown again reopens its stream; without BroadcastChannel two tabs hold two streams", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("107", "A tab whose stream is slow to open reads Connecting, shows the queue from one read at once and polls until the first frame; then Live, polling stopped", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("108", "A queue read that fails while the stream is Live raises the banner and polls every 5 s until a read succeeds, then stops; the stream stays Live", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("109", "The stream's heartbeat is an `hb` event with `{}` as its data that a real EventSource dispatches to page script; the app's tab receiving them stays Live", "N/A(spa-only) on legacy: the live stream is new SPA behaviour (PLN step 6)"),
-    ("120", "The service worker registers from the app at scope `/`, activates and controls the page; /sw.js is the generated precache worker", "N/A(spa-only) on legacy: the legacy page keeps its inline worker (PLN step 6)"),
-    ("121", "With the worker active, reloading the page and opening `/` afresh go to the network (the daemon sees each GET, cache-control no-store), not a copy planted in the worker's own cache", "N/A(spa-only) on legacy"),
-    ("122", "With the worker active, every /api/egress/queue read from the page, the same URL again and again, reaches the daemon", "N/A(spa-only) on legacy"),
-    ("123", "With the worker active and the session cookie cleared, `/` and an app route show the pointer page from the network, not the app", "N/A(spa-only) on legacy"),
-    ("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it (at the end, besides the pages the test planted itself); a pre-seeded `djinn-admin-shell-v3` and another foreign cache are deleted after activation", "N/A(spa-only) on legacy"),
-    ("125", "The page links a web manifest: standalone, start `/`, the tokens' canvas colour, 192 and 512 png icons that load", "N/A(spa-only) on legacy"),
-    ("126", "/sw.js is served as JavaScript with cache-control no-cache", "N/A(spa-only) on legacy"),
-    ("127", "With the daemon unreachable (context offline) an /api/egress/queue fetch and a navigation to `/` fail with a network error instead of being answered from a cache", "N/A(spa-only) on legacy"),
-    ("130", "The page never asks for notification permission on load; the bell reads `Enable desktop notifications`", "N/A(spa-only) on legacy: notifications are new SPA behaviour (PLN step 6)"),
-    ("131", "Clicking the bell in the default state calls `requestPermission` exactly once and, granted, the bell reads on; rows open at that moment raise no notification", "N/A(spa-only) on legacy"),
-    ("132", "A request filed after load raises exactly one notification with the literal title, body and tag; the initial snapshot's rows and repeat snapshots raise none", "N/A(spa-only) on legacy"),
-    ("133", "Muted (kept in localStorage across a reload) raises zero notifications; unmuting does not replay what arrived while muted", "N/A(spa-only) on legacy"),
-    ("134", "With permission denied the bell explains the browser blocks notifications, sends no prompt, and nothing is raised", "N/A(spa-only) on legacy"),
-    ("135", "The notification's `onclick` focuses that request's row, in view, from History, from another route and past a hiding filter; a decided request still lands on the queue", "N/A(spa-only) on legacy"),
-    ("136", "With the real Notification API underneath a filed request constructs one real notification whose own `tag` is the request id", "N/A(spa-only) on legacy"),
-    ("137", "Without the Notification API the bell is disabled and says so; the queue still works with no console error", "N/A(spa-only) on legacy"),
-    ("138", "A request that leaves and comes back with the same id raises no second notification", "N/A(spa-only) on legacy"),
-    ("139", "The bell in every state sits inside the top bar and viewport, clear of the theme button and the link indicator, with its state's accessible name", "N/A(spa-only) on legacy"),
-    ("140", "A notification constructor that throws moves the bell to unsupported, never on again, tried once, logged once", "N/A(spa-only) on legacy"),
-    ("141", "The bell follows a permission changed under the open page, on focus and on visibility change", "N/A(spa-only) on legacy"),
-    ("142", "The unsupported bell on an insecure page says it needs a secure connection", "N/A(spa-only) on legacy"),
-    ("143", "With the stream open a request filed at the broker arrives by the stream and raises exactly one notification with the literal title, body and tag within 3 s, and the tab reads no /api/egress/queue after the first frame", "N/A(spa-only) on legacy"),
-    ("150", "In one browser context, 6 visible tabs and 3 hidden ones hold one stream at the daemon (all Live, hidden included); a decide from a follower and one from the leader each complete in under 1 s, and the leader's next frame takes the rows out of every tab", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("151", "A request filed at the broker shows in each of 6 tabs (2 hidden) within 3 s, and no tab reads /api/egress/queue after the first frame (a follower never does)", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("152", "With the bell on in two tabs, one hidden, a filed request raises exactly one notification in each within 3 s (the literal title, body and tag), over one stream", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("153", "When the leader's tab closes another tab takes over within 5 s: the tabs left read Live, Connecting, Live, the daemon has one stream again, and a request filed then reaches both", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("154", "A leader hidden keeps the one stream and stays Live; a filed request reaches it and the other tabs within 3 s, and no tab reads the queue", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("155", "A follower that hears nothing from the leader for 40 s reads the queue itself and says Polling; the leader's next message returns it to Live and stops the reads", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("156", "A decide is the acting tab's alone (one POST from it, none from the others; its own read after it works), and the row leaves every tab by the leader's next frame; still one stream", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("157", "A stream lost by the leader reads Reconnecting then Polling in every tab, only the leader reads the queue (what it reads reaches the followers), and every tab is Live again when the stream returns", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("158", "A stream frame ends the polling a failed read started while Live: the banner clears and no read follows though every read of the queue still fails", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("159", "Connecting's spinner turns (`animation-name: spin`) and holds still under `prefers-reduced-motion: reduce`", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("160", "The `Filters cleared to show <host>` note is gone as soon as a filter changes", "N/A(spa-only) on legacy"),
-    ("161", "The `Filters cleared to show <host>` note is gone once that request is decided or leaves the queue", "N/A(spa-only) on legacy"),
-    ("162", "Each bell state has its own glyph, so muted and denied differ by shape and not by colour alone", "N/A(spa-only) on legacy"),
-    ("163", "The blocked and unsupported popovers give a reason and a next step in their body, without repeating the heading or asking for a reload", "N/A(spa-only) on legacy"),
-    ("164", "The spa suite's log has no `Task was destroyed but it is pending` line", "N/A(spa-only) on legacy"),
-    ("170", "A leader that gets Page Lifecycle `freeze` (dispatched by hand: headless Chromium does not freeze) lets go of the lock: another tab leads within 5 s with one stream at the daemon, a filed request reaches the running tabs within 3 s, and on `resume` the tab follows without a stream of its own", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-    ("171", "A new tab's hello is answered to that tab alone: every link and snapshot message a tab already open hears meanwhile is addressed to the newcomer", "N/A(spa-only) on legacy: one stream per browser (PLN step 6.4)"),
-]
-
-
-def mapping_markdown() -> str:
-    rows = ["| Original legacy check | Behaviour check | Note |", "|---|---|---|"]
-    rows += [f"| {a} | {b} | {c} |" for a, b, c in LEGACY_MAP]
-    new = ["| Check | What it asserts | On legacy |", "|---|---|---|"]
-    new += [f"| ({a}) | {b} | {c} |" for a, b, c in NEW_CHECKS]
-    return (
-        "# Legacy check → behaviour check mapping\n\n"
-        "Every check in the pre-refactor `tests/admin_ui_playwright.py` (21 call sites, 24 report lines when the "
-        "overflow and action loops expand) and where it went. A check that asserts a deliberate difference from the "
-        "legacy page reports `SKIP(design-change: <PLN Architecture decision>)` under `--ui legacy`; a check of "
-        "behaviour that only exists in the new app reports `N/A(spa-only)`. Nothing else is skipped.\n\n"
-        + "\n".join(rows) + "\n\n"
-        "## New behaviour checks with no legacy original\n\n"
-        + "\n".join(new) + "\n"
-    )
+NO_PENDING_TASKS_CHECK = ("164", "The suite's log has no `Task was destroyed but it is pending` line")
 
 
 # ---- main -----------------------------------------------------------------------------
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--ui", choices=["legacy", "spa"], default="legacy")
-    ui = parser.parse_args().ui
     out = Path(os.environ.get("ADMIN_UI_SHOTS") or tempfile.mkdtemp(prefix="admin-ui-"))
     out.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
 
-    if ui == "spa":
-        refusal = bundle_refusal(WORKTREE)
-        if refusal:
-            print(refusal, file=sys.stderr)
-            return 2
+    refusal = bundle_refusal(WORKTREE)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
 
     asyncio_warnings = AsyncioWarnings()
     logging.getLogger("asyncio").addHandler(asyncio_warnings)
@@ -5114,10 +4918,9 @@ def main() -> int:
         return 2
     log(f"stage=preflight ok schemas={stub.QUEUE_SCHEMA},{stub.DECIDE_SCHEMA},{stub.ERROR_SCHEMA}")
     broker_url = broker.start()
-    served = Served(ui, broker_url)
-    log(f"stage=serve ui={ui} admin={served.base} broker={broker_url}")
+    served = Served(broker_url)
+    log(f"stage=serve admin={served.base} broker={broker_url}")
 
-    driver_cls = SpaDriver if ui == "spa" else LegacyDriver
     results: list[Result] = []
     from playwright.sync_api import sync_playwright
 
@@ -5129,40 +4932,40 @@ def main() -> int:
                 context, page, traffic = new_page(browser, served, viewport, "light")
                 t0 = time.monotonic()
                 try:
-                    drv = open_queue(page, served, driver_cls, traffic)
-                    results += run_scenario(ui, viewport, page, drv, traffic, broker)
+                    drv = open_queue(page, served, traffic)
+                    results += run_scenario(viewport, page, drv, traffic, broker)
                 except Exception as exc:  # noqa: BLE001 - the scenario could not even start
                     results.append(Result("FAIL", viewport, "0", "queue renders", squash(str(exc))[:300]))
                 finally:
                     context.close()
-                results += run_dedicated(ui, viewport, browser, served, broker)
-                results += run_history(ui, viewport, browser, served, broker)
-                results += run_queue_features(ui, viewport, browser, served, broker)
-                results += run_live_stream(ui, viewport, browser, served, broker)
-                results += run_service_worker(ui, viewport, browser, served, broker)
-                results += run_notifications(ui, viewport, browser, served, broker)
-                results += run_one_stream(ui, viewport, browser, served, broker)
+                results += run_dedicated(viewport, browser, served, broker)
+                results += run_history(viewport, browser, served, broker)
+                results += run_queue_features(viewport, browser, served, broker)
+                results += run_live_stream(viewport, browser, served, broker)
+                results += run_service_worker(viewport, browser, served, broker)
+                results += run_notifications(viewport, browser, served, broker)
+                results += run_one_stream(viewport, browser, served, broker)
+                results += run_upgrade(viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):
                     try:
-                        capture_states(browser, served, broker, driver_cls, out, ui, viewport, theme)
+                        capture_states(browser, served, broker, out, viewport, theme)
                     except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
                         results.append(Result("FAIL", viewport, "0", f"captures ({theme})", squash(str(exc))[:300]))
-                    if ui == "spa":
+                    try:
+                        capture_bell_states(browser, served, broker, out, viewport, theme)
+                    except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
+                        results.append(Result("FAIL", viewport, "0", f"bell captures ({theme})", squash(str(exc))[:300]))
+                    for extra in (capture_bell_live, capture_filters_cleared):
                         try:
-                            capture_bell_states(browser, served, broker, out, viewport, theme)
+                            extra(browser, served, broker, out, viewport, theme)
                         except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
-                            results.append(Result("FAIL", viewport, "0", f"bell captures ({theme})", squash(str(exc))[:300]))
-                        for extra in (capture_bell_live, capture_filters_cleared):
-                            try:
-                                extra(browser, served, broker, out, viewport, theme)
-                            except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
-                                results.append(Result("FAIL", viewport, "0", f"{extra.__name__} ({theme})", squash(str(exc))[:300]))
-                        try:
-                            capture_one_stream(browser, served, broker, out, viewport, theme)
-                        except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
-                            results.append(Result("FAIL", viewport, "0", f"one-stream captures ({theme})", squash(str(exc))[:300]))
+                            results.append(Result("FAIL", viewport, "0", f"{extra.__name__} ({theme})", squash(str(exc))[:300]))
+                    try:
+                        capture_one_stream(browser, served, broker, out, viewport, theme)
+                    except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
+                        results.append(Result("FAIL", viewport, "0", f"one-stream captures ({theme})", squash(str(exc))[:300]))
             browser.close()
     finally:
         served.stop()
@@ -5173,26 +4976,19 @@ def main() -> int:
             print(f"CONTRACT VIOLATION: {violation}", file=sys.stderr)
         return 2
 
-    if ui == "legacy":
-        results.append(Result("N/A", "all", "164", dict((a, b) for a, b, _c in NEW_CHECKS)["164"], "spa-only"))
-    else:
-        gc.collect()   # a dropped task is reported when it is collected
-        pending = asyncio_warnings.pending
-        log(f"stage=asyncio-warnings pending_task_lines={len(pending)}")
-        results.append(Result("FAIL" if pending else "PASS", "all", "164",
-                              dict((a, b) for a, b, _c in NEW_CHECKS)["164"],
-                              f"{len(pending)} line(s), first: {pending[0]}" if pending else ""))
+    gc.collect()   # a dropped task is reported when it is collected
+    pending = asyncio_warnings.pending
+    log(f"stage=asyncio-warnings pending_task_lines={len(pending)}")
+    number, name = NO_PENDING_TASKS_CHECK
+    results.append(Result("FAIL" if pending else "PASS", "all", number, name,
+                          f"{len(pending)} line(s), first: {pending[0]}" if pending else ""))
 
     printed = [result.line() for result in results]
-    counts = {status: sum(1 for r in results if r.status == status) for status in ("PASS", "SKIP", "N/A", "FAIL")}
-    summary = (f"{ui.upper()}: {counts['PASS']} PASS, {counts['SKIP']} SKIP(design-change), "
-               f"{counts['N/A']} N/A(spa-only), {counts['FAIL']} FAIL")
-    mapping = mapping_markdown()
-    (out / "legacy-mapping.md").write_text(mapping, encoding="utf-8")
-    (out / f"REPORT-{ui}.md").write_text("\n".join(f"- {line}" for line in printed) + f"\n\n{summary}\n", encoding="utf-8")
+    counts = {status: sum(1 for r in results if r.status == status) for status in ("PASS", "FAIL")}
+    summary = f"{counts['PASS']} PASS, {counts['FAIL']} FAIL"
+    (out / "REPORT.md").write_text("\n".join(f"- {line}" for line in printed) + f"\n\n{summary}\n", encoding="utf-8")
     print("\n".join(printed))
     print(f"\n{summary}  ({int(time.monotonic() - started)}s, captures in {out})")
-    print("\n" + mapping)
     return 1 if counts["FAIL"] else 0
 
 
