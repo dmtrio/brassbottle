@@ -75,7 +75,7 @@
           "deny_reason": { "type": ["string", "null"] },
           "hit_count": {
             "type": "integer",
-            "$comment": "Requests folded into this row: coalesced repeats while it was open, plus, for a decided_by 'denylist' row, suppressed repeats inside the coalesce window after the decision (suppressed_hit in src/egress_store.py). The operator UI sums it per denylist host."
+            "$comment": "Requests folded into this row: coalesced repeats while it was open, plus, for a decided_by 'denylist' row, suppressed repeats inside the coalesce window after the decision (suppressed_hit in src/egress_store.py). The operator UI sums it across denylist rows."
           }
         },
         "required": [
