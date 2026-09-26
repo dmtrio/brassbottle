@@ -1,10 +1,23 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { Box, Group, Rows3, X } from '@lucide/vue'
+import { Ban, Box, Check, ChevronDown, FilterX, Group, Rows3, X } from '@lucide/vue'
 import { useMediaQuery } from '@vueuse/core'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Progress } from '@/components/ui/progress'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -19,10 +32,23 @@ import {
 import { decide as apiDecide, type DecideAction, type DecidePayload } from '@/api/egress'
 import { useQueue } from '@/composables/useQueue'
 import { outcomeLabel, outcomeTone, relTime } from '@/lib/decision'
+import {
+  AGE_OPTIONS,
+  denylistHitTotal,
+  filterOpen,
+  filtersActive,
+  isDenylistHit,
+  NO_FILTERS,
+  type AgeFilter,
+  type QueueFilters,
+  type StateFilter,
+} from '@/lib/queue'
 import type { OpenRow } from '@/types'
+import BottleMultiFilter from './BottleMultiFilter.vue'
 import DecideButtons from './DecideButtons.vue'
 import EmptyState from './EmptyState.vue'
 import RequestSummary, { type RowNote } from './RequestSummary.vue'
+import SearchField from './SearchField.vue'
 
 const REASON_MAX = 200
 
@@ -50,12 +76,43 @@ function byNewest(a: OpenRow, b: OpenRow): number {
   return Date.parse(b.opened_at) - Date.parse(a.opened_at)
 }
 
+// Filters narrow the list in the browser: the queue is the whole snapshot, a
+// few dozen rows at most, so nothing here asks the broker.
+const filters = reactive<QueueFilters>({ ...NO_FILTERS, bottles: [] })
+const filtered = computed(() => filtersActive(filters))
+
+// A toggle group deselects on a second click; a state must always be chosen.
+function chooseState(next: unknown): void {
+  if (next === 'all' || next === 'failed') filters.state = next as StateFilter
+}
+
+function chooseAge(next: unknown): void {
+  if (AGE_OPTIONS.some((option) => option.value === next)) filters.age = next as AgeFilter
+}
+
+function clearFilters(): void {
+  Object.assign(filters, NO_FILTERS, { bottles: [] })
+}
+
+const openRows = computed(() => snapshot.value?.open ?? [])
+
+// Every bottle with an open request, plus any still selected after its last
+// request was decided, so a selection can always be undone.
+const bottleOptions = computed(() =>
+  [...new Set([...openRows.value.map((row) => row.container), ...filters.bottles])].sort(),
+)
+
+// `Date.now()` is read when the snapshot or a filter changes: a request that
+// crosses an age edge between polls is re-bucketed by the next one.
+const visibleRows = computed(() => filterOpen(openRows.value, filters, Date.now()))
+
 // Grouped by hand rather than with TanStack's getGroupedRowModel: "bottles
 // alphabetical, rows newest first within" is a plain sort and the grouped row
-// model would need overriding to express it.
+// model would need overriding to express it. TanStack Table was not added for
+// the filters either: they are the plain predicates in lib/queue.ts.
 const groups = computed(() => {
   const byBottle = new Map<string, OpenRow[]>()
-  for (const row of snapshot.value?.open ?? []) {
+  for (const row of visibleRows.value) {
     const list = byBottle.get(row.container) ?? []
     list.push(row)
     byBottle.set(row.container, list)
@@ -68,12 +125,18 @@ const groups = computed(() => {
 const sections = computed(() =>
   view.value === 'grouped'
     ? groups.value
-    : [{ container: null as string | null, rows: [...(snapshot.value?.open ?? [])].sort(byNewest) }],
+    : [{ container: null as string | null, rows: [...visibleRows.value].sort(byNewest) }],
 )
 
-const recentRows = computed(() =>
+// Denylist hits are not decisions anyone made: one collapsed group, its hits
+// summed, instead of a row each in the list of what was decided.
+const decidedByTime = computed(() =>
   [...(snapshot.value?.recent ?? [])].sort((a, b) => Date.parse(b.decided_at) - Date.parse(a.decided_at)),
 )
+const denylistRows = computed(() => decidedByTime.value.filter(isDenylistHit))
+const denylistHits = computed(() => denylistHitTotal(denylistRows.value))
+const recentRows = computed(() => decidedByTime.value.filter((row) => !isDenylistHit(row)))
+const denylistOpen = ref(false)
 
 function clock(isoTs: string): string {
   return new Date(isoTs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
@@ -132,23 +195,36 @@ function affectedIds(row: OpenRow, action: DecideAction): string[] {
   return ids.includes(row.request_id) ? ids : [...ids, row.request_id]
 }
 
-// Legacy semantics for each outcome; see PLN "Decide outcomes".
-async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Promise<void> {
-  const key = row.request_id
-  const payload: DecidePayload = { action, host: row.host }
-  if (action !== 'deny_global') payload.container = row.container
-  if (reason) payload.reason = reason
+function lockRows(ids: string[]): void {
+  for (const id of ids) busy.set(id, (busy.get(id) ?? 0) + 1)
+}
 
-  const locked = affectedIds(row, action)
-  for (const id of locked) busy.set(id, (busy.get(id) ?? 0) + 1)
-  notes[key] = undefined
-  const result = await apiDecide(payload)
-  for (const id of locked) {
+function unlockRows(ids: string[]): void {
+  for (const id of ids) {
     const left = (busy.get(id) ?? 1) - 1
     if (left > 0) busy.set(id, left)
     else busy.delete(id)
   }
+}
 
+function payloadFor(row: OpenRow, action: DecideAction, reason = ''): DecidePayload {
+  const payload: DecidePayload = { action, host: row.host }
+  if (action !== 'deny_global') payload.container = row.container
+  if (reason) payload.reason = reason
+  return payload
+}
+
+// What a decide's answer means for its row: the outcome note, and the queue
+// re-read that drops the rows the broker decided. Returns false when the
+// request stays queued with a failure marked on it. Legacy semantics for each
+// outcome; see PLN "Decide outcomes". `bulk` keeps a failed decide off the
+// banner: a bulk run reports its failures once, in its own result line.
+async function settle(
+  row: OpenRow,
+  result: Awaited<ReturnType<typeof apiDecide>>,
+  bulk: boolean,
+): Promise<boolean> {
+  const key = row.request_id
   if (!result.ok) {
     if (result.status === 400) {
       notes[key] = { tone: 'deny', text: result.error }
@@ -158,21 +234,110 @@ async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Pro
       // failure succeeds, and the row says the decision was not sent. No
       // immediate refresh here: a good one would clear the banner unseen.
       notes[key] = { tone: 'deny', text: `Not sent: ${result.error}` }
-      setStale(result.error)
+      if (!bulk) setStale(result.error)
     }
-    return
+    return false
   }
 
   const failure = (result.data.apply_failures ?? []).find((f) => f.request_id === key)
+  let stays = false
   if (!failure) {
     notes[key] = { tone: 'neutral', text: 'Decision recorded' }
   } else if (failure.reason === 'ip_requires_cidr') {
     notes[key] = { tone: 'neutral', text: 'Recorded — add the CIDR to the manifest by hand' }
   } else {
     notes[key] = { tone: 'deny', text: 'Decision recorded but the rule install failed — the request stays queued' }
+    stays = true
   }
   await refresh()
+  return !stays
 }
+
+async function runDecision(row: OpenRow, action: DecideAction, reason = ''): Promise<void> {
+  const locked = affectedIds(row, action)
+  lockRows(locked)
+  notes[row.request_id] = undefined
+  const result = await apiDecide(payloadFor(row, action, reason))
+  unlockRows(locked)
+  await settle(row, result, false)
+}
+
+// Bulk decide for one bottle. The broker has no batch endpoint, so this is the
+// single-row decide, once per open request, one after another. `rows` is every
+// open request of the bottle when the dialog opened, not only the ones the
+// filters show: the dialog says so and lists them all.
+type BulkAction = 'allow_live' | 'deny'
+type BulkRun = { container: string; action: BulkAction; total: number; done: number; failed: number; running: boolean }
+
+const bulkAsk = reactive({
+  open: false,
+  container: '',
+  action: 'allow_live' as BulkAction,
+  rows: [] as OpenRow[],
+  hidden: 0,
+})
+const bulk = ref<BulkRun | null>(null)
+const bulkRunning = computed(() => bulk.value?.running === true)
+const bulkPercent = computed(() => (bulk.value ? (100 * bulk.value.done) / bulk.value.total : 0))
+
+function bottleRows(container: string): OpenRow[] {
+  return openRows.value.filter((row) => row.container === container).sort(byNewest)
+}
+
+// A bottle's Allow all / Deny all are off while a bulk run is going (one at a
+// time, so the decides stay sequential) and while any of its rows is mid-decide.
+function bulkDisabled(container: string): boolean {
+  return bulkRunning.value || bottleRows(container).some((row) => isBusy(row.request_id))
+}
+
+function askBulk(container: string, action: BulkAction): void {
+  const rows = bottleRows(container)
+  bulkAsk.container = container
+  bulkAsk.action = action
+  bulkAsk.rows = rows
+  bulkAsk.hidden = rows.filter((row) => !visibleRows.value.includes(row)).length
+  bulkAsk.open = true
+}
+
+async function runBulk(): Promise<void> {
+  bulkAsk.open = false
+  if (bulkRunning.value) return
+  const { container, action } = bulkAsk
+  // Rows decided or locked since the dialog opened are left out: never a
+  // second decide on a request another is already deciding.
+  const stillOpen = new Set(openRows.value.map((row) => row.request_id))
+  const rows = bulkAsk.rows.filter((row) => stillOpen.has(row.request_id) && !isBusy(row.request_id))
+  if (rows.length === 0) return
+
+  const run: BulkRun = reactive({ container, action, total: rows.length, done: 0, failed: 0, running: true })
+  bulk.value = run
+  const pending = rows.map((row) => row.request_id)
+  lockRows(pending)
+  try {
+    for (const row of rows) {
+      notes[row.request_id] = undefined
+      const result = await apiDecide(payloadFor(row, action))
+      unlockRows([row.request_id])
+      pending.splice(pending.indexOf(row.request_id), 1)
+      if (!(await settle(row, result, true))) run.failed += 1
+      run.done += 1
+    }
+  } finally {
+    unlockRows(pending)
+    run.running = false
+  }
+}
+
+const bulkVerb = (action: BulkAction): string => (action === 'allow_live' ? 'Allow' : 'Deny')
+
+const bulkResult = computed(() => {
+  const run = bulk.value
+  if (!run || run.running) return null
+  const done = run.total - run.failed
+  const verb = run.action === 'allow_live' ? 'Allowed' : 'Denied'
+  const tail = run.failed ? ` · ${run.failed} failed and stay${run.failed === 1 ? 's' : ''} open, marked in the list` : ''
+  return `${verb} ${done} of ${run.total} in ${run.container}${tail}`
+})
 
 function onDecide(row: OpenRow, action: DecideAction): void {
   if (action === 'deny_bottle' || action === 'deny_global') {
@@ -185,12 +350,77 @@ function onDecide(row: OpenRow, action: DecideAction): void {
 
 <template>
   <div class="stack-section">
+    <div
+      class="toolbar"
+      data-testid="queue-filters"
+    >
+      <SearchField
+        v-model="filters.search"
+        placeholder="Search destination"
+      />
+      <BottleMultiFilter
+        v-model="filters.bottles"
+        :options="bottleOptions"
+      />
+      <ToggleGroup
+        :model-value="filters.state"
+        type="single"
+        variant="outline"
+        class="bg-background"
+        data-testid="queue-state"
+        @update:model-value="chooseState"
+      >
+        <ToggleGroupItem
+          value="all"
+          class="h-control"
+        >
+          All
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="failed"
+          class="h-control"
+        >
+          Failed apply
+        </ToggleGroupItem>
+      </ToggleGroup>
+      <Select
+        :model-value="filters.age"
+        @update:model-value="chooseAge"
+      >
+        <SelectTrigger
+          class="w-select bg-background"
+          aria-label="Age"
+          data-testid="queue-age"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem
+            v-for="option in AGE_OPTIONS"
+            :key="option.value"
+            :value="option.value"
+          >
+            {{ option.label }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
+      <Button
+        v-if="filtered"
+        variant="ghost"
+        class="h-control"
+        data-testid="queue-filter-clear"
+        @click="clearFilters"
+      >
+        <FilterX class="size-icon" /> Clear
+      </Button>
+    </div>
+
     <div class="toolbar justify-between">
       <p
         class="row-meta"
         data-testid="summary"
       >
-        {{ snapshot?.count ?? 0 }} open · {{ groups.length }} bottle{{ groups.length === 1 ? '' : 's' }} · newest first
+        {{ visibleRows.length }} of {{ snapshot?.count ?? 0 }} open · {{ groups.length }} bottle{{ groups.length === 1 ? '' : 's' }} · newest first
       </p>
       <ToggleGroup
         :model-value="view"
@@ -198,6 +428,7 @@ function onDecide(row: OpenRow, action: DecideAction): void {
         variant="outline"
         size="sm"
         class="bg-background"
+        data-testid="queue-view"
         @update:model-value="chooseView"
       >
         <ToggleGroupItem value="grouped">
@@ -218,9 +449,37 @@ function onDecide(row: OpenRow, action: DecideAction): void {
       <span class="pill pill-warn">{{ staleText }}</span>
     </p>
 
+    <p
+      v-if="bulk && (bulk.running || bulkResult)"
+      class="inline-row"
+      role="status"
+      data-testid="bulk-status"
+    >
+      <template v-if="bulk.running">
+        <span class="pill pill-neutral">{{ bulkVerb(bulk.action) }} all in {{ bulk.container }}: {{ bulk.done }}/{{ bulk.total }}</span>
+      </template>
+      <template v-else>
+        <span
+          class="pill"
+          :class="bulk.failed ? 'pill-deny' : 'pill-neutral'"
+        >{{ bulkResult }}</span>
+        <Button
+          variant="ghost"
+          size="sm"
+          @click="bulk = null"
+        >
+          Dismiss
+        </Button>
+      </template>
+    </p>
+
     <EmptyState
       v-if="!snapshot?.open.length"
       :message="snapshot ? 'No open requests.' : 'Loading…'"
+    />
+    <EmptyState
+      v-else-if="!visibleRows.length"
+      message="Nothing matches these filters."
     />
 
     <!-- Desktop / tablet -->
@@ -258,6 +517,42 @@ function onDecide(row: OpenRow, action: DecideAction): void {
                   <Box class="size-icon" />
                   <span class="font-semibold">{{ s.container }}</span>
                   <span class="pill pill-neutral rounded-full">{{ s.rows.length }} open</span>
+                  <div class="flex-1" />
+                  <template v-if="bulk?.running && bulk.container === s.container">
+                    <div class="w-col-time">
+                      <Progress
+                        :model-value="bulkPercent"
+                        :aria-label="`${bulkVerb(bulk.action)} all in ${s.container}`"
+                        data-testid="bulk-progress"
+                      />
+                    </div>
+                    <span
+                      class="row-meta"
+                      data-testid="bulk-count"
+                    >{{ bulk.done }}/{{ bulk.total }}</span>
+                  </template>
+                  <template v-else>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="text-allow-text hover:text-allow-hover"
+                      :disabled="bulkDisabled(s.container)"
+                      :aria-label="`Allow all in ${s.container}`"
+                      @click="askBulk(s.container, 'allow_live')"
+                    >
+                      <Check class="size-icon" /> Allow all
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="text-destructive hover:text-destructive"
+                      :disabled="bulkDisabled(s.container)"
+                      :aria-label="`Deny all in ${s.container}`"
+                      @click="askBulk(s.container, 'deny')"
+                    >
+                      <X class="size-icon" /> Deny all
+                    </Button>
+                  </template>
                 </div>
               </TableCell>
             </TableRow>
@@ -314,6 +609,42 @@ function onDecide(row: OpenRow, action: DecideAction): void {
         >
           <Box class="size-icon" /><span class="font-semibold">{{ s.container }}</span>
           <span class="pill pill-neutral rounded-full">{{ s.rows.length }} open</span>
+          <div class="flex-1" />
+          <template v-if="bulk?.running && bulk.container === s.container">
+            <div class="w-col-time">
+              <Progress
+                :model-value="bulkPercent"
+                :aria-label="`${bulkVerb(bulk.action)} all in ${s.container}`"
+                data-testid="bulk-progress"
+              />
+            </div>
+            <span
+              class="row-meta"
+              data-testid="bulk-count"
+            >{{ bulk.done }}/{{ bulk.total }}</span>
+          </template>
+          <template v-else>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="text-allow-text hover:text-allow-hover"
+              :disabled="bulkDisabled(s.container)"
+              :aria-label="`Allow all in ${s.container}`"
+              @click="askBulk(s.container, 'allow_live')"
+            >
+              <Check class="size-icon" /> Allow all
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="text-destructive hover:text-destructive"
+              :disabled="bulkDisabled(s.container)"
+              :aria-label="`Deny all in ${s.container}`"
+              @click="askBulk(s.container, 'deny')"
+            >
+              <X class="size-icon" /> Deny all
+            </Button>
+          </template>
         </div>
         <article
           v-for="r in s.rows"
@@ -340,14 +671,71 @@ function onDecide(row: OpenRow, action: DecideAction): void {
 
     <!-- Recent (24 h) -->
     <section
-      v-if="recentRows.length"
+      v-if="recentRows.length || denylistRows.length"
       class="stack-section"
       data-testid="recent"
     >
       <h2 class="text-lead font-semibold">
         Recent decisions (24 h)
       </h2>
-      <div class="panel divide-y">
+      <Collapsible
+        v-if="denylistRows.length"
+        v-model:open="denylistOpen"
+        class="panel"
+        data-testid="denylist-group"
+      >
+        <CollapsibleTrigger
+          class="cell-group toolbar w-full text-left"
+          data-testid="denylist-toggle"
+        >
+          <Ban class="size-icon text-muted-foreground" />
+          <span class="font-medium">Denylist</span>
+          <span
+            class="pill pill-neutral rounded-full"
+            data-testid="denylist-hits"
+          >{{ denylistHits }} hit{{ denylistHits === 1 ? '' : 's' }}</span>
+          <span class="row-meta max-sm:hidden">Blocked automatically, no decision needed</span>
+          <ChevronDown
+            class="size-icon ml-auto transition-transform"
+            :class="denylistOpen && 'rotate-180'"
+          />
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div class="divide-y border-t">
+            <div
+              v-for="r in denylistRows"
+              :key="r.request_id"
+              class="cell-group stack-line"
+              data-testid="recent-row"
+            >
+              <div class="inline-row">
+                <span class="row-title">{{ r.host }}<span class="font-normal text-muted-foreground">:{{ r.port }}</span></span>
+                <span
+                  class="pill pill-neutral"
+                  data-testid="denylist-row-hits"
+                >{{ r.hit_count }}×</span>
+              </div>
+              <div class="overflow-hidden">
+                <div class="meta-flow row-meta">
+                  <span class="meta-item inline-flex items-center gap-tight font-medium text-foreground"><Box class="size-icon-sm" />{{ r.container }}</span>
+                  <span class="meta-item row-caption">{{ relTime(r.decided_at) }}</span>
+                </div>
+              </div>
+              <p
+                v-if="r.deny_reason"
+                class="row-caption"
+              >
+                {{ r.deny_reason }}
+              </p>
+            </div>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+      <div
+        v-if="recentRows.length"
+        class="panel divide-y"
+        data-testid="recent-list"
+      >
         <div
           v-for="r in recentRows"
           :key="r.request_id"
@@ -377,6 +765,51 @@ function onDecide(row: OpenRow, action: DecideAction): void {
       </div>
     </section>
   </div>
+
+  <!-- Bulk confirm -->
+  <AlertDialog v-model:open="bulkAsk.open">
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>
+          {{ bulkVerb(bulkAsk.action) }} all {{ bulkAsk.rows.length }} open request{{ bulkAsk.rows.length === 1 ? '' : 's' }} for {{ bulkAsk.container }}?
+        </AlertDialogTitle>
+        <AlertDialogDescription
+          as="div"
+          class="stack-section"
+        >
+          <p v-if="bulkAsk.hidden">
+            This is every open request in the bottle, including {{ bulkAsk.hidden }} the current filters hide.
+          </p>
+          <ul
+            class="stack-line font-mono text-body text-foreground"
+            data-testid="bulk-hosts"
+          >
+            <li
+              v-for="r in bulkAsk.rows"
+              :key="r.request_id"
+            >
+              {{ r.host }}:{{ r.port }}
+            </li>
+          </ul>
+          <p>
+            {{ bulkAsk.action === 'allow_live'
+              ? 'Each is allowed until the bottle restarts, as the Allow button on its row does.'
+              : 'Each is denied once. Nothing is added to a denylist.' }}
+            They are decided one after another; one that fails stays in the list, marked.
+          </p>
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      <AlertDialogFooter>
+        <AlertDialogCancel>Cancel</AlertDialogCancel>
+        <AlertDialogAction
+          :variant="bulkAsk.action === 'allow_live' ? 'allow' : 'destructive'"
+          @click="runBulk"
+        >
+          {{ bulkVerb(bulkAsk.action) }} {{ bulkAsk.rows.length }}
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
 
   <!-- Permanent deny dialog -->
   <Dialog v-model:open="dlg.open">

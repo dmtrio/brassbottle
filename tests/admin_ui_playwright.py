@@ -332,10 +332,19 @@ class SpaDriver(Driver):
             parsed.append((name, int(count)))
         return parsed
 
+    def open_denylist_group(self) -> None:
+        """Expand the recent list's denylist group (the SPA folds the denylist's hits into one collapsed group)."""
+        toggle = self.page.locator("[data-testid=denylist-toggle]")
+        if toggle.count() and toggle.get_attribute("aria-expanded") != "true":
+            toggle.click()
+            self.page.locator("[data-testid=denylist-group] [data-testid=recent-row]").first.wait_for()
+
     def recent_text(self):
+        self.open_denylist_group()
         return self.page.locator("[data-testid=recent]").inner_text()
 
     def recent_rows(self):
+        self.open_denylist_group()
         return [squash(text) for text in self.page.locator("[data-testid=recent-row]").all_inner_texts()]
 
     def stale_banner(self):
@@ -345,7 +354,8 @@ class SpaDriver(Driver):
         return squash(self.row(host).locator("[role=status]").inner_text())
 
     def set_view(self, label: str) -> None:
-        self.page.locator("button, [role=radio]").filter(has_text=re.compile(rf"^\s*{label}\s*$")).click()
+        self.page.locator("[data-testid=queue-view]").locator("button, [role=radio]").filter(
+            has_text=re.compile(rf"^\s*{label}\s*$")).click()
 
     def button(self, label: str, host: str, port: int | None = None, bottle: str | None = None):
         """A row button by its unique accessible name, e.g. `Allow a1.example.com:443 in alpha`."""
@@ -1122,6 +1132,490 @@ def run_dedicated(ui: str, viewport: str, browser, served: Served, broker: stub.
 
 
 
+# ---- Queue features: filters, per-bottle bulk decide, denylist group (80..93) --------------
+
+FEATURE_HOSTS = {   # bottle -> its open hosts, newest first (stub.FEATURE_ROWS)
+    "alpha": ["fa1.example.com", "fa2.example.com", "fa3.example.com", "192.0.2.77", "fa5.example.com"],
+    "mid": ["fm1.example.com", "fm2.example.com", "fm3.example.com", "fm4.example.com"],
+    "zeta": ["fz1.example.com", "fz2.example.com", "fz3.example.com"],
+}
+FEATURE_PORT = {"192.0.2.77": 5432, "fm4.example.com": 8443}   # every other feature row is on 443
+
+
+def hp(host: str) -> str:
+    return f"{host}:{FEATURE_PORT.get(host, 443)}"
+
+
+def hps(*bottles: str) -> list[str]:
+    return [hp(host) for bottle in bottles for host in FEATURE_HOSTS[bottle]]
+
+
+ALL_FEATURE = hps("alpha", "mid", "zeta")
+
+
+class QueuePage:
+    """The queue on the queue-features fixture, driven by test ids and accessible names."""
+
+    def __init__(self, page, traffic: Traffic, broker: stub.StubBroker):
+        self.page, self.traffic, self.broker = page, traffic, broker
+        self.drv = SpaDriver(page, traffic)
+
+    @property
+    def bar(self):
+        return self.page.locator("[data-testid=queue-filters]")
+
+    def hosts(self):
+        return self.page.locator("[data-testid=request-host]")
+
+    def expect_hosts(self, expected: list[str]) -> None:
+        from playwright.sync_api import expect
+        if expected:
+            expect(self.hosts()).to_have_text(expected)
+        else:
+            expect(self.hosts()).to_have_count(0)
+
+    def count_line(self) -> str:
+        return squash(self.page.get_by_test_id("summary").inner_text())
+
+    def pick_bottles(self, *names: str) -> None:
+        self.page.get_by_test_id("queue-bottle-filter").click()
+        for name in names:
+            self.page.get_by_role("menuitemcheckbox", name=name, exact=True).click()
+        self.page.keyboard.press("Escape")
+
+    def state(self, label: str) -> None:
+        self.state_item(label).click()
+
+    def state_item(self, label: str):
+        return self.page.get_by_test_id("queue-state").locator("button, [role=radio]").filter(
+            has_text=re.compile(rf"^\s*{label}\s*$"))
+
+    def age(self, label: str) -> None:
+        self.page.get_by_test_id("queue-age").click()
+        self.page.get_by_role("option", name=label, exact=True).click()
+
+    def search(self, text: str) -> None:
+        self.bar.get_by_placeholder("Search destination").fill(text)
+
+    def clear_button(self):
+        return self.page.get_by_test_id("queue-filter-clear")
+
+    def reset(self) -> None:
+        if self.clear_button().count():
+            self.clear_button().click()
+        self.expect_hosts(ALL_FEATURE)
+
+    def bulk_button(self, verb: str, bottle: str):
+        return self.page.get_by_role("button", name=f"{verb} all in {bottle}", exact=True)
+
+    def dialog(self):
+        return self.page.get_by_role("alertdialog")
+
+    def ask(self, verb: str, bottle: str):
+        self.bulk_button(verb, bottle).click()
+        dialog = self.dialog()
+        dialog.wait_for()
+        return dialog
+
+    def confirm(self, dialog, verb: str) -> None:
+        dialog.get_by_role("button", name=re.compile(rf"^{verb} \d+$")).click()
+
+    def status(self):
+        return self.page.get_by_test_id("bulk-status")
+
+    def broker_decides(self) -> list[dict]:
+        with self.broker.lock:
+            return [dict(body) for body in self.broker.decides]
+
+    def sent_bodies(self) -> list[dict]:
+        return [entry["body"] for entry in self.traffic.decides]
+
+    def groups(self) -> list[tuple[str, int]]:
+        return self.drv.groups()
+
+
+def _f_bottle(q: QueuePage) -> None:
+    q.pick_bottles("mid")
+    q.expect_hosts(hps("mid"))
+    _in("4 of 12 open", q.count_line())
+    _eq(q.groups(), [("mid", 4)])
+    q.pick_bottles("zeta")
+    q.expect_hosts(hps("mid", "zeta"))
+    _in("7 of 12 open", q.count_line())
+    _in("2 bottles", q.page.get_by_test_id("queue-bottle-filter").inner_text())
+    q.pick_bottles("mid", "zeta")
+    q.expect_hosts(ALL_FEATURE)
+    _in("All bottles", q.page.get_by_test_id("queue-bottle-filter").inner_text())
+
+
+def _f_state(q: QueuePage) -> None:
+    q.state("Failed apply")
+    q.expect_hosts([hp("fa2.example.com"), hp("192.0.2.77"), hp("fm2.example.com"), hp("fz2.example.com")])
+    _in("4 of 12 open", q.count_line())
+    q.state("All")
+    q.expect_hosts(ALL_FEATURE)
+
+
+def _f_age(q: QueuePage) -> None:
+    q.age("Under 5 minutes")
+    q.expect_hosts([hp(h) for h in ("fa1.example.com", "fa2.example.com", "fm1.example.com",
+                                    "fz1.example.com", "fz2.example.com")])
+    q.age("Under 1 hour")
+    q.expect_hosts([hp(h) for h in ("fa1.example.com", "fa2.example.com", "fa3.example.com", "fm1.example.com",
+                                    "fm2.example.com", "fz1.example.com", "fz2.example.com")])
+    q.age("Older than 1 hour")
+    q.expect_hosts([hp(h) for h in ("192.0.2.77", "fa5.example.com", "fm3.example.com", "fm4.example.com",
+                                    "fz3.example.com")])
+    _in("5 of 12 open", q.count_line())
+    q.age("Any age")
+    q.expect_hosts(ALL_FEATURE)
+
+
+def _f_search(q: QueuePage) -> None:
+    q.search("fm4")
+    q.expect_hosts([hp("fm4.example.com")])
+    q.search("FZ")
+    q.expect_hosts(hps("zeta"))
+    q.search(":5432")
+    q.expect_hosts([hp("192.0.2.77")])
+    _in("1 of 12 open", q.count_line())
+    q.search("")
+    q.expect_hosts(ALL_FEATURE)
+
+
+def _f_clear(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    assert q.clear_button().count() == 0, "Clear is shown with no filter active"
+    q.pick_bottles("alpha", "mid")
+    expect(q.clear_button()).to_be_visible()
+    q.reset()
+    assert q.clear_button().count() == 0, "Clear stays after it was used"
+    q.state("Failed apply")
+    q.age("Under 1 hour")
+    q.search("fa")
+    q.pick_bottles("alpha")
+    q.expect_hosts([hp("fa2.example.com")])
+    q.clear_button().click()
+    q.expect_hosts(ALL_FEATURE)
+    _in("12 of 12 open", q.count_line())
+    _in("All bottles", q.page.get_by_test_id("queue-bottle-filter").inner_text())
+    _in("Any age", q.page.get_by_test_id("queue-age").inner_text())
+    _eq(q.bar.get_by_placeholder("Search destination").input_value(), "")
+    _eq(q.state_item("All").get_attribute("data-state"), "on")
+    _eq(q.state_item("Failed apply").get_attribute("data-state"), "off")
+    assert q.clear_button().count() == 0, "Clear stays with every filter reset"
+    q.search("no-such-host")
+    expect(q.page.get_by_text("Nothing matches these filters.")).to_be_visible()
+    q.expect_hosts([])
+    _in("0 of 12 open", q.count_line())
+    q.reset()
+
+
+def _f_failed_detail(q: QueuePage) -> None:
+    q.pick_bottles("alpha")
+    q.state("Failed apply")
+    q.expect_hosts([hp("fa2.example.com"), hp("192.0.2.77")])
+    want = {
+        "fa2.example.com": "Apply failed after 3 attempts: rule install failed",
+        "192.0.2.77": "Apply failed after 1 attempt: an IP address needs a CIDR in the manifest",
+    }
+    for host, text in want.items():
+        got = squash(q.drv.row(host).inner_text())
+        assert _loose(text) in _loose(got), f"{host}: {text!r} missing from {got!r}"
+    q.reset()
+    q.state("Failed apply")
+    for host, text in (("fm2.example.com", "Apply failed after 2 attempts: rule install failed"),
+                       ("fz2.example.com", "Apply failed after 1 attempt: rule install failed")):
+        got = squash(q.drv.row(host).inner_text())
+        assert _loose(text) in _loose(got), f"{host}: {text!r} missing from {got!r}"
+    q.state("All")
+    q.expect_hosts(ALL_FEATURE)
+
+
+def _deny_body(host: str, bottle: str) -> dict:
+    return {"decision": "deny", "scope": "once", "host": host, "container": bottle}
+
+
+def _f_deny_all(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    dialog = q.ask("Deny", "alpha")
+    _in("Deny all 5 open requests for alpha?", squash(dialog.inner_text()))
+    _eq([squash(t) for t in dialog.locator("[data-testid=bulk-hosts] li").all_inner_texts()], hps("alpha"))
+    assert "hide" not in dialog.inner_text(), "the dialog claims hidden rows with no filter active"
+    assert not q.broker_decides(), "a decide was sent before the confirmation"
+    q.confirm(dialog, "Deny")
+    expect(q.status()).to_contain_text("Denied 5 of 5 in alpha")
+    _eq(q.broker_decides(), [_deny_body(h, "alpha") for h in FEATURE_HOSTS["alpha"]])
+    _eq(q.sent_bodies(), [{"action": "deny", "host": h, "container": "alpha"} for h in FEATURE_HOSTS["alpha"]])
+    q.expect_hosts(hps("mid", "zeta"))
+    _eq(q.groups(), [("mid", 4), ("zeta", 3)])
+
+
+def _f_deny_all_hidden(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    q.pick_bottles("alpha")
+    q.state("Failed apply")
+    q.expect_hosts([hp("fa2.example.com"), hp("192.0.2.77")])
+    dialog = q.ask("Deny", "alpha")
+    text = squash(dialog.inner_text())
+    _in("Deny all 5 open requests for alpha?", text)
+    _in("including 3 the current filters hide", text)
+    _eq([squash(t) for t in dialog.locator("[data-testid=bulk-hosts] li").all_inner_texts()], hps("alpha"))
+    q.confirm(dialog, "Deny")
+    expect(q.status()).to_contain_text("Denied 5 of 5 in alpha")
+    _eq(q.broker_decides(), [_deny_body(h, "alpha") for h in FEATURE_HOSTS["alpha"]])
+    with q.broker.lock:
+        left = sorted(r["request_id"] for r in q.broker.queue["open"])
+    _eq(left, ["fm1", "fm2", "fm3", "fm4", "fz1", "fz2", "fz3"])
+
+
+def _f_allow_all(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    dialog = q.ask("Allow", "zeta")
+    _in("Allow all 3 open requests for zeta?", squash(dialog.inner_text()))
+    q.confirm(dialog, "Allow")
+    expect(q.status()).to_contain_text("Allowed 3 of 3 in zeta")
+    _eq(q.broker_decides(), [{"decision": "allow", "scope": "live", "host": h, "container": "zeta"}
+                             for h in FEATURE_HOSTS["zeta"]])
+    _eq(q.sent_bodies(), [{"action": "allow_live", "host": h, "container": "zeta"} for h in FEATURE_HOSTS["zeta"]])
+    q.expect_hosts(hps("alpha", "mid"))
+    _eq(q.groups(), [("alpha", 5), ("mid", 4)])
+
+
+def _f_cancel(q: QueuePage) -> None:
+    dialog = q.ask("Deny", "mid")
+
+    def cancel():
+        dialog.get_by_role("button", name="Cancel").click()
+        dialog.wait_for(state="hidden")
+    assert q.drv.sent_nothing_after(cancel), "Cancel sent a decide"
+    assert not q.broker_decides(), "the broker received a decide after Cancel"
+    q.expect_hosts(ALL_FEATURE)
+
+
+def _f_partial(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    held, release_next, _button = _held_decides(q.page, q.traffic, q.drv)
+    q.broker.fail_nth_decide(2)
+    dialog = q.ask("Deny", "mid")
+    q.confirm(dialog, "Deny")
+    for step in range(4):
+        q.drv._wait_until(lambda: len(held) == 1, 5)
+        assert len(held) == 1, f"decide {step + 1} was not in flight alone (held {len(held)})"
+        assert len(q.broker_decides()) == step, f"the broker had {len(q.broker_decides())} decides before release {step + 1}"
+        expect(q.page.get_by_test_id("bulk-count")).to_have_text(f"{step}/4")
+        release_next()
+        if step == 0:
+            expect(q.page.get_by_test_id("bulk-progress")).to_have_attribute("aria-valuenow", "25")
+    expect(q.status()).to_contain_text("Denied 3 of 4 in mid · 1 failed and stays open, marked in the list")
+    _eq(q.broker_decides(), [_deny_body(h, "mid") for h in FEATURE_HOSTS["mid"]])
+    q.expect_hosts(hps("alpha") + [hp("fm2.example.com")] + hps("zeta"))
+    q.drv.wait_note("fm2.example.com", "^Not sent: ")
+    _eq(q.groups(), [("alpha", 5), ("mid", 1), ("zeta", 3)])
+    assert q.drv.stale_banner().count() == 0, "a failed bulk decide raised the banner"
+    for host in ("fm1.example.com", "fm3.example.com", "fm4.example.com"):
+        assert q.drv.row(host).count() == 0, f"{host} did not leave"
+
+
+def _f_locks(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    held, release_next, button = _held_decides(q.page, q.traffic, q.drv)
+
+    def single(label, host, bottle):
+        return button(label, host, FEATURE_PORT.get(host, 443), bottle)
+
+    # A row mid-decide keeps its bottle's bulk buttons off.
+    single("Deny", "fm1.example.com", "mid").click()
+    q.drv._wait_until(lambda: len(held) == 1, 5)
+    for verb in ("Allow", "Deny"):
+        expect(q.bulk_button(verb, "mid")).to_be_disabled()
+        expect(q.bulk_button(verb, "zeta")).to_be_enabled()
+    release_next()
+    expect(q.bulk_button("Deny", "mid")).to_be_enabled()
+    expect(q.drv.row("fm1.example.com")).to_have_count(0)
+
+    # A bulk run locks every request it will decide, and no other bulk starts meanwhile.
+    dialog = q.ask("Deny", "mid")
+    _eq([squash(t) for t in dialog.locator("[data-testid=bulk-hosts] li").all_inner_texts()],
+        [hp(h) for h in FEATURE_HOSTS["mid"][1:]])
+    q.confirm(dialog, "Deny")
+    q.drv._wait_until(lambda: len(held) == 1, 5)
+    for label in ("Allow", "Deny", "More allow options for", "More deny options for"):
+        expect(single(label, "fm3.example.com", "mid")).to_be_disabled()
+    expect(single("Allow", "fz1.example.com", "zeta")).to_be_enabled()
+    for verb in ("Allow", "Deny"):
+        for bottle in ("alpha", "zeta"):
+            expect(q.bulk_button(verb, bottle)).to_be_disabled()
+    release_next()
+    q.drv._wait_until(lambda: len(held) == 1, 5)
+    before = len(q.broker_decides())
+    # a poll lands while the next decide is held: the decided row must not come back
+    q.page.wait_for_timeout(5500)
+    assert q.drv.row("fm2.example.com").count() == 0, "a poll resurrected a decided row"
+    assert len(q.broker_decides()) == before, "a decide was sent while the previous one was still in flight"
+    expect(single("Allow", "fm3.example.com", "mid")).to_be_disabled()
+    release_next()
+    q.drv._wait_until(lambda: len(held) == 1, 5)
+    release_next()
+    expect(q.status()).to_contain_text("Denied 3 of 3 in mid")
+    _eq(q.broker_decides(), [_deny_body(h, "mid") for h in FEATURE_HOSTS["mid"]])
+
+
+def _f_denylist(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    toggle = q.page.get_by_test_id("denylist-toggle")
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    _eq(q.page.get_by_test_id("denylist-group").count(), 1)
+    _eq(squash(q.page.get_by_test_id("denylist-hits").inner_text()), "13 hits")
+    group_rows = q.page.locator("[data-testid=denylist-group] [data-testid=recent-row]").locator("visible=true")
+    _eq(group_rows.count(), 0)
+    recent = q.page.get_by_test_id("recent")
+    for host in ("ads.example.com", "track.example.net", "metrics.example.org"):
+        assert host not in recent.inner_text(), f"{host} is listed while the denylist group is collapsed"
+    ordinary = q.page.locator("[data-testid=recent] [data-testid=recent-row]").locator("visible=true")
+    _eq(ordinary.count(), 1)
+    _in("registry.npmjs.org", ordinary.first.inner_text())
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-expanded", "true")
+    expect(group_rows).to_have_count(3)
+    _eq([squash(t) for t in q.page.get_by_test_id("denylist-row-hits").all_inner_texts()], ["4×", "7×", "2×"])
+    texts = [squash(t) for t in group_rows.all_inner_texts()]
+    for text, (host, bottle) in zip(texts, (("ads.example.com", "zeta"), ("track.example.net", "alpha"),
+                                            ("metrics.example.org", "mid"))):
+        assert host in text and bottle in text, f"{host}/{bottle} missing from {text!r}"
+    _eq(squash(q.page.get_by_test_id("denylist-hits").inner_text()), "13 hits")
+    toggle.click()
+    expect(group_rows).to_have_count(0)
+
+
+def _f_denylist_card(q: QueuePage) -> None:
+    """The collapsed denylist group is a card of its own; ordinary recent rows are not read as its members."""
+    from playwright.sync_api import expect
+    page = q.page
+    expect(page.get_by_test_id("denylist-toggle")).to_have_attribute("aria-expanded", "false")
+    _eq(page.locator("[data-testid=denylist-group] [data-testid=recent-row]").count(), 0)   # none in the DOM at all
+    found = page.evaluate("""() => {
+        const group = document.querySelector('[data-testid=denylist-group]');
+        const rows = [...document.querySelectorAll('[data-testid=recent-row]')];
+        const ordinary = rows.filter((row) => !group.contains(row));
+        const groupCard = group.closest('.panel');
+        const box = (el) => el.getBoundingClientRect();
+        return {
+            groupIsItsOwnCard: groupCard === group,
+            ordinary: ordinary.length,
+            sharedCard: ordinary.filter((row) => row.closest('.panel') === groupCard).length,
+            gap: ordinary.length ? box(ordinary[0].closest('.panel')).top - box(group).bottom : null,
+        };
+    }""")
+    assert found["ordinary"] == 1, f"expected the one ordinary recent row outside the group: {found}"
+    assert found["groupIsItsOwnCard"], f"the denylist group is not its own card: {found}"
+    assert found["sharedCard"] == 0, f"an ordinary recent row sits in the denylist group's card: {found}"
+    assert found["gap"] >= 16, f"the ordinary rows' card is {found['gap']}px below the group, not clearly apart: {found}"
+
+
+def _f_reach(q: QueuePage) -> None:
+    from playwright.sync_api import expect
+    page = q.page
+
+    def inside(name, locator):
+        box = locator.bounding_box()
+        assert box, f"{name} has no box"
+        width = page.evaluate("window.innerWidth")
+        assert box["x"] >= -0.5 and box["x"] + box["width"] <= width + 0.5, \
+            f"{name} [{box['x']:.0f}, {box['x'] + box['width']:.0f}] leaves the {width}px viewport"
+
+    scroll, inner = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
+    assert scroll <= inner, f"scrollWidth {scroll} > innerWidth {inner}"
+    inside("search", q.bar.get_by_placeholder("Search destination"))
+    inside("bottle filter", page.get_by_test_id("queue-bottle-filter"))
+    inside("state toggle", page.get_by_test_id("queue-state"))
+    inside("age", page.get_by_test_id("queue-age"))
+    for verb, bottle in (("Allow", "alpha"), ("Deny", "alpha"), ("Allow", "zeta"), ("Deny", "zeta")):
+        button = q.bulk_button(verb, bottle)
+        button.scroll_into_view_if_needed()
+        inside(f"{verb} all in {bottle}", button)
+    page.get_by_test_id("queue-bottle-filter").click()
+    inside("bottle menu", page.get_by_role("menu"))
+    page.keyboard.press("Escape")
+    dialog = q.ask("Deny", "alpha")
+    inside("confirm dialog", dialog)
+    inside("dialog Cancel", dialog.get_by_role("button", name="Cancel"))
+    inside("dialog Deny", dialog.get_by_role("button", name="Deny 5"))
+    dialog.get_by_role("button", name="Cancel").click()
+    dialog.wait_for(state="hidden")
+    scroll, inner = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
+    assert scroll <= inner, f"scrollWidth {scroll} > innerWidth {inner} after the dialog"
+    expect(page.get_by_test_id("denylist-toggle")).to_be_visible()
+    _eq(q.traffic.console_errors, [])
+
+
+QUEUE_SHARED_CHECKS = [   # one page, in order; each leaves the filters cleared
+    ("80", "The bottle multi-select narrows the queue to the chosen bottles and the count line follows", _f_bottle),
+    ("81", "The Failed apply state shows only requests with a last_error", _f_state),
+    ("82", "The age filter buckets requests: under 5 minutes, under 1 hour, older than 1 hour", _f_age),
+    ("83", "The destination search narrows by host:port, ignoring case", _f_search),
+    ("84", "Clear shows only while a filter is active and resets every filter; no match shows the empty state", _f_clear),
+    ("85", "One bottle plus Failed apply shows exactly that bottle's failed requests with their last_error text",
+     _f_failed_detail),
+]
+QUEUE_OWN_CHECKS = [   # each on a fresh page: they decide rows
+    ("86", "Deny all for one bottle sends exactly one deny per open request of that bottle, and none for another",
+     _f_deny_all),
+    ("87", "Deny all under filters still decides every open request of the bottle, and the dialog says the filters "
+           "hide some", _f_deny_all_hidden),
+    ("88", "Allow all sends exactly the Allow body per open request of the bottle and those rows leave", _f_allow_all),
+    ("89", "Cancel in the bulk dialog sends nothing", _f_cancel),
+    ("90", "When the second decide of a bulk run fails that request stays, marked, the others leave, decides run "
+           "one at a time and the run reports every request", _f_partial),
+    ("91", "A request mid-decide keeps its bottle's bulk buttons off; a bulk run locks its requests and other "
+           "bulk buttons, and a poll does not bring a decided row back", _f_locks),
+    ("92", "Denylist hits are one group, collapsed by default, headed by the summed hits, with a row and N× per hit "
+           "when expanded", _f_denylist),
+    ("93", "Filters, bulk buttons, menus and the bulk dialog stay inside the viewport, with no console errors",
+     _f_reach),
+    ("94", "The collapsed denylist group is a card of its own with no row elements in it, and the ordinary recent rows "
+           "sit in a separate card clearly below it", _f_denylist_card),
+]
+
+
+def with_features_page(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str, fn):
+    from playwright.sync_api import expect
+    broker.reset()
+    broker.use_fixture("queue-features")
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    try:
+        expect.set_options(timeout=TIMEOUT_MS)
+        page.goto(served.base + "/")
+        expect(page.locator("[data-testid=request]")).to_have_count(len(stub.FEATURE_ROWS))
+        return fn(QueuePage(page, traffic, broker))
+    finally:
+        broker.reset()
+        context.close()
+
+
+def run_queue_features(ui: str, viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    """Queue-feature checks (80..94); the SPA only."""
+    suite = Suite(ui, viewport)
+    if ui == "legacy":
+        for number, name, _fn in QUEUE_SHARED_CHECKS + QUEUE_OWN_CHECKS:
+            suite.check(number, name, lambda: None, spa_only=True)
+        return suite.results
+
+    def shared(q: QueuePage) -> None:
+        for number, name, fn in QUEUE_SHARED_CHECKS:
+            suite.check(number, name, lambda fn=fn: fn(q))
+
+    try:
+        with_features_page(browser, served, broker, viewport, "light", shared)
+    except Exception as exc:  # noqa: BLE001 - the queue could not even open
+        suite.results.append(Result("FAIL", viewport, "80", "queue-features page opens", squash(str(exc))[:300]))
+    for number, name, fn in QUEUE_OWN_CHECKS:
+        def own(fn=fn):
+            with_features_page(browser, served, broker, viewport, "light", fn)
+        suite.check(number, name, own)
+    return suite.results
+
+
 # ---- History tab ----------------------------------------------------------------------
 
 HISTORY_PAGES = [50, 50, 50, 50, 47]
@@ -1346,11 +1840,11 @@ def _h_client_side(hist, page, traffic, broker) -> None:
     from playwright.sync_api import expect
     hist.open()
     sent = len(traffic.recent)
-    page.get_by_placeholder("Search destination").fill("history-01")
+    history_search(page).fill("history-01")
     expect(hist.rows()).to_have_count(10)
     for host in hist.hosts():
         assert "history-01" in host, host
-    page.get_by_placeholder("Search destination").fill("")
+    history_search(page).fill("")
     status_button = lambda label: page.get_by_test_id("history-status").get_by_text(label, exact=True)
     status_button("Denied").click()
     denied = hist.page.locator("[data-testid=history-row]")
@@ -1564,7 +2058,7 @@ def _h_reason_and_long_bottle(hist, page, traffic, broker) -> None:
 def _h_toolbar_layout(hist, page, traffic, broker) -> None:
     hist.open()
     box = lambda locator: locator.bounding_box()
-    search = box(page.get_by_placeholder("Search destination"))
+    search = box(history_search(page))
     date = box(page.get_by_test_id("history-range"))
     bottle = box(page.get_by_test_id("history-bottle"))
     status = box(page.get_by_test_id("history-status"))
@@ -1597,6 +2091,11 @@ def _h_date_trigger_name(hist, page, traffic, broker) -> None:
     _eq(button.get_attribute("aria-label"), f"Date range: {label}")
     _eq(page.get_by_role("button", name=f"Date range: {label}", exact=True).count(), 1)
     hist.close_popover()
+
+
+def history_search(page):
+    """History's search field: the queue's own (hidden while History is open) shares its placeholder."""
+    return page.get_by_placeholder("Search destination").locator("visible=true")
 
 
 def expect_disabled(page, test_id: str, disabled: bool) -> None:
@@ -1890,6 +2389,7 @@ def capture_states(browser, served, broker, driver_cls, out: Path, ui: str, view
         capture_stale_banner(browser, served, broker, driver_cls, out, viewport, theme)
         capture_empty(browser, served, broker, out, viewport, theme)
         capture_history(browser, served, broker, out, viewport, theme)
+        capture_queue_features(browser, served, broker, out, viewport, theme)
 
 
 def capture_long_comm(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
@@ -1946,6 +2446,48 @@ def capture_empty(browser, served, broker, out: Path, viewport: str, theme: str)
         broker.reset()
         context.close()
 
+
+
+def capture_queue_features(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """Queue features: filtered, bulk dialog, bulk in progress, partial failure, expanded denylist group."""
+    from playwright.sync_api import expect
+
+    def filtered(q: QueuePage) -> None:
+        q.pick_bottles("alpha")
+        q.state("Failed apply")
+        q.expect_hosts([hp("fa2.example.com"), hp("192.0.2.77")])
+        capture(q.page, out, "spa", viewport, theme, "queue-filtered")
+
+    def in_progress(q: QueuePage) -> None:
+        held, release_next, _button = _held_decides(q.page, q.traffic, q.drv)
+        dialog = q.ask("Deny", "mid")
+        capture(q.page, out, "spa", viewport, theme, "queue-bulk-dialog")
+        q.confirm(dialog, "Deny")
+        q.drv._wait_until(lambda: len(held) == 1, 5)
+        release_next()
+        q.drv._wait_until(lambda: len(held) == 1, 5)
+        expect(q.page.get_by_test_id("bulk-count")).to_have_text("1/4")
+        capture(q.page, out, "spa", viewport, theme, "queue-bulk-in-progress")
+        for _ in range(3):
+            release_next()
+            q.drv._wait_until(lambda: len(held) == 1, 2)
+        expect(q.status()).to_contain_text("of 4 in mid")
+
+    def partial(q: QueuePage) -> None:
+        q.broker.fail_nth_decide(2)
+        q.confirm(q.ask("Deny", "mid"), "Deny")
+        expect(q.status()).to_contain_text("1 failed and stays open")
+        q.drv.wait_note("fm2.example.com", "^Not sent: ")
+        capture(q.page, out, "spa", viewport, theme, "queue-partial-failure")
+
+    def denylist(q: QueuePage) -> None:
+        q.page.get_by_test_id("denylist-toggle").click()
+        expect(q.page.get_by_test_id("denylist-row-hits")).to_have_count(3)
+        capture(q.page, out, "spa", viewport, theme, "queue-denylist-expanded",
+                scroll_to=q.page.get_by_test_id("denylist-group"))
+
+    for fn in (filtered, in_progress, partial, denylist):
+        with_features_page(browser, served, broker, viewport, theme, fn)
 
 
 def capture_history(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
@@ -2038,6 +2580,21 @@ NEW_CHECKS = [
     ("50", "The stale banner says `Showing data from <time>` only after a failed poll; a decide failure reads `Decision not sent: <error>`", "N/A(spa-only) on legacy"),
     ("51", "The light theme paints no pure-red (#ff0000) pixel in any request row", "N/A(spa-only) on legacy"),
     ("52", "An unbreakable meta string wraps inside its row instead of being clipped", "N/A(spa-only) on legacy"),
+    ("80", "The bottle multi-select narrows the queue to the chosen bottles; the count line reads `N of M open`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("81", "The Failed apply state shows only requests with a `last_error`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("82", "The age filter buckets requests: under 5 minutes, under 1 hour, older than 1 hour", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("83", "The destination search narrows by host:port, ignoring case", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("84", "Clear shows only while a filter is active and resets every filter; a filter matching nothing shows `Nothing matches these filters.`", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("85", "One bottle plus Failed apply shows exactly that bottle's failed requests with their `last_error` reason and attempt", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("86", "Deny all for one bottle sends exactly one `deny` decide per open request of that bottle (literal bodies) and none for another bottle; those rows leave", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("87", "Deny all decides every open request of the bottle even when filters hide some, and the dialog says so", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("88", "Allow all sends exactly the Allow body per open request of the bottle (literal bodies)", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("89", "Cancel in the bulk dialog sends nothing", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("90", "When the mock fails the second decide of a bulk run that request stays open and marked while the others leave; decides run one at a time; the run reports every request", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("91", "A request mid-decide keeps its bottle's bulk buttons off; a bulk run locks its requests and other bulk buttons; a poll does not bring a decided row back", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("92", "Denylist hits are one group, collapsed by default, headed by the summed hits, expanding to a row with `N×` each", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("93", "Filters, bulk buttons, menus and the bulk dialog stay inside the viewport at every viewport, with no console errors", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
+    ("94", "The collapsed denylist group is a card of its own with no row elements in it; the ordinary recent rows sit in a separate card clearly below", "N/A(spa-only) on legacy: queue features are new SPA behaviour (PLN step 5)"),
     ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", "N/A(spa-only) on legacy"),
     ("61", "A deny reason sits inline from sm up and is hidden below; a long bottle name ends in an ellipsis on a phone, and from sm up gives way without clipping by or the reason", "N/A(spa-only) on legacy"),
     ("62", "The selected day, a range's end and its start in the History date picker have at least 4.5:1 text contrast, hovered or not, focused or not, light and dark", "N/A(spa-only) on legacy"),
@@ -2109,6 +2666,7 @@ def main() -> int:
                     context.close()
                 results += run_dedicated(ui, viewport, browser, served, broker)
                 results += run_history(ui, viewport, browser, served, broker)
+                results += run_queue_features(ui, viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):
