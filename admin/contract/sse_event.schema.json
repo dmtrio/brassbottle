@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SseQueueEvent",
-  "description": "Planned shape for the queue SSE stream event: event name plus the full queue_snapshot() payload as data. No stream exists yet; schema only.",
+  "description": "One event of the live queue stream, GET /api/egress/stream on the admin daemon (spa mode, session cookie required). On the wire an event is `event: queue` and one `data:` line carrying the whole queue_snapshot() as compact JSON; this schema is that event as an object, {event, data}. The stream sends the current snapshot at once on connect and again whenever it changes, ignoring `generated_at` and each open row's `age_seconds`, which change on every poll. A `: hb` comment line every 15 s keeps an idle stream alive (a comment is not an event). At most 8 streams are open at once; a ninth, or a connect while the broker is unreachable, gets 503 with an error_response body. There is no error event: when the broker stays unreachable the daemon ends the streams and the app falls back to polling GET /api/egress/queue.",
   "type": "object",
   "properties": {
     "event": {

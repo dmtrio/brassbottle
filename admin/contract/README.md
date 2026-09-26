@@ -3,7 +3,7 @@ proxy: the exact JSON shapes of `queue_snapshot()`, the three successful
 broker `/decide` bodies (allow, deny once, persistent deny), the 200 body of
 the admin proxy's `/api/egress/decide`, the error body every non-200 response
 carries, the keyset-paged recent-history page (`GET /recent` on the broker,
-`GET /api/egress/recent` on the admin), and the planned queue SSE event.
+`GET /api/egress/recent` on the admin), and the queue SSE event.
 The broker (`src/egress_broker_host.py`) and the admin daemon
 (`src/admin_daemon.py`) are the source of truth; these files describe them,
 never the reverse. `tests/test_admin_contract.py` validates real daemon and
@@ -22,3 +22,17 @@ is `null` when fewer than `limit` rows remained (default 50, clamped to
 the page after it is empty with `next: null`. A malformed `before`, `since`,
 `until` or `limit` is a 400 with an `error_response` body on both the broker
 and the admin; a missing session is a 403 from the admin.
+
+## Queue stream
+
+`sse_event.schema.json` describes one event of `GET /api/egress/stream` on the
+admin (spa mode only; session cookie required, refused 403 like the other
+`/api/*` routes). On the wire an event is `event: queue` plus one `data:` line
+holding the whole `queue_snapshot()` as compact JSON; the schema is that event
+as an object, `{event, data}`. A stream gets the current snapshot the moment it
+opens and another whenever the queue changes; a change ignores `generated_at`
+and each open row's `age_seconds`, which move on every poll. `: hb` comment
+lines every 15 s keep an idle stream open. At most 8 streams are open; a ninth,
+or an open while the broker is unreachable, is a 503 with an `error_response`
+body. There is no error event: when the broker stays unreachable the admin ends
+its streams, and the app falls back to polling `GET /api/egress/queue`.
