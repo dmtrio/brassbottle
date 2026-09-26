@@ -345,3 +345,12 @@ class ClosingTests(unittest.TestCase):
         for text in ("Task was destroyed but it is pending!\ntask: <Task pending>", "Executing <Handle> took 0.2 s"):
             handler.emit(logging.LogRecord("asyncio", logging.ERROR, __file__, 1, text, None, None))
         self.assertEqual(handler.pending, ["Task was destroyed but it is pending! task: <Task pending>"])
+
+    def test_the_asyncio_handler_still_prints_every_record_to_stderr(self):
+        import logging
+        handler = suite.AsyncioWarnings()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            handler.emit(logging.LogRecord("asyncio", logging.ERROR, __file__, 1, "Future exception was never retrieved", None, None))
+        self.assertEqual(err.getvalue(), "Future exception was never retrieved\n")
+        self.assertEqual(handler.pending, [])
