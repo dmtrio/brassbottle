@@ -2576,7 +2576,7 @@ def capture_history(browser, served, broker, out: Path, viewport: str, theme: st
     finally:
         context.close()
 
-# ---- Service worker (120..126) --------------------------------------------------------------
+# ---- Service worker (120..127) --------------------------------------------------------------
 
 LEGACY_SHELL_CACHE = "djinn-admin-shell-v3"     # the legacy page's cache; the new worker deletes it
 OTHER_FOREIGN_CACHE = "some-other-app-cache"    # any cache that is not the worker's own goes too
@@ -2602,10 +2602,11 @@ SETTLED_JS = """async ([legacy, other]) => {
 
 # Plants the same pages in the worker's OWN cache: were `/` or `/api/*` ever answered from a
 # cache the worker owns, this is what it would answer with.
-PLANT_OWN_CACHE_JS = """async ([prefix, poison]) => {
+PLANTED_PATHS = ["/", "/egress", "/api/egress/queue"]
+PLANT_OWN_CACHE_JS = """async ([prefix, poison, paths]) => {
   const own = (await caches.keys()).find((name) => name.startsWith(prefix));
   const cache = await caches.open(own);
-  for (const path of ['/', '/egress', '/api/egress/queue']) await cache.put(path, new Response(poison));
+  for (const path of paths) await cache.put(path, new Response(poison));
   return own;
 }"""
 
@@ -2615,6 +2616,32 @@ CACHE_STORAGE_JS = """async () => {
     out[name] = (await (await caches.open(name)).keys()).map((req) => new URL(req.url).pathname);
   }
   return out;
+}"""
+
+
+# Every entry of every cache: its url (path and query) and whether its body is still the planted poison.
+# An entry the worker wrote over a planted url has a body that is no longer the poison.
+CACHE_ENTRIES_JS = """async (poison) => {
+  const out = {};
+  for (const name of await caches.keys()) {
+    const cache = await caches.open(name);
+    out[name] = [];
+    for (const req of await cache.keys()) {
+      const u = new URL(req.url);
+      out[name].push({url: u.pathname + u.search, poisoned: (await (await cache.match(req)).text()) === poison});
+    }
+  }
+  return out;
+}"""
+
+# The daemon is unreachable: a fetch and a navigation must fail, not be answered from a cache.
+OFFLINE_FETCH_JS = """async (url) => {
+  try {
+    const r = await fetch(url, {cache: 'no-store'});
+    return {failed: false, status: r.status, text: (await r.text()).slice(0, 80)};
+  } catch (err) {
+    return {failed: true, error: String(err)};
+  }
 }"""
 
 
@@ -2662,6 +2689,8 @@ class SwObservations:
     manifest: dict = field(default_factory=dict)
     sw_headers: dict = field(default_factory=dict)
     caches_after: dict = field(default_factory=dict)    # Cache Storage at the very end
+    entries_after: dict = field(default_factory=dict)   # the same, with each entry's url and query, and whether it is still planted
+    offline: dict = field(default_factory=dict)         # the api fetch and the navigation of `/` with the daemon unreachable
 
 
 def service_worker_scenario(browser, served: Served, broker: stub.StubBroker, viewport: str) -> SwObservations:
@@ -2700,7 +2729,7 @@ def service_worker_scenario(browser, served: Served, broker: stub.StubBroker, vi
             log(f"stage=sw active viewport={viewport} scope={obs.registration['scope']} "
                 f"script={obs.registration['script']} caches={ {k: len(v) for k, v in obs.caches_before.items()} }")
 
-            obs.own_cache = page.evaluate(PLANT_OWN_CACHE_JS, [OWN_CACHE_PREFIX, POISON])
+            obs.own_cache = page.evaluate(PLANT_OWN_CACHE_JS, [OWN_CACHE_PREFIX, POISON, PLANTED_PATHS])
 
             # (121) reloading the page, and opening `/` afresh, go to the network, not the planted copy.
             # The app's router lands `/` on /egress, so a reload asks for /egress: both are probed.
@@ -2727,6 +2756,26 @@ def service_worker_scenario(browser, served: Served, broker: stub.StubBroker, vi
                 }""", url)
                 obs.api.append({"url": url, "status": got["status"], "poisoned": POISON in got["text"],
                                 "daemon": daemon.count(url, mark)})
+
+            # (127) the daemon unreachable: an /api read and a navigation of `/` must fail. Were either
+            # answered from a cache the worker owns (network-first, offline fallback) this is where it shows.
+            nonce = f"offline-{viewport}-{int(time.time() * 1000)}"
+            context.set_offline(True)
+            try:
+                obs.offline["api"] = page.evaluate(OFFLINE_FETCH_JS, f"/api/egress/queue?probe={nonce}")
+                obs.offline["api"]["url"] = f"/api/egress/queue?probe={nonce}"
+                try:
+                    response = page.goto(served.base + "/")
+                    obs.offline["root"] = {"failed": False, "status": response.status if response else None,
+                                           "from_worker": response.from_service_worker if response else None}
+                except Exception as exc:  # noqa: BLE001 - the navigation failing is the expected outcome
+                    obs.offline["root"] = {"failed": True, "error": squash(str(exc))[:120]}
+            finally:
+                context.set_offline(False)
+            log(f"stage=sw offline viewport={viewport} api_failed={obs.offline['api']['failed']} "
+                f"root_failed={obs.offline['root']['failed']}")
+            page.goto(served.base + "/egress")
+            expect(page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
 
             # (126) the worker script itself and the manifest, as the browser fetches them
             obs.sw_headers = page.evaluate("""async () => {
@@ -2762,6 +2811,7 @@ def service_worker_scenario(browser, served: Served, broker: stub.StubBroker, vi
                         e["cookie"] for e in daemon.entries[mark:] if e["path"] == route),
                     "controlled": page.evaluate("navigator.serviceWorker.controller !== null")})
             obs.caches_after = page.evaluate(CACHE_STORAGE_JS)
+            obs.entries_after = page.evaluate(CACHE_ENTRIES_JS, POISON)
             log(f"stage=sw probes viewport={viewport} daemon_requests={len(daemon.entries)} "
                 f"caches_after={ {k: len(v) for k, v in obs.caches_after.items()} } "
                 f"ms={int((time.monotonic() - started) * 1000)}")
@@ -2835,6 +2885,17 @@ def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: 
         assert o.own_cache == own[0]
         urls = o.caches_before[own[0]]
         assert urls and all(path.startswith("/assets/") for path in urls), f"the precache holds {urls}"
+        # At the very end the cache also holds the pages this test planted in it (PLANTED_PATHS, still
+        # the poison). Everything else, a url a probe fetched included, must be a hashed /assets/ file.
+        for entry in o.entries_after[own[0]]:
+            planted = entry["url"] in PLANTED_PATHS and entry["poisoned"]
+            assert planted or entry["url"].startswith("/assets/"), \
+                f"the worker's own cache holds {entry['url']}, which is neither under /assets/ nor a page this test planted"
+
+    def offline_fails(o: SwObservations) -> None:
+        api, root = o.offline["api"], o.offline["root"]
+        assert api["failed"], f"{api['url']} with the daemon unreachable was answered: {api}"
+        assert root["failed"], f"navigating to / with the daemon unreachable was answered: {root}"
 
     def manifest_installable(o: SwObservations) -> None:
         m = o.manifest
@@ -2858,11 +2919,14 @@ def run_service_worker(ui: str, viewport: str, browser, served: Served, broker: 
                  "reaches the daemon", api_hits_network)
     check("123", "With the worker active and the session cookie cleared, `/` and an app route show the pointer page "
                  "from the network, not the app", pointer_without_cookie)
-    check("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it; a pre-seeded "
-                 "`djinn-admin-shell-v3` and another foreign cache are deleted after activation", caches_pruned)
+    check("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it (at the end, besides "
+                 "the pages the test planted itself); a pre-seeded `djinn-admin-shell-v3` and another foreign cache are "
+                 "deleted after activation", caches_pruned)
     check("125", "The page links a web manifest: standalone, start `/`, tokens' canvas colour, 192 and 512 png icons "
                  "that load", manifest_installable)
     check("126", "/sw.js is served as JavaScript with cache-control no-cache", worker_script_never_cached)
+    check("127", "With the daemon unreachable (context offline) an /api/egress/queue fetch and a navigation to `/` "
+                 "fail with a network error instead of being answered from a cache", offline_fails)
     return suite.results
 
 
@@ -2952,9 +3016,10 @@ NEW_CHECKS = [
     ("121", "With the worker active, reloading the page and opening `/` afresh go to the network (the daemon sees each GET, cache-control no-store), not a copy planted in the worker's own cache", "N/A(spa-only) on legacy"),
     ("122", "With the worker active, every /api/egress/queue read from the page, the same URL again and again, reaches the daemon", "N/A(spa-only) on legacy"),
     ("123", "With the worker active and the session cookie cleared, `/` and an app route show the pointer page from the network, not the app", "N/A(spa-only) on legacy"),
-    ("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it; a pre-seeded `djinn-admin-shell-v3` and another foreign cache are deleted after activation", "N/A(spa-only) on legacy"),
+    ("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it (at the end, besides the pages the test planted itself); a pre-seeded `djinn-admin-shell-v3` and another foreign cache are deleted after activation", "N/A(spa-only) on legacy"),
     ("125", "The page links a web manifest: standalone, start `/`, the tokens' canvas colour, 192 and 512 png icons that load", "N/A(spa-only) on legacy"),
     ("126", "/sw.js is served as JavaScript with cache-control no-cache", "N/A(spa-only) on legacy"),
+    ("127", "With the daemon unreachable (context offline) an /api/egress/queue fetch and a navigation to `/` fail with a network error instead of being answered from a cache", "N/A(spa-only) on legacy"),
 ]
 
 
