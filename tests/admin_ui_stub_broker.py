@@ -120,7 +120,7 @@ def build_queue(now: datetime | None = None) -> dict[str, Any]:
         return {
             "request_id": rid, "container": container, "host": host, "port": 443, "status": status,
             "scope": scope, "decided_at": _iso(now - timedelta(seconds=ago)), "decided_by": by,
-            "apply_status": apply_status, "deny_reason": reason,
+            "apply_status": apply_status, "deny_reason": reason, "hit_count": 1,
         }
 
     return {
@@ -169,14 +169,14 @@ def build_history(now: datetime | None = None) -> list[dict[str, Any]]:
             "request_id": f"h{i:04d}", "container": container,
             "host": host, "port": 443, "status": status,
             "scope": scope, "decided_at": _iso(when), "decided_by": by,
-            "apply_status": applied, "deny_reason": reason,
+            "apply_status": applied, "deny_reason": reason, "hit_count": 1,
         })
     for rid, host, days in (("h9001", "twentynine.example.com", 29), ("h9002", ARCHIVE_HOST, 30),
                             ("h9003", "old.example.com", 61)):
         rows.append({
             "request_id": rid, "container": "alpha", "host": host, "port": 443,
             "status": "allowed", "scope": "live", "decided_at": _iso(now - timedelta(days=days)),
-            "decided_by": "operator", "apply_status": "applied", "deny_reason": None,
+            "decided_by": "operator", "apply_status": "applied", "deny_reason": None, "hit_count": 1,
         })
     return rows
 
@@ -263,6 +263,7 @@ def decide_reply(queue: dict[str, Any], body: dict[str, Any], *, now: datetime |
         "decided_at": _iso(now), "decided_by": "operator",
         "apply_status": "applied" if allowed else None,
         "deny_reason": None if allowed else body.get("reason"),
+        "hit_count": match["hit_count"],
     })
     if action in ("deny_bottle", "deny_global"):
         return 200, {"decided": [rid], "persisted": {

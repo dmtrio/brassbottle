@@ -1976,7 +1976,7 @@ class EgressBrokerHostTests(unittest.TestCase):
                 set(recent),
                 {
                     "request_id", "container", "host", "port", "status", "scope",
-                    "decided_at", "decided_by", "apply_status", "deny_reason",
+                    "decided_at", "decided_by", "apply_status", "deny_reason", "hit_count",
                 },
             )
             self.assertEqual(recent["request_id"], id2)

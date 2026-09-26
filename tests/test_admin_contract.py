@@ -181,6 +181,11 @@ class AdminContractTests(unittest.TestCase):
             )
             denylist_row = b.store.get(ids["denied_denylist"])
             self.assertEqual(denylist_row.hit_count, 5)
+            # The denylist group in the queue sums this field, so the wire
+            # value is pinned literally: five hits on the denylist row, one on
+            # the operator-denied row.
+            self.assertEqual(recent_by_id[ids["denied_denylist"]]["hit_count"], 5)
+            self.assertEqual(recent_by_id[ids["denied_operator"]]["hit_count"], 1)
 
             # And the two open rows really are open, one carrying the
             # failed-apply state.

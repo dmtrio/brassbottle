@@ -33,11 +33,15 @@
             "enum": ["applied", "apply_failed", "ip_requires_cidr", null],
             "$comment": "APPLY_OUTCOMES in src/egress_store.py; null when no allow was attempted."
           },
-          "deny_reason": { "type": ["string", "null"] }
+          "deny_reason": { "type": ["string", "null"] },
+          "hit_count": {
+            "type": "integer",
+            "$comment": "Same field as queue_snapshot().recent[].hit_count."
+          }
         },
         "required": [
           "request_id", "container", "host", "port", "status", "scope",
-          "decided_at", "decided_by", "apply_status", "deny_reason"
+          "decided_at", "decided_by", "apply_status", "deny_reason", "hit_count"
         ],
         "additionalProperties": false
       }
