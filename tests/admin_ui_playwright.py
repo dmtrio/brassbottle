@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import gc
 import json
+import logging
 import os
 import re
 import socket
@@ -83,6 +85,23 @@ BANNER_OBSERVER = """() => {
 
 def log(message: str) -> None:
     print(f"[suite] {message}", file=sys.stderr, flush=True)
+
+
+TASK_WARNING = "Task was destroyed but it is pending"
+
+
+class AsyncioWarnings(logging.Handler):
+    """Collects what asyncio logs while the suite runs (it reports a task that was dropped while pending as an
+    error-level log line on stderr, at garbage collection, where nothing else would catch it)."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.pending: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        text = record.getMessage()
+        if TASK_WARNING in text:
+            self.pending.append(squash(text)[:300])
 
 
 BUNDLE = "admin/ui/dist/index.html"
@@ -1776,7 +1795,7 @@ def run_history(ui: str, viewport: str, browser, served: Served, broker: stub.St
     except Exception as exc:  # noqa: BLE001 - the History tab could not even open
         suite.results.append(Result("FAIL", viewport, "30", "History tab opens", squash(str(exc))[:300]))
     finally:
-        context.close()
+        close_page_context(context, page)
     for number, name, fn in (RELTIME_CHECK, CONTRAST_CHECK):
         suite.check(number, name, lambda fn=fn: fn(browser, served, broker, viewport))
     return suite.results
@@ -2181,11 +2200,11 @@ def _h_relative_time_ticks(browser, served: Served, broker: stub.StubBroker, vie
     from playwright.sync_api import expect
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, "light")
+    held: list = []
     try:
         page.clock.install(time=datetime.now(timezone.utc))
         hist = HistoryPage(page, served, traffic, broker)
         hist.open()
-        held: list = []
         page.route("**/api/egress/queue", lambda route: held.append(route))
         when = page.get_by_test_id("history-row-when")
         expect(when).to_have_count(50)
@@ -2206,7 +2225,13 @@ def _h_relative_time_ticks(browser, served: Served, broker: stub.StubBroker, vie
             wanted = reltime_labels_after(seconds, 120)
             assert any(a.endswith(w) for w in wanted), f"a row said {b!r}, then {a!r} after 2 minutes (wanted one of {sorted(wanted)})"
     finally:
-        context.close()
+        # A held poll left unanswered is a task still pending when the context closes (check 164).
+        for route in held:
+            try:
+                route.continue_()
+            except Exception:  # noqa: BLE001 - the page may already be gone
+                pass
+        close_page_context(context, page)
 
 
 RELTIME_CHECK = ("60", "History's relative times update on an open page (a fake clock advanced 2 minutes changes every row still in seconds or minutes)", _h_relative_time_ticks)
@@ -2386,6 +2411,16 @@ def new_page(browser, served: Served, viewport: str, theme: str):
     return context, page, traffic
 
 
+def close_page_context(context, page) -> None:
+    """Close a context after unrouting its page: a route still installed holds a task that is pending when the
+    context goes, and asyncio reports it as "Task was destroyed but it is pending" (check 164)."""
+    try:
+        page.unroute_all(behavior="ignoreErrors")
+    except Exception as error:  # noqa: BLE001 - closing must go on
+        log(f"stage=close unroute_all failed: {error}")
+    context.close()
+
+
 def open_queue(page, served: Served, driver_cls, traffic: Traffic) -> Driver:
     from playwright.sync_api import expect
 
@@ -2470,9 +2505,9 @@ def capture_stale_banner(browser, served, broker, driver_cls, out: Path, viewpor
     """A decide fails on the broker while polls succeed; later polls are held so the banner stays for the capture."""
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, theme)
+    held: list = []
     try:
         drv = open_queue(page, served, driver_cls, traffic)
-        held: list = []
         page.route("**/api/egress/queue", lambda route: held.append(route))
         with broker.lock:
             broker.decide_outage = 500
@@ -2483,7 +2518,12 @@ def capture_stale_banner(browser, served, broker, driver_cls, out: Path, viewpor
     finally:
         with broker.lock:
             broker.decide_outage = None
-        context.close()
+        for route in held:   # polls held for the capture: pending tasks when the context closes (check 164)
+            try:
+                route.continue_()
+            except Exception:  # noqa: BLE001 - the page may already be gone
+                pass
+        close_page_context(context, page)
 
 
 def capture_empty(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
@@ -2957,6 +2997,7 @@ BELL_LABELS = {   # the tooltip: what the bell is doing (and, for a toggle, what
 INSECURE_LABEL = "Desktop notifications need a secure connection (https or localhost)"
 TOGGLE_NAME = "Desktop notifications"   # a toggle keeps one accessible name; aria-pressed carries on/muted
 BELL_STATES = list(BELL_LABELS)
+BROWSER_NEXT_STEP = "Open the admin in a desktop browser such as Chrome or Firefox."
 
 
 def bell_name(state: str) -> str:
@@ -3067,7 +3108,7 @@ class NotifyPage:
             raise
 
     def close(self) -> None:
-        self.context.close()
+        close_page_context(self.context, self.page)
 
     @property
     def bell(self):
@@ -3268,7 +3309,7 @@ def _n_unsupported(n: NotifyPage) -> None:
     n.bell.click()
     explained = n.page.get_by_test_id("notify-unsupported")
     expect(explained).to_be_visible()
-    assert BELL_LABELS["unsupported"] in squash(explained.inner_text()), explained.inner_text()
+    assert BROWSER_NEXT_STEP in squash(explained.inner_text()), explained.inner_text()
     n.page.keyboard.press("Escape")
     n.broker.file_request("still.example.com", request_id="u1")
     n.page.clock.run_for(NotifyPage.POLL_MS)
@@ -3293,7 +3334,7 @@ def _n_constructor_throws(n: NotifyPage) -> None:
     assert_bell(n.bell, "unsupported")
     expect(n.bell).to_be_enabled()
     n.bell.click()
-    assert BELL_LABELS["unsupported"] in squash(n.page.get_by_test_id("notify-unsupported").inner_text())
+    assert BROWSER_NEXT_STEP in squash(n.page.get_by_test_id("notify-unsupported").inner_text())
     n.page.keyboard.press("Escape")
     # Never "on" again this session, and the constructor is not tried again: two more requests, one attempt.
     n.broker.file_request("droid2.example.com", request_id="t2")
@@ -3352,6 +3393,117 @@ def _n_arrives_by_stream(n: NotifyPage) -> None:
     wait_link(n.page, "live", 500)
     assert not n.traffic.console_errors, n.traffic.console_errors
 
+
+FILTERS_CLEARED = "Filters cleared to show focus.example.com"
+
+
+def _cleared_note_raised(n: NotifyPage):
+    """Files a request a filter hides, clicks its notification, and leaves the queue showing the note.
+
+    Returns (search box, polite status, visible pill, the filters bar)."""
+    from playwright.sync_api import expect
+    page = n.page
+    n.poll()
+    n.broker.file_request("focus.example.com", container="zeta", request_id="f1")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    assert [m["tag"] for m in n.made()] == ["f1"], n.made()
+    search = page.get_by_test_id("queue-filters").get_by_role("textbox")
+    search.fill("check18")   # hides f1; the click below has to give way
+    page.get_by_test_id("tab-history").click()
+    page.wait_for_selector("[data-testid=request]", state="hidden")
+    n.click_notification(0)
+    status = page.get_by_test_id("filters-cleared-status")
+    pill = page.locator(".pill", has_text="Filters cleared")
+    expect(pill).to_have_text(FILTERS_CLEARED)
+    assert (status.text_content() or "").strip() == FILTERS_CLEARED, status.text_content()
+    assert search.input_value() == "", "the filter that hid the row was left on"
+    return search, status, pill
+
+
+def _n_note_goes_on_filter_change(n: NotifyPage) -> None:
+    """The note is about the reset it announces: a filter changed afterwards ends it, in the pill and the live region."""
+    from playwright.sync_api import expect
+    search, status, pill = _cleared_note_raised(n)
+    search.fill("zz")
+    expect(pill).to_have_count(0)
+    assert (status.text_content() or "").strip() == "", f"the live region kept {status.text_content()!r} after a filter changed"
+    # The other controls end it the same way, not only the search box: "zz" hides f1 again, so the click resets.
+    n.click_notification(0)
+    expect(pill).to_have_text(FILTERS_CLEARED)
+    n.page.get_by_test_id("queue-state").get_by_text("Failed apply").click()
+    expect(pill).to_have_count(0)
+    assert (status.text_content() or "").strip() == "", status.text_content()
+    assert not n.traffic.console_errors, n.traffic.console_errors
+
+
+def _n_note_goes_when_decided(n: NotifyPage) -> None:
+    """The note names a request: once that request is decided (or gone from the queue) it names nothing."""
+    from playwright.sync_api import expect
+    _search, status, pill = _cleared_note_raised(n)
+    n.page.get_by_role("button", name="Allow focus.example.com:443 in zeta", exact=True).click()
+    expect(n.page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
+    expect(pill).to_have_count(0)
+    assert (status.text_content() or "").strip() == "", f"the live region kept {status.text_content()!r} after its request was decided"
+    # Left the queue without a click of ours (another admin decided it, or the broker swept it).
+    n.broker.file_request("focus.example.com", container="zeta", request_id="f2")
+    n.poll(rows=len(stub.OPEN_ROWS) + 1)
+    n.page.get_by_test_id("queue-filters").get_by_role("textbox").fill("check18")
+    n.page.get_by_test_id("tab-history").click()
+    assert [m["tag"] for m in n.made()] == ["f1", "f2"], n.made()
+    n.click_notification(1)
+    expect(pill).to_have_text(FILTERS_CLEARED)
+    n.broker.withdraw_request("f2")
+    n.poll(rows=len(stub.OPEN_ROWS))
+    expect(pill).to_have_count(0)
+    assert (status.text_content() or "").strip() == "", status.text_content()
+    assert not n.traffic.console_errors, n.traffic.console_errors
+
+
+BELL_GLYPHS = {"default": "bell", "on": "bell-ring", "muted": "bell-off", "denied": "shield-ban", "unsupported": "bell-minus"}
+
+
+def _n_glyph_per_state(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """Every state has a glyph of its own, so muted and denied differ by shape and not by colour alone."""
+    seen: dict[str, str] = {}
+    for state in BELL_STATES:
+        n = open_bell_state(browser, served, broker, viewport, "light", state)
+        try:
+            icons = n.page.evaluate("""() => [...document.querySelectorAll('[data-testid=notify-bell] svg')].map(
+              (svg) => ({icon: svg.getAttribute('data-icon'), lucide: [...svg.classList].filter((c) => c.startsWith('lucide-') && c !== 'lucide')}))""")
+            assert len(icons) == 1, f"{state}: {len(icons)} glyphs in the bell {icons}"
+            seen[state] = icons[0]["icon"]
+            # The attribute is the app's word for it; the class is what lucide drew.
+            assert f"lucide-{seen[state]}" in icons[0]["lucide"], f"{state}: data-icon {seen[state]!r} but drawn as {icons[0]['lucide']}"
+        finally:
+            n.close()
+    assert seen == BELL_GLYPHS, f"glyphs per state {seen} != {BELL_GLYPHS}"
+    assert len(set(seen.values())) == len(seen), f"two states share a glyph: {seen}"
+
+
+def _n_popover_copy(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
+    """The popovers give a reason and a next step in their body, never the heading again, and the blocked one
+    does not ask for a reload (the page re-reads the permission when the tab is focused)."""
+    want = {
+        "denied": ("notify-blocked", "Notifications are blocked",
+                   "Your browser is blocking notifications for this site. Allow them in the browser's site settings, then come back to this page."),
+        "unsupported": ("notify-unsupported", "Notifications are not available",
+                        "This browser or device cannot show them. Open the admin in a desktop browser such as Chrome or Firefox."),
+    }
+    for state, insecure in (("denied", False), ("unsupported", False), ("unsupported", True)):
+        how = dict(BELL_PAGE[state], **({"insecure": True} if insecure else {}))
+        n = NotifyPage(browser, served, broker, viewport, "light", **how)
+        try:
+            n.page.wait_for_selector(f"[data-testid=notify-bell][data-state={state}]")
+            n.bell.click()
+            testid, heading, body = want[state]
+            if insecure:
+                body = "Desktop notifications need a secure connection (https or localhost). Open the admin that way."
+            popover = n.page.get_by_test_id(testid)
+            popover.wait_for()
+            paragraphs = [squash(t) for t in popover.locator("p").all_inner_texts()]
+            assert paragraphs == [heading, body], f"{state}{' (insecure)' if insecure else ''}: {paragraphs}"
+        finally:
+            n.close()
 
 def _n_insecure_wording(n: NotifyPage) -> None:
     assert_bell(n.bell, "unsupported", label=INSECURE_LABEL)
@@ -3491,6 +3643,18 @@ NOTIFY_CHECKS = [
     ("143", "With the stream open (no polling, the top bar says Live) a request filed at the broker arrives by the stream and raises exactly one notification, with the literal title `New egress request from <bottle>`, body `<host>:<port>` and tag = request id, within 3 s, and the tab makes no /api/egress/queue read after the first frame",
      {"permission": "granted", "live": True}, _n_arrives_by_stream),
 ]
+BELL_DETAIL_CHECKS = [   # 160..164: the round-2 polish; those that open their own pages take (browser, served, broker, viewport)
+    ("160", "In spa mode the `Filters cleared to show <host>` note, in the pill and in the polite live region, is gone as soon as a filter changes (the search box, the state toggle)",
+     {"permission": "granted"}, _n_note_goes_on_filter_change),
+    ("161", "The `Filters cleared to show <host>` note is gone, pill and live region, once that request is decided from its row, or leaves the queue without our click",
+     {"permission": "granted"}, _n_note_goes_when_decided),
+]
+BELL_OWN_PAGE_CHECKS = [
+    ("162", "Each bell state has its own glyph: default `bell`, on `bell-ring`, muted `bell-off`, denied `shield-ban`, unsupported `bell-minus`, and no two share one; the drawn lucide class matches",
+     _n_glyph_per_state),
+    ("163", "The blocked popover body reads `Your browser is blocking notifications for this site. Allow them in the browser's site settings, then come back to this page.`; the unsupported popover's body gives the reason and next step (`Open the admin in a desktop browser such as Chrome or Firefox.`, or the secure-connection wording) and does not repeat its heading",
+     _n_popover_copy),
+]
 BELL_LAYOUT_CHECK = ("139", "The bell in every state (default, on, muted, denied, unsupported) sits inside the top bar and the viewport, clear of the theme button and of the link indicator (whichever of its five words it shows), at least 24 px, with its state's accessible name and no horizontal overflow",
                      _n_bell_layout)
 
@@ -3502,6 +3666,8 @@ def run_notifications(ui: str, viewport: str, browser, served: Served, broker: s
         for number, name, _how, _fn in NOTIFY_CHECKS:
             suite.check(number, name, lambda: None, spa_only=True)
         suite.check(BELL_LAYOUT_CHECK[0], BELL_LAYOUT_CHECK[1], lambda: None, spa_only=True)
+        for number, name, *_rest in BELL_DETAIL_CHECKS + BELL_OWN_PAGE_CHECKS:
+            suite.check(number, name, lambda: None, spa_only=True)
         return suite.results
     for number, name, how, fn in NOTIFY_CHECKS:
         def run(how=how, fn=fn):
@@ -3513,6 +3679,16 @@ def run_notifications(ui: str, viewport: str, browser, served: Served, broker: s
         suite.check(number, name, run)
     number, name, fn = BELL_LAYOUT_CHECK
     suite.check(number, name, lambda: fn(browser, served, broker, viewport))
+    for number, name, how, fn in BELL_DETAIL_CHECKS:
+        def run(how=how, fn=fn):
+            n = NotifyPage(browser, served, broker, viewport, "light", **how)
+            try:
+                fn(n)
+            finally:
+                n.close()
+        suite.check(number, name, run)
+    for number, name, fn in BELL_OWN_PAGE_CHECKS:
+        suite.check(number, name, lambda fn=fn: fn(browser, served, broker, viewport))
     broker.reset()
     return suite.results
 
@@ -3534,6 +3710,33 @@ def capture_bell_states(browser, served, broker, out: Path, viewport: str, theme
                 capture(n.page, out, "spa", viewport, theme, f"bell-{state}-open")
         finally:
             n.close()
+    broker.reset()
+
+
+def capture_bell_live(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """The bell on, beside the Live indicator: the stream path, no route aborted."""
+    n = NotifyPage(browser, served, broker, viewport, theme, permission="granted", live=True)
+    try:
+        n.page.mouse.move(2, viewport_height(viewport) - 2)
+        n.page.evaluate("() => document.activeElement && document.activeElement.blur()")
+        n.page.wait_for_timeout(300)
+        assert_bell(n.bell, "on")
+        capture(n.page, out, "spa", viewport, theme, "bell-on-live")
+        n.page.locator("header").screenshot(path=str(out / f"spa-{viewport}-{theme}-bell-on-live-bar.png"))
+    finally:
+        n.close()
+    broker.reset()
+
+
+def capture_filters_cleared(browser, served, broker, out: Path, viewport: str, theme: str) -> None:
+    """The `Filters cleared to show <host>` pill, as a notification click leaves it."""
+    n = NotifyPage(browser, served, broker, viewport, theme, permission="granted")
+    try:
+        _cleared_note_raised(n)
+        n.page.wait_for_timeout(300)
+        capture(n.page, out, "spa", viewport, theme, "filters-cleared-note")
+    finally:
+        n.close()
     broker.reset()
 
 
@@ -4223,6 +4426,11 @@ NEW_CHECKS = [
     ("141", "The bell follows a permission changed under the open page, on focus and on visibility change", "N/A(spa-only) on legacy"),
     ("142", "The unsupported bell on an insecure page says it needs a secure connection", "N/A(spa-only) on legacy"),
     ("143", "With the stream open a request filed at the broker arrives by the stream and raises exactly one notification with the literal title, body and tag within 3 s, and the tab reads no /api/egress/queue after the first frame", "N/A(spa-only) on legacy"),
+    ("160", "The `Filters cleared to show <host>` note is gone as soon as a filter changes", "N/A(spa-only) on legacy"),
+    ("161", "The `Filters cleared to show <host>` note is gone once that request is decided or leaves the queue", "N/A(spa-only) on legacy"),
+    ("162", "Each bell state has its own glyph, so muted and denied differ by shape and not by colour alone", "N/A(spa-only) on legacy"),
+    ("163", "The blocked and unsupported popovers give a reason and a next step in their body, without repeating the heading or asking for a reload", "N/A(spa-only) on legacy"),
+    ("164", "The spa suite's log has no `Task was destroyed but it is pending` line", "N/A(spa-only) on legacy"),
 ]
 
 
@@ -4260,6 +4468,8 @@ def main() -> int:
             print(refusal, file=sys.stderr)
             return 2
 
+    asyncio_warnings = AsyncioWarnings()
+    logging.getLogger("asyncio").addHandler(asyncio_warnings)
     broker = stub.StubBroker(log=lambda message: None)
     try:
         broker.preflight()
@@ -4307,6 +4517,11 @@ def main() -> int:
                             capture_bell_states(browser, served, broker, out, viewport, theme)
                         except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
                             results.append(Result("FAIL", viewport, "0", f"bell captures ({theme})", squash(str(exc))[:300]))
+                        for extra in (capture_bell_live, capture_filters_cleared):
+                            try:
+                                extra(browser, served, broker, out, viewport, theme)
+                            except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
+                                results.append(Result("FAIL", viewport, "0", f"{extra.__name__} ({theme})", squash(str(exc))[:300]))
             browser.close()
     finally:
         served.stop()
@@ -4316,6 +4531,16 @@ def main() -> int:
         for violation in broker.violations:
             print(f"CONTRACT VIOLATION: {violation}", file=sys.stderr)
         return 2
+
+    if ui == "legacy":
+        results.append(Result("N/A", "all", "164", dict((a, b) for a, b, _c in NEW_CHECKS)["164"], "spa-only"))
+    else:
+        gc.collect()   # a dropped task is reported when it is collected
+        pending = asyncio_warnings.pending
+        log(f"stage=asyncio-warnings pending_task_lines={len(pending)}")
+        results.append(Result("FAIL" if pending else "PASS", "all", "164",
+                              dict((a, b) for a, b, _c in NEW_CHECKS)["164"],
+                              f"{len(pending)} line(s), first: {pending[0]}" if pending else ""))
 
     printed = [result.line() for result in results]
     counts = {status: sum(1 for r in results if r.status == status) for status in ("PASS", "SKIP", "N/A", "FAIL")}

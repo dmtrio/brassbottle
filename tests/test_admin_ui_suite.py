@@ -305,3 +305,43 @@ class RelativeTimeLabelTests(unittest.TestCase):
 
     def test_a_10_minute_row_reads_12_minutes(self):
         self.assertEqual(suite.reltime_labels_after(10 * 60, 120), {"· 12m ago"})
+
+
+class ClosingTests(unittest.TestCase):
+    """Check 164: a page is unrouted before its context closes, so no route task is left pending."""
+
+    def test_the_page_is_unrouted_ignoring_errors_and_then_the_context_closes(self):
+        calls = []
+
+        class Page:
+            def unroute_all(self, **kwargs):
+                calls.append(("unroute_all", kwargs))
+
+        class Context:
+            def close(self):
+                calls.append(("close", {}))
+
+        suite.close_page_context(Context(), Page())
+        self.assertEqual(calls, [("unroute_all", {"behavior": "ignoreErrors"}), ("close", {})])
+
+    def test_a_page_that_cannot_be_unrouted_still_has_its_context_closed(self):
+        closed = []
+
+        class Page:
+            def unroute_all(self, **kwargs):
+                raise RuntimeError("target closed")
+
+        class Context:
+            def close(self):
+                closed.append(True)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            suite.close_page_context(Context(), Page())
+        self.assertEqual(closed, [True])
+
+    def test_the_asyncio_handler_keeps_dropped_task_lines_and_nothing_else(self):
+        import logging
+        handler = suite.AsyncioWarnings()
+        for text in ("Task was destroyed but it is pending!\ntask: <Task pending>", "Executing <Handle> took 0.2 s"):
+            handler.emit(logging.LogRecord("asyncio", logging.ERROR, __file__, 1, text, None, None))
+        self.assertEqual(handler.pending, ["Task was destroyed but it is pending! task: <Task pending>"])

@@ -101,8 +101,26 @@ function clearFilters(): void {
 const openRows = computed(() => snapshot.value?.open ?? [])
 
 // Said in the queue's polite live region when a notification click had to
-// reset the filters, so the reset is not silent. Cleared by the next click.
+// reset the filters, so the reset is not silent. It is about one request and
+// one filter state: it goes when a filter changes, when that request leaves the
+// queue (decided), or on the next click.
 const filtersClearedNote = ref('')
+const filtersClearedFor = ref<string | null>(null)
+
+function dropClearedNote(): void {
+  filtersClearedNote.value = ''
+  filtersClearedFor.value = null
+}
+
+// Synchronous, so the reset that raises the note (which changes the filters
+// too) has finished before the note is set and cannot clear it.
+watch(filters, dropClearedNote, { deep: true, flush: 'sync' })
+watch(
+  () => (filtersClearedFor.value ? openRows.value.some((row) => row.request_id === filtersClearedFor.value) : true),
+  (stillOpen) => {
+    if (!stillOpen) dropClearedNote()
+  },
+)
 
 // A notification click lands here: bring the request's row into view and focus
 // it. A filter may be hiding it, and the notification is about that request,
@@ -112,11 +130,12 @@ watch(
   focusRequestId,
   async (id) => {
     if (!id) return
-    filtersClearedNote.value = ''
+    dropClearedNote()
     const open = openRows.value.find((row) => row.request_id === id)
     if (open && !hasRequestRow(id)) {
       clearFilters()
       filtersClearedNote.value = `Filters cleared to show ${open.host}`
+      filtersClearedFor.value = id
       await nextTick()
     }
     focusRequestRow(id)

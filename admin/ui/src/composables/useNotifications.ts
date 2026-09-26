@@ -39,7 +39,9 @@ const permission = ref<Permission | null>(readPermission())
 const muted = ref(readMuted())
 // Set when `new Notification` throws (Chrome for Android has the API and a
 // permission but an illegal constructor): from then on this session the bell
-// says notifications are unavailable rather than "on".
+// says notifications are unavailable rather than "on". Any throw counts, not
+// only the illegal constructor: a constructor that fails once is not trusted
+// again, and the bell would otherwise claim "on" while showing nothing.
 const unavailable = ref(false)
 const seen = new SeenRequests()
 let router: Router | null = null
@@ -189,6 +191,8 @@ export function useBell() {
     // The tooltip; and the accessible name, which a toggle keeps stable.
     label: computed(() => bellLabel(state.value, reason.value)),
     name: computed(() => bellName(state.value, reason.value)),
+    // Why an unsupported bell is: the popover's next step depends on it.
+    reason,
     press,
   }
 }

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Bell, BellMinus, BellOff, BellRing } from '@lucide/vue'
+import { Bell, BellMinus, BellOff, BellRing, ShieldBan } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { useBell } from '@/composables/useNotifications'
+import { BROWSER_NEXT_STEP, INSECURE_NEXT_STEP } from '@/lib/notify'
 
-const { state, label, name, press } = useBell()
+const { state, label, name, reason, press } = useBell()
 
 // A bell that cannot be pressed still answers a click: it says why, which a
 // disabled button cannot do on touch or in a browser without tooltips.
@@ -23,13 +24,15 @@ const explains = computed(() => state.value === 'denied' || state.value === 'uns
         data-testid="notify-bell"
         :data-state="state"
       >
-        <BellOff
+        <ShieldBan
           v-if="state === 'denied'"
           class="size-icon text-warn-text"
+          data-icon="shield-ban"
         />
         <BellMinus
           v-else
           class="size-icon text-warn-text"
+          data-icon="bell-minus"
         />
       </Button>
     </PopoverTrigger>
@@ -43,7 +46,7 @@ const explains = computed(() => state.value === 'denied' || state.value === 'uns
         </p>
         <p class="row-meta">
           Your browser is blocking notifications for this site. Allow them in the browser's
-          site settings, then reload this page.
+          site settings, then come back to this page.
         </p>
       </template>
       <template v-else>
@@ -51,7 +54,7 @@ const explains = computed(() => state.value === 'denied' || state.value === 'uns
           Notifications are not available
         </p>
         <p class="row-meta">
-          {{ label }}.
+          {{ reason === 'insecure' ? INSECURE_NEXT_STEP : BROWSER_NEXT_STEP }}
         </p>
       </template>
     </PopoverContent>
@@ -70,14 +73,17 @@ const explains = computed(() => state.value === 'denied' || state.value === 'uns
     <BellRing
       v-if="state === 'on'"
       class="size-icon text-allow-text"
+      data-icon="bell-ring"
     />
     <Bell
       v-else-if="state === 'default'"
       class="size-icon"
+      data-icon="bell"
     />
     <BellOff
       v-else
       class="size-icon text-muted-foreground"
+      data-icon="bell-off"
     />
   </Button>
 </template>
