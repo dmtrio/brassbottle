@@ -3125,30 +3125,86 @@ PWA_HEAD_CHECKS = {
            "whatever the OS scheme is",
 }
 
-LEDGER_REGEN_CHECK = ("195", "Re-rendering the icons from the master into a temp dir, with the suite's own "
-                              "Chromium, reproduces the committed PNGs and icons.json byte-for-byte")
+LEDGER_REGEN_CHECK = ("195", "Re-rendering the icons from the master with the suite's own Chromium reproduces "
+                              "the committed PNGs within a per-pixel tolerance, and icons.json's master entry "
+                              "and favicon.svg byte-for-byte")
+
+# Anti-aliased alpha edges on the four transparent-background outputs (icon-192, icon-512,
+# favicon-32, favicon-16) rasterise a handful of pixels differently between Chromium builds on
+# different CPU architectures, even at the same Playwright/Chromium version (round 2 of REVIEW -
+# brassbottle 178, Blocker 1: this container is aarch64, CI is x86_64). A tolerance this small lets
+# through only that: a handful of edge pixels shifted by a small amount. It still fails a hand-edited
+# icon, which changes many pixels by far more than this (M1), and a stale render after the master's
+# colour shifted, which changes nearly every pixel by a small but near-uniform amount that this
+# tolerance's pixel-count half catches even though its per-channel-delta half would not (M2).
+ICON_DIFF_MAX_DELTA = 24
+ICON_DIFF_MAX_FRACTION = 0.01
+
+
+def _png_pixel_diff(a: bytes, b: bytes) -> tuple[bool, int, int, int]:
+    """(same dimensions and colour type, max per-channel delta, differing pixels, total pixels)
+    between two PNGs, decoded with the stdlib decoder already used by tests/test_admin_icons.py.
+    Colour type is folded into bytes-per-pixel (3 for RGB, 4 for RGBA)."""
+    aw, ah, abpp, arows = png_pixels.decode_rows(a)
+    bw, bh, bbpp, brows = png_pixels.decode_rows(b)
+    if (aw, ah, abpp) != (bw, bh, bbpp):
+        return False, 0, 0, 0
+    max_delta = 0
+    diff_pixels = 0
+    for arow, brow in zip(arows, brows):
+        for i in range(0, len(arow), abpp):
+            delta = max(abs(arow[i + c] - brow[i + c]) for c in range(abpp))
+            if delta:
+                diff_pixels += 1
+                max_delta = max(max_delta, delta)
+    return True, max_delta, diff_pixels, aw * ah
 
 
 def check_icons_are_reproducible(browser) -> Result:
     """The Ledger's own Gate (tests/test_admin_icons.py) only compares committed icons against
     icons.json, so a hand-edited PNG with its hash updated to match passes it (PLN D1, Minor 1 of
     REVIEW - brassbottle 178). This re-renders from the master with the suite's already-launched
-    Chromium and diffs the result against what is actually committed, which a hand-edit cannot
-    fake. Not viewport-specific: run once."""
+    Chromium and diffs the result (in memory, against the actually-committed public/ files, which a
+    hand-edit cannot fake) within ICON_DIFF_MAX_DELTA/ICON_DIFF_MAX_FRACTION rather than byte-for-byte,
+    because that rasterisation differs slightly by CPU architecture (see the module comment above).
+    icons.json's master entry and favicon.svg (an SVG has no rasterisation to tolerate) are still
+    compared byte/hash-for-hash. Logs each output's numbers whether or not it passes, so a CI failure
+    shows the actual delta. Not viewport-specific: run once."""
     number, name = LEDGER_REGEN_CHECK
     try:
-        out_dir = Path(tempfile.mkdtemp(prefix="admin-icons-regen-"))
         master_bytes, outputs = render_icons.render(browser)
         fresh_ledger = render_icons.ledger(master_bytes, outputs)
-        for out_name, body in outputs.items():
-            (out_dir / out_name).write_bytes(body)
-        (out_dir / "icons.json").write_text(json.dumps(fresh_ledger, indent=2) + "\n", encoding="utf-8")
         committed_ledger = json.loads(render_icons.LEDGER.read_text(encoding="utf-8"))
-        mismatched = [n for n in render_icons.OUTPUTS if (out_dir / n).read_bytes() != (render_icons.PUBLIC / n).read_bytes()]
-        log(f"stage=icon-regen dir={out_dir} outputs={len(outputs)} bytes={sum(len(b) for b in outputs.values())} "
-            f"mismatched={mismatched}")
-        assert not mismatched, f"a fresh render of {mismatched} does not byte-match public/ (stale or hand-edited)"
-        assert fresh_ledger == committed_ledger, "icons.json does not match a fresh render's ledger"
+        details = []
+        mismatched = []
+
+        master_matches = fresh_ledger["master"] == committed_ledger["master"]
+        details.append(f"master:match={master_matches}")
+        if not master_matches:
+            mismatched.append("master")
+
+        for out_name in render_icons.OUTPUTS:
+            fresh_bytes = outputs[out_name]
+            public_bytes = (render_icons.PUBLIC / out_name).read_bytes()
+            if out_name == "favicon.svg" or fresh_bytes == public_bytes:
+                same = fresh_bytes == public_bytes
+                details.append(f"{out_name}:byte-identical={same}")
+                if not same:
+                    mismatched.append(out_name)
+                continue
+            same_shape, max_delta, diff_pixels, total_pixels = _png_pixel_diff(fresh_bytes, public_bytes)
+            within_tolerance = (
+                same_shape and max_delta <= ICON_DIFF_MAX_DELTA
+                and diff_pixels <= total_pixels * ICON_DIFF_MAX_FRACTION)
+            details.append(
+                f"{out_name}:dims={'match' if same_shape else 'MISMATCH'} max_delta={max_delta} "
+                f"diff_pixels={diff_pixels}/{total_pixels}")
+            if not within_tolerance:
+                mismatched.append(out_name)
+
+        log(f"stage=icon-regen outputs={len(outputs)} bytes={sum(len(b) for b in outputs.values())} "
+            + " ".join(details))
+        assert not mismatched, f"{mismatched} differs beyond tolerance (stale, hand-edited, or a renderer change)"
         return Result("PASS", "all", number, name)
     except Exception as exc:  # noqa: BLE001 - any failure is a FAIL line, never a crash
         return Result("FAIL", "all", number, name, squash(str(exc))[:300])
