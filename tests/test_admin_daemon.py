@@ -321,6 +321,51 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    def test_signin_page_has_the_form_fields_and_theme_color_metas_from_the_build(self):
+        """The sign-in page (the pointer page without a session) carries the literal form the inline
+        script drives, and per-scheme theme-color metas valued from dist/theme-colors.json — the same
+        file admin/ui/pwa.ts writes at build time."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = make_stub_dist(home)
+            (dist / admin.THEME_COLORS_FILENAME).write_text(
+                json.dumps({"light": "#fafafb", "dark": "#0f0f12"}), encoding="utf-8"
+            )
+            server, thread = self._start_admin(home, env={"DJINN_ADMIN_UI_DIST": str(dist)})
+            host, port = server.server_address
+            try:
+                _status, _payload, _headers, raw = self._request(host, port, "GET", "/")
+                text = raw.decode("utf-8")
+                self.assertIn('<form id="signin-form"', text)
+                self.assertIn('<input id="signin-input" name="signin-input" type="password" autocomplete="off">', text)
+                self.assertIn(">Sign in<", text)
+                self.assertIn('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafb">', text)
+                self.assertIn('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f0f12">', text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
+    def test_signin_page_falls_back_safely_with_no_theme_colors_json(self):
+        """A dist without theme-colors.json (every stub dist in this suite, or a build that predates
+        it) still starts and serves the form; it ships no theme-color meta rather than a hand-written
+        hex, and says so at INFO rather than failing or warning."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with self.assertLogs(admin.LOG, level="INFO") as captured:
+                server, thread = self._start_admin(home)
+            host, port = server.server_address
+            try:
+                self.assertTrue(any("theme colors absent" in m for m in captured.output))
+                _status, _payload, _headers, raw = self._request(host, port, "GET", "/")
+                text = raw.decode("utf-8")
+                self.assertIn('<form id="signin-form"', text)
+                self.assertNotIn("theme-color", text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
     def test_get_shell_with_valid_cookie_serves_app_and_sets_no_cookie(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

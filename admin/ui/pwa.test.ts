@@ -1,6 +1,8 @@
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { canvasColours, oklchToHex, pwaOptions, themeColorTags } from './pwa.ts'
+import { canvasColours, oklchToHex, pwaOptions, themeColorTags, writeThemeColorsJson } from './pwa.ts'
 
 describe('oklchToHex', () => {
   it('maps the ends of the lightness scale', () => {
@@ -47,6 +49,15 @@ describe('the theme-color metas', () => {
       { tag: 'meta', injectTo: 'head',
         attrs: { name: 'theme-color', media: '(prefers-color-scheme: dark)', content: '#0f0f12', 'data-scheme': 'dark' } },
     ])
+  })
+})
+
+describe('theme-colors.json (the daemon reads it for the sign-in page)', () => {
+  it('carries the same light/dark hexes as the manifest and page metas', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'theme-colors-'))
+    writeThemeColorsJson(import.meta.dirname, tmp)
+    const written = JSON.parse(fs.readFileSync(path.join(tmp, 'theme-colors.json'), 'utf8'))
+    expect(written).toEqual({ light: '#fafafb', dark: '#0f0f12' })
   })
 })
 

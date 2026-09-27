@@ -74,18 +74,32 @@ STREAM_FULL_ERROR = "too many live streams"
 ADMIN_KEY_FILENAME = "admin.key"
 ADMIN_KEY_ENV = "EGRESS_ADMIN_KEY"
 
-POINTER_HTML = """<!doctype html>
+# The build writes this beside index.html (admin/ui/pwa.ts's themeColorPlugin);
+# the daemon reads it once at startup. Missing or unreadable (a test dist, or a
+# build that predates it) is not fatal: the sign-in page ships with no
+# theme-color meta rather than a hand-written fallback hex.
+THEME_COLORS_FILENAME = "theme-colors.json"
+
+_THEME_COLOR_METAS_MARKER = "<!--theme-color-metas-->"
+
+SIGNIN_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#1b3a4b">
+  <!--theme-color-metas-->
   <title>Egress queue - Djinn admin</title>
   <style>
     :root { color-scheme: light dark; }
     body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 2rem; }
     main { max-width: 40rem; margin: 0 auto; }
     code { word-break: break-all; }
+    form { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.6rem; max-width: 28rem; }
+    label { font-weight: 600; }
+    input[type="password"] { font: inherit; padding: 0.5rem 0.6rem; }
+    button { font: inherit; padding: 0.5rem 1rem; align-self: flex-start; }
+    #signin-error { min-height: 1.2em; color: #b3261e; }
+    #signin-error:empty { display: none; }
   </style>
 </head>
 <body>
@@ -94,12 +108,87 @@ POINTER_HTML = """<!doctype html>
     <p>This page must be opened from the session URL the egress service
     prints. On the djinn host run:</p>
     <p><code>./djinn egress url</code></p>
-    <p>and open the URL it prints (it carries the one-time session key this
-    page is guarded by). Opening the bare page address sets nothing.</p>
+    <p>and paste the URL it prints, or just its key, below.</p>
+    <form id="signin-form" autocomplete="off">
+      <label for="signin-input">Session URL or key</label>
+      <input id="signin-input" name="signin-input" type="password" autocomplete="off">
+      <button type="submit">Sign in</button>
+      <p id="signin-error" role="alert"></p>
+    </form>
   </main>
+  <script>
+  (function () {
+    var form = document.getElementById('signin-form');
+    var input = document.getElementById('signin-input');
+    var error = document.getElementById('signin-error');
+
+    function extractKey(raw) {
+      var value = (raw || '').trim();
+      if (!value) return '';
+      var match = /(?:^|[?&])key=([^&#\\s]+)/.exec(value);
+      if (match) {
+        try { return decodeURIComponent(match[1]); } catch (e) { return match[1]; }
+      }
+      // Not a URL carrying a key: only a bare key (no '=' or '/') is accepted.
+      if (value.indexOf('=') !== -1 || value.indexOf('/') !== -1) return '';
+      return value;
+    }
+
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var key = extractKey(input.value);
+      if (!key) {
+        error.textContent = 'Paste the session URL from "./djinn egress url", or its key.';
+        return;
+      }
+      error.textContent = '';
+      window.location.assign('/session?key=' + encodeURIComponent(key));
+    });
+  })();
+  </script>
 </body>
 </html>
 """
+
+
+def _load_theme_colors(dist: Path) -> dict[str, str] | None:
+    """The build's `light`/`dark` canvas hexes (dist/theme-colors.json), or None
+    if the file is missing or not the shape the build writes."""
+    path = dist / THEME_COLORS_FILENAME
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Routine for a build that predates this file, or a test/stub dist: not a build defect,
+        # so INFO rather than WARNING. A file present but unreadable or malformed is one, below.
+        LOG.info("admin theme colors absent path=%s; sign-in page ships with no theme-color meta", path)
+        return None
+    except OSError as exc:
+        LOG.warning("admin theme colors unavailable path=%s reason=%s", path, exc)
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        LOG.warning("admin theme colors unreadable path=%s reason=%s", path, exc)
+        return None
+    if not isinstance(data, dict) or not all(isinstance(data.get(scheme), str) for scheme in ("light", "dark")):
+        LOG.warning("admin theme colors malformed path=%s", path)
+        return None
+    return {"light": data["light"], "dark": data["dark"]}
+
+
+def _theme_color_metas_html(colors: dict[str, str] | None) -> str:
+    if colors is None:
+        return ""
+    return "\n  ".join(
+        f'<meta name="theme-color" media="(prefers-color-scheme: {scheme})" content="{colors[scheme]}">'
+        for scheme in ("light", "dark")
+    )
+
+
+def render_signin_html(colors: dict[str, str] | None) -> bytes:
+    """The sign-in page served for any app route without a valid session cookie."""
+    return SIGNIN_HTML.replace(_THEME_COLOR_METAS_MARKER, _theme_color_metas_html(colors)).encode("utf-8")
+
 
 _SRC_DIR = Path(__file__).resolve().parent
 
@@ -548,6 +637,7 @@ class AdminHTTPServer(ThreadingHTTPServer):
         # Nothing is bound or started until the build is known to be there: a daemon with no app to
         # serve refuses to start (RuntimeError, which main() turns into a non-zero exit).
         self._load_spa()
+        self.signin_html = render_signin_html(_load_theme_colors(self.spa_dist.resolve()))
         self.stream_heartbeat_seconds = stream_heartbeat_seconds
         self.stream_hub = QueueStreamHub(
             self._fetch_queue,
@@ -704,7 +794,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_bytes(
             HTTPStatus.OK,
-            POINTER_HTML.encode("utf-8"),
+            self.server.signin_html,
             content_type="text/html; charset=utf-8",
         )
 
