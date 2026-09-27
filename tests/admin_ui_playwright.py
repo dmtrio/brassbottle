@@ -3130,15 +3130,14 @@ LEDGER_REGEN_CHECK = ("195", "Re-rendering the icons from the master with the su
                               "and favicon.svg byte-for-byte")
 
 # Anti-aliased alpha edges on the four transparent-background outputs (icon-192, icon-512,
-# favicon-32, favicon-16) rasterise a handful of pixels differently between Chromium builds on
-# different CPU architectures, even at the same Playwright/Chromium version (round 2 of REVIEW -
-# brassbottle 178, Blocker 1: this container is aarch64, CI is x86_64). A tolerance this small lets
-# through only that: a handful of edge pixels shifted by a small amount. It still fails a hand-edited
-# icon, which changes many pixels by far more than this (M1), and a stale render after the master's
-# colour shifted, which changes nearly every pixel by a small but near-uniform amount that this
-# tolerance's pixel-count half catches even though its per-channel-delta half would not (M2).
-ICON_DIFF_MAX_DELTA = 24
-ICON_DIFF_MAX_FRACTION = 0.01
+# favicon-32, favicon-16) rasterise a handful of pixels differently between CPU architectures, even
+# at the same Playwright/Chromium version: the Ledger was rendered on aarch64, CI runs x86_64, and CI
+# measured a max per-channel delta of 1 on at most 0.2 % of pixels. The tolerance sits just above
+# that and lets through only such edge noise. A hand-edited icon changes pixels by far more than 4
+# (the delta half catches it); a stale render after the master's colour shifted changes nearly every
+# pixel (the pixel-count half catches it even where each shift is small).
+ICON_DIFF_MAX_DELTA = 4
+ICON_DIFF_MAX_FRACTION = 0.005
 
 
 def _png_pixel_diff(a: bytes, b: bytes) -> tuple[bool, int, int, int]:
@@ -3162,8 +3161,7 @@ def _png_pixel_diff(a: bytes, b: bytes) -> tuple[bool, int, int, int]:
 
 def check_icons_are_reproducible(browser) -> Result:
     """The Ledger's own Gate (tests/test_admin_icons.py) only compares committed icons against
-    icons.json, so a hand-edited PNG with its hash updated to match passes it (PLN D1, Minor 1 of
-    REVIEW - brassbottle 178). This re-renders from the master with the suite's already-launched
+    icons.json, so a hand-edited PNG with its hash updated to match passes it. This re-renders from the master with the suite's already-launched
     Chromium and diffs the result (in memory, against the actually-committed public/ files, which a
     hand-edit cannot fake) within ICON_DIFF_MAX_DELTA/ICON_DIFF_MAX_FRACTION rather than byte-for-byte,
     because that rasterisation differs slightly by CPU architecture (see the module comment above).
