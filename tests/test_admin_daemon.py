@@ -1718,7 +1718,10 @@ class AdminDaemonTests(unittest.TestCase):
         """Run main() against `dist`; return its exit code, stderr, and the ERROR log lines."""
         err = io.StringIO()
         env = {"DJINN_HOME": str(home), "DJINN_ADMIN_UI_DIST": str(dist)}
-        with mock.patch.dict(os.environ, env), mock.patch("sys.stderr", err):
+        # A regression that lets the daemon start must fail here, not hang in serve_forever.
+        started = AssertionError("the daemon started serving despite the bad dist")
+        with mock.patch.dict(os.environ, env), mock.patch("sys.stderr", err), \
+                mock.patch.object(admin.AdminHTTPServer, "serve_forever", side_effect=started):
             with self.assertLogs(admin.LOG, level="ERROR") as captured:
                 rc = admin.main(["--port", "0"])
         return rc, err.getvalue(), [r.getMessage() for r in captured.records]
