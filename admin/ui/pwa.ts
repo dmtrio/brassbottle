@@ -6,7 +6,7 @@
 // navigation fallback and no runtime caching. public/sw-cleanup.js, pulled in
 // with importScripts, deletes every cache the worker does not own, the legacy
 // page's `djinn-admin-shell-v3` included.
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import type { Plugin } from 'vite'
 import type { VitePWAOptions } from 'vite-plugin-pwa'
@@ -58,9 +58,29 @@ export function themeColorTags(root: string) {
   return [meta('light', light), meta('dark', dark)]
 }
 
-/** Writes the per-scheme `theme-color` metas into index.html at build time, so no colour is written by hand. */
+/** Writes the canvas hexes to `<outDir>/theme-colors.json`: the admin daemon reads the same two
+ * values at startup to put per-scheme theme-color metas into the sign-in page it serves statically
+ * (src/admin_daemon.py), so that page needs no hand-written colour either. */
+export function writeThemeColorsJson(root: string, outDir: string): void {
+  const { light, dark } = canvasColours(root)
+  const dest = path.isAbsolute(outDir) ? outDir : path.join(root, outDir)
+  writeFileSync(path.join(dest, 'theme-colors.json'), JSON.stringify({ light, dark }) + '\n')
+}
+
+/** Writes the per-scheme `theme-color` metas into index.html at build time, so no colour is written
+ * by hand, and theme-colors.json beside it via writeThemeColorsJson. */
 export function themeColorPlugin(root: string): Plugin {
-  return { name: 'djinn-theme-color', transformIndexHtml: () => themeColorTags(root) }
+  let outDir = 'dist'
+  return {
+    name: 'djinn-theme-color',
+    transformIndexHtml: () => themeColorTags(root),
+    configResolved(config) {
+      outDir = config.build.outDir
+    },
+    writeBundle() {
+      writeThemeColorsJson(root, outDir)
+    },
+  }
 }
 
 export function pwaOptions(root: string): Partial<VitePWAOptions> {

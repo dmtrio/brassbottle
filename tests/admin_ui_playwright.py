@@ -3125,6 +3125,145 @@ PWA_HEAD_CHECKS = {
            "whatever the OS scheme is",
 }
 
+# ---- sign-in page (the pointer page without a session) --------------------------------
+
+SIGNIN_CHECKS = {
+    "196": "With no session cookie an app route shows the sign-in page: the existing instructions plus "
+           "a password field and a Sign in button, and no inline error yet",
+    "197": "Pasting the full session URL from `./djinn egress url` and pressing Sign in lands the same "
+           "page object on the Vue app at /egress with the session cookie set; no new window or popup "
+           "opened in the context",
+    "198": "The same, pasting only the URL's key",
+    "199": "A wrong key shows the daemon's 403 refusal in the same window and sets no cookie",
+    "200": "Empty input shows an inline error and sends no request to /session",
+}
+
+
+def _signin_page_state(page) -> dict:
+    return {
+        "path": urlsplit(page.url).path,
+        "text": squash(page.locator("body").inner_text()),
+        "password_fields": page.locator('input[type="password"]').count(),
+        "submit": page.locator('button:has-text("Sign in")').count(),
+        "error": squash(page.locator("#signin-error").inner_text()),
+    }
+
+
+def _signin_bare_context(browser, viewport: str):
+    """A context with no session cookie, tracking every request path and any extra page/popup."""
+    context = browser.new_context(viewport=VIEWPORTS[viewport], locale="en-US", timezone_id="UTC")
+    requests: list[str] = []
+    context.on("request", lambda r: requests.append(urlsplit(r.url).path))
+    return context, requests
+
+
+def _submit_signin(browser, served: Served, viewport: str, value: str) -> dict:
+    """Open the sign-in page with no cookie, fill the form with `value`, click Sign in, and report
+    where the page (the same object throughout) ends up."""
+    context, requests = _signin_bare_context(browser, viewport)
+    page = context.new_page()
+    try:
+        page.goto(served.base + "/egress")
+        page.locator('input[type="password"]').fill(value)
+        pages_before = len(context.pages)
+        page.locator('button:has-text("Sign in")').click()
+        if value.strip():
+            page.wait_for_load_state("load", timeout=TIMEOUT_MS)
+            # A right key redirects to `/`; the Vue router then replaces that with `/egress`
+            # client-side (no further "load" event), so wait for the URL itself to settle.
+            if urlsplit(page.url).path == "/":
+                page.wait_for_url(re.compile(r"/egress/?$"), timeout=TIMEOUT_MS)
+            error = ""
+        else:
+            page.wait_for_timeout(200)
+            error = squash(page.locator("#signin-error").inner_text())
+        return {
+            "path": urlsplit(page.url).path,
+            "text": squash(page.locator("body").inner_text()),
+            "cookies": [c["value"] for c in context.cookies() if c["name"] == admin.SESSION_COOKIE_NAME],
+            "pages_grew": len(context.pages) > pages_before,
+            "session_requests": [p for p in requests if p == "/session"],
+            "error": error,
+        }
+    finally:
+        close_page_context(context, page)
+
+
+def signin_scenario(browser, served: Served, broker: stub.StubBroker, viewport: str) -> dict:
+    """Everything checks 196..200 read: the sign-in page with no session, then what the form does with
+    the full session URL, a bare key, a wrong key, and nothing at all."""
+    broker.reset()
+    seen: dict = {}
+
+    context, _requests = _signin_bare_context(browser, viewport)
+    page = context.new_page()
+    try:
+        page.goto(served.base + "/egress")
+        seen["no_session"] = _signin_page_state(page)
+    finally:
+        close_page_context(context, page)
+
+    admin_key = served.server.admin_key
+    seen["full_url"] = _submit_signin(browser, served, viewport, f"{served.base}/session?key={admin_key}")
+    seen["bare_key"] = _submit_signin(browser, served, viewport, admin_key)
+    seen["wrong_key"] = _submit_signin(browser, served, viewport, "not-the-key")
+    seen["empty"] = _submit_signin(browser, served, viewport, "   ")
+    log(f"stage=signin viewport={viewport} "
+        f"no_session={seen['no_session']['path']} "
+        f"full_url={seen['full_url']['path']} bare_key={seen['bare_key']['path']} "
+        f"wrong_key={seen['wrong_key']['path']} empty={seen['empty']['path']}")
+    return seen
+
+
+def run_signin(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(viewport)
+    try:
+        seen = signin_scenario(browser, served, broker, viewport)
+    except Exception as exc:  # noqa: BLE001 - the scenario could not run: every check of it fails
+        detail = squash(str(exc))[:300]
+        return [Result("FAIL", viewport, number, name, detail) for number, name in SIGNIN_CHECKS.items()]
+    finally:
+        broker.reset()
+
+    def shows_the_signin_page() -> None:
+        page_state = seen["no_session"]
+        assert "./djinn egress url" in page_state["text"], page_state["text"][:200]
+        assert page_state["password_fields"] == 1, page_state
+        assert page_state["submit"] == 1, page_state
+        assert page_state["error"] == "", f"an error is already shown: {page_state}"
+
+    def full_url_signs_in() -> None:
+        result = seen["full_url"]
+        assert result["path"] == "/egress", f"ended on {result['path']}, not /egress: {result}"
+        assert result["cookies"], "no session cookie was set"
+        assert not result["pages_grew"], "a new window or popup opened"
+
+    def bare_key_signs_in() -> None:
+        result = seen["bare_key"]
+        assert result["path"] == "/egress", f"ended on {result['path']}, not /egress: {result}"
+        assert result["cookies"], "no session cookie was set"
+        assert not result["pages_grew"], "a new window or popup opened"
+
+    def wrong_key_is_refused() -> None:
+        result = seen["wrong_key"]
+        assert result["path"] == "/session", f"ended on {result['path']}, expected the refusal in-window: {result}"
+        assert not result["cookies"], f"a session cookie was set on a wrong key: {result}"
+        assert "forbidden" in result["text"], result
+
+    def empty_input_sends_nothing() -> None:
+        result = seen["empty"]
+        assert result["path"] == "/egress", f"the page navigated away on empty input: {result}"
+        assert result["error"], f"no inline error shown: {result}"
+        assert not result["session_requests"], f"a request reached /session on empty input: {result}"
+        assert not result["cookies"], result
+
+    for (number, name), fn in zip(SIGNIN_CHECKS.items(), (
+            shows_the_signin_page, full_url_signs_in, bare_key_signs_in, wrong_key_is_refused,
+            empty_input_sends_nothing)):
+        suite.check(number, name, fn)
+    return suite.results
+
+
 LEDGER_REGEN_CHECK = ("195", "Re-rendering the icons from the master with the suite's own Chromium reproduces "
                               "the committed PNGs within a per-pixel tolerance, and icons.json's master entry "
                               "and favicon.svg byte-for-byte")
@@ -3132,12 +3271,15 @@ LEDGER_REGEN_CHECK = ("195", "Re-rendering the icons from the master with the su
 # Anti-aliased alpha edges on the four transparent-background outputs (icon-192, icon-512,
 # favicon-32, favicon-16) rasterise a handful of pixels differently between CPU architectures, even
 # at the same Playwright/Chromium version: the Ledger was rendered on aarch64, CI runs x86_64, and CI
-# measured a max per-channel delta of 1 on at most 0.2 % of pixels. The tolerance sits just above
-# that and lets through only such edge noise. A hand-edited icon changes pixels by far more than 4
-# (the delta half catches it); a stale render after the master's colour shifted changes nearly every
-# pixel (the pixel-count half catches it even where each shift is small).
+# measured a max per-channel delta of 1, on favicon-16 at 1 of 256 pixels (0.39 %) and lower fractions
+# on the other three. The tolerance sits just above that: any change of at most 4 per channel on at
+# most the allowed pixel count passes, whether that is edge noise or a subtle hand edit. A hand-edited
+# icon changes pixels by far more than 4 (the delta half catches it); a stale render after the
+# master's colour shifted changes nearly every pixel (the pixel-count half catches it even where each
+# shift is small).
 ICON_DIFF_MAX_DELTA = 4
 ICON_DIFF_MAX_FRACTION = 0.005
+ICON_DIFF_MIN_PIXELS = 2   # a floor so a small icon (favicon-16, 256 px) has real headroom, not a fraction that rounds to ~1
 
 
 def _png_pixel_diff(a: bytes, b: bytes) -> tuple[bool, int, int, int]:
@@ -3193,7 +3335,7 @@ def check_icons_are_reproducible(browser) -> Result:
             same_shape, max_delta, diff_pixels, total_pixels = _png_pixel_diff(fresh_bytes, public_bytes)
             within_tolerance = (
                 same_shape and max_delta <= ICON_DIFF_MAX_DELTA
-                and diff_pixels <= total_pixels * ICON_DIFF_MAX_FRACTION)
+                and diff_pixels <= max(ICON_DIFF_MIN_PIXELS, total_pixels * ICON_DIFF_MAX_FRACTION))
             details.append(
                 f"{out_name}:dims={'match' if same_shape else 'MISMATCH'} max_delta={max_delta} "
                 f"diff_pixels={diff_pixels}/{total_pixels}")
@@ -5194,6 +5336,7 @@ def main() -> int:
                 results += run_one_stream(viewport, browser, served, broker)
                 results += run_upgrade(viewport, browser, served, broker)
                 results += run_pwa_head(viewport, browser, served, broker)
+                results += run_signin(viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):
