@@ -166,6 +166,13 @@ class RenderHelpers(unittest.TestCase):
         root = ET.fromstring(svg)
         self.assertEqual((root.get("width"), root.get("height"), root.get("viewBox")), ("32", "32", "0 0 1024 1024"))
 
+    def test_sized_refuses_a_root_with_no_width_height_pair(self):
+        # A reordered or missing width/height attribute pair must not silently pass through
+        # un-resized (which would render the maskable/apple icons at 1024 clipped to a corner).
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" height="1024" width="1024" viewBox="0 0 1024 1024"/>'
+        with self.assertRaises(ValueError):
+            render_icons.sized(svg, 32)
+
     def _png(self, alpha: int) -> bytes:
         import zlib
 
