@@ -2852,7 +2852,7 @@ def run_service_worker(viewport: str, browser, served: Served, broker: stub.Stub
         assert m["status"] == 200 and m["type"] == "application/manifest+json", f"manifest served as {m['type']}"
         assert m["json"]["display"] == "standalone" and m["json"]["start_url"] == "/" and m["json"]["scope"] == "/"
         assert m["json"]["name"] == "Djinn admin" and m["json"]["theme_color"] == "#fafafb"
-        assert sorted(i["sizes"] for i in m["icons"]) == ["192x192", "512x512"], m["icons"]
+        assert [i["sizes"] for i in m["icons"]] == ["192x192", "512x512", "512x512"], m["icons"]
         assert all(i["status"] == 200 and i["type"] == "image/png" for i in m["icons"]), m["icons"]
 
     def worker_script_never_cached(o: SwObservations) -> None:
@@ -2871,8 +2871,8 @@ def run_service_worker(viewport: str, browser, served: Served, broker: stub.Stub
     check("124", "Cache Storage holds only the worker's own precache, and only /assets/ urls in it (at the end, besides "
                  "the pages the test planted itself); a pre-seeded `djinn-admin-shell-v3` and another foreign cache are "
                  "deleted after activation", caches_pruned)
-    check("125", "The page links a web manifest: standalone, start `/`, tokens' canvas colour, 192 and 512 png icons "
-                 "that load", manifest_installable)
+    check("125", "The page links a web manifest: standalone, start `/`, tokens' canvas colour, its three png icons "
+                 "(192, 512, maskable 512) that load", manifest_installable)
     check("126", "/sw.js is served as JavaScript with cache-control no-cache", worker_script_never_cached)
     check("127", "With the daemon unreachable (context offline) an /api/egress/queue fetch and a navigation to `/` "
                  "fail with a network error instead of being answered from a cache", offline_fails)
@@ -2970,6 +2970,146 @@ def run_upgrade(viewport: str, browser, served: Served, broker: stub.StubBroker)
     suite = Suite(viewport)
     suite.check(*UPGRADE_CHECK, lambda: upgrade_from_legacy_worker(browser, served, broker, viewport))
     return suite.results
+
+
+# ---- PWA head: icons and per-scheme theme colour (190..194) --------------------------------
+
+# The manifest's icons, literal: two rounded "any" tiles and the full-bleed maskable one.
+MANIFEST_ICONS = [
+    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+]
+# Every png the page or the manifest points at, with its literal side.
+PNG_ICONS = {"/icon-192.png": 192, "/icon-512.png": 512, "/icon-maskable-512.png": 512,
+             "/apple-touch-icon.png": 180, "/favicon-32.png": 32, "/favicon-16.png": 16}
+CANVAS = {"light": "#fafafb", "dark": "#0f0f12"}   # the tokens' --app-canvas, light and dark
+
+MANIFEST_JS = """async () => {
+  const link = document.querySelector('link[rel=manifest]');
+  const json = await (await fetch(link.href)).json();
+  return json.icons;
+}"""
+
+PNG_SIZE_JS = """async (url) => {
+  const r = await fetch(url, {cache: 'no-store'});
+  const seen = {status: r.status, type: r.headers.get('content-type'), width: null, height: null};
+  try {
+    const bitmap = await createImageBitmap(await r.blob());
+    seen.width = bitmap.width;
+    seen.height = bitmap.height;
+  } catch (error) { seen.error = String(error); }   // a missing file is a 404 page, which is not an image
+  return seen;
+}"""
+
+HEAD_LINKS_JS = """() => [...document.querySelectorAll('link[rel~=icon], link[rel=apple-touch-icon]')].map((l) => (
+  {rel: l.getAttribute('rel'), href: l.getAttribute('href'), sizes: l.getAttribute('sizes'), type: l.getAttribute('type')}))"""
+
+# The colour the browser takes as the page's theme-color: the first meta whose media query matches.
+THEME_COLOUR_JS = """() => {
+  const metas = [...document.querySelectorAll('meta[name=theme-color]')];
+  const chosen = metas.find((m) => !m.media || matchMedia(m.media).matches);
+  return {chosen: chosen ? chosen.content : null, all: metas.map((m) => m.content), count: metas.length};
+}"""
+
+
+def open_head_page(browser, served: Served, viewport: str, theme: str):
+    from playwright.sync_api import expect
+
+    context, page, traffic = new_page(browser, served, viewport, theme)
+    open_queue(page, served, traffic)
+    expect(page.locator("button[title=Theme]")).to_be_visible()
+    return context, page
+
+
+def pwa_head_scenario(browser, served: Served, broker: stub.StubBroker, viewport: str) -> dict:
+    """Everything checks 190..194 read, gathered from real pages of the built app."""
+    broker.reset()
+    seen: dict = {"themes": {}, "toggled": {}}
+    context, page = open_head_page(browser, served, viewport, "light")
+    try:
+        seen["manifest_icons"] = page.evaluate(MANIFEST_JS)
+        seen["pngs"] = {url: page.evaluate(PNG_SIZE_JS, url) for url in PNG_ICONS}
+        seen["svg"] = page.evaluate("async () => { const r = await fetch('/favicon.svg'); return {status: r.status, "
+                                    "type: r.headers.get('content-type'), text: (await r.text()).slice(0, 5)}; }")
+        seen["links"] = page.evaluate(HEAD_LINKS_JS)
+        seen["themes"]["light"] = page.evaluate(THEME_COLOUR_JS)
+        page.locator("button[title=Theme]").click()
+        page.wait_for_function("document.documentElement.classList.contains('dark')")
+        seen["toggled"]["light->dark"] = page.evaluate(THEME_COLOUR_JS)
+        page.locator("button[title=Theme]").click()
+        page.wait_for_function("!document.documentElement.classList.contains('dark')")
+        seen["toggled"]["light->dark->light"] = page.evaluate(THEME_COLOUR_JS)
+    finally:
+        close_page_context(context, page)
+    context, page = open_head_page(browser, served, viewport, "dark")
+    try:
+        seen["themes"]["dark"] = page.evaluate(THEME_COLOUR_JS)
+        page.locator("button[title=Theme]").click()
+        page.wait_for_function("!document.documentElement.classList.contains('dark')")
+        seen["toggled"]["dark->light"] = page.evaluate(THEME_COLOUR_JS)
+    finally:
+        close_page_context(context, page)
+    log(f"stage=pwa-head viewport={viewport} themes={seen['themes']} toggled={seen['toggled']}")
+    return seen
+
+
+def run_pwa_head(viewport: str, browser, served: Served, broker: stub.StubBroker) -> list[Result]:
+    suite = Suite(viewport)
+    try:
+        seen = pwa_head_scenario(browser, served, broker, viewport)
+    except Exception as exc:  # noqa: BLE001 - the scenario could not run: every check of it fails
+        detail = squash(str(exc))[:300]
+        return [Result("FAIL", viewport, number, name, detail) for number, name in PWA_HEAD_CHECKS.items()]
+    finally:
+        broker.reset()
+
+    def manifest_icon_list() -> None:
+        assert seen["manifest_icons"] == MANIFEST_ICONS, seen["manifest_icons"]
+
+    def icons_serve_at_their_size() -> None:
+        for url, side in PNG_ICONS.items():
+            got = seen["pngs"][url]
+            assert got["status"] == 200 and got["type"] == "image/png", f"{url}: {got}"
+            assert (got["width"], got["height"]) == (side, side), f"{url} is {got['width']}x{got['height']}, expected {side}x{side} ({got})"
+        svg = seen["svg"]
+        assert svg["status"] == 200 and svg["type"] == "image/svg+xml" and svg["text"] == "<svg ", f"favicon.svg: {svg}"
+
+    def head_links() -> None:
+        links = seen["links"]
+        assert {"rel": "apple-touch-icon", "href": "/apple-touch-icon.png", "sizes": None, "type": None} in links, links
+        assert {"rel": "icon", "href": "/favicon-32.png", "sizes": "32x32", "type": "image/png"} in links, links
+        assert {"rel": "icon", "href": "/favicon-16.png", "sizes": "16x16", "type": "image/png"} in links, links
+        assert {"rel": "icon", "href": "/favicon.svg", "sizes": None, "type": "image/svg+xml"} in links, links
+
+    def theme_colour_follows_the_os() -> None:
+        for scheme in ("light", "dark"):
+            got = seen["themes"][scheme]
+            assert got["count"] == 2, f"{scheme}: {got['count']} theme-color metas"
+            assert got["chosen"] == CANVAS[scheme], f"under {scheme} the theme-color is {got['chosen']}, expected {CANVAS[scheme]}"
+
+    def theme_colour_follows_the_toggle() -> None:
+        for path, expected in (("light->dark", "dark"), ("light->dark->light", "light"), ("dark->light", "light")):
+            got = seen["toggled"][path]
+            assert got["chosen"] == CANVAS[expected], f"after {path} the theme-color is {got['chosen']}, expected {CANVAS[expected]}"
+            assert got["all"] == [CANVAS[expected]] * 2, f"after {path} the metas are {got['all']}"
+
+    for (number, name), fn in zip(PWA_HEAD_CHECKS.items(), (
+            manifest_icon_list, icons_serve_at_their_size, head_links, theme_colour_follows_the_os,
+            theme_colour_follows_the_toggle)):
+        suite.check(number, name, fn)
+    return suite.results
+
+
+PWA_HEAD_CHECKS = {
+    "190": "The manifest's icon list is literal: /icon-192.png and /icon-512.png as `any`, /icon-maskable-512.png as `maskable`",
+    "191": "Every icon URL serves at its literal size: the three manifest icons, apple-touch-icon.png (180), "
+           "favicon-32.png and favicon-16.png as image/png, favicon.svg as image/svg+xml",
+    "192": "The page links apple-touch-icon.png and the png and svg favicons",
+    "193": "The page's theme-color is the light canvas under a light OS scheme and the dark canvas under a dark one",
+    "194": "The in-app theme toggle moves the theme-color to the canvas of the scheme it switches to, in both directions and "
+           "whatever the OS scheme is",
+}
 
 
 # ---- notification bell ----------------------------------------------------------------
@@ -4957,6 +5097,7 @@ def main() -> int:
                 results += run_notifications(viewport, browser, served, broker)
                 results += run_one_stream(viewport, browser, served, broker)
                 results += run_upgrade(viewport, browser, served, broker)
+                results += run_pwa_head(viewport, browser, served, broker)
                 log(f"stage=scenario viewport={viewport} ms={int((time.monotonic() - t0) * 1000)} "
                     f"decides={len(broker.decides)}")
                 for theme in ("light", "dark"):
