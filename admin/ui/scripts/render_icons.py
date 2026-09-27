@@ -85,7 +85,11 @@ def rounded_svg(master: str) -> str:
 
 def sized(svg: str, size: int) -> str:
     """The same SVG with its root width and height set to `size`."""
-    return re.sub(r"(<svg\b[^>]*?)\swidth=\"\d+\"\s+height=\"\d+\"", rf'\1 width="{size}" height="{size}"', svg, count=1)
+    out, count = re.subn(
+        r"(<svg\b[^>]*?)\swidth=\"\d+\"\s+height=\"\d+\"", rf'\1 width="{size}" height="{size}"', svg, count=1)
+    if count != 1:
+        raise ValueError("the svg root has no width/height pair to resize")
+    return out
 
 
 def strip_alpha(png: bytes) -> bytes:
@@ -128,28 +132,37 @@ def screenshot(browser, svg: str, size: int, transparent: bool) -> bytes:
         page.close()
 
 
-def main() -> int:
-    from playwright.sync_api import sync_playwright
-
-    started = time.monotonic()
+def render(browser) -> tuple[bytes, dict[str, bytes]]:
+    """The master's raw bytes and every output's bytes, keyed by name, rendered with an
+    already-launched `browser`. Split out of `main` so a caller that already has Playwright's
+    Chromium running (tests/admin_ui_playwright.py check 195, the Ledger-regeneration check) can
+    reuse it instead of launching a second one."""
     master_bytes = MASTER.read_bytes()
     master = master_bytes.decode("utf-8")
     log(f"stage=read master={MASTER.relative_to(ROOT)} bytes={len(master_bytes)} sha256={sha256(master_bytes)[:12]}")
     rounded = rounded_svg(master)
     outputs: dict[str, bytes] = {"favicon.svg": rounded.encode("utf-8")}
+    for name, (kind, size, source) in OUTPUTS.items():
+        if source == "svg":
+            continue
+        t0 = time.monotonic()
+        svg = rounded if source == "rounded" else master
+        png = screenshot(browser, svg, size, transparent=source == "rounded")
+        if source == "opaque":
+            png = strip_alpha(png)
+        outputs[name] = png
+        log(f"stage=render name={name} kind={kind} size={size} bytes={len(png)} ms={int((time.monotonic() - t0) * 1000)}")
+    return master_bytes, outputs
+
+
+def main() -> int:
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
-            for name, (kind, size, source) in OUTPUTS.items():
-                if source == "svg":
-                    continue
-                t0 = time.monotonic()
-                svg = rounded if source == "rounded" else master
-                png = screenshot(browser, svg, size, transparent=source == "rounded")
-                if source == "opaque":
-                    png = strip_alpha(png)
-                outputs[name] = png
-                log(f"stage=render name={name} kind={kind} size={size} bytes={len(png)} ms={int((time.monotonic() - t0) * 1000)}")
+            master_bytes, outputs = render(browser)
         finally:
             browser.close()
     for name, body in outputs.items():

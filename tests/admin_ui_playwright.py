@@ -46,6 +46,7 @@ import admin_daemon as admin  # noqa: E402
 import admin_ui_stub_broker as stub  # noqa: E402
 import build_inputs  # noqa: E402
 import png_pixels  # noqa: E402
+import render_icons  # noqa: E402
 from egress_test_sync import join_thread_or_fail, wait_for_tcp_listening  # noqa: E402
 
 VIEWPORTS = {
@@ -3034,6 +3035,14 @@ def pwa_head_scenario(browser, served: Served, broker: stub.StubBroker, viewport
                                     "type: r.headers.get('content-type'), text: (await r.text()).slice(0, 5)}; }")
         seen["links"] = page.evaluate(HEAD_LINKS_JS)
         seen["themes"]["light"] = page.evaluate(THEME_COLOUR_JS)
+        # A runtime OS scheme change (not the in-app toggle): the light page's own OS preference
+        # flips to dark after load. `App.vue`'s watch(mode, ...) is the only thing that can react,
+        # since `syncThemeColor` already overwrote both metas' `media` attributes at mount.
+        page.emulate_media(color_scheme="dark")
+        page.wait_for_function("document.documentElement.classList.contains('dark')")
+        seen["themes"]["os_change_to_dark"] = page.evaluate(THEME_COLOUR_JS)
+        page.emulate_media(color_scheme="light")
+        page.wait_for_function("!document.documentElement.classList.contains('dark')")
         page.locator("button[title=Theme]").click()
         page.wait_for_function("document.documentElement.classList.contains('dark')")
         seen["toggled"]["light->dark"] = page.evaluate(THEME_COLOUR_JS)
@@ -3087,6 +3096,10 @@ def run_pwa_head(viewport: str, browser, served: Served, broker: stub.StubBroker
             got = seen["themes"][scheme]
             assert got["count"] == 2, f"{scheme}: {got['count']} theme-color metas"
             assert got["chosen"] == CANVAS[scheme], f"under {scheme} the theme-color is {got['chosen']}, expected {CANVAS[scheme]}"
+        got = seen["themes"]["os_change_to_dark"]
+        assert got["chosen"] == CANVAS["dark"], (
+            f"after a runtime OS scheme change to dark the theme-color is {got['chosen']}, expected {CANVAS['dark']}")
+        assert got["all"] == [CANVAS["dark"]] * 2, f"after a runtime OS scheme change to dark the metas are {got['all']}"
 
     def theme_colour_follows_the_toggle() -> None:
         for path, expected in (("light->dark", "dark"), ("light->dark->light", "light"), ("dark->light", "light")):
@@ -3106,10 +3119,39 @@ PWA_HEAD_CHECKS = {
     "191": "Every icon URL serves at its literal size: the three manifest icons, apple-touch-icon.png (180), "
            "favicon-32.png and favicon-16.png as image/png, favicon.svg as image/svg+xml",
     "192": "The page links apple-touch-icon.png and the png and svg favicons",
-    "193": "The page's theme-color is the light canvas under a light OS scheme and the dark canvas under a dark one",
+    "193": "The page's theme-color is the light canvas under a light OS scheme and the dark canvas under a dark one, "
+           "including a runtime OS scheme change after the page has already loaded",
     "194": "The in-app theme toggle moves the theme-color to the canvas of the scheme it switches to, in both directions and "
            "whatever the OS scheme is",
 }
+
+LEDGER_REGEN_CHECK = ("195", "Re-rendering the icons from the master into a temp dir, with the suite's own "
+                              "Chromium, reproduces the committed PNGs and icons.json byte-for-byte")
+
+
+def check_icons_are_reproducible(browser) -> Result:
+    """The Ledger's own Gate (tests/test_admin_icons.py) only compares committed icons against
+    icons.json, so a hand-edited PNG with its hash updated to match passes it (PLN D1, Minor 1 of
+    REVIEW - brassbottle 178). This re-renders from the master with the suite's already-launched
+    Chromium and diffs the result against what is actually committed, which a hand-edit cannot
+    fake. Not viewport-specific: run once."""
+    number, name = LEDGER_REGEN_CHECK
+    try:
+        out_dir = Path(tempfile.mkdtemp(prefix="admin-icons-regen-"))
+        master_bytes, outputs = render_icons.render(browser)
+        fresh_ledger = render_icons.ledger(master_bytes, outputs)
+        for out_name, body in outputs.items():
+            (out_dir / out_name).write_bytes(body)
+        (out_dir / "icons.json").write_text(json.dumps(fresh_ledger, indent=2) + "\n", encoding="utf-8")
+        committed_ledger = json.loads(render_icons.LEDGER.read_text(encoding="utf-8"))
+        mismatched = [n for n in render_icons.OUTPUTS if (out_dir / n).read_bytes() != (render_icons.PUBLIC / n).read_bytes()]
+        log(f"stage=icon-regen dir={out_dir} outputs={len(outputs)} bytes={sum(len(b) for b in outputs.values())} "
+            f"mismatched={mismatched}")
+        assert not mismatched, f"a fresh render of {mismatched} does not byte-match public/ (stale or hand-edited)"
+        assert fresh_ledger == committed_ledger, "icons.json does not match a fresh render's ledger"
+        return Result("PASS", "all", number, name)
+    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL line, never a crash
+        return Result("FAIL", "all", number, name, squash(str(exc))[:300])
 
 
 # ---- notification bell ----------------------------------------------------------------
@@ -5118,6 +5160,7 @@ def main() -> int:
                         capture_one_stream(browser, served, broker, out, viewport, theme)
                     except Exception as exc:  # noqa: BLE001 - a capture that cannot be taken is a FAIL line
                         results.append(Result("FAIL", viewport, "0", f"one-stream captures ({theme})", squash(str(exc))[:300]))
+            results.append(check_icons_are_reproducible(browser))
             browser.close()
     finally:
         served.stop()
