@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { canvasColours, oklchToHex, pwaOptions } from './pwa.ts'
+import { canvasColours, oklchToHex, pwaOptions, themeColorTags } from './pwa.ts'
 
 describe('oklchToHex', () => {
   it('maps the ends of the lightness scale', () => {
@@ -25,6 +25,28 @@ describe('the manifest colours', () => {
     expect(manifest.theme_color).toBe('#fafafb')
     expect(manifest.background_color).toBe('#fafafb')
     expect(manifest.display).toBe('standalone')
+  })
+})
+
+describe('the manifest icons', () => {
+  const manifest = pwaOptions(import.meta.dirname).manifest as { icons: unknown[] }
+  it('are the two rounded tiles, "any", and the full-bleed maskable one', () => {
+    expect(manifest.icons).toEqual([
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ])
+  })
+})
+
+describe('the theme-color metas', () => {
+  it('are one per scheme, valued from the canvas tokens, in the head', () => {
+    expect(themeColorTags(import.meta.dirname)).toEqual([
+      { tag: 'meta', injectTo: 'head',
+        attrs: { name: 'theme-color', media: '(prefers-color-scheme: light)', content: '#fafafb', 'data-scheme': 'light' } },
+      { tag: 'meta', injectTo: 'head',
+        attrs: { name: 'theme-color', media: '(prefers-color-scheme: dark)', content: '#0f0f12', 'data-scheme': 'dark' } },
+    ])
   })
 })
 

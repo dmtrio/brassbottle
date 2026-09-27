@@ -1479,6 +1479,10 @@ class AdminDaemonTests(unittest.TestCase):
         "manifest.webmanifest": b'{"name":"Djinn admin","display":"standalone"}',
         "icon-192.png": b"\x89PNG\r\n\x1a\n192",
         "icon-512.png": b"\x89PNG\r\n\x1a\n512",
+        "icon-maskable-512.png": b"\x89PNG\r\n\x1a\nmaskable",
+        "apple-touch-icon.png": b"\x89PNG\r\n\x1a\n180",
+        "favicon-32.png": b"\x89PNG\r\n\x1a\n32",
+        "favicon-16.png": b"\x89PNG\r\n\x1a\n16",
     }
 
     def _build_spa_dist_with_worker(self, parent: Path) -> Path:
@@ -1489,7 +1493,8 @@ class AdminDaemonTests(unittest.TestCase):
 
     def test_serves_the_built_service_worker_and_manifest(self):
         """The worker the build generates (sw.js, its workbox chunk,
-        the importScripts file), the manifest and the icons come from dist, byte
+        the importScripts file), the manifest and the icons (the manifest's three, the apple-touch icon
+        and the png favicons) come from dist, byte
         for byte, with the right content type; sw.js is `no-cache` so a new
         worker is found on the next visit, and no session is needed for any of
         them."""
@@ -1500,6 +1505,10 @@ class AdminDaemonTests(unittest.TestCase):
             "manifest.webmanifest": "application/manifest+json",
             "icon-192.png": "image/png",
             "icon-512.png": "image/png",
+            "icon-maskable-512.png": "image/png",
+            "apple-touch-icon.png": "image/png",
+            "favicon-32.png": "image/png",
+            "favicon-16.png": "image/png",
         }
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

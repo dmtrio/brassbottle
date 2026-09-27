@@ -8,6 +8,7 @@
 // page's `djinn-admin-shell-v3` included.
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import type { Plugin } from 'vite'
 import type { VitePWAOptions } from 'vite-plugin-pwa'
 
 export const CACHE_ID = 'djinn-admin'   // the precache is `djinn-admin-precache-v2-<scope>`; sw-cleanup.js keeps that prefix
@@ -46,6 +47,22 @@ export function canvasColours(root: string): { light: string; dark: string } {
   return { light: pick(':root'), dark: pick('\\.dark') }
 }
 
+/** The two `theme-color` metas, one per colour scheme, valued from the canvas tokens (see src/lib/theme-color.ts). */
+export function themeColorTags(root: string) {
+  const { light, dark } = canvasColours(root)
+  const meta = (scheme: 'light' | 'dark', content: string) => ({
+    tag: 'meta',
+    attrs: { name: 'theme-color', media: `(prefers-color-scheme: ${scheme})`, content, 'data-scheme': scheme },
+    injectTo: 'head' as const,
+  })
+  return [meta('light', light), meta('dark', dark)]
+}
+
+/** Writes the per-scheme `theme-color` metas into index.html at build time, so no colour is written by hand. */
+export function themeColorPlugin(root: string): Plugin {
+  return { name: 'djinn-theme-color', transformIndexHtml: () => themeColorTags(root) }
+}
+
 export function pwaOptions(root: string): Partial<VitePWAOptions> {
   const { light } = canvasColours(root)
   return {
@@ -62,8 +79,9 @@ export function pwaOptions(root: string): Partial<VitePWAOptions> {
       theme_color: light,
       background_color: light,
       icons: [
-        { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-        { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+        { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+        { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+        { src: '/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
       ],
     },
     integration: {

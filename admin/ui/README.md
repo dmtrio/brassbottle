@@ -31,6 +31,17 @@ Check 180 of `tests/admin_ui_playwright.py` installs a copy of that earlier page
 worker (`tests/fixtures/admin_legacy_sw.js`) and pins the upgrade.
 `tests/test_admin_sw_build.py` checks the generated worker.
 
+Icons: every icon is derived from one SVG master, `icons/app-icon.svg` (a brass bottle
+with "DJINN" down the body). `python3 scripts/render_icons.py` (needs Playwright's Chromium)
+renders it into `public/` (`icon-192.png`, `icon-512.png` on a rounded tile, the full-bleed
+`icon-maskable-512.png`, the opaque `apple-touch-icon.png`, `favicon-32.png`, `favicon-16.png`,
+and `favicon.svg`) and writes `icons/icons.json`, the master's sha256 and each output's size
+and sha256. The committed files are a Ledger: `tests/test_admin_icons.py` fails when the master
+changes without a re-run or an icon no longer matches, and never re-renders. The page carries a
+`theme-color` meta per colour scheme, written into `index.html` at build time from the canvas
+tokens (`themeColorPlugin` in `pwa.ts`); `src/lib/theme-color.ts` moves them with the in-app theme
+toggle.
+
 The queue arrives over `GET /api/egress/stream` (server-sent events) while it is
 up, and the tab does not poll then. While the stream opens the tab reads `GET /api/egress/queue` once at once (Connecting), so the list is
 never empty, and keeps reading every 5 s until the first frame. If the stream is

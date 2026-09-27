@@ -6,6 +6,7 @@ import { Ban, Box, Database, Globe, Moon, ShieldCheck, Sun } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import LinkIndicator from '@/components/LinkIndicator.vue'
 import NotificationBell from '@/components/NotificationBell.vue'
+import { syncThemeColor } from '@/lib/theme-color'
 import { useNotifications } from '@/composables/useNotifications'
 import { useQueue } from '@/composables/useQueue'
 
@@ -25,6 +26,9 @@ const activeLabel = computed(() => {
   const match = nav.find((n) => n.to === route.path)
   return match?.label ?? 'Djinn admin'
 })
+
+// The installed window's title bar follows the scheme the app shows, the toggle's as well as the OS's.
+watch(mode, (scheme) => syncThemeColor(window.document, scheme === 'dark' ? 'dark' : 'light'), { immediate: true })
 
 // "(N) Egress · Djinn admin" on the egress route; the count rides on every
 // route's title so a background tab still shows it.
