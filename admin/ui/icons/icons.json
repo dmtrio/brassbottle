@@ -1,0 +1,50 @@
+{
+  "master": {
+    "path": "icons/app-icon.svg",
+    "sha256": "a75780a268ac44a775f466f81a9d65a96667adc9bbeac886522fa9599fc889d8"
+  },
+  "outputs": [
+    {
+      "name": "icon-192.png",
+      "kind": "any",
+      "size": 192,
+      "sha256": "fc35af1e6b1395374187abc2990dadf7fd9da56edfade22115e2b6b0572697b7"
+    },
+    {
+      "name": "icon-512.png",
+      "kind": "any",
+      "size": 512,
+      "sha256": "b04a377cd77a39e3c647505a3f97835d7609fed5b2d517a02da1bfbece8db59e"
+    },
+    {
+      "name": "icon-maskable-512.png",
+      "kind": "maskable",
+      "size": 512,
+      "sha256": "3ba754beec7a9d905ab50131858195d0ab264fb00c1aed1c7ea96541a43e5882"
+    },
+    {
+      "name": "apple-touch-icon.png",
+      "kind": "apple-touch",
+      "size": 180,
+      "sha256": "02dbba7f5edd6fbd6599b60487d93260f6e563c3eb1a65194412565f59bf024a"
+    },
+    {
+      "name": "favicon-32.png",
+      "kind": "favicon",
+      "size": 32,
+      "sha256": "cc72cea08da9f1cdb80e4329417ad901d34779b0a5023fedebd744bf84144ced"
+    },
+    {
+      "name": "favicon-16.png",
+      "kind": "favicon",
+      "size": 16,
+      "sha256": "37c65efe9dc406fc621b0cb071122eb43765f9d9997f1e8bc2eadc5bc13aded6"
+    },
+    {
+      "name": "favicon.svg",
+      "kind": "favicon",
+      "size": 1024,
+      "sha256": "826acf080934e4e909889e0b11b233bf4cbb6562c566a86c7256f5ac043a5793"
+    }
+  ]
+}
