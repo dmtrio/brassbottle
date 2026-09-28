@@ -366,6 +366,33 @@ class AdminDaemonTests(unittest.TestCase):
                 server.server_close()
                 join_thread_or_fail(thread, label="admin")
 
+    def test_signin_page_rejects_a_theme_color_that_is_not_a_bare_hex(self):
+        """A theme-colors.json value that is not exactly `#rrggbb` (a corrupted build, or one crafted
+        to break out of the `content="..."` attribute) takes the existing malformed-file WARNING path
+        with no theme-color meta at all, rather than being interpolated into the page raw."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            dist = make_stub_dist(home)
+            payload = 'x"><script>alert(1)</script><meta x="'
+            (dist / admin.THEME_COLORS_FILENAME).write_text(
+                json.dumps({"light": payload, "dark": "#0f0f12"}), encoding="utf-8"
+            )
+            with self.assertLogs(admin.LOG, level="WARNING") as captured:
+                server, thread = self._start_admin(home, env={"DJINN_ADMIN_UI_DIST": str(dist)})
+            host, port = server.server_address
+            try:
+                self.assertTrue(any("admin theme colors malformed" in m for m in captured.output))
+                _status, _payload, _headers, raw = self._request(host, port, "GET", "/")
+                text = raw.decode("utf-8")
+                self.assertIn('<form id="signin-form"', text)
+                self.assertNotIn("theme-color", text)
+                self.assertNotIn("<script>alert(1)</script>", text)
+                self.assertNotIn(payload, text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                join_thread_or_fail(thread, label="admin")
+
     def test_get_shell_with_valid_cookie_serves_app_and_sets_no_cookie(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -616,7 +643,7 @@ class AdminDaemonTests(unittest.TestCase):
             try:
                 with self.assertLogs(admin.LOG, level="INFO") as captured:
                     self._request(host, port, "GET", "/session?key=key-value-42")
-                    self._request(host, port, "GET", "/session?key=wrong")
+                    self._request(host, port, "GET", "/session?key=distinctive-wrong-key-998877")
                     self._request(host, port, "GET", "/")
                     self._request(
                         host,
@@ -627,6 +654,7 @@ class AdminDaemonTests(unittest.TestCase):
                     )
                 joined = "\n".join(captured.output)
                 self.assertNotIn("key-value-42", joined)
+                self.assertNotIn("distinctive-wrong-key-998877", joined)
                 self.assertNotIn("?key=", joined)
                 for path in ("/", "/session?key=key-value-42"):
                     conn = HTTPConnection(host, port, timeout=5)
