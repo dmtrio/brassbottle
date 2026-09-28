@@ -370,10 +370,15 @@ class AdminDaemonTests(unittest.TestCase):
         """A theme-colors.json value that is not exactly `#rrggbb` (a corrupted build, or one crafted
         to break out of the `content="..."` attribute) takes the existing malformed-file WARNING path
         with no theme-color meta at all, rather than being interpolated into the page raw."""
+        # The second payload starts with a valid hex, so only a whole-value match rejects it.
+        for payload in ('x"><script>alert(1)</script><meta x="', '#fafafb"><script>alert(1)</script><meta x="'):
+            with self.subTest(payload=payload):
+                self._assert_theme_color_rejected(payload)
+
+    def _assert_theme_color_rejected(self, payload: str) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             dist = make_stub_dist(home)
-            payload = 'x"><script>alert(1)</script><meta x="'
             (dist / admin.THEME_COLORS_FILENAME).write_text(
                 json.dumps({"light": payload, "dark": "#0f0f12"}), encoding="utf-8"
             )
