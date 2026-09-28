@@ -3136,6 +3136,9 @@ SIGNIN_CHECKS = {
     "198": "The same, pasting only the URL's key",
     "199": "A wrong key shows the daemon's 403 refusal in the same window and sets no cookie",
     "200": "Empty input shows an inline error and sends no request to /session",
+    "201": "Pasting a session URL on another origin still signs in on this origin: the page ends "
+           "up at /egress of served.base with the cookie set, and every request the scenario made "
+           "stayed on served.base",
 }
 
 
@@ -3150,10 +3153,17 @@ def _signin_page_state(page) -> dict:
 
 
 def _signin_bare_context(browser, viewport: str):
-    """A context with no session cookie, tracking every request path and any extra page/popup."""
+    """A context with no session cookie, tracking every request's origin and path (so a check can
+    tell "we asked our own /session" from "we followed a pasted URL to another origin"), and any
+    extra page/popup."""
     context = browser.new_context(viewport=VIEWPORTS[viewport], locale="en-US", timezone_id="UTC")
-    requests: list[str] = []
-    context.on("request", lambda r: requests.append(urlsplit(r.url).path))
+    requests: list[tuple[str, str]] = []
+
+    def _record(request) -> None:
+        parts = urlsplit(request.url)
+        requests.append((f"{parts.scheme}://{parts.netloc}", parts.path))
+
+    context.on("request", _record)
     return context, requests
 
 
@@ -3182,7 +3192,8 @@ def _submit_signin(browser, served: Served, viewport: str, value: str) -> dict:
             "text": squash(page.locator("body").inner_text()),
             "cookies": [c["value"] for c in context.cookies() if c["name"] == admin.SESSION_COOKIE_NAME],
             "pages_grew": len(context.pages) > pages_before,
-            "session_requests": [p for p in requests if p == "/session"],
+            "session_requests": [path for _origin, path in requests if path == "/session"],
+            "origins": sorted({origin for origin, _path in requests}),
             "error": error,
         }
     finally:
@@ -3208,10 +3219,15 @@ def signin_scenario(browser, served: Served, broker: stub.StubBroker, viewport: 
     seen["bare_key"] = _submit_signin(browser, served, viewport, admin_key)
     seen["wrong_key"] = _submit_signin(browser, served, viewport, "not-the-key")
     seen["empty"] = _submit_signin(browser, served, viewport, "   ")
+    # A URL on another origin, carrying our own real key: the page must still sign in on
+    # served.base (build its own relative /session URL), never navigate to elsewhere.invalid.
+    seen["off_origin_url"] = _submit_signin(
+        browser, served, viewport, f"http://elsewhere.invalid:1/session?key={admin_key}")
     log(f"stage=signin viewport={viewport} "
         f"no_session={seen['no_session']['path']} "
         f"full_url={seen['full_url']['path']} bare_key={seen['bare_key']['path']} "
-        f"wrong_key={seen['wrong_key']['path']} empty={seen['empty']['path']}")
+        f"wrong_key={seen['wrong_key']['path']} empty={seen['empty']['path']} "
+        f"off_origin_url={seen['off_origin_url']['path']}/{seen['off_origin_url']['origins']}")
     return seen
 
 
@@ -3257,9 +3273,17 @@ def run_signin(viewport: str, browser, served: Served, broker: stub.StubBroker) 
         assert not result["session_requests"], f"a request reached /session on empty input: {result}"
         assert not result["cookies"], result
 
+    def off_origin_url_still_signs_in_here() -> None:
+        result = seen["off_origin_url"]
+        assert result["path"] == "/egress", f"ended on {result['path']}, not /egress: {result}"
+        assert result["cookies"], "no session cookie was set"
+        assert not result["pages_grew"], "a new window or popup opened"
+        assert result["origins"] == [served.base], (
+            f"a request left served.base ({served.base}): saw origins {result['origins']}")
+
     for (number, name), fn in zip(SIGNIN_CHECKS.items(), (
             shows_the_signin_page, full_url_signs_in, bare_key_signs_in, wrong_key_is_refused,
-            empty_input_sends_nothing)):
+            empty_input_sends_nothing, off_origin_url_still_signs_in_here)):
         suite.check(number, name, fn)
     return suite.results
 

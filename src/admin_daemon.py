@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import queue
+import re
 import secrets
 import select
 import socket
@@ -80,6 +81,8 @@ ADMIN_KEY_ENV = "EGRESS_ADMIN_KEY"
 # theme-color meta rather than a hand-written fallback hex.
 THEME_COLORS_FILENAME = "theme-colors.json"
 
+_THEME_COLOR_HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
 _THEME_COLOR_METAS_MARKER = "<!--theme-color-metas-->"
 
 SIGNIN_HTML = """<!doctype html>
@@ -100,13 +103,14 @@ SIGNIN_HTML = """<!doctype html>
     button { font: inherit; padding: 0.5rem 1rem; align-self: flex-start; }
     #signin-error { min-height: 1.2em; color: #b3261e; }
     #signin-error:empty { display: none; }
+    @media (prefers-color-scheme: dark) { #signin-error { color: #f2b8b5; } }
   </style>
 </head>
 <body>
   <main>
     <h1>Egress admin</h1>
-    <p>This page must be opened from the session URL the egress service
-    prints. On the djinn host run:</p>
+    <p>Sign in with the session URL the egress service prints. On the
+    djinn host run:</p>
     <p><code>./djinn egress url</code></p>
     <p>and paste the URL it prints, or just its key, below.</p>
     <form id="signin-form" autocomplete="off">
@@ -170,7 +174,10 @@ def _load_theme_colors(dist: Path) -> dict[str, str] | None:
     except json.JSONDecodeError as exc:
         LOG.warning("admin theme colors unreadable path=%s reason=%s", path, exc)
         return None
-    if not isinstance(data, dict) or not all(isinstance(data.get(scheme), str) for scheme in ("light", "dark")):
+    if not isinstance(data, dict) or not all(
+        isinstance(data.get(scheme), str) and _THEME_COLOR_HEX_RE.fullmatch(data[scheme])
+        for scheme in ("light", "dark")
+    ):
         LOG.warning("admin theme colors malformed path=%s", path)
         return None
     return {"light": data["light"], "dark": data["dark"]}
