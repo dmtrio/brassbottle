@@ -1,0 +1,61 @@
+# playwright — headless-browser MCP that runs INSIDE the bottle, baked into the
+# image. See ./README.md.
+#
+# Every page load leaves from the bottle's own network namespace, so it is
+# subject to the bottle's egress rules (and files to the egress queue as this
+# bottle when the destination is not approved). That is the point of running it
+# here rather than on the host gateway. This plugin therefore declares NO
+# egress: — it must not widen the allowlist on its own.
+
+install: |
+  # Pinned. To update: bump this, rebuild the image. It pins its own
+  # playwright-core, and so the Chromium revision installed below.
+  PW_MCP_VERSION=0.0.83
+  npm install -g "@playwright/mcp@${PW_MCP_VERSION}"
+  # The browser CLI is the copy @playwright/mcp itself resolves, so the
+  # Chromium revision we download is the one the server will ask for. Resolved
+  # through node rather than a hoisted path: global installs nest it.
+  cd "$(npm root -g)/@playwright/mcp"
+  pw_core="$(dirname "$(node -p "require.resolve('playwright-core/package.json')")")"
+  cd "$HOME"
+  # Shared libraries Chromium needs (apt, so root), then the browser itself
+  # (into ~/.cache/ms-playwright, as the coder user that will run it).
+  sudo env "PATH=$PATH" node "$pw_core/cli.js" install-deps chromium
+  # --no-shell: `--browser chromium` launches full Chromium even headless, so
+  # the separate headless shell would be ~275 MB nothing runs.
+  node "$pw_core/cli.js" install --no-shell chromium
+  sudo rm -rf /var/lib/apt/lists/*
+  # Fail the build loudly if either half is missing.
+  playwright-mcp --version
+  python3 -m py_compile /opt/plugins/playwright/mcp_filter.py
+  test -d "$HOME/.cache/ms-playwright"
+
+# LOCAL server: command + args ONLY (up.sh hard-fails on other fields, so every
+# agent wires identically). Runs through mcp_filter.py, which enforces the tool
+# allowlist @playwright/mcp cannot (see README): the same 22 tools the host
+# gateway exposed, no browser_run_code_unsafe.
+#
+# The server's own flags: --headless (no display in a bottle); --no-sandbox
+# (Chromium's sandbox needs user namespaces the container does not grant, and
+# the bottle is the sandbox); --browser chromium (the one we baked; the default
+# is the Chrome channel, which is not installed); --isolated (profile in
+# memory, nothing written to disk); --output-dir under /tmp so a screenshot
+# never lands in a repo checkout; --idle-timeout 5 min (the browser is closed
+# when unused and relaunched by the next tool call, so an idle bottle does not
+# hold Chromium's memory).
+mcp:
+  playwright:
+    command: python3
+    args:
+      - /opt/plugins/playwright/mcp_filter.py
+      - --
+      - playwright-mcp
+      - --headless
+      - --no-sandbox
+      - --browser
+      - chromium
+      - --isolated
+      - --output-dir
+      - /tmp/playwright-mcp
+      - --idle-timeout
+      - "300000"

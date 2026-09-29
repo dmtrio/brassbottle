@@ -157,6 +157,16 @@ locations:
     path: plugins/openrouter/plugin.yml
     component: plugin.openrouter
 
+  # The package pin, and the install line that consumes it.
+  plugin.playwright:
+    path: plugins/playwright/plugin.yml
+    component: plugin.playwright
+    find: "PW_MCP_VERSION=0.0.83"
+  plugin.playwright.install:
+    path: plugins/playwright/plugin.yml
+    component: plugin.playwright
+    find: 'npm install -g "@playwright/mcp@'
+
   plugin.proxyman:
     path: plugins/proxyman/plugin.yml
     component: plugin.proxyman

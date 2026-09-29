@@ -237,6 +237,19 @@ components:
     policy: external
     # env-only: delivers an API key slot; selects and installs no version.
 
+  plugin.playwright:
+    name: Playwright MCP
+    kind: plugin
+    owner: plugins/playwright/plugin.yml
+    enabled_when: "manifest plugins: lists playwright"
+    policy: exact
+    constraint: "0.0.83"
+    resolver: npm
+    platform: "linux/amd64+arm64"
+    source: {type: npm, location: "registry.npmjs.org/@playwright/mcp"}
+    # Chromium is not pinned separately: it is the revision that
+    # @playwright/mcp's own playwright-core asks for.
+
   plugin.proxyman:
     name: Proxyman bridge
     kind: plugin

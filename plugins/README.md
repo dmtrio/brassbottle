@@ -41,6 +41,7 @@ opinion.
 | [`serena`](serena/) | local (stdio, baked) | — | [README](serena/README.md) |
 | [`archex`](archex/) | local (stdio, baked) | — | [README](archex/README.md) |
 | [`codebase-memory`](codebase-memory/) | local (stdio, baked) | — | [README](codebase-memory/README.md) |
+| [`playwright`](playwright/) | local (stdio, baked, headless Chromium) | — | [README](playwright/README.md) |
 | [`gateway`](gateway/) | remote HTTP | `./djinn service gateway` | [README](gateway/README.md) |
 | [`proxyman`](proxyman/) | local (stdio bridge → host :8813, baked) | `./djinn service proxyman` | [README](proxyman/README.md) |
 | [`browser`](browser/) | local (stdio bridge → host :8814, baked) | `./djinn service browser <container>` | [README](browser/README.md) |
