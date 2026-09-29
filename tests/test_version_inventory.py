@@ -819,7 +819,7 @@ class RealRepoIntegrationTests(unittest.TestCase):
 
     def test_report_lists_all_four_classifications(self):
         report = audit.format_report(self.catalog, self.locations, [])
-        for label in ("pinned: 4", "floating: 7", "external: 12",
+        for label in ("pinned: 5", "floating: 7", "external: 12",
                       "deferred: 12"):
             self.assertIn(label, report)
         self.assertIn("opaque live vendor installer", report)
@@ -875,7 +875,7 @@ class RealRepoIntegrationTests(unittest.TestCase):
         # The acceptance baseline: every shipped agent and plugin
         # descriptor directory is owned by a catalog location.
         owned, _escapes = audit._owned_dirs(REPO_ROOT)
-        self.assertEqual(len(owned), 26)  # 7 agent dirs + 19 plugins
+        self.assertEqual(len(owned), 27)  # 7 agent dirs + 20 plugins
         for directory, (kind, name, _d) in owned.items():
             rel = str(directory.relative_to(REPO_ROOT))
             hits = [record for record in self.locations["locations"].values()
