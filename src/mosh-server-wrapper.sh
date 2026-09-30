@@ -1,7 +1,7 @@
 #!/bin/bash
-# mosh-server wrapper — jump-only (the jump carries mosh for the whole
-# fleet: mosh coder@<jump ip>, then ssh djinn-<bottle>; bottles no longer
-# run mosh-server). Installed as /usr/local/bin/mosh-server, which precedes
+# mosh-server wrapper — jump-only (the jump terminates mosh for the whole
+# fleet: mosh coder@<jump ip>, then ssh djinn-<bottle>; bottles carry a stock
+# mosh-server but not this wrapper). Installed as /usr/local/bin/mosh-server, which precedes
 # /usr/bin on PATH, so the `mosh-server new ...` command that the mosh
 # client launches over SSH resolves here. Pins the server to the UDP range
 # the jump's firewall accepts and its compose publishes; a client cannot
