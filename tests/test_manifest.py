@@ -28,14 +28,14 @@ SERENA = {"install": "x", "mcp": {"serena": {"command": "bash", "args": ["-lc", 
           "egress": ["blob.core.windows.net"]}
 OTHER = {"install": "x", "mcp": {"other-tool": {"command": "python3"}}, "egress": []}
 # Remote plugins: no install:, url: config + host_port + a required hybrid slot.
-GATEWAY = {"host_port": 8811,
+GATEWAY = {"host_port": 8811, "egress_relay": "open",
            "secrets": {"MCP_GATEWAY_TOKEN": {
                        "hint": "gateway (run ./service.sh gateway once)"}},
            "mcp": {"coding": {"url": "http://host.docker.internal:8811/mcp",
                               "headers": {"Authorization": "Bearer ${MCP_GATEWAY_TOKEN}"},
                               "requires": ["MCP_GATEWAY_TOKEN"]}}}
 MCP_REMOTE_INSTALL = "npm install -g 'mcp-remote@^0.1.38'"
-PROXYMAN = {"host_port": 8813,
+PROXYMAN = {"host_port": 8813, "egress_relay": "open",
             "install": MCP_REMOTE_INSTALL,
             "secrets": {"PROXYMAN_BRIDGE_KEY": {
                         "hint": "proxyman (run ./service.sh proxyman once)"}},
@@ -43,7 +43,7 @@ PROXYMAN = {"host_port": 8813,
                                  "args": ["http://host.docker.internal:${HOST_PORT}/mcp",
                                           "--allow-http", "--header", "X-API-Key: ${PROXYMAN_BRIDGE_KEY}"],
                                  "requires": ["PROXYMAN_BRIDGE_KEY"]}}}
-BROWSER = {"host_port": 8814,
+BROWSER = {"host_port": 8814, "egress_relay": "policy",
            "install": MCP_REMOTE_INSTALL,
            "secrets": {"RESEARCH_BROWSER_KEY": {
                        "hint": "browser (run ./service.sh browser once)"}},
@@ -2165,7 +2165,7 @@ class TestReviewFixes(unittest.TestCase):
         self.assertFalse(hasattr(wire_plugins, "RESERVED_SERVER_NAMES"))
         for name in ("coding", "proxyman", "browser", "obsidian-annotated"):
             with self.subTest(name):
-                files = {"p": {"host_port": 9999,
+                files = {"p": {"host_port": 9999, "egress_relay": "policy",
                                "mcp": {name: {"url": "http://host.docker.internal:9999/mcp"}}}}
                 d = derive({"plugins": ["p"]}, plugin_files=files)
                 self.assertEqual(json.loads(d["PLUGIN_MCP_ENTRIES"].strip()),
@@ -2196,7 +2196,7 @@ class TestHybridSchemaRules(unittest.TestCase):
         self.assertIn("needs an install: block", str(cm.exception))
         # remote server needs no install:
         self._d({"plugins": ["p"]},
-                files={"p": {"host_port": 9000,
+                files={"p": {"host_port": 9000, "egress_relay": "policy",
                              "mcp": {"s": {"url": "http://host.docker.internal:9000/mcp"}}}})
         # egress-only plugin (no mcp) needs no install: either
         self._d({"plugins": ["p"]}, files={"p": {"egress": ["a.com"]}})
@@ -2223,7 +2223,7 @@ class TestHybridSchemaRules(unittest.TestCase):
         # a LOCAL bridge that dials the host may declare host_port (rhinomcp)
         # — but only when a ${HOST_PORT} ref shows the bridge takes the port
         d = self._d({"plugins": ["p"]},
-                    files={"p": {"install": "x", "host_port": 1999,
+                    files={"p": {"install": "x", "host_port": 1999, "egress_relay": "open",
                                  "mcp": {"s": {"command": "bash",
                                                "args": ["-c", "P=${HOST_PORT} exec b"]}}}})
         self.assertEqual(d["HOST_MCP_PORTS"], "1999")
@@ -2232,22 +2232,22 @@ class TestHybridSchemaRules(unittest.TestCase):
         # override would move the grant but not the dial target)
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"plugins": ["p"]},
-                    files={"p": {"install": "x", "host_port": 1999,
+                    files={"p": {"install": "x", "host_port": 1999, "egress_relay": "open",
                                  "mcp": {"s": {"command": "x"}}}})
         self.assertIn("needs a ${HOST_PORT} reference", str(cm.exception))
         # ...and with no mcp server at all there is nothing to use the grant
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"plugins": ["p"]},
-                    files={"p": {"host_port": 8811, "egress": ["a.com"]}})
+                    files={"p": {"host_port": 8811, "egress_relay": "policy", "egress": ["a.com"]}})
         self.assertIn("host_port needs an mcp server", str(cm.exception))
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"plugins": ["p"]},
-                    files={"p": {"host_port": "8811", "mcp": {"s": {"url": "http://h/mcp"}}}})
+                    files={"p": {"host_port": "8811", "egress_relay": "policy", "mcp": {"s": {"url": "http://h/mcp"}}}})
         self.assertIn("host_port must be an integer", str(cm.exception))
         # out-of-range (typo like 88111) is a named error, not a bogus grant
         with self.assertRaises(m.ManifestError) as cm:
             self._d({"plugins": ["p"]},
-                    files={"p": {"host_port": 88111, "mcp": {"s": {"url": "http://h/mcp"}}}})
+                    files={"p": {"host_port": 88111, "egress_relay": "policy", "mcp": {"s": {"url": "http://h/mcp"}}}})
         self.assertIn("out of range (1-65535)", str(cm.exception))
 
     def test_duplicate_secret_slot_across_plugins(self):
@@ -2410,6 +2410,72 @@ class TestUniversalHybridSecrets(unittest.TestCase):
         self.assertIn("exactly one of secret or disabled", str(cm.exception))
 
 
+class TestEgressRelay(unittest.TestCase):
+    """Every host_port plugin declares egress_relay: policy | open."""
+
+    RELAY = {"host_port": 9000,
+             "mcp": {"s": {"url": "http://host.docker.internal:9000/mcp"}}}
+
+    def _d(self, plugin, name="p"):
+        return derive({"plugins": [name]}, plugin_files={name: plugin})
+
+    def test_host_port_without_egress_relay_fails_derivation(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d(dict(self.RELAY))
+        self.assertEqual(
+            str(cm.exception),
+            "plugin 'p': a plugin with host_port must declare egress_relay: "
+            "policy | open (missing)")
+
+    def test_invalid_egress_relay_value_fails_derivation(self):
+        for bad in ("closed", "OPEN", True, ""):
+            with self.subTest(bad):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self._d(dict(self.RELAY, egress_relay=bad))
+                self.assertIn(f"egress_relay: policy | open (got {bad!r})", str(cm.exception))
+
+    def test_egress_relay_without_host_port_is_refused(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self._d({"egress_relay": "open"})
+        self.assertIn("egress_relay is only valid on a plugin with host_port", str(cm.exception))
+
+    def test_policy_relay_is_silent_and_not_listed(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = self._d(dict(self.RELAY, egress_relay="policy"))
+        self.assertEqual(d["OPEN_RELAYS"], "")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_open_relay_warns_by_name_and_is_listed(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d = derive({"plugins": ["proxyman", "browser", "gateway"]})
+        self.assertEqual(d["OPEN_RELAYS"], "gateway proxyman")
+        self.assertEqual(
+            [ln for ln in err.getvalue().splitlines() if "open egress relay" in ln],
+            [m.open_relay_warning("gateway"), m.open_relay_warning("proxyman")])
+        self.assertIn("plugin 'proxyman' is an open egress relay", err.getvalue())
+
+    def test_open_relays_render_as_a_shell_assignment(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            d = derive({"plugins": ["proxyman"]})
+        self.assertIn("OPEN_RELAYS=proxyman\n", d.render())
+
+    def test_shipped_plugins_classification(self):
+        # The real plugin.yml files, through the real yq→derive path.
+        if not shutil.which("yq"):
+            self.skipTest("SKIP: yq not available")
+        want = {"browser": "policy", "proxyman": "open", "rhinomcp": "open",
+                "rhinomcp-official": "open", "cordyceps": "open", "gateway": "open"}
+        root = Path(__file__).resolve().parent.parent / "plugins"
+        got = {}
+        for f in sorted(root.glob("*/plugin.yml")):
+            doc = json.loads(subprocess.check_output(["yq", "-o=json", "-I=0", str(f)]))
+            if isinstance(doc, dict) and doc.get("host_port"):
+                got[f.parent.name] = doc.get("egress_relay")
+        self.assertEqual(got, want)
+
+
 class TestPluginPorts(unittest.TestCase):
     """plugin_ports: per-container override of a plugin's host_port. The
     resolved value drives BOTH the firewall grant and the ${HOST_PORT} url."""
@@ -2452,7 +2518,7 @@ class TestPluginPorts(unittest.TestCase):
         self.assertEqual(BROWSER["mcp"]["browser"]["args"][0],
                          "http://host.docker.internal:${HOST_PORT}/mcp")
 
-    LOCAL_BRIDGE = {"p": {"install": "x", "host_port": 1999,
+    LOCAL_BRIDGE = {"p": {"install": "x", "host_port": 1999, "egress_relay": "open",
                           "mcp": {"s": {"command": "bash",
                                         "args": ["-c", "PORT=${HOST_PORT} exec bridge"]}}}}
 

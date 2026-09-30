@@ -2548,14 +2548,35 @@ SEED_CACHES_JS = """async ([legacy, other, poison]) => {
   return await caches.keys();
 }"""
 
-# Waits for the worker to be active, controlling this page, and to have pruned every foreign cache.
+# One look at whether the worker is active, controlling this page, and has pruned every foreign cache.
+# Returns {ok, detail}: `detail` says what is still missing, for the timeout message.
 SETTLED_JS = """async ([legacy, other]) => {
   const reg = await navigator.serviceWorker.ready;
   // `ready` resolves while the worker may still be `activating`; wait for `activated`.
-  if (!reg.active || reg.active.state !== 'activated' || !navigator.serviceWorker.controller) return false;
+  const state = reg.active ? reg.active.state : 'none';
+  const controlled = navigator.serviceWorker.controller !== null;
   const keys = await caches.keys();
-  return !keys.includes(legacy) && !keys.includes(other);
+  const stale = keys.filter((name) => name === legacy || name === other);
+  return {ok: state === 'activated' && controlled && stale.length === 0,
+          detail: `worker state ${state}, controlled ${controlled}, foreign caches left ${JSON.stringify(stale)}`};
 }"""
+
+
+def wait_until_settled(page, js: str, arg, timeout_ms: int, what: str, interval_ms: int = 50) -> dict:
+    """Poll `js` (an async function returning {ok, detail}) until ok, or fail after `timeout_ms`.
+
+    Not page.wait_for_function: Playwright does not await an async predicate's promise, so a
+    promise (always truthy) ends that wait at once, whatever the page state.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        seen = page.evaluate(js, arg)
+        if seen["ok"]:
+            return seen
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{what}: not settled after {timeout_ms} ms ({seen['detail']})")
+        page.wait_for_timeout(interval_ms)
+
 
 # Plants the same pages in the worker's OWN cache: were `/` or `/api/*` ever answered from a
 # cache the worker owns, this is what it would answer with.
@@ -2675,7 +2696,8 @@ def service_worker_scenario(browser, served: Served, broker: stub.StubBroker, vi
 
             page.goto(served.base + "/")
             expect(page.locator("[data-testid=request]")).to_have_count(len(stub.OPEN_ROWS))
-            page.wait_for_function(SETTLED_JS, arg=[LEGACY_SHELL_CACHE, OTHER_FOREIGN_CACHE], timeout=TIMEOUT_MS * 2)
+            wait_until_settled(page, SETTLED_JS, [LEGACY_SHELL_CACHE, OTHER_FOREIGN_CACHE], TIMEOUT_MS * 2,
+                               "the service worker")
             obs.registration = page.evaluate("""async () => {
                 const reg = await navigator.serviceWorker.ready;
                 return {scope: reg.scope, script: reg.active.scriptURL, state: reg.active.state,

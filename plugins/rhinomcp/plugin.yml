@@ -13,6 +13,7 @@
 # the only thing between this container and the Mac's Rhino. See ./README.md.
 
 host_port: 1999
+egress_relay: open
 
 install: |
   uv tool install -p 3.13 rhinomcp
