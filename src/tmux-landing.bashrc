@@ -13,8 +13,9 @@
 #   $- has i       — non-interactive channels (scp, VS Code Remote-SSH's
 #                    command channel, tasks/debug/git shells) stay untouched
 #   trigger source — sshd (ssh logins; 'sshd-session' since OpenSSH 9.8 split
-#                    the per-session binary; bottle logins arrive via sshd
-#                    only now — mosh lives on the jump), OR
+#                    the per-session binary; bottle logins arrive via sshd;
+#                    a direct mosh login is parented by mosh-server and does
+#                    not land here), OR
 #                    TERM_PROGRAM=vscode (interactive VS Code/Cursor terminals —
 #                    BOTH Remote-SSH and attach-to-running-container flows: the
 #                    editor sets that var in every integrated terminal, so the

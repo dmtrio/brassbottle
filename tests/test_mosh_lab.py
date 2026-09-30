@@ -7,8 +7,9 @@ on one throwaway docker network, then runs `mosh coder@<bottle> -- <cmd>` from
 the client. The command prints a marker plus the remote user, so a pass shows
 mosh-server started as `coder` and the UDP leg carried the session.
 
-Skips cleanly when docker is unavailable, or when the prebuilt image tags are
-not given: CI builds the images first and passes them through
+Skips only when the prebuilt image tags are not given; once they are set (CI),
+an unavailable docker FAILS the class rather than skipping, so the gated step
+cannot go green without running. CI builds the images first and passes them through
 DJINN_BOTTLE_CI_IMAGE / DJINN_JUMP_CI_IMAGE (the jump image is the client: it
 already carries mosh, a UTF-8 locale and ssh). Building a bottle image inside
 the test would make every `unittest discover` run a multi-minute build.
@@ -23,6 +24,7 @@ import sys
 import time
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -32,20 +34,42 @@ MARKER = "MOSH_LAB_MARKER"
 MARKER_SCRIPT = "/tmp/mosh_lab_marker.sh"
 SESSION_ATTEMPTS = 12
 SESSION_RETRY_SECONDS = 2
+SESSION_ATTEMPT_TIMEOUT = 30
 
 
 BOTTLE_IMAGE = os.environ.get("DJINN_BOTTLE_CI_IMAGE", "")
 CLIENT_IMAGE = os.environ.get("DJINN_JUMP_CI_IMAGE", "")
 
 
-def lab_ready() -> bool:
-    if not (BOTTLE_IMAGE and CLIENT_IMAGE):
-        return False
+def lab_requested() -> bool:
+    """True when the caller asked for the lab (either image tag is set)."""
+    return bool(BOTTLE_IMAGE or CLIENT_IMAGE)
+
+
+def docker_available() -> bool:
     try:
         subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=30)
         return True
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
+
+
+def require_lab(bottle: str, client: str, probe=docker_available) -> None:
+    """Gate for MoshLabTests.setUpClass: raise when the lab was requested but cannot run.
+
+    Both image tags are needed to run; a half-set pair or a dead docker is a
+    misconfigured gate, and must fail loudly instead of skipping.
+    """
+    if not (bottle and client):
+        raise AssertionError(
+            "DJINN_BOTTLE_CI_IMAGE and DJINN_JUMP_CI_IMAGE must both be set "
+            f"(bottle={bottle!r}, client={client!r})"
+        )
+    if not probe():
+        raise AssertionError(
+            "docker is unavailable but the mosh lab was requested via "
+            "DJINN_BOTTLE_CI_IMAGE / DJINN_JUMP_CI_IMAGE; refusing to skip"
+        )
 
 
 def log(msg: str) -> None:
@@ -97,13 +121,35 @@ class BottleImageSourceTests(unittest.TestCase):
         self.assertIn("ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8", DOCKERFILE)
 
 
+class LabGateTests(unittest.TestCase):
+    """Docker-free: the gating logic, with the docker probe stubbed."""
+
+    def test_unavailable_docker_fails_when_images_are_set(self):
+        with self.assertRaises(AssertionError) as ctx:
+            require_lab("bottle", "jump", probe=lambda: False)
+        self.assertIn("refusing to skip", str(ctx.exception))
+
+    def test_half_set_images_fail(self):
+        with self.assertRaises(AssertionError):
+            require_lab("bottle", "", probe=lambda: True)
+
+    def test_available_docker_passes(self):
+        require_lab("bottle", "jump", probe=lambda: True)
+
+    def test_lab_requested_follows_either_variable(self):
+        for bottle, client, want in (("", "", False), ("b", "", True), ("", "c", True), ("b", "c", True)):
+            with mock.patch.multiple(sys.modules[__name__], BOTTLE_IMAGE=bottle, CLIENT_IMAGE=client):
+                self.assertEqual(lab_requested(), want)
+
+
 @unittest.skipUnless(
-    lab_ready(),
-    "docker or DJINN_BOTTLE_CI_IMAGE / DJINN_JUMP_CI_IMAGE not available",
+    lab_requested(),
+    "DJINN_BOTTLE_CI_IMAGE / DJINN_JUMP_CI_IMAGE not set",
 )
 class MoshLabTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        require_lab(BOTTLE_IMAGE, CLIENT_IMAGE)
         suffix = uuid.uuid4().hex[:8]
         cls.network = f"djinn-mosh-lab-{suffix}"
         cls.bottle = f"djinn-mosh-lab-bottle-{suffix}"
@@ -158,10 +204,17 @@ class MoshLabTests(unittest.TestCase):
         last = None
         for attempt in range(1, SESSION_ATTEMPTS + 1):
             # -t: mosh-client insists on a terminal; docker allocates a pty.
-            last = docker(
-                "exec", "-t", self.client, "sh", "-c", mosh_command(self.bottle),
-                check=False, timeout=120,
-            )
+            try:
+                last = docker(
+                    "exec", "-t", self.client, "sh", "-c", mosh_command(self.bottle),
+                    check=False, timeout=SESSION_ATTEMPT_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired as exc:
+                # mosh-client waits forever when the UDP leg never comes up.
+                log(f"session attempt={attempt} timeout={SESSION_ATTEMPT_TIMEOUT}s")
+                last = subprocess.CompletedProcess(exc.cmd, -1, "", "")
+                time.sleep(SESSION_RETRY_SECONDS)
+                continue
             log(f"session attempt={attempt} rc={last.returncode}")
             if f"{MARKER}_coder" in last.stdout:
                 break
