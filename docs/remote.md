@@ -324,5 +324,6 @@ Per-bottle jump users (one Unix user per bottle, each holding only that
 bottle's key) are a planned follow-up — see *PLN - Djinn Admin Plane* §D8.
 Today the jump holds one key that opens every bottle that authorises it.
 
-The jump is the fleet's only mosh endpoint: bottles run sshd alone, and the
-mosh leg from your phone always terminates on the jump.
+The jump is the fleet's only routed mosh endpoint today: bottles carry
+`mosh-server` and a UTF-8 locale, but nothing publishes UDP to them yet, so the
+mosh leg from your phone still terminates on the jump.

@@ -129,16 +129,18 @@ yq -r '.services.djinn.environment[]' compose/docker-compose.ssh.yml | grep -q '
     && pass "ssh overlay carries ONLY SSH_ENABLED (keys/shell/notify moved to local compose)" \
     || fail "ssh overlay environment: has drifted from just SSH_ENABLED"
 
-echo "── bottle image no longer carries mosh"
-# grep -q mosh Dockerfile still matches (the RFC 04 comment explains mosh
-# lives on the jump) — the check that matters is every apt-get install
-# package list, so scan each RUN apt-get block up to its cache purge.
+echo "── bottle image carries mosh-server (no UDP publish, no wrapper)"
+# Scan each apt-get install block up to its cache purge: the package list is
+# what matters, not the comments that mention mosh.
 awk '/apt-get install/,/rm -rf \/var\/lib\/apt\/lists/' Dockerfile | grep -v '^\s*#' | grep -qw mosh \
-    && fail "Dockerfile still apt-installs mosh into the bottle image" \
-    || pass "Dockerfile does not apt-install mosh"
+    && pass "Dockerfile apt-installs mosh into the bottle image" \
+    || fail "Dockerfile does not apt-install mosh into the bottle image"
+! grep -q 'mosh-server-wrapper' Dockerfile \
+    && pass "bottle image does not bake the jump's mosh-server wrapper" \
+    || fail "Dockerfile bakes the jump-only mosh-server wrapper"
 ! test -f compose/docker-compose.mosh.yml \
     && pass "compose/docker-compose.mosh.yml is gone" \
-    || fail "compose/docker-compose.mosh.yml still exists (bottles no longer publish mosh UDP)"
+    || fail "compose/docker-compose.mosh.yml still exists (bottles publish no mosh UDP)"
 
 echo "── mosh-server wrapper (jump-only; src/jump_config.py DEFAULT_MOSH_PORTS is the source)"
 # Bottles no longer run mosh-server or publish a UDP range — the wrapper

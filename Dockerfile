@@ -441,14 +441,17 @@ ENV SSH_ENABLED=false
 # tmux gives every SSH-reachable container fresh-per-login landing sessions.
 # Each login starts in an empty session and can jump to other sessions from
 # tmux's picker; herdr (above, with the other base tools) is the
-# agent-aware alternative. mosh lives on
-# the jump (mosh coder@<jump ip>, then ssh djinn-<bottle>). locales is
-# needed: update-locale writes /etc/default/locale, which PAM reads for SSH
+# agent-aware alternative. mosh-server is installed here so a direct mosh
+# session can land on the bottle itself (nothing routes UDP to it yet; the
+# jump still terminates the operator's mosh leg today). It is the stock
+# /usr/bin/mosh-server: the jump's port-pinning wrapper is not baked in.
+# locales is needed by mosh-server (it aborts without a UTF-8 native locale)
+# and by the rest of the remote stack: update-locale writes /etc/default/locale, which PAM reads for SSH
 # sessions (the ENV below only covers entrypoint/docker-exec processes; sshd
 # builds its env from PAM and would otherwise run C/POSIX and break UTF-8
 # terminal output for sshd/herdr sessions).
 RUN apt-get update && apt-get install -y \
-    tmux locales \
+    tmux locales mosh \
     && rm -rf /var/lib/apt/lists/* \
     && locale-gen en_US.UTF-8 \
     && update-locale LANG=en_US.UTF-8
