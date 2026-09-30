@@ -10,6 +10,7 @@
 # port-scoped firewall grant (HOST_MCP_PORTS) is the only gate. See ./README.md.
 
 host_port: 10500
+egress_relay: open
 
 mcp:
   rhinomcp-official:

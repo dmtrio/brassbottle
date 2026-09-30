@@ -1125,6 +1125,14 @@ def _git_identity(git, env, secrets_file, identity_names, forge_declared):
     }
 
 
+EGRESS_RELAY_KINDS = ("policy", "open")
+
+
+def open_relay_warning(name):
+    return (f"  ⚠ plugin '{name}' is an open egress relay — the host service reaches "
+            "beyond this bottle's egress rules")
+
+
 class Derived(dict):
     """Ordered VAR → value string map with shell-quoted rendering."""
 
@@ -1561,6 +1569,7 @@ def derive(manifest, plugin_files, agent_files, env):
     plugin_mcp_entries = []
     seen_server_names = set()
     host_ports = []
+    open_relays = []       # enabled plugins declaring egress_relay: open, plugin order
     secret_slots = {}      # SLOT -> (plugin, hint)
     servers_by_name = {}   # name -> {"spec": {...}, "requires": [SLOT, ...]}
     server_slots = []      # required slot names, first-seen order
@@ -1771,6 +1780,22 @@ def derive(manifest, plugin_files, agent_files, env):
             plugin_setup[p] = setup
 
         hp = doc.get("host_port")
+        # A host service acts for the bottle beyond its egress rules, so every
+        # host_port plugin must say which kind it is: `policy` (the host side
+        # enforces the bottle's egress policy) or `open` (it does not; the
+        # bottle is exempt from the containment claim and `./djinn up` warns).
+        relay = doc.get("egress_relay")
+        if not _falsy(hp):
+            if relay not in EGRESS_RELAY_KINDS:
+                shown = "missing" if relay is None else f"got {relay!r}"
+                raise ManifestError(
+                    f"plugin '{p}': a plugin with host_port must declare "
+                    f"egress_relay: policy | open ({shown})")
+            if relay == "open":
+                open_relays.append(p)
+        elif relay is not None:
+            raise ManifestError(
+                f"plugin '{p}': egress_relay is only valid on a plugin with host_port")
         if not _falsy(hp):
             # A host grant needs a server that actually dials the host: a
             # remote (url:) server, or a local bridge whose command dials the
@@ -1912,6 +1937,12 @@ def derive(manifest, plugin_files, agent_files, env):
     # Sorted + deduped so the firewall grant string is order-independent of the
     # plugin list and two plugins sharing a port don't double up the grant.
     out["HOST_MCP_PORTS"] = ",".join(str(p) for p in sorted(set(host_ports)))
+    # Enabled `egress_relay: open` plugins, space-separated and sorted, so the
+    # policy document can expose them. One warning line each on stderr, which
+    # up.sh's DERIVED=$(…) lets through to the operator.
+    out["OPEN_RELAYS"] = " ".join(sorted(open_relays))
+    for name in sorted(open_relays):
+        print(open_relay_warning(name), file=sys.stderr)
     # Required server definitions. Env-only slots are not included in
     # AGENT_SERVER_SLOTS. No slot VALUE reaches the wiring exec: a remote
     # agent-scoped server is rendered natively (a ${SLOT} ref the agent expands)

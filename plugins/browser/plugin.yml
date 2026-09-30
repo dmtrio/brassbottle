@@ -6,6 +6,7 @@
 # time from the agent shim env, not argv. See ./README.md.
 
 host_port: 8814                        # firewall grant → HOST_MCP_PORTS
+egress_relay: policy
 
 secrets:
   RESEARCH_BROWSER_KEY: {hint: "browser (run ./service.sh browser once)"}
