@@ -354,3 +354,47 @@ class ClosingTests(unittest.TestCase):
             handler.emit(logging.LogRecord("asyncio", logging.ERROR, __file__, 1, "Future exception was never retrieved", None, None))
         self.assertEqual(err.getvalue(), "Future exception was never retrieved\n")
         self.assertEqual(handler.pending, [])
+
+
+# A predicate that turns true only ~400 ms after the page loads, reported the way SETTLED_JS reports.
+DELAYED_JS = """async ([ms]) => {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const up = performance.now() >= ms;
+  return {ok: up, detail: `at ${Math.round(performance.now())} ms`};
+}"""
+
+
+class WaitUntilSettledTests(unittest.TestCase):
+    """Pin: the service-worker wait really waits (Playwright's wait_for_function does not await an async predicate)."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from playwright.sync_api import sync_playwright
+            cls.pw = sync_playwright().start()
+            cls.browser = cls.pw.chromium.launch()
+        except Exception as exc:  # noqa: BLE001 - no playwright or no Chromium here
+            raise unittest.SkipTest(f"SKIP: no Playwright Chromium ({exc})")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+
+    def setUp(self):
+        self.page = self.browser.new_page()
+        self.addCleanup(self.page.close)
+
+    def test_the_wait_returns_only_once_the_predicate_is_true(self):
+        seen = suite.wait_until_settled(self.page, DELAYED_JS, [400], 5000, "delayed")
+        self.assertTrue(seen["ok"])
+        self.assertGreaterEqual(self.page.evaluate("performance.now()"), 400)
+
+    def test_the_old_wait_returned_at_once_on_the_same_predicate(self):
+        self.page.wait_for_function(DELAYED_JS, arg=[400], timeout=5000)
+        self.assertLess(self.page.evaluate("performance.now()"), 400)
+
+    def test_a_predicate_that_never_settles_fails_with_its_detail(self):
+        with self.assertRaises(AssertionError) as caught:
+            suite.wait_until_settled(self.page, DELAYED_JS, [10 ** 9], 300, "the service worker")
+        self.assertRegex(str(caught.exception), r"^the service worker: not settled after 300 ms \(at \d+ ms\)$")
