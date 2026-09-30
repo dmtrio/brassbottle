@@ -2,10 +2,11 @@
 # `workflow` scope, so a human moves this file into .github/workflows/ and a
 # follow-up commit removes this staged copy.
 #
-# This revision runs the admin contract tests, builds the Vue admin app in
-# admin/ui/, builds the egress image with its UI stage, asserts the built
-# assets are present, and runs the admin Playwright suites against the built
-# app: the shell test, then the behaviour suite.
+# This revision builds the shared image with the playwright plugin enabled
+# (--build-arg PLUGINS_ENABLED=playwright) and asserts the MCP server, the
+# tool-allowlist filter and Chromium are present in it. Everything else is
+# unchanged from the current workflow.
+
 name: ci
 
 on:
@@ -58,7 +59,20 @@ jobs:
       - name: Image builds
         # "If it ships, CI builds it": the shared image is the artifact
         # every container runs, so a PR that breaks the Dockerfile must fail.
-        run: docker build -t djinn-ci-smoke .
+        run: docker build --build-arg PLUGINS_ENABLED=playwright -t djinn-ci-smoke .
+      - name: Playwright plugin is baked into the image
+        # The build above bakes the playwright plugin (PLUGINS_ENABLED is
+        # empty by default, so without the build-arg no plugin installs). A
+        # green build with a missing server, browser or filter would still be
+        # a broken plugin: assert each one is there, and print the sizes.
+        run: |
+          docker run --rm --entrypoint bash djinn-ci-smoke -lc '
+            set -e
+            playwright-mcp --version
+            test -f /opt/plugins/playwright/mcp_filter.py
+            ls "$HOME"/.cache/ms-playwright | grep -q chromium
+            du -sh "$HOME/.cache/ms-playwright" "$(npm root -g)/@playwright"
+          '
       - name: Backup image builds
         run: docker build -f backup/Dockerfile -t djinn-backup-ci-smoke .
       - name: Jump image builds
