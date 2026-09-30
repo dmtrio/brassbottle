@@ -3,7 +3,9 @@
 - **The browser runs in this bottle**, so its page loads are this bottle's
   traffic and follow the bottle's egress rules. A page that fails to load
   because the destination is not approved is the firewall, not a flaky site:
-  file it with `request_egress` (naming the host) and retry after approval.
+  the blocked load is already queued for the operator as this bottle, so
+  retry after approval. (`request_egress` applies only where the egress plugin
+  is enabled.)
 - **Take a `browser_snapshot` before acting**; it is cheaper than a screenshot
   and gives the element refs the other tools need.
 - **Only the tools listed are available.** There is no `browser_run_code_unsafe`;
