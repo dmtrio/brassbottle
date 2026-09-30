@@ -143,8 +143,8 @@ awk '/apt-get install/,/rm -rf \/var\/lib\/apt\/lists/' Dockerfile | grep -v '^\
     || fail "compose/docker-compose.mosh.yml still exists (bottles publish no mosh UDP)"
 
 echo "── mosh-server wrapper (jump-only; src/jump_config.py DEFAULT_MOSH_PORTS is the source)"
-# Bottles no longer run mosh-server or publish a UDP range — the wrapper
-# lives on for the jump alone (jump/Dockerfile COPYs it). jump_config.py
+# Bottles carry the stock mosh-server but publish no UDP range, and never bake
+# this wrapper — it lives on for the jump alone (jump/Dockerfile COPYs it). jump_config.py
 # always sets MOSH_PORTS in the jump container, so the wrapper's and the
 # jump entrypoint's ${MOSH_PORTS:-…} fallbacks are pinned to THAT default:
 # changing DEFAULT_MOSH_PORTS must fail here, not leave stale fallbacks.
