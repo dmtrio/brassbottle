@@ -8,6 +8,7 @@
 # sync with host_port / a manifest plugin_ports: override. See ./README.md.
 
 host_port: 26929
+egress_relay: open
 
 mcp:
   cordyceps:

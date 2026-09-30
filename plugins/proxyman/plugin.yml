@@ -5,6 +5,7 @@
 # header at connect time from the agent shim env. See ./README.md.
 
 host_port: 8813                        # firewall grant → HOST_MCP_PORTS
+egress_relay: open
 
 secrets:
   PROXYMAN_BRIDGE_KEY: {hint: "proxyman (run ./service.sh proxyman once)"}

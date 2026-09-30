@@ -16,6 +16,7 @@
 # endpoint together. See ./README.md.
 
 host_port: 8811                        # firewall grant → HOST_MCP_PORTS, and ${HOST_PORT}
+egress_relay: open
 
 # A common default can be overridden or disabled for individual agents.
 secrets:
