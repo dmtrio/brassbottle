@@ -2170,25 +2170,31 @@ def _measure_cell(cell, prefix: str) -> dict:
     return out
 
 
-def selected_day_contrast(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str) -> dict:
+def selected_day_contrast(browser, served: Served, broker: stub.StubBroker, viewport: str, theme: str,
+                          today: datetime | None = None) -> dict:
     """Pick a day in the History date picker and measure its selected cell, then extend the pick to
     a two-day range and measure the range's end cell (selection-end without selection-start) and
     its start cell. A single-day pick carries both attributes, so only the range reaches each half."""
     broker.reset()
     context, page, traffic = new_page(browser, served, viewport, theme)
     try:
+        if today is not None:
+            page.clock.install(time=today)       # from before the first script: the picker's "today", still ticking
         hist = HistoryPage(page, served, traffic, broker)
         hist.open()
         picked = hist.pick_day(3)                # the popover stays open on the selected day
-        cell = page.locator("[data-slot=range-calendar-trigger][data-selected]").first
+        # The calendar shows two months, and a month's grid also draws its neighbours' days (marked
+        # data-outside-view) with the same selection attributes: count only the days a grid owns.
+        own = "[data-slot=range-calendar-trigger]:not([data-outside-view])"
+        cell = page.locator(f"{own}[data-selected]").first
         cell.wait_for()
         found = _measure_cell(cell, "single day")
         year, month, day = (int(part) for part in picked.split("-"))
         other = day + 1 if day < calendar.monthrange(year, month)[1] else day - 1
         page.locator("[data-slot=range-calendar] table").first.locator(
-            "[data-slot=range-calendar-trigger]:not([data-outside-view])").get_by_text(str(other), exact=True).first.click()
-        end = page.locator("[data-slot=range-calendar-trigger][data-selection-end]:not([data-selection-start])")
-        start = page.locator("[data-slot=range-calendar-trigger][data-selection-start]:not([data-selection-end])")
+            own).get_by_text(str(other), exact=True).first.click()
+        end = page.locator(f"{own}[data-selection-end]:not([data-selection-start])")
+        start = page.locator(f"{own}[data-selection-start]:not([data-selection-end])")
         _eq(end.count(), 1)
         _eq(start.count(), 1)
         found.update(_measure_cell(end, "range end"))
@@ -2198,14 +2204,23 @@ def selected_day_contrast(browser, served: Served, broker: stub.StubBroker, view
         context.close()
 
 
+# Frozen "today"s (None is the wall clock). On 2026-09-30 the picked days (27th, 28th) are also drawn
+# in the next month's grid as outside-view cells, so a selector that does not exclude them counts each
+# cell twice; on 2026-09-15 no neighbouring grid repeats them.
+CONTRAST_CLOCKS = (
+    datetime(2026, 9, 30, 12, tzinfo=timezone.utc),
+    datetime(2026, 9, 15, 12, tzinfo=timezone.utc),
+)
+
+
 def _h_calendar_contrast(browser, served: Served, broker: stub.StubBroker, viewport: str) -> None:
     low = []
-    for theme in ("light", "dark"):
-        measured = selected_day_contrast(browser, served, broker, viewport, theme)
+    for theme, today in [(theme, today) for theme in ("light", "dark") for today in (None, *CONTRAST_CLOCKS)]:
+        measured = selected_day_contrast(browser, served, broker, viewport, theme, today)
         _eq(len(measured), 12)                   # three cells (single day, range end, range start), four states each
         for state, got in measured.items():
             if got["ratio"] < MIN_TEXT_CONTRAST:
-                low.append(f"{theme}/{state}: {got['ratio']:.2f}:1 (text {got['fg']} on {got['bg']})")
+                low.append(f"{theme}/{today or 'now'}/{state}: {got['ratio']:.2f}:1 (text {got['fg']} on {got['bg']})")
     assert not low, f"the selected day is under {MIN_TEXT_CONTRAST}:1: " + "; ".join(low)
 
 
