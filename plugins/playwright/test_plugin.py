@@ -192,6 +192,10 @@ FAKE_SERVER = textwrap.dedent("""
     TOOLS = ["browser_navigate", "browser_run_code_unsafe", "browser_cookie_list"]
     for line in sys.stdin:
         m = json.loads(line)
+        if isinstance(m, list):
+            print(json.dumps([{"jsonrpc": "2.0", "id": x["id"], "result": {"called": x["params"]["name"]}}
+                              for x in m if "id" in x]), flush=True)
+            continue
         if m.get("method") == "tools/list":
             out = {"jsonrpc": "2.0", "id": m["id"], "result": {"tools": [{"name": t} for t in TOOLS]}}
         elif m.get("method") == "tools/call":
@@ -215,6 +219,9 @@ class EndToEnd(unittest.TestCase):
         replies = {}
         for line in proc.stdout.splitlines():
             msg = json.loads(line)  # stdout must be clean JSON-RPC only
+            if isinstance(msg, list):
+                replies.setdefault("batches", []).append(msg)
+                continue
             replies[msg["id"]] = msg
         return proc, replies
 
@@ -234,6 +241,29 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("start:", proc.stderr)
         self.assertIn("exit: status 0", proc.stderr)
         self.assertIn("dropped unparseable client line", proc.stderr)
+
+    def call(self, msg_id, tool):
+        return {"jsonrpc": "2.0", "id": msg_id, "method": "tools/call", "params": {"name": tool}}
+
+    def test_mixed_batch_gets_one_array_reply(self):
+        proc, replies = self.run_filter([
+            json.dumps([self.call(1, "browser_navigate"),
+                        self.call(2, "browser_run_code_unsafe")]) + "\n"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(replies["batches"]), 1)
+        self.assertEqual(len(replies), 1)  # no stray top-level objects
+        by_id = {m["id"]: m for m in replies["batches"][0]}
+        self.assertEqual(by_id[1]["result"], {"called": "browser_navigate"})
+        self.assertEqual(by_id[2]["error"]["code"], -32602)
+
+    def test_all_refused_batch_gets_a_single_array(self):
+        proc, replies = self.run_filter([
+            json.dumps([self.call(1, "browser_run_code_unsafe"),
+                        self.call(2, "browser_find")]) + "\n"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(replies), 1)
+        self.assertEqual([m["id"] for m in replies["batches"][0]], [1, 2])
+        self.assertTrue(all(m["error"]["code"] == -32602 for m in replies["batches"][0]))
 
     def test_usage_error_without_a_server_command(self):
         proc = subprocess.run([sys.executable, str(FILTER_PATH)],

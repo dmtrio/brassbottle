@@ -13,8 +13,11 @@ gets the same 22 tools and nothing else.
 Client -> server: a `tools/call` naming a tool outside ALLOWED_TOOLS is answered
 here with a JSON-RPC error and never reaches the server. Server -> client: the
 result of `tools/list` is stripped to ALLOWED_TOOLS, so the agent never sees
-the rest. Everything else passes through byte-for-byte. Fail closed: an
-unparseable client line is dropped, never forwarded.
+the rest. Client lines that need no change are forwarded untouched; server
+lines are parsed and re-serialised (same JSON value, not the same bytes).
+A JSON-RPC batch gets one array reply: refusals are merged into the server's
+batch response, or sent as a single array when every call was refused. Fail
+closed: an unparseable client line is dropped, never forwarded.
 
 Boundary log (stderr, so stdout stays clean JSON-RPC): child spawn, each
 tools/list (tools in -> tools out), each refused call (tool name only, never
@@ -108,7 +111,33 @@ def filter_server_message(msg, list_ids):
     return msg
 
 
-def _pump_client(child, out_lock, list_ids):
+def _id_keys(batch):
+    return {json.dumps(m["id"]) for m in batch if isinstance(m, dict) and "id" in m}
+
+
+def merge_batch_reply(msg, pending):
+    """Fold held refusals into the server's array reply to a forwarded batch.
+
+    `pending` is a list of (id keys of the forwarded requests, refusals). A
+    non-array message, or an array matching no held batch, is returned as is.
+    """
+    if not isinstance(msg, list):
+        return msg
+    keys = _id_keys(msg)
+    for entry in pending:
+        if entry[0] & keys:
+            pending.remove(entry)
+            return msg + entry[1]
+    return msg
+
+
+def _write_out(out_lock, obj):
+    with out_lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+
+def _pump_client(child, out_lock, list_ids, pending):
     """stdin -> child, applying the allowlist. Ends the child's stdin at EOF."""
     dropped = 0
     for line in sys.stdin:
@@ -121,10 +150,20 @@ def _pump_client(child, out_lock, list_ids):
             log(f"dropped unparseable client line ({len(line)} bytes)")
             continue
         forward, replies = filter_client_message(msg, list_ids)
-        for reply in replies:
-            with out_lock:
-                sys.stdout.write(json.dumps(reply) + "\n")
-                sys.stdout.flush()
+        if isinstance(msg, list):
+            # One array reply per batch: send the refusals now only when the
+            # server will not answer this batch; otherwise hold them and merge
+            # into the server's array (before forwarding, so no race).
+            if replies:
+                held = _id_keys(forward) if forward else set()
+                if held:
+                    with out_lock:
+                        pending.append((held, replies))
+                else:
+                    _write_out(out_lock, replies)
+        else:
+            for reply in replies:
+                _write_out(out_lock, reply)
         if forward is not None:
             try:
                 # Re-serialised only when we changed something; otherwise the
@@ -148,7 +187,8 @@ def run(argv):
                              text=True, bufsize=1)
     list_ids = set()
     out_lock = threading.Lock()
-    threading.Thread(target=_pump_client, args=(child, out_lock, list_ids),
+    pending = []
+    threading.Thread(target=_pump_client, args=(child, out_lock, list_ids, pending),
                      daemon=True).start()
     for line in child.stdout:
         try:
@@ -159,8 +199,11 @@ def run(argv):
             continue
         out = filter_server_message(msg, list_ids)
         with out_lock:
+            out = merge_batch_reply(out, pending)
             sys.stdout.write(json.dumps(out) + "\n")
             sys.stdout.flush()
+    if pending:
+        log(f"exit with {len(pending)} batch refusal(s) unsent (server closed)")
     code = child.wait()
     log(f"exit: status {code} after {time.monotonic() - started:.1f}s")
     return code
