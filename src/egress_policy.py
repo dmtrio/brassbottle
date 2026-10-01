@@ -11,8 +11,12 @@ Inputs, all read here and nowhere else:
     plus `remote.direct` (default true) read straight from the manifest;
   * $DJINN_HOME/run/bottle-nets.json (src/bottle_net.py): network, subnet,
     browser_port, ssh_port — empty (null) for a bottle with no allocation;
-  * the request store: operator allows, as extra zones or `name:port` /
-    `cidr:port` grants;
+  * the request store: live operator allows, as extra zones or `name:port` /
+    `cidr:port` grants. A live allow is scoped to the container it was made
+    on and drops out of the policy when that bottle is recreated. A
+    manifest-scope allow is NOT read from the store: allow_manifest writes the
+    zone into the manifest, which is the source, so removing it there removes
+    it here;
   * the denylist: persisted denies.
 
 The revision is persisted in <egress root>/policy.json beside the last
@@ -42,10 +46,14 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import bottle_net
+import derive_env
 
 LOG = logging.getLogger(__name__)
 
 POLICY_FILENAME = "policy.json"
+LIVE_FILENAME = "policy-live.json"
+# src/common.sh DJINN_CTR_PREFIX: the docker name of a bottle is prefix + name.
+CONTAINER_PREFIX = "djinn-"
 POLICY_WAIT_SECONDS = 25.0
 DERIVE_TIMEOUT_SECONDS = 60
 WEB_PORTS = (80, 443)
@@ -54,6 +62,8 @@ TEMPLATE_STEM = "TEMPLATE"
 Document = dict[str, Any]
 # (bottle name, manifest path) -> {"derived": {...}, "remote_direct": bool}
 DeriveFn = Callable[[str, Path], "Mapping[str, Any]"]
+# () -> {bottle: container id}, or None when docker could not answer.
+IdentityFn = Callable[[], "Mapping[str, str] | None"]
 
 
 class PolicyError(Exception):
@@ -88,32 +98,88 @@ def _is_cidr_or_ip(value: str) -> bool:
     return len(parts) == 4 and all(p.isdigit() for p in parts)
 
 
-def default_derive(repo_root: Path) -> DeriveFn:
-    """Derive one manifest the way up.sh does: yq -> manifest.py --derive."""
+def docker_identities() -> dict[str, str] | None:
+    """{bottle: container id} for every djinn container, None if docker failed."""
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                "docker", "ps", "-a", "--no-trunc",
+                "--filter", f"name=^{CONTAINER_PREFIX}",
+                "--format", "{{.Names}}\t{{.ID}}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=DERIVE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log("identity", started, status="error", error=type(exc).__name__)
+        return None
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        _log("identity", started, status="error", exit=result.returncode)
+        return None
+    found: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        name, _, cid = line.partition("\t")
+        if cid and name.startswith(CONTAINER_PREFIX):
+            found[name[len(CONTAINER_PREFIX):]] = cid
+    _log("identity", started, status="ok", containers=len(found))
+    return found
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def default_derive(repo_root: Path, home: Path | None = None) -> DeriveFn:
+    """Derive one manifest the way up.sh does: yq -> manifest.py --derive.
+
+    manifest.py runs under src/derive_env.py's environment, the same one up.sh
+    supplies. `yq` output for the manifest and every plugin/agent descriptor is
+    cached by (mtime, size): a recompute with nothing edited spawns manifest.py
+    once per bottle and no yq at all.
+    """
+    secrets_file = (home or Path(os.environ.get("DJINN_HOME", "."))) / "secrets.env"
+    yq_cache: dict[Path, tuple[tuple[int, int] | None, str]] = {}
+
+    def run(argv: list[str], stdin: str | None = None, env: Mapping[str, str] | None = None) -> str:
+        result = subprocess.run(
+            argv,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=DERIVE_TIMEOUT_SECONDS,
+            env=None if env is None else dict(env),
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or "").strip().splitlines()[-1:] or [""]
+            raise PolicyError(f"{argv[0]} exit={result.returncode} {tail[0][:200]}")
+        return result.stdout
+
+    def yq_json(path: Path) -> str:
+        key = _stat_key(path)
+        cached = yq_cache.get(path)
+        if key is not None and cached is not None and cached[0] == key:
+            return cached[1]
+        doc = run(["yq", "-o=json", "-I=0", str(path)]).strip()
+        yq_cache[path] = (key, doc)
+        return doc
 
     def derive(name: str, manifest: Path) -> Mapping[str, Any]:
-        def run(argv: list[str], stdin: str | None = None) -> str:
-            result = subprocess.run(
-                argv,
-                input=stdin,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=DERIVE_TIMEOUT_SECONDS,
-            )
-            if result.returncode != 0:
-                tail = (result.stderr or "").strip().splitlines()[-1:] or [""]
-                raise PolicyError(f"{argv[0]} exit={result.returncode} {tail[0][:200]}")
-            return result.stdout
-
-        manifest_json = run(["yq", "-o=json", "-I=0", str(manifest)]).strip()
+        manifest_json = yq_json(manifest)
         lines = [manifest_json]
         for group, pattern in (("plugins", "plugin.yml"), ("agents", "agent.yml")):
             if group == "agents":
                 lines.append("---agents---")
             for f in sorted((repo_root / group).glob(f"*/{pattern}")):
                 try:
-                    doc = run(["yq", "-o=json", "-I=0", str(f)]).strip()
+                    doc = yq_json(f)
                     if "\n" in doc:
                         doc = "!"
                 except (PolicyError, OSError, subprocess.SubprocessError):
@@ -122,6 +188,7 @@ def default_derive(repo_root: Path) -> DeriveFn:
         out = run(
             [sys.executable, str(repo_root / "src" / "manifest.py"), "--derive"],
             stdin="\n".join(lines) + "\n",
+            env=derive_env.child_env(secrets_file),
         )
         derived: dict[str, str] = {}
         # Values are shlex-quoted and may span lines, so tokenise the whole
@@ -149,6 +216,7 @@ class PolicyEngine:
         home: Path | None = None,
         repo_root: Path | None = None,
         derive_fn: DeriveFn | None = None,
+        identity_fn: IdentityFn | None = None,
         store: Any = None,
         denylist: Any = None,
         wait_seconds: float = POLICY_WAIT_SECONDS,
@@ -158,8 +226,12 @@ class PolicyEngine:
         self._bottles_path = bottles_path
         self._home = home
         self._derive = derive_fn or default_derive(
-            repo_root or Path(__file__).resolve().parent.parent
+            repo_root or Path(__file__).resolve().parent.parent, home
         )
+        self._identity = identity_fn or docker_identities
+        self._live_path = root / LIVE_FILENAME
+        # request_id -> container id the live allow was first seen on.
+        self._adopted: dict[str, str] = self._load_adopted()
         self._store = store
         self._denylist = denylist
         self._wait_seconds = wait_seconds
@@ -257,12 +329,64 @@ class PolicyEngine:
             LOG.info("egress policy allocations unreadable error=%s", str(exc)[:200])
             return None
 
+    def _load_adopted(self) -> dict[str, str]:
+        try:
+            data = json.loads(self._live_path.read_bytes())
+            adopted = data["adopted"]
+            if not isinstance(adopted, dict):
+                raise ValueError("adopted must be an object")
+            return {str(k): str(v) for k, v in adopted.items()}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            # Losing this only re-adopts live allows onto the current
+            # container; it never moves the revision.
+            LOG.info("egress policy live state unreadable error=%s", str(exc)[:200])
+            return {}
+
+    def _save_adopted(self) -> None:
+        started = time.monotonic()
+        payload = (json.dumps({"adopted": self._adopted}, indent=2, sort_keys=True) + "\n").encode()
+        tmp = self._live_path.with_name(self._live_path.name + f".{os.getpid()}.tmp")
+        self._root.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(payload)
+        os.replace(tmp, self._live_path)
+        _log("persist_live", started, bytes_out=len(payload), allows=len(self._adopted))
+
     def _live_allows(self) -> dict[str, list[tuple[str, int]]]:
+        """Live allows still tied to their bottle's current container.
+
+        The first time a live allow is seen it is adopted onto the container
+        the bottle runs now; once docker reports a different container for
+        that bottle (or none), the allow is dropped for good. Docker being
+        unreachable keeps every allow: an unreadable identity never revokes.
+        """
         allows: dict[str, list[tuple[str, int]]] = {}
         if self._store is None:
             return allows
-        for row in self._store.list_allowed():
+        rows = self._store.list_allowed()
+        identities = self._identity() if rows else None
+        dropped = 0
+        adopted: dict[str, str] = {}
+        for row in rows:
+            current = None if identities is None else identities.get(row.container)
+            recorded = self._adopted.get(row.request_id)
+            if identities is not None and current is None:
+                dropped += 1  # docker answered and the container is gone
+                continue
+            if recorded is None and current is not None:
+                recorded = current
+            if recorded is not None:
+                adopted[row.request_id] = recorded
+            if current is not None and recorded != current:
+                dropped += 1
+                continue
             allows.setdefault(row.container, []).append((row.host, row.port))
+        if adopted != self._adopted:
+            self._adopted = adopted
+            self._save_adopted()
+        if dropped:
+            LOG.info("egress policy live allows dropped=%d kept=%d", dropped, len(rows) - dropped)
         return allows
 
     @staticmethod

@@ -680,22 +680,38 @@ class _LockedDenyList:
             return self._denylist.load()
 
 
-def _recomputes_policy(cause: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Recompute the policy after a broker method that can change it.
+class _PolicyScope(threading.local):
+    """Per-thread nesting of policy-recomputing broker methods."""
 
-    Runs after the method returns, outside the broker lock, whatever it
-    returned; a recompute that finds the document unchanged moves nothing.
-    A recompute failure is logged, never raised: the decision it follows has
-    already been taken and recorded.
+    def __init__(self) -> None:
+        self.depth = 0
+        self.dirty = False
+
+
+def _recomputes_policy(cause: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Recompute the policy once, when the outermost wrapped call ends.
+
+    A wrapped method marks standing state changed with
+    EgressBroker._policy_changed(); nested wrapped calls (a zone sweep calling
+    decide() per request) defer to the outermost, so a sweep of N requests
+    costs one recompute and a call that changed nothing costs none. The
+    recompute runs outside the broker lock, even when the method raised after
+    an earlier step changed state. A recompute failure is logged, never
+    raised: the decision has already been taken and recorded.
     """
 
     def wrap(method: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(method)
         def inner(self: "EgressBroker", *args: Any, **kwargs: Any) -> Any:
+            scope = self._policy_scope
+            scope.depth += 1
             try:
                 return method(self, *args, **kwargs)
             finally:
-                self.recompute_policy(cause)
+                scope.depth -= 1
+                if scope.depth == 0 and scope.dirty:
+                    scope.dirty = False
+                    self.recompute_policy(cause)
 
         return inner
 
@@ -719,6 +735,7 @@ class EgressBroker:
         hold_seconds_default: int = DEFAULT_HOLD_SECONDS,
         notifier: Callable[[EgressNotification], object] | None = None,
         policy_derive: Callable[..., Any] | None = None,
+        policy_identity: Callable[[], Any] | None = None,
         policy_wait_seconds: float | None = None,
     ) -> None:
         self._root = root.expanduser().resolve()
@@ -738,6 +755,7 @@ class EgressBroker:
         # the in-flight apply resolves it.
         self._applying: set[str] = set()
         self._import_open_once()
+        self._policy_scope = _PolicyScope()
         home = self._root.parent.parent
         bottles_env = (os.environ.get("BOTTLES_PATH") or "").strip()
         self._policy = PolicyEngine(
@@ -746,6 +764,7 @@ class EgressBroker:
             home=home,
             repo_root=self._repo_root,
             derive_fn=policy_derive,
+            identity_fn=policy_identity,
             store=self._store,
             denylist=_LockedDenyList(self._denylist, self._lock),
             **({} if policy_wait_seconds is None else {"wait_seconds": policy_wait_seconds}),
@@ -770,6 +789,10 @@ class EgressBroker:
     @property
     def policy(self) -> PolicyEngine:
         return self._policy
+
+    def _policy_changed(self) -> None:
+        """Mark standing policy state changed; the outermost wrapper recomputes."""
+        self._policy_scope.dirty = True
 
     def recompute_policy(self, cause: str, *, caller: str = "broker") -> bool | None:
         """Rebuild the policy; True if the revision moved, None on failure."""
@@ -1330,6 +1353,7 @@ class EgressBroker:
                             "scope": resolved_scope,
                         },
                     )
+                    self._policy_changed()
                 else:
                     self._store.mark_apply(request_id=request_id, outcome="apply_failed", now=now)
                     allow_error = APPLY_FAILED_REASON
@@ -1355,6 +1379,7 @@ class EgressBroker:
                 if host_covered_by_zone(row.host, zone)
             ]
 
+    @_recomputes_policy("decide_zone")
     def decide_allow_for_zone(
         self,
         container: str,
@@ -1554,6 +1579,7 @@ class EgressBroker:
             )
             return PersistDenyResult(decided=[], entry=None, error=DENYLIST_PERSIST_FAILED_REASON)
 
+        self._policy_changed()
         with self._lock:
             # Force a fresh reload of the SAME DenyList instance matches()
             # consults, under the same lock matches() is always called

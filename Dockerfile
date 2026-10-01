@@ -416,6 +416,7 @@ COPY src/egress_store.py /usr/local/lib/djinn/egress_store.py
 COPY src/egress_denylist.py /usr/local/lib/djinn/egress_denylist.py
 COPY src/egress_notify.py /usr/local/lib/djinn/egress_notify.py
 COPY src/egress_policy.py /usr/local/lib/djinn/egress_policy.py
+COPY src/derive_env.py /usr/local/lib/djinn/derive_env.py
 COPY src/bottle_net.py /usr/local/lib/djinn/bottle_net.py
 COPY src/egress_broker_host.py /usr/local/lib/djinn/egress_broker_host.py
 COPY src/egress_broker.py /usr/local/lib/djinn/egress_broker.py
@@ -426,6 +427,7 @@ RUN chmod 644 /usr/local/lib/djinn/egress_store.py \
     /usr/local/lib/djinn/egress_denylist.py \
     /usr/local/lib/djinn/egress_notify.py \
     /usr/local/lib/djinn/egress_policy.py \
+    /usr/local/lib/djinn/derive_env.py \
     /usr/local/lib/djinn/bottle_net.py \
     /usr/local/lib/djinn/egress_broker_host.py \
     /usr/local/lib/djinn/egress_broker.py \

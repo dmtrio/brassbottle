@@ -88,13 +88,10 @@ SECRETS_FILE="$BASE_PATH/secrets.env"
 # file's assigned names — NOT the whole shell environment (`compgen -v` would
 # fold in PATH/HOME/USER/…, letting a typo'd source resolve to a non-secret
 # value instead of hard-failing) — and keep the ones that are non-empty.
-PRESENT_SECRET_VARS=""
-for v in $(grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$SECRETS_FILE" \
-           | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' | LC_ALL=C sort -u); do
-    if [ -n "${!v}" ]; then
-        PRESENT_SECRET_VARS="${PRESENT_SECRET_VARS:+$PRESENT_SECRET_VARS }$v"
-    fi
-done
+# src/derive_env.py owns that scan and every other variable the derive step
+# reads (PRESENT_SECRET_VARS, SECRETS_FILE, GIT_*_DEFAULT, NTFY_*, DJINN_*), so
+# the egress broker's policy engine derives manifests under the same
+# environment; up.sh only forwards the two shell-local networking vars.
 DERIVED=$(
     {
         yq -o=json -I=0 "$MANIFEST"
@@ -116,13 +113,10 @@ DERIVED=$(
                 && [ "$(printf '%s\n' "$DOC" | wc -l)" -eq 1 ] || DOC='!'
             printf '%s\t%s\n' "$(basename "$(dirname "$f")")" "$DOC"
         done
-    } | PRESENT_SECRET_VARS="$PRESENT_SECRET_VARS" \
-        SECRETS_FILE="$SECRETS_FILE" \
-        GIT_NAME_DEFAULT="$(git config --global user.name 2>/dev/null || true)" \
-        GIT_EMAIL_DEFAULT="$(git config --global user.email 2>/dev/null || true)" \
-        NTFY_URL="${NTFY_URL:-}" NTFY_TOPIC="${NTFY_TOPIC:-}" \
+    } | NTFY_URL="${NTFY_URL:-}" NTFY_TOPIC="${NTFY_TOPIC:-}" \
         DJINN_SUBNET="${DJINN_SUBNET:-}" \
         DJINN_EGRESS_IP="${DJINN_EGRESS_IP:-}" \
+        "$PYTHON3" "$SCRIPT_DIR/src/derive_env.py" --secrets-file "$SECRETS_FILE" -- \
         "$PYTHON3" "$SCRIPT_DIR/src/manifest.py" --derive
 )
 eval "$DERIVED"

@@ -64,6 +64,7 @@ class AdminContractTests(unittest.TestCase):
             repo_root=REPO_ROOT,
             now_fn=clock.now,
             hold_seconds_default=5,
+            policy_identity=lambda: None,  # no docker in unit tests
         )
 
     def _serve(self, root: Path, b: broker.EgressBroker) -> tuple[str, int]:

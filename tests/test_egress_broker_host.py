@@ -67,6 +67,7 @@ class EgressBrokerHostTests(unittest.TestCase):
             repo_root=REPO_ROOT,
             now_fn=clock.now,
             hold_seconds_default=hold_seconds,
+            policy_identity=lambda: None,  # no docker in unit tests
         )
 
     def _http_server(

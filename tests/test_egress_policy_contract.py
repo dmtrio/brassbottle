@@ -68,6 +68,8 @@ class PolicyContractTests(unittest.TestCase):
         }
         self.remote_direct = True
         self.derive_calls = 0
+        # What docker reports: bottle -> container id; None = docker down.
+        self.identities: dict[str, str] | None = {BOTTLE_NAME: "container-1"}
         self.servers: list[tuple] = []
 
     # -- helpers -----------------------------------------------------------
@@ -76,12 +78,16 @@ class PolicyContractTests(unittest.TestCase):
         self.derive_calls += 1
         return {"derived": dict(self.derived), "remote_direct": self.remote_direct}
 
+    def _identity(self):
+        return None if self.identities is None else dict(self.identities)
+
     def _broker(self, wait_seconds: float = 0.4) -> broker.EgressBroker:
         return broker.EgressBroker(
             self.root,
             repo_root=REPO_ROOT,
             hold_seconds_default=5,
             policy_derive=self._derive,
+            policy_identity=self._identity,
             policy_wait_seconds=wait_seconds,
         )
 
@@ -425,14 +431,194 @@ class PolicyContractTests(unittest.TestCase):
             "  egress: [pypi.org, db.example.com:5432]\n"
             "  egress_cidrs: [10.9.0.0/24]\n"
         )
-        result = egress_policy.default_derive(REPO_ROOT)(BOTTLE_NAME, manifest)
+        result = egress_policy.default_derive(REPO_ROOT, self.home)(BOTTLE_NAME, manifest)
         # remote.direct is not a derive-accepted key yet: the default holds.
         self.assertTrue(result["remote_direct"])
         self.assertEqual(result["derived"]["EGRESS_CIDRS"], "10.9.0.0/24")
         self.assertIn("db.example.com:5432", result["derived"]["EGRESS"].split(","))
         manifest.write_text("task: [unterminated\n")
         with self.assertRaises(egress_policy.PolicyError):
-            egress_policy.default_derive(REPO_ROOT)(BOTTLE_NAME, manifest)
+            egress_policy.default_derive(REPO_ROOT, self.home)(BOTTLE_NAME, manifest)
+
+    def _real_derive(self, manifest_text: str, secrets: str = ""):
+        manifest = self.bottles / f"{BOTTLE_NAME}.yml"
+        manifest.write_text(manifest_text)
+        (self.home / "secrets.env").write_text(secrets)
+        return egress_policy.default_derive(REPO_ROOT, self.home)(BOTTLE_NAME, manifest)
+
+    def test_real_derive_of_an_ntfy_manifest_gets_ntfy_url_from_secrets_env(self):
+        text = "task: coding\nremote:\n  shell: tmux\n  notify: ntfy\n"
+        with self.assertRaises(egress_policy.PolicyError) as ctx:
+            self._real_derive(text)
+        self.assertIn("NTFY_URL", str(ctx.exception))
+        with mock.patch.dict("os.environ", {}, clear=False):
+            result = self._real_derive(text, "NTFY_URL=https://ntfy.example.com\n")
+        self.assertEqual(result["derived"]["CONTAINER_NTFY_URL"], "https://ntfy.example.com")
+        self.assertIn("ntfy.example.com", result["derived"]["EGRESS"])
+
+    def test_real_derive_of_an_identity_ref_manifest_sees_present_secrets(self):
+        text = "task: coding\nidentities:\n  obsidian: [me_claude]\n"
+        with self.assertRaises(egress_policy.PolicyError) as ctx:
+            self._real_derive(text, "OBSIDIAN_KEY_me_claude=\n")
+        self.assertIn("OBSIDIAN_KEY_me_claude", str(ctx.exception))
+        result = self._real_derive(text, "OBSIDIAN_KEY_me_claude=s3cret-value\n")
+        self.assertIn("mcp-obsidian.dmetr.io", result["derived"]["EGRESS"])
+
+    def test_derive_failure_never_echoes_secret_values(self):
+        with self.assertRaises(egress_policy.PolicyError) as ctx:
+            self._real_derive(
+                "task: coding\nidentities:\n  obsidian: [gone_claude]\n",
+                "OTHER_SECRET=hunter2-value\n",
+            )
+        self.assertNotIn("hunter2-value", str(ctx.exception))
+
+    def test_yq_output_is_cached_by_mtime_and_size(self):
+        manifest = self.bottles / f"{BOTTLE_NAME}.yml"
+        manifest.write_text("task: coding\n")
+        derive = egress_policy.default_derive(REPO_ROOT, self.home)
+        real_run = egress_policy.subprocess.run
+        calls: list[str] = []
+
+        def counting(argv, *a, **k):
+            calls.append(Path(argv[0]).name)
+            return real_run(argv, *a, **k)
+
+        with mock.patch.object(egress_policy.subprocess, "run", counting):
+            derive(BOTTLE_NAME, manifest)
+            first = calls.count("yq")
+            self.assertGreater(first, 1)  # manifest + plugin and agent descriptors
+            calls.clear()
+            derive(BOTTLE_NAME, manifest)
+            self.assertEqual(calls.count("yq"), 0)
+            self.assertEqual([c for c in calls if c not in ("git",)], [Path(sys.executable).name])
+            calls.clear()
+            manifest.write_text("task: coding\n# edited\n")
+            derive(BOTTLE_NAME, manifest)
+            self.assertEqual(calls.count("yq"), 1)  # only the edited manifest
+
+    # -- live and manifest allows -----------------------------------------
+
+    def test_live_allow_drops_out_when_the_bottle_is_recreated(self):
+        b = self._broker()
+        addr = self._serve(b)
+        self._file_and_allow(b, scope="live")
+        _, doc = self._get(addr)
+        self.assertIn("docs.example.com", doc["bottles"][BOTTLE_NAME]["zones"])
+        before = doc["revision"]
+        self.identities = {BOTTLE_NAME: "container-2"}  # up recreated it
+        status, body = self._refresh(addr)
+        self.assertEqual((status, body["changed"]), (HTTPStatus.OK, True))
+        _, doc = self._get(addr)
+        self.assertEqual(doc["revision"], before + 1)
+        self.assertNotIn("docs.example.com", doc["bottles"][BOTTLE_NAME]["zones"])
+        # And it stays gone: the old allow is not re-adopted by the new container.
+        _, body = self._refresh(addr)
+        self.assertFalse(body["changed"])
+
+    def test_an_allow_on_the_new_container_survives_the_old_ones_drop(self):
+        b = self._broker()
+        addr = self._serve(b)
+        self._file_and_allow(b, host="old.example.com")
+        self.identities = {BOTTLE_NAME: "container-2"}
+        self._file_and_allow(b, host="new.example.com")
+        _, doc = self._get(addr)
+        zones = doc["bottles"][BOTTLE_NAME]["zones"]
+        self.assertIn("new.example.com", zones)
+        self.assertNotIn("old.example.com", zones)
+
+    def test_live_allow_outlives_a_broker_restart_on_the_same_container(self):
+        b = self._broker()
+        self._file_and_allow(b)
+        again = self._broker()
+        self.assertIn("docs.example.com", again.policy.document()["bottles"][BOTTLE_NAME]["zones"])
+        self.identities = {BOTTLE_NAME: "container-2"}
+        third = self._broker()
+        self.assertNotIn("docs.example.com", third.policy.document()["bottles"][BOTTLE_NAME]["zones"])
+
+    def test_live_allow_is_kept_while_docker_cannot_say(self):
+        b = self._broker()
+        addr = self._serve(b)
+        self._file_and_allow(b)
+        self.identities = None
+        _, body = self._refresh(addr)
+        self.assertFalse(body["changed"])
+        _, doc = self._get(addr)
+        self.assertIn("docs.example.com", doc["bottles"][BOTTLE_NAME]["zones"])
+
+    def test_live_allow_of_a_container_docker_no_longer_has_is_dropped(self):
+        b = self._broker()
+        addr = self._serve(b)
+        self._file_and_allow(b)
+        self.identities = {}
+        self._refresh(addr)
+        _, doc = self._get(addr)
+        self.assertNotIn("docs.example.com", doc["bottles"][BOTTLE_NAME]["zones"])
+
+    def test_manifest_scope_allow_is_not_merged_from_the_store(self):
+        b = self._broker()
+        addr = self._serve(b)
+        before = self._revision(addr)
+        # allow_manifest's real effect is a manifest edit; the mocked script
+        # here edits nothing, so the store row alone must add nothing.
+        self._file_and_allow(b, host="saved.example.com", scope="manifest")
+        _, doc = self._get(addr)
+        self.assertEqual(doc["revision"], before)
+        self.assertNotIn("saved.example.com", doc["bottles"][BOTTLE_NAME]["zones"])
+        # The manifest is the source: the zone appears when it is written...
+        self.derived["EGRESS"] += ",saved.example.com"
+        self._refresh(addr)
+        _, doc = self._get(addr)
+        self.assertIn("saved.example.com", doc["bottles"][BOTTLE_NAME]["zones"])
+        # ...and removing it from the manifest removes it from the policy.
+        self.derived["EGRESS"] = "pypi.org,files.pythonhosted.org"
+        self._refresh(addr)
+        _, doc = self._get(addr)
+        self.assertNotIn("saved.example.com", doc["bottles"][BOTTLE_NAME]["zones"])
+
+    # -- recompute cost ----------------------------------------------------
+
+    def test_a_zone_sweep_of_n_requests_recomputes_once(self):
+        b = self._broker()
+        addr = self._serve(b)
+        for host in ("a.example.com", "b.example.com", "c.example.com", "d.example.com"):
+            b.file_request(BOTTLE_NAME, host, 443)
+        before, calls = self._revision(addr), self.derive_calls
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0)
+            result = b.decide_allow_for_zone(BOTTLE_NAME, "example.com")
+        self.assertEqual(len(result.decided), 4)
+        self.assertEqual(self.derive_calls - calls, 1)
+        _, doc = self._get(addr)
+        self.assertEqual(doc["revision"], before + 1)
+        self.assertEqual(
+            [z for z in doc["bottles"][BOTTLE_NAME]["zones"] if z.endswith(".example.com")],
+            ["a.example.com", "b.example.com", "c.example.com", "d.example.com"],
+        )
+
+    def test_decisions_that_change_no_standing_state_do_not_recompute(self):
+        b = self._broker()
+        for host in ("a.example.com", "b.example.com"):
+            b.file_request(BOTTLE_NAME, host, 443)
+        calls = self.derive_calls
+        self.assertEqual(len(b.decide_deny_for_zone(BOTTLE_NAME, "example.com")), 2)
+        self.assertEqual(self.derive_calls, calls)  # once-deny sweep
+        _, rid = b.file_request(BOTTLE_NAME, "fail.example.org", 443)
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=1)
+            self.assertIsNotNone(b.decide(rid, "allow"))  # apply failed
+        self.assertEqual(self.derive_calls, calls)
+        with self.assertRaises(broker.EgressBrokerHostError):
+            b.decide("0" * 32, "allow")
+        self.assertEqual(self.derive_calls, calls)
+
+    def test_persistent_deny_recomputes_once_however_many_requests_it_sweeps(self):
+        b = self._broker()
+        for host in ("a.example.com", "b.example.com", "c.example.com"):
+            b.file_request(BOTTLE_NAME, host, 443)
+        calls = self.derive_calls
+        result = b.persist_deny("example.com", "global")
+        self.assertEqual(len(result.decided), 3)
+        self.assertEqual(self.derive_calls - calls, 1)
 
     # -- concurrency -------------------------------------------------------
 
@@ -480,7 +666,10 @@ class PolicyContractTests(unittest.TestCase):
         zones = doc["bottles"][BOTTLE_NAME]["zones"]
         self.assertIn("allowed.example", zones)
         self.assertIn("refreshed.example", zones)
-        self.assertEqual(doc["revision"], start + 2)
+        # One bump when the later cause's rebuild already holds both changes
+        # (the allow's own recompute then finds nothing new), two otherwise.
+        self.assertGreater(doc["revision"], start)
+        self.assertLessEqual(doc["revision"], start + 2)
         # Monotonic and persisted: the file on disk is the document served.
         on_disk = json.loads((self.root / egress_policy.POLICY_FILENAME).read_text())
         self.assertEqual(on_disk, doc)
