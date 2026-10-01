@@ -6,6 +6,8 @@
 # (--build-arg PLUGINS_ENABLED=playwright) and asserts the MCP server, the
 # tool-allowlist filter and Chromium are present in it. Everything else is
 # unchanged from the current workflow.
+# Adds one step, "Mosh lab", after the bottle entry-point check; the step is
+# self-contained.
 
 name: ci
 
@@ -107,6 +109,15 @@ jobs:
         # container — assert the declared ENTRYPOINT file is present and
         # executable inside the built image.
         run: docker run --rm --entrypoint test djinn-ci-smoke -x /home/coder/entrypoint.sh
+      - name: Mosh lab (client container to bottle)
+        # Starts the built bottle image and the built jump image (the mosh
+        # client) on one throwaway network and completes a mosh session that
+        # prints a marker as coder. Skips without both image tags, so the
+        # plain discovery run in the suite step never builds an image itself.
+        env:
+          DJINN_BOTTLE_CI_IMAGE: djinn-ci-smoke
+          DJINN_JUMP_CI_IMAGE: djinn-jump-ci-smoke
+        run: python3 -m unittest tests.test_mosh_lab -v
       - name: Egress image with admin UI
         # The egress image now builds the Vue admin SPA; assert the dist
         # directory and every hashed asset referenced from index.html land in
