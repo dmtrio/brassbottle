@@ -563,6 +563,35 @@ class HarnessSoundnessTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 lab_env.bottle_hardening(path)
 
+    def _hardening_of(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.yml"
+            path.write_text(text)
+            return lab_env.bottle_hardening(path)
+
+    def test_bottle_hardening_reads_flow_lists_and_compact_indent(self):
+        flow = self._hardening_of("services:\n  djinn:\n    cap_add: [NET_ADMIN, NET_RAW]\n"
+                                  "    security_opt: ['no-new-privileges:true']\n")
+        self.assertEqual(flow, {"cap_add": ["NET_ADMIN", "NET_RAW"], "cap_drop": [],
+                                "security_opt": ["no-new-privileges:true"]})
+        compact = self._hardening_of("services:\n  djinn:\n    cap_drop:\n    - ALL\n    - NET_RAW\n")
+        self.assertEqual(compact["cap_drop"], ["ALL", "NET_RAW"])
+
+    def test_bottle_hardening_raises_on_declared_but_unreadable_keys(self):
+        for body in ("    cap_add: []\n", "    cap_add:\n", "    cap_drop: ALL\n",
+                     "    cap_drop:\n      - {a: b}\n"):
+            with self.subTest(body=body), self.assertRaises(RuntimeError):
+                self._hardening_of("services:\n  djinn:\n" + body)
+
+    def test_bottle_hardening_raises_on_a_malformed_file(self):
+        with self.assertRaises(RuntimeError):
+            self._hardening_of("services:\n  djinn:\n    cap_add: [NET_ADMIN\n")
+
+    def test_bottle_hardening_raises_when_yq_is_missing(self):
+        with mock.patch.object(lab_env.subprocess, "run", side_effect=FileNotFoundError("yq")):
+            with self.assertRaises(RuntimeError):
+                lab_env.bottle_hardening()
+
     def test_run_args_carry_cap_drop_and_security_opt(self):
         argv = lab_env.run_args("c", "img", "n", "11.1.1.21", "fd::21", ["sleep"], cap_drop=("NET_RAW",),
                                 security_opt=("no-new-privileges:true",))

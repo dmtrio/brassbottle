@@ -96,25 +96,33 @@ def bottle_hardening(path: Path = BOTTLE_COMPOSE) -> dict:
     """The bottle service's `cap_add`, `cap_drop` and `security_opt`, read from the
     compose file up.sh renders, so the probes judge what ships (a hardcoded list
     would let child 16's cap_drop flip A-root/B early and hide a regression that
-    re-adds caps). Reads the `djinn` service's top-level list keys only."""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    out = {"cap_add": [], "cap_drop": [], "security_opt": []}
-    in_service, key = False, None
-    for raw in lines:
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip())
-        text = line.strip()
-        if indent == 2 and text.endswith(":"):
-            in_service, key = text == "djinn:", None
-        elif in_service and indent == 4:
-            name = text.rstrip(":") if text.endswith(":") else None
-            key = name if name in out else None
-        elif in_service and key and indent >= 6 and text.startswith("- "):
-            out[key].append(text[2:].strip().strip("\"'"))
-    if not any(l.strip() == "djinn:" for l in lines):
+    re-adds caps). Parsed by `yq` (the repo's YAML tool, installed in CI), so flow
+    lists, compact indents and anchors read the same as block lists. Fails
+    closed: a missing yq, an unparseable file, a missing `djinn` service, or a
+    key that is declared but is not a non-empty list of strings raises, never
+    returns an empty list that would hand the lab a bottle with no caps."""
+    try:
+        res = subprocess.run(["yq", "-o=json", ".services.djinn | explode(.)", str(path)],
+                             text=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"cannot run yq to read {path}: {exc}") from exc
+    if res.returncode != 0:
+        raise RuntimeError(f"yq could not parse {path} (rc={res.returncode}): {res.stderr.strip()[:300]}")
+    try:
+        service = json.loads(res.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"yq output for {path} is not JSON: {exc}") from exc
+    if not isinstance(service, dict):
         raise RuntimeError(f"no djinn service found in {path}")
+    out = {}
+    for key in ("cap_add", "cap_drop", "security_opt"):
+        if key not in service:
+            out[key] = []
+            continue
+        value = service[key]
+        if not (isinstance(value, list) and value and all(isinstance(v, str) and v for v in value)):
+            raise RuntimeError(f"djinn.{key} in {path} is declared but is not a non-empty list of strings: {value!r}")
+        out[key] = list(value)
     return out
 
 
