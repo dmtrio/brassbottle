@@ -53,6 +53,10 @@ RUN set -eu; arch="$(dpkg --print-architecture)"; \
 # /opt/brassbottle exactly as they sit in the repo.
 COPY src/ /opt/brassbottle/src/
 COPY bin/ /opt/brassbottle/bin/
+# The broker derives policy from manifests with the same chain up.sh uses, so
+# it needs the plugin and agent descriptors manifest.py validates against.
+COPY plugins/ /opt/brassbottle/plugins/
+COPY agents/ /opt/brassbottle/agents/
 COPY djinn /opt/brassbottle/djinn
 COPY --from=ui /build/admin/ui/dist /opt/brassbottle/admin/ui/dist
 RUN chmod +x /opt/brassbottle/bin/allow-egress.sh /opt/brassbottle/djinn

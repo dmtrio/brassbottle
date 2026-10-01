@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EgressPolicy",
+  "description": "Body of GET /policy (gateway token). The broker's whole answer to 'what may leave, per bottle'. `revision` is a persisted, monotonic counter that moves only when the rest of the document changes. A bottle absent from `bottles` has no policy. Allocation fields (network, subnet, browser_port, ssh_port) come from bottle-nets.json and are null until a bottle has an allocation.",
+  "$comment": "Emitted by PolicyEngine.document()/wait() in src/egress_policy.py, served by _handle_policy_get in src/egress_broker_host.py. Enforced by tests/test_egress_policy_contract.py.",
+  "type": "object",
+  "properties": {
+    "revision": {"type": "integer"},
+    "bottles": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/bottle"}
+    },
+    "denylist": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "zone": {"type": "string"},
+          "scope": {"type": "string"}
+        },
+        "required": ["zone", "scope"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["revision", "bottles", "denylist"],
+  "additionalProperties": false,
+  "$defs": {
+    "bottle": {
+      "type": "object",
+      "properties": {
+        "network": {"type": ["string", "null"]},
+        "subnet": {"type": ["string", "null"]},
+        "zones": {"type": "array", "items": {"type": "string"}},
+        "grants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "cidr": {"type": "string"},
+              "ports": {"type": "array", "items": {"type": "integer"}}
+            },
+            "required": ["ports"],
+            "additionalProperties": false
+          }
+        },
+        "host_ports": {"type": "array", "items": {"type": "integer"}},
+        "browser_port": {"type": ["integer", "null"]},
+        "ssh_port": {"type": ["integer", "null"]},
+        "remote_direct": {"type": "boolean"},
+        "open_relays": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["network", "subnet", "zones", "grants", "host_ports", "browser_port", "ssh_port", "remote_direct", "open_relays"],
+      "additionalProperties": false
+    }
+  }
+}

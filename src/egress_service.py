@@ -14,8 +14,9 @@ The broker container mounts the host's docker socket so bin/allow-egress.sh
 (exec'd from inside the broker) can docker exec into bottles and edit
 manifests; DOCKER_HOST selects which socket is mounted (unix only — a TCP
 docker endpoint is a different transport and is refused by name). Token files
-(operator.token, admin.key) are created HOST-SIDE before the containers come
-up, so they stay operator-owned and `djinn egress url` can read them.
+(operator.token, gateway.token, admin.key) are created HOST-SIDE before the
+containers come up, so they stay operator-owned and `djinn egress url` can
+read them.
 
 Stdlib only; host-side. Docker command output is boundary-logged the way
 jump_host._run logs it: exact argv, duration, exit code.
@@ -52,6 +53,7 @@ from admin_daemon import (  # noqa: E402
 from egress_broker_host import (  # noqa: E402
     DEFAULT_PORT as BROKER_DEFAULT_PORT,
     LOCK_FILENAME,
+    ensure_gateway_token,
     ensure_operator_token,
     resolve_egress_root,
 )
@@ -484,6 +486,7 @@ def _ensure_host_side_state(egress_root: Path) -> None:
     egress_root.mkdir(parents=True, exist_ok=True)
     (egress_root / "tokens").mkdir(parents=True, exist_ok=True)
     ensure_operator_token(egress_root)
+    ensure_gateway_token(egress_root)
     ensure_admin_key(egress_root)
 
 

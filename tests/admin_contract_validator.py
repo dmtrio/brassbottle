@@ -3,10 +3,12 @@
 
 Stdlib-only. Covers exactly the draft-2020-12 subset the schemas in
 admin/contract/ use: type (including unions with null), required,
-properties, additionalProperties: false, items, enum, const, pattern (strings, re.search), anyOf (valid
+properties, additionalProperties (false, or a schema applied to every key not
+in properties), items, enum, const, pattern (strings, re.search), anyOf (valid
 when any branch has zero errors; on failure one error names the branch count
-and the errors of the closest branch), and $ref to a sibling schema file (by bare filename). validate() returns a list of error
-strings, each with the JSON path of the offending value, e.g.
+and the errors of the closest branch), and $ref: to a sibling schema file (by
+bare filename) or to a local "#/$defs/<name>". validate() returns a list of
+error strings, each with the JSON path of the offending value, e.g.
 "$.open[0].last_error: expected string|null, got integer".
 """
 
@@ -71,8 +73,13 @@ def validate(
     *,
     path: str = "$",
     base_dir: Path | None = None,
+    root: dict[str, Any] | None = None,
 ) -> list[str]:
     """Validate instance against the supported schema subset; list errors."""
+    root = schema if root is None else root
+    if "$ref" in schema and schema["$ref"].startswith("#/$defs/"):
+        target = root["$defs"][schema["$ref"][len("#/$defs/"):]]
+        return validate(instance, target, path=path, base_dir=base_dir, root=root)
     if "$ref" in schema:
         target = load_schema(schema["$ref"], base_dir=base_dir or CONTRACT_DIR)
         return validate(instance, target, path=path, base_dir=base_dir or CONTRACT_DIR)
@@ -91,7 +98,7 @@ def validate(
 
     if "anyOf" in schema:
         branch_errors = [
-            validate(instance, branch, path=path, base_dir=base_dir)
+            validate(instance, branch, path=path, base_dir=base_dir, root=root)
             for branch in schema["anyOf"]
         ]
         if all(branch_errors):
@@ -107,7 +114,9 @@ def validate(
         for key, sub in schema.get("properties", {}).items():
             if key in instance:
                 errors.extend(
-                    validate(instance[key], sub, path=f"{path}.{key}", base_dir=base_dir)
+                    validate(
+                        instance[key], sub, path=f"{path}.{key}", base_dir=base_dir, root=root
+                    )
                 )
         for key in schema.get("required", []):
             if key not in instance:
@@ -117,11 +126,19 @@ def validate(
             for key in instance:
                 if key not in schema.get("properties", {}):
                     errors.append(f"{path}: unexpected key {key!r}")
+        elif isinstance(extra, dict):
+            for key, value in instance.items():
+                if key not in schema.get("properties", {}):
+                    errors.extend(
+                        validate(value, extra, path=f"{path}.{key}", base_dir=base_dir, root=root)
+                    )
 
     if isinstance(instance, list) and "items" in schema:
         for index, item in enumerate(instance):
             errors.extend(
-                validate(item, schema["items"], path=f"{path}[{index}]", base_dir=base_dir)
+                validate(
+                    item, schema["items"], path=f"{path}[{index}]", base_dir=base_dir, root=root
+                )
             )
 
     return errors
@@ -131,4 +148,4 @@ def validate_document(
     instance: Any, filename: str, *, base_dir: Path | None = None
 ) -> list[str]:
     """Load a contract schema by filename and validate instance against it."""
-    return validate(instance, load_schema(filename, base_dir=base_dir))
+    return validate(instance, load_schema(filename, base_dir=base_dir), base_dir=base_dir)
