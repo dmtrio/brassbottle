@@ -66,6 +66,7 @@ unless a test or maintainer note says to; the public entry points are `djinn`,
 - `code_workspace.py` keeps `dev.code-workspace` in sync with repos and visible
   worktrees.
 - `ensure_net.py` creates or verifies the shared Docker network.
+- `bottle_net.py` allocates each bottle's subnet and host ports under a lock (no Docker calls).
 
 ## Image / Container Runtime
 
