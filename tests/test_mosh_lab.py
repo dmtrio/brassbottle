@@ -19,6 +19,7 @@ tests.test_mosh_lab -v
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -35,6 +36,18 @@ MARKER_SCRIPT = "/tmp/mosh_lab_marker.sh"
 SESSION_ATTEMPTS = 12
 SESSION_RETRY_SECONDS = 2
 SESSION_ATTEMPT_TIMEOUT = 30
+# `docker exec -t` on a runner with no controlling terminal makes a 0x0 pty,
+# and mosh-client aborts on `s_height > 0`; the client sets a size itself.
+PTY_ROWS = 24
+PTY_COLS = 80
+
+# OSC (to BEL or ST), CSI, charset selects, then any other two-byte escape.
+ESCAPE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"
+    r"|\x1b[()][0-9A-Za-z]"
+    r"|\x1b[@-Z\\-_=>]"
+)
 
 
 BOTTLE_IMAGE = os.environ.get("DJINN_BOTTLE_CI_IMAGE", "")
@@ -103,7 +116,30 @@ def mosh_command(bottle: str) -> str:
         "ssh -i /tmp/lab_key -o StrictHostKeyChecking=no "
         "-o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
     )
-    return f"mosh --ssh='{ssh}' coder@{bottle} -- {MARKER_SCRIPT}"
+    # stty sizes the exec pty (stdin) before mosh-client reads TIOCGWINSZ.
+    return (
+        f"stty rows {PTY_ROWS} cols {PTY_COLS}; "
+        f"exec mosh --ssh='{ssh}' coder@{bottle} -- {MARKER_SCRIPT}"
+    )
+
+
+def client_exec_args(client: str, bottle: str) -> list:
+    """argv after `docker` for one client attempt (-t: mosh-client needs a pty)."""
+    return ["exec", "-t", "-e", "TERM=xterm-256color", client, "sh", "-c", mosh_command(bottle)]
+
+
+def strip_escapes(text: str) -> str:
+    """Terminal output with escape sequences and carriage returns removed."""
+    return ESCAPE_RE.sub("", text).replace("\r", "")
+
+
+def find_marker_line(output: str, user: str = "coder"):
+    """The line of session output carrying the marker for `user`, or None."""
+    wanted = f"{MARKER}_{user}"
+    for line in strip_escapes(output).splitlines():
+        if wanted in line:
+            return line.strip()
+    return None
 
 
 class BottleImageSourceTests(unittest.TestCase):
@@ -140,6 +176,38 @@ class LabGateTests(unittest.TestCase):
         for bottle, client, want in (("", "", False), ("b", "", True), ("", "c", True), ("b", "c", True)):
             with mock.patch.multiple(sys.modules[__name__], BOTTLE_IMAGE=bottle, CLIENT_IMAGE=client):
                 self.assertEqual(lab_requested(), want)
+
+
+class SessionCommandTests(unittest.TestCase):
+    """Docker-free: the client command and the output parsing."""
+
+    def test_command_sizes_the_pty_then_execs_mosh(self):
+        cmd = mosh_command("bottle1")
+        self.assertTrue(cmd.startswith("stty rows 24 cols 80; exec mosh --ssh='ssh -i /tmp/lab_key "))
+        self.assertTrue(cmd.endswith(f"coder@bottle1 -- {MARKER_SCRIPT}"))
+
+    def test_exec_argv_keeps_the_pty_and_passes_the_command_whole(self):
+        argv = client_exec_args("cl", "bottle1")
+        self.assertEqual(argv[:5], ["exec", "-t", "-e", "TERM=xterm-256color", "cl"])
+        self.assertEqual(argv[5:7], ["sh", "-c"])
+        self.assertEqual(argv[7], mosh_command("bottle1"))
+        self.assertEqual(len(argv), 8)
+
+    def test_strip_escapes_removes_csi_osc_and_charset(self):
+        raw = "\x1b[?1049h\x1b[H\x1b[2J\x1b]0;title\x07\x1b(B\x1b[0mhi\x1b[1;32m!\r\n"
+        self.assertEqual(strip_escapes(raw), "hi!\n")
+
+    def test_marker_line_found_through_escapes(self):
+        raw = (
+            "\x1b[?1049h\x1b[H\x1b[2Jnoise\r\n"
+            "\x1b[1m\x1b[32mMOSH_LAB_MARKER_coder\x1b[0m\x1b[K\r\n\x1b[?1049l"
+        )
+        self.assertEqual(find_marker_line(raw), "MOSH_LAB_MARKER_coder")
+
+    def test_marker_for_another_user_or_none_is_not_a_match(self):
+        self.assertIsNone(find_marker_line("MOSH_LAB_MARKER_root\r\n"))
+        self.assertIsNone(find_marker_line("mosh-client: Assertion `s_height > 0' failed.\n"))
+        self.assertEqual(find_marker_line("MOSH_LAB_MARKER_root\n", user="root"), "MOSH_LAB_MARKER_root")
 
 
 @unittest.skipUnless(
@@ -206,7 +274,7 @@ class MoshLabTests(unittest.TestCase):
             # -t: mosh-client insists on a terminal; docker allocates a pty.
             try:
                 last = docker(
-                    "exec", "-t", self.client, "sh", "-c", mosh_command(self.bottle),
+                    *client_exec_args(self.client, self.bottle),
                     check=False, timeout=SESSION_ATTEMPT_TIMEOUT,
                 )
             except subprocess.TimeoutExpired as exc:
@@ -216,12 +284,15 @@ class MoshLabTests(unittest.TestCase):
                 time.sleep(SESSION_RETRY_SECONDS)
                 continue
             log(f"session attempt={attempt} rc={last.returncode}")
-            if f"{MARKER}_coder" in last.stdout:
+            marker_line = find_marker_line(last.stdout)
+            if marker_line:
+                # Boundary event, and the line the CI step log carries as Evidence.
+                log(f"session attempt={attempt} matched marker={marker_line!r}")
+                print(marker_line, flush=True)
                 break
             time.sleep(SESSION_RETRY_SECONDS)  # sshd may still be starting
-        self.assertIn(
-            f"{MARKER}_coder",
-            last.stdout,
+        self.assertIsNotNone(
+            find_marker_line(last.stdout),
             f"no marker from a coder session\nclient out:\n{last.stdout[-2000:]}\n"
             f"client err:\n{last.stderr[-2000:]}\nbottle logs:\n{self._bottle_logs()}",
         )
