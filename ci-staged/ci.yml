@@ -159,6 +159,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
       - name: Containment lab unit tests (no docker)
         run: python3 -m unittest discover -s tests/containment -p 'test_units.py' -v
       - name: Build the bottle image from this PR
