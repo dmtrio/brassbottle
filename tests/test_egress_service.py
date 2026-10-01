@@ -288,6 +288,12 @@ class StartFlowTests(unittest.TestCase):
             # host-side secrets exist BEFORE the containers, operator-owned
             self.assertTrue((base / "run" / "egress" / broker.OPERATOR_TOKEN_FILENAME).is_file())
             self.assertTrue((base / "run" / "egress" / admin_key_filename()).is_file())
+            gateway = base / "run" / "egress" / broker.GATEWAY_TOKEN_FILENAME
+            self.assertTrue(gateway.is_file())
+            self.assertEqual(gateway.stat().st_mode & 0o777, 0o600)
+            # the token value never reaches the start output or the compose file
+            token = gateway.read_text().strip()
+            self.assertNotIn(token, out + err + text)
             # the session URL is printed, exactly as ./djinn egress url prints it
             key = (base / "run" / "egress" / admin_key_filename()).read_text().strip()
             self.assertIn(

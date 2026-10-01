@@ -1229,6 +1229,20 @@ class EgressStore:
                 )
             return [self._row(raw) for raw in cursor.fetchall()]
 
+    def list_allowed(self) -> list[RequestRow]:
+        """Rows an operator allowed with a live or manifest scope, oldest first.
+
+        These are the allows the egress policy carries; a once-scoped allow
+        and every deny leave no standing grant behind.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT %s FROM requests WHERE status = 'allowed'"
+                " AND scope IN ('live', 'manifest')"
+                " ORDER BY decided_at, request_id" % ", ".join(_REQUEST_COLUMNS)
+            )
+            return [self._row(raw) for raw in cursor.fetchall()]
+
     def find_open(self, container: str, host: str, port: int) -> RequestRow | None:
         """The OPEN row for (container, host, port), or None.
 

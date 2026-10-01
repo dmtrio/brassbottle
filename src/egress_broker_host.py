@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import functools
 import hmac
 import ipaddress
 import json
@@ -47,6 +48,7 @@ from egress_denylist import (
     resolve_egress_root,
     validate_bottle_scope,
 )
+from egress_policy import PolicyEngine, PolicyError
 from egress_notify import (
     EgressNotification,
     NtfyNotifier,
@@ -80,6 +82,7 @@ TOKENS_DIRNAME = "tokens"
 LOCK_FILENAME = "daemon.lock"
 CONFIG_FILENAME = "config.json"
 OPERATOR_TOKEN_FILENAME = "operator.token"
+GATEWAY_TOKEN_FILENAME = "gateway.token"
 ENDPOINT_FILENAME = "daemon.json"
 EGRESS_BROKER_URL_ENV = "EGRESS_BROKER_URL"
 EGRESS_ADMIN_URL_ENV = "EGRESS_ADMIN_URL"
@@ -291,6 +294,14 @@ def ensure_operator_token(egress_root: Path) -> str:
     return _load_secret_token(
         token_path,
         created_log="egress broker operator token created",
+    )
+
+
+def ensure_gateway_token(egress_root: Path) -> str:
+    """Create or return the host-only gateway bearer token (never in bottles)."""
+    return _load_secret_token(
+        egress_root / GATEWAY_TOKEN_FILENAME,
+        created_log="egress broker gateway token created",
     )
 
 
@@ -653,6 +664,44 @@ def parse_recent_query(query: str) -> dict[str, Any]:
     }
 
 
+class _LockedDenyList:
+    """The broker's DenyList, read only under the broker lock.
+
+    DenyList is not safe to reload from a handler thread concurrently with
+    matches(); every reader goes through EgressBroker._lock, policy included.
+    """
+
+    def __init__(self, denylist: DenyList, lock: threading.RLock) -> None:
+        self._denylist = denylist
+        self._lock = lock
+
+    def load(self) -> list[Any]:
+        with self._lock:
+            return self._denylist.load()
+
+
+def _recomputes_policy(cause: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Recompute the policy after a broker method that can change it.
+
+    Runs after the method returns, outside the broker lock, whatever it
+    returned; a recompute that finds the document unchanged moves nothing.
+    A recompute failure is logged, never raised: the decision it follows has
+    already been taken and recorded.
+    """
+
+    def wrap(method: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(method)
+        def inner(self: "EgressBroker", *args: Any, **kwargs: Any) -> Any:
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                self.recompute_policy(cause)
+
+        return inner
+
+    return wrap
+
+
 class EgressBroker:
     """Request store, instant filing, and approval executor for egress.
 
@@ -669,6 +718,8 @@ class EgressBroker:
         now_fn: NowFn | None = None,
         hold_seconds_default: int = DEFAULT_HOLD_SECONDS,
         notifier: Callable[[EgressNotification], object] | None = None,
+        policy_derive: Callable[..., Any] | None = None,
+        policy_wait_seconds: float | None = None,
     ) -> None:
         self._root = root.expanduser().resolve()
         self._repo_root = (repo_root or _repo_root()).resolve()
@@ -687,6 +738,19 @@ class EgressBroker:
         # the in-flight apply resolves it.
         self._applying: set[str] = set()
         self._import_open_once()
+        home = self._root.parent.parent
+        bottles_env = (os.environ.get("BOTTLES_PATH") or "").strip()
+        self._policy = PolicyEngine(
+            self._root,
+            bottles_path=Path(bottles_env) if bottles_env else home / "bottles",
+            home=home,
+            repo_root=self._repo_root,
+            derive_fn=policy_derive,
+            store=self._store,
+            denylist=_LockedDenyList(self._denylist, self._lock),
+            **({} if policy_wait_seconds is None else {"wait_seconds": policy_wait_seconds}),
+        )
+        self.recompute_policy("startup")
 
     @property
     def root(self) -> Path:
@@ -702,6 +766,18 @@ class EgressBroker:
     @property
     def store(self) -> EgressStore:
         return self._store
+
+    @property
+    def policy(self) -> PolicyEngine:
+        return self._policy
+
+    def recompute_policy(self, cause: str, *, caller: str = "broker") -> bool | None:
+        """Rebuild the policy; True if the revision moved, None on failure."""
+        try:
+            return self._policy.recompute(cause, caller=caller)
+        except (PolicyError, OSError, EgressStoreError) as exc:
+            LOG.warning("egress policy recompute failed cause=%s error=%s", cause, exc)
+            return None
 
     def now(self) -> datetime:
         return _utc_now(self._now_fn())
@@ -1054,6 +1130,7 @@ class EgressBroker:
 
     # -- deciding -----------------------------------------------------------
 
+    @_recomputes_policy("decide")
     def decide(
         self,
         request_id: str,
@@ -1363,6 +1440,7 @@ class EgressBroker:
             decided.append(request_id)
         return decided
 
+    @_recomputes_policy("persist_deny")
     def persist_deny(
         self,
         zone_raw: str,
@@ -1756,10 +1834,13 @@ class EgressBrokerHTTPServer(ThreadingHTTPServer):
         broker: EgressBroker,
         token_store: BottleTokenStore,
         operator_token: str,
+        gateway_token: str | None = None,
     ) -> None:
         self.broker = broker
         self.token_store = token_store
         self.operator_token = operator_token
+        # None means no gateway is provisioned: /policy refuses every caller.
+        self.gateway_token = gateway_token
         # Instance attribute, set BEFORE super().__init__ — socketserver reads
         # self.address_family when it creates the socket.
         self.address_family = address_family_for_host(server_address[0])
@@ -1826,9 +1907,57 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _resolve_gateway_auth(self) -> bool:
+        header = self.headers.get("Authorization", "")
+        provided = header[7:].strip() if header.startswith("Bearer ") else ""
+        expected = self.server.gateway_token
+        if not provided or not expected or not hmac.compare_digest(provided, expected):
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return False
+        return True
+
+    def _handle_policy_get(self, query: str) -> None:
+        LOG.info("egress broker request enter path=/policy query_bytes=%d", len(query))
+        if not self._resolve_gateway_auth():
+            return
+        after: int | None = None
+        params = urllib.parse.parse_qs(query, keep_blank_values=True)
+        if set(params) - {"wait"} or len(params.get("wait", [])) > 1:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "unsupported query"})
+            return
+        if "wait" in params:
+            raw = params["wait"][0]
+            if not raw.isascii() or not raw.isdigit() or len(raw) > 18:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "wait must be a revision"})
+                return
+            after = int(raw)
+        self._send_json(HTTPStatus.OK, self.server.broker.policy.wait(after))
+
+    def _handle_policy_refresh_post(self) -> None:
+        started = time.monotonic()
+        LOG.info("egress broker request enter path=/policy/refresh")
+        if not self._resolve_operator_auth():
+            return
+        moved = self.server.broker.recompute_policy("refresh", caller="operator")
+        if moved is None:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "policy refresh failed"})
+            return
+        revision = self.server.broker.policy.revision
+        LOG.info(
+            "egress broker request exit path=/policy/refresh moved=%s revision=%d duration_ms=%.1f",
+            str(moved).lower(),
+            revision,
+            (time.monotonic() - started) * 1000,
+        )
+        self._send_json(HTTPStatus.OK, {"revision": revision, "changed": moved})
+
     def do_GET(self) -> None:
         if self.path == "/health":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
+            return
+        policy_path, _, policy_query = self.path.partition("?")
+        if policy_path == "/policy":
+            self._handle_policy_get(policy_query)
             return
         poll_match = re.fullmatch(r"/egress/([0-9a-f]{32}|[0-9a-f]{8})", self.path)
         if poll_match:
@@ -1867,6 +1996,9 @@ class EgressBrokerRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path == "/decide":
             self._handle_decide_post()
+            return
+        if self.path == "/policy/refresh":
+            self._handle_policy_refresh_post()
             return
         if self.path != "/egress":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -2200,6 +2332,7 @@ def run_daemon(
     lock.acquire()
 
     operator_token = ensure_operator_token(egress_root)
+    gateway_token = ensure_gateway_token(egress_root)
     settings = load_ntfy_settings(
         base_path,
         os.environ,
@@ -2227,7 +2360,9 @@ def run_daemon(
         hold_seconds_default=hold_default,
         notifier=notifier,
     )
-    server = EgressBrokerHTTPServer((host, port), broker, token_store, operator_token)
+    server = EgressBrokerHTTPServer(
+        (host, port), broker, token_store, operator_token, gateway_token
+    )
     # DaemonLock is already held above, so only one daemon ever writes this.
     # --advertise records the address host-side callers should use (the
     # published loopback port) as a docker-managed endpoint with no pid: the
