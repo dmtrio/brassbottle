@@ -37,6 +37,19 @@ def log(stage: str, msg: str) -> None:
     print(f"{LOG_PREFIX} {stage}: {msg}", file=sys.stderr, flush=True)
 
 
+class HarnessError(RuntimeError):
+    """The lab itself broke (a client crashed, a recorder died). Never a verdict:
+    the probe wrapper turns it into a loud unexpected success, not containment."""
+
+
+class NotBuilt(Exception):
+    """The probe has no assertion yet; reported as `not-built`, never as a measurement."""
+
+    def __init__(self, probe: str, notes):
+        self.probe, self.notes = probe, list(notes)
+        super().__init__(f"probe {probe} is not built: " + "; ".join(self.notes))
+
+
 class Breach(AssertionError):
     """A recorder saw traffic the Contract forbids. `evidence` is never empty."""
 
@@ -104,6 +117,7 @@ class Recorder:
 
     def __init__(self, name: str, fetch, blind: bool = False):
         self.name, self._fetch, self.blind = name, fetch, blind
+        self._high = 0   # most events ever seen: the file only grows, so shrinking means a dead/reset recorder
 
     def snapshot(self):
         started = time.monotonic()
@@ -111,6 +125,10 @@ class Recorder:
         events, dropped = parse_events(text, self.name)
         if dropped:
             raise AssertionError(f"recorder {self.name}: {dropped} unparseable event line(s)")
+        if len(events) < self._high:
+            raise HarnessError(f"recorder {self.name} went backwards: {len(events)} events after "
+                               f"{self._high} (container restarted or its file was lost)")
+        self._high = len(events)
         if self.blind:  # CONTAINMENT_BLIND_RECORDER: prove a blind recorder fails the check
             events = []
         log("recorder", f"{self.name} read {len(text)}B parsed={len(events)} dropped={dropped} "
@@ -127,13 +145,17 @@ def tagged(tag: str):
     return lambda event: tag in (event.get("preview") or "") or tag in (event.get("qname") or "")
 
 
-def silence(probe: str, recorders, marks: dict, filters: dict = None, ignore=(), match=None):
+def silence(probe: str, recorders, marks: dict, filters: dict = None, ignore=(), match=None, canary=None):
     """Raise Breach if any recorder in `recorders` saw traffic since `marks[name]`.
 
     `filters` maps recorder name -> predicate on the packet source (default: any
     source not in `ignore`, the lab's own control addresses); `match` further
-    restricts to events satisfying it (see `tagged`)."""
+    restricts to events satisfying it (see `tagged`). Events carrying the
+    `canary` tag are the liveness check's own traffic and never count."""
     filters = filters or {}
+    if canary is not None:
+        inner, is_canary = match, tagged(canary)
+        match = lambda e: not is_canary(e) and (inner is None or inner(e))  # noqa: E731
     evidence = []
     for rec in recorders:
         pred = filters.get(rec.name, lambda src: src not in ignore)
@@ -154,7 +176,7 @@ def missing_from(events, expectations):
 @dataclass
 class ProbeResult:
     probe: str
-    status: str            # pass | unmet | unexpected-pass | regression | harness-error
+    status: str            # pass | unmet | not-built | unexpected-pass | regression | harness-error
     unmet_by: str = ""
     evidence: list = field(default_factory=list)
     error: str = ""
@@ -171,6 +193,8 @@ def classify(probe: str, unmet_by, exc):
     if isinstance(exc, Breach) and exc.evidence:
         return ProbeResult(probe, "unmet" if unmet_by else "regression", unmet_by or "",
                            evidence=exc.evidence)
+    if isinstance(exc, NotBuilt):
+        return ProbeResult(probe, "not-built", unmet_by or "", evidence=exc.notes)
     return ProbeResult(probe, "harness-error", unmet_by or "", error=f"{type(exc).__name__}: {exc}")
 
 
@@ -206,7 +230,7 @@ def probe(name: str, results=None, harness_errors=None):
                 if unmet_by:
                     return  # unexpected success: loud, instead of a silent expected failure
                 raise exc
-            if res.status in ("unmet", "regression"):
+            if res.status in ("unmet", "regression", "not-built"):
                 raise exc
 
         wrapper.__name__ = fn.__name__

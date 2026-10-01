@@ -42,6 +42,7 @@ TAMPER = (
     ("add an address", "ip addr add 10.99.99.9/32 dev eth0", "ip addr del 10.99.99.9/32 dev eth0"),
     ("add a route", "ip route add 10.98.98.0/24 dev eth0", "ip route del 10.98.98.0/24 dev eth0"),
     ("add a link", "ip link add lab0 type dummy", "ip link del lab0"),
+    ("add a policy rule", "ip rule add from 10.97.0.0/24 lookup 100", "ip rule del from 10.97.0.0/24 lookup 100"),
     ("insert a firewall rule", "iptables -I OUTPUT 1 -j ACCEPT", "iptables -D OUTPUT 1"),
     ("unshare -n", "unshare -n true", "true"),
     ("create a netns", "ip netns add labns", "ip netns del labns"),
@@ -79,12 +80,16 @@ class ContainmentProbes(unittest.TestCase):
         return [self.lab.recorders[n] for n in names]
 
     def finish(self, probe_id, marks, recorders=("sink",), extra=(), **kw):
-        """Wait for the recorders to catch up, then require silence; `extra`
-        are breach lines the probe found by other means (a command that worked)."""
+        """Wait for the recorders to catch up, prove each one alive with a canary
+        sent now, then require silence; `extra` are breach lines the probe found
+        by other means (a command that worked). A recorder that cannot record
+        the canary is a harness error, never silence."""
         self.lab.settle()
+        canary = new_tag("canary")
+        self.lab.prove_alive(recorders, canary)
         kw.setdefault("ignore", self.lab.ignore_sources)
         try:
-            silence(probe_id, self.rec(*recorders), marks, **kw)
+            silence(probe_id, self.rec(*recorders), marks, canary=canary, **kw)
         except Breach as breach:
             raise Breach(probe_id, list(extra) + breach.evidence)
         if extra:
@@ -93,6 +98,9 @@ class ContainmentProbes(unittest.TestCase):
     # ── baseline: the recorders are not blind ─────────────────────────────
 
     def test_00_baseline_recorder_sees_every_traffic_class(self):
+        self.check_recorders_see_control_traffic()
+
+    def check_recorders_see_control_traffic(self):
         """Control traffic from `ctl` (outside any bottle policy) must show up in the
         recorders, once per class later probes call 'seen nothing'. If a runner
         cannot route IPv6 or send AF_PACKET frames this fails here, by name,
@@ -161,6 +169,36 @@ class ContainmentProbes(unittest.TestCase):
         missing += lab_kit.missing_from(own, {"loopback": lambda e: f"{tag}-loopback" in e.get("preview", "")})
         self.assertEqual(missing, [], f"addresses no recorder could see: {missing}")
 
+    def check_decoy_and_bottle_recorders(self):
+        """The decoy and bottle 1's recorder are the only witnesses for H, C-inv's
+        host halves and K's host-relay half. Prove each from the sources the probes
+        use: control and both bottles to the decoy; control and bottle 2 to bottle 1
+        (not loopback, which is all test_02 covers)."""
+        lab, a, tag = self.lab, self.lab.addrs, new_tag("wit")
+        before = lab.marks()
+        for role, host, label in (("ctl", a.decoy4, "ctl-decoy"), ("b1", a.decoy4, "b1-decoy"),
+                                  ("b2", a.decoy4, "b2-decoy"), ("ctl", a.b1_4, "ctl-b1"),
+                                  ("b2", a.b1_4, "b2-b1")):
+            lab.client(role, "tcp", "--host", host, "--port", "443", "--payload", f"{tag}-{label}")
+        lab.settle()
+        decoy = lab_kit.traffic(lab.recorders["decoy"].snapshot(), before["decoy"], match=lab_kit.tagged(tag))
+        own = lab_kit.traffic(lab.recorders["b1"].snapshot(), before["b1"], match=lab_kit.tagged(tag))
+        has = lambda label: (lambda e: f"{tag}-{label}" in e.get("preview", ""))  # noqa: E731
+        missing = [f"decoy:{n}" for n in lab_kit.missing_from(
+            decoy, {n: has(n) for n in ("ctl-decoy", "b1-decoy", "b2-decoy")})]
+        missing += [f"b1:{n}" for n in lab_kit.missing_from(own, {n: has(n) for n in ("ctl-b1", "b2-b1")})]
+        self.assertEqual(missing, [], f"witness recorders missed traffic from the sources the probes "
+                                      f"use (a bottle without NET_RAW cannot capture, for one): {missing}")
+
+    def test_03_baseline_decoy_and_bottle_recorders_see_probe_sources(self):
+        self.check_decoy_and_bottle_recorders()
+
+    def test_99_closing_baseline_recorders_are_still_alive(self):
+        """Every recorder must still see every class after the last probe: one that
+        died mid-run would otherwise have read as silence for the probes after it."""
+        self.check_recorders_see_control_traffic()
+        self.check_decoy_and_bottle_recorders()
+
     # ── probes ────────────────────────────────────────────────────────────
 
     @probe("A-root")
@@ -180,9 +218,17 @@ class ContainmentProbes(unittest.TestCase):
         # today's bottle already has it.
         lab, a, tag = self.lab, self.lab.addrs, new_tag("Aspoof")
         marks = lab.marks()
+        unsent = []
         for src in (a.b2_4, a.b1_4.rsplit(".", 1)[0] + ".99", "11.0.0.1"):
-            lab.client("b1", "rawspoof", "--src-ip", src, "--dst-ip", a.sink4, "--dport", "443",
-                       "--payload", f"{tag}-{src}")
+            res = lab.client("b1", "rawspoof", "--src-ip", src, "--dst-ip", a.sink4, "--dport", "443",
+                             "--payload", f"{tag}-{src}")
+            if not res["ok"]:
+                unsent.append(f"{src}: {res['detail']}")
+        if unsent:
+            # The probe asks whether the *network* drops forged sources. A bottle
+            # that cannot even build the packet proves nothing about that, so a
+            # variant without NET_RAW must grant it to this bottle for this probe.
+            raise lab_kit.HarnessError(f"A-spoof sent nothing (bottle lacks raw sockets?): {unsent}")
         self.finish("A-spoof", marks, match=tagged(tag))
 
     @probe("B")
@@ -251,7 +297,7 @@ class ContainmentProbes(unittest.TestCase):
 
     @probe("F")
     def test_40_F_dns_for_non_allowed_zones_stays_in_the_gateway(self):
-        lab, a, tag = self.lab, self.lab.addrs, new_tag("F")
+        lab, tag = self.lab, new_tag("F")
         marks, server = lab.marks(), lab.bottle_resolver()
         for qtype in QTYPES_ALL:
             for transport in ("udp", "tcp"):
@@ -262,7 +308,9 @@ class ContainmentProbes(unittest.TestCase):
             lab.client("b1", "dns", "--server", server, "--malformed", kind)
             lab.client("b1", "dns", "--server", server, "--malformed", kind, "--transport", "tcp")
         lab.client("b1", "dns", "--server", server, "--qname", "cname.blocked.lab")
-        self.finish("F", marks, recorders=("dns",), filters={"dns": lambda src: src == a.b1_4})
+        # Any arrival not from ctl counts: malformed queries carry no qname to tag, and
+        # behind the edge resolver the upstream sees the gateway's uplink, not b1.
+        self.finish("F", marks, recorders=("dns",))
 
     @probe("G")
     def test_41_G_docker_embedded_dns_does_not_forward(self):
@@ -299,12 +347,21 @@ class ContainmentProbes(unittest.TestCase):
         # machinery is here now so the zero-at-the-sink assertion is already live.
         lab, a = self.lab, self.lab.addrs
         marks = lab.marks()
-        stream = threading.Thread(target=lab.client, args=("b1", "stream", "--host", a.sink4, "--port", "443",
-                                                           "--duration", "5"), kwargs={"timeout": 30})
+        failed = []
+
+        def run_stream():
+            try:
+                lab.client("b1", "stream", "--host", a.sink4, "--port", "443", "--duration", "5", timeout=30)
+            except Exception as exc:  # noqa: BLE001 — re-raised below, on the test thread
+                failed.append(exc)
+
+        stream = threading.Thread(target=run_stream)
         stream.start()
         for name in lab.gateway_containers():  # none until child 09
             lab.gateway_exec(name, ["true"])
         stream.join()
+        if failed:
+            raise failed[0]
         self.finish("I", marks, match=lambda e: "lab-stream" in (e.get("preview") or "") or e.get("proto") == "icmp")
 
     @probe("J")
@@ -316,7 +373,7 @@ class ContainmentProbes(unittest.TestCase):
                 evidence.append(f"{phase}: default route {out!r} (no assertion built yet)")
             except LookupError as exc:
                 evidence.append(f"{phase}: {exc}")
-        raise Breach("J", evidence)
+        raise lab_kit.NotBuilt("J", evidence)
 
     @probe("K")
     def test_60_K_per_bottle_policy_and_fake_ip_namespaces(self):

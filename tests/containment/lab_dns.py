@@ -69,6 +69,11 @@ MALFORMED_KINDS = ("truncated", "label-overrun", "overlong-name", "pointer-loop"
 
 def parse_query(data: bytes):
     """-> (txid, flags, qname, qtype, edns). Raises ValueError on anything off."""
+    return _parse(data)[:5]
+
+
+def _parse(data: bytes):
+    """parse_query plus the offset where the question ends (the echo slice)."""
     if len(data) < 12:
         raise ValueError("short header")
     txid, flags, qdcount, _an, _ns, arcount = struct.unpack("!HHHHHH", data[:12])
@@ -94,7 +99,7 @@ def parse_query(data: bytes):
     if pos + 4 > len(data):
         raise ValueError("no qtype/qclass")
     qtype = struct.unpack("!H", data[pos:pos + 2])[0]
-    return txid, flags, qname, qtype, arcount > 0
+    return txid, flags, qname, qtype, arcount > 0, pos + 4
 
 
 class Zone:
@@ -125,11 +130,11 @@ def build_response(query: bytes, zone: Zone) -> bytes:
     """Response for a (possibly broken) query; FORMERR when it cannot be parsed."""
     txid = struct.unpack("!H", query[:2])[0] if len(query) >= 2 else 0
     try:
-        _txid, _flags, qname, qtype, _edns = parse_query(query)
+        _txid, _flags, qname, qtype, _edns, q_end = _parse(query)
     except ValueError:
         return struct.pack("!HHHHHH", txid, 0x8000 | RCODE_FORMERR, 0, 0, 0, 0)
     records = zone.records(qname)
-    question = query[12:12 + len(encode_name(qname)) + 4]
+    question = query[12:q_end]   # echoed as sent: a root or non-ASCII name must not need re-encoding
     if records is None:
         return struct.pack("!HHHHHH", txid, 0x8400 | RCODE_NXDOMAIN, 1, 0, 0, 0) + question
     answers = b"".join(
@@ -162,6 +167,13 @@ class Server:
         with self._lock, open(self.events_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(event) + "\n")
 
+    def failed(self, transport: str, peer, exc: Exception) -> None:
+        """A query the server could not answer: logged and recorded, never fatal."""
+        print(f"lab-dns: {transport} from {peer[0]} not answered: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        self.record({"kind": "error", "t": time.time(), "src": peer[0], "transport": transport,
+                     "error": type(exc).__name__})
+
     def _udp(self, family: int, bind: str) -> None:
         sock = socket.socket(family, socket.SOCK_DGRAM)
         if family == socket.AF_INET6:
@@ -170,7 +182,10 @@ class Server:
         while True:
             data, peer = sock.recvfrom(4096)
             self.record(dns_event(peer[0], "udp", data))
-            sock.sendto(build_response(data, self.zone), peer)
+            try:
+                sock.sendto(build_response(data, self.zone), peer)
+            except Exception as exc:  # noqa: BLE001 — one bad query must never end the recorder
+                self.failed("udp", peer, exc)
 
     def _tcp_conn(self, conn: socket.socket, peer) -> None:
         try:
@@ -192,6 +207,8 @@ class Server:
             conn.sendall(struct.pack("!H", len(reply)) + reply)
         except OSError:
             pass
+        except Exception as exc:  # noqa: BLE001
+            self.failed("tcp", peer, exc)
         finally:
             conn.close()
 

@@ -27,6 +27,9 @@ UDP_PORTS = (53, 443, 60001)
 HOST_PLUGIN_PORT = 9100   # a plugin port bottle 1 would be granted; bottle 2 is not
 EVENTS = "/tmp/events.jsonl"
 READY_TIMEOUT = 40
+CANARY_TIMEOUT = 10
+REPO = LAB_DIR.parents[1]
+BOTTLE_COMPOSE = REPO / "compose" / "docker-compose.local.yml"
 
 # name -> (family, address, observed_by). The classes probe C-inv makes a name
 # resolve to; each address is an alias on the sink, routed there from the
@@ -89,6 +92,32 @@ def plan_addresses(a: int, b: int) -> Addrs:
                  f"{p6}::21", f"{p6}::22")
 
 
+def bottle_hardening(path: Path = BOTTLE_COMPOSE) -> dict:
+    """The bottle service's `cap_add`, `cap_drop` and `security_opt`, read from the
+    compose file up.sh renders, so the probes judge what ships (a hardcoded list
+    would let child 16's cap_drop flip A-root/B early and hide a regression that
+    re-adds caps). Reads the `djinn` service's top-level list keys only."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out = {"cap_add": [], "cap_drop": [], "security_opt": []}
+    in_service, key = False, None
+    for raw in lines:
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        text = line.strip()
+        if indent == 2 and text.endswith(":"):
+            in_service, key = text == "djinn:", None
+        elif in_service and indent == 4:
+            name = text.rstrip(":") if text.endswith(":") else None
+            key = name if name in out else None
+        elif in_service and key and indent >= 6 and text.startswith("- "):
+            out[key].append(text[2:].strip().strip("\"'"))
+    if not any(l.strip() == "djinn:" for l in lines):
+        raise RuntimeError(f"no djinn service found in {path}")
+    return out
+
+
 def docker(*args: str, check: bool = True, timeout: int = 300, **kw) -> subprocess.CompletedProcess:
     started = time.monotonic()
     try:
@@ -118,12 +147,16 @@ def network_create_args(name: str, addrs: Addrs) -> list:
 
 
 def run_args(name: str, image: str, network: str, ip4: str, ip6: str, entrypoint: list,
-             caps=(), dns=None, add_host=None, labels=None) -> list:
+             caps=(), dns=None, add_host=None, labels=None, cap_drop=(), security_opt=()) -> list:
     """argv after `docker` for one lab container. Always root, /lab mounted read-only."""
     argv = ["run", "-d", "--name", name, "--network", network, "--ip", ip4, "--ip6", ip6,
             "--user", "root", "-v", f"{LAB_DIR}:/lab:ro"]
     for cap in caps:
         argv += ["--cap-add", cap]
+    for cap in cap_drop:
+        argv += ["--cap-drop", cap]
+    for opt in security_opt:
+        argv += ["--security-opt", opt]
     if dns:
         argv += ["--dns", dns]
     if add_host:
@@ -176,6 +209,7 @@ class Lab:
         self.names = {role: f"djinn-ct-{role}-{self.suffix}"
                       for role in ("decoy", "sink", "dns", "ctl", "b1", "b2")}
         self.recorders = {}
+        self.hardening = bottle_hardening()
         self.blind = os.environ.get("CONTAINMENT_BLIND_RECORDER") == "1"
 
     # ── lifecycle ─────────────────────────────────────────────────────────
@@ -200,10 +234,12 @@ class Lab:
                   (), labels=label)
         self._run("ctl", a.ctl4, a.ctl6, ["sleep", "infinity"], ("NET_RAW", "NET_ADMIN"), labels=label)
         host_alias = f"host.docker.internal:{a.decoy4}"
+        hard = self.hardening
+        lab_kit.log("lab", f"bottle hardening from {BOTTLE_COMPOSE.name}: {hard}")
         for role, ip4, ip6 in (("b1", a.b1_4, a.b1_6), ("b2", a.b2_4, a.b2_6)):
-            # Today's bottle: NET_ADMIN and NET_RAW (compose/docker-compose.local.yml).
-            self._run(role, ip4, ip6, ["sleep", "infinity"], ("NET_ADMIN", "NET_RAW"),
-                      dns=a.dns4, add_host=host_alias, labels=label)
+            self._run(role, ip4, ip6, ["sleep", "infinity"], tuple(hard["cap_add"]),
+                      dns=a.dns4, add_host=host_alias, labels=label,
+                      cap_drop=tuple(hard["cap_drop"]), security_opt=tuple(hard["security_opt"]))
         # Best effort: a kernel that refuses an alias shows up as a failed
         # baseline (test_02), by name, not as a silent gap in a probe.
         for cmd in alias_commands(a):
@@ -226,9 +262,10 @@ class Lab:
         subprocess.run(["docker", "network", "rm", self.net], capture_output=True, timeout=120)
         lab_kit.log("lab", f"stopped net={self.net}")
 
-    def _run(self, role, ip4, ip6, entrypoint, caps, dns=None, add_host=None, labels=None) -> None:
+    def _run(self, role, ip4, ip6, entrypoint, caps, dns=None, add_host=None, labels=None,
+             cap_drop=(), security_opt=()) -> None:
         docker(*run_args(self.names[role], self.image, self.net, ip4, ip6, entrypoint, caps, dns,
-                         add_host, labels))
+                         add_host, labels, cap_drop, security_opt))
 
     def _best_effort(self, role: str, cmd) -> None:
         res = self.exec(role, cmd, check=False)
@@ -236,14 +273,23 @@ class Lab:
             lab_kit.log("lab", f"WARN {role}: `{' '.join(cmd)}` rc={res.returncode} {res.stderr.strip()[:120]}")
 
     def _events_text(self, role: str) -> str:
-        res = docker("exec", self.names[role], "sh", "-c", f"cat {EVENTS} 2>/dev/null || true",
-                     check=False)
+        """The recorder's event file. A dead container or a missing file is a
+        harness error: returning "" would read as silence."""
+        res = docker("exec", self.names[role], "cat", EVENTS, check=False)
+        if res.returncode != 0:
+            raise lab_kit.HarnessError(f"recorder {role} unreadable: rc={res.returncode} "
+                                       f"{res.stderr.strip()[-200:]}")
         return res.stdout
 
     def _wait_ready(self, role: str) -> None:
         deadline = time.monotonic() + READY_TIMEOUT
         while time.monotonic() < deadline:
-            events, _ = lab_kit.parse_events(self._events_text(role), role)
+            try:
+                text = self._events_text(role)
+            except lab_kit.HarnessError:   # not started yet; the deadline bounds the wait
+                time.sleep(1)
+                continue
+            events, _ = lab_kit.parse_events(text, role)
             if any(e.get("kind") == "ready" for e in events):
                 return
             time.sleep(1)
@@ -256,14 +302,42 @@ class Lab:
         return docker("exec", "-u", "root", self.names[role], *argv, check=check, timeout=timeout)
 
     def client(self, role: str, *args: str, timeout: int = 60) -> dict:
-        """Run lab_client.py in a container; returns its JSON result (ok=False on a bad exit)."""
+        """Run lab_client.py in a container; returns its JSON result. The client
+        catches network errors itself and exits 0 with ok=False, so a non-zero
+        exit or no JSON line means the harness broke (traceback, bad argument,
+        container gone): that raises, it is never a refusal."""
         res = docker("exec", "-u", "root", self.names[role], "python3", "/lab/lab_client.py", *args,
                      check=False, timeout=timeout)
         lines = [ln for ln in res.stdout.splitlines() if ln.startswith("{")]
         if res.returncode != 0 or not lines:
-            return {"action": args[0], "ok": False,
-                    "detail": f"client rc={res.returncode} {res.stderr.strip()[-200:]}"}
+            raise lab_kit.HarnessError(f"client `{' '.join(args[:1])}` in {role} failed rc={res.returncode} "
+                                       f"json_lines={len(lines)} {res.stderr.strip()[-300:]}")
         return json.loads(lines[-1])
+
+    def canary_sender(self, recorder: str, tag: str):
+        """A control-source send that the named recorder must record, and where."""
+        a = self.addrs
+        if recorder == "dns":
+            return ("ctl", ("dns", "--server", a.dns4, "--qname", f"{tag}.allowed.lab"))
+        target = {"sink": a.sink4, "decoy": a.decoy4, "b1": a.b1_4}[recorder]
+        return ("ctl", ("tcp", "--host", target, "--port", "443", "--payload", tag))
+
+    def prove_alive(self, names, tag: str) -> None:
+        """Send `tag` through each named recorder and require it to be recorded.
+        Called right before every silence check, so a recorder that died, went
+        blind or lost its path since the baseline cannot read as silence."""
+        for name in names:
+            role, args = self.canary_sender(name, tag)
+            self.client(role, *args)
+        deadline, dead = time.monotonic() + CANARY_TIMEOUT, list(names)
+        while dead and time.monotonic() < deadline:
+            time.sleep(0.5)
+            dead = [n for n in dead
+                    if not lab_kit.traffic(self.recorders[n].snapshot(), match=lab_kit.tagged(tag))]
+        if dead:
+            raise lab_kit.HarnessError(f"recorder(s) {dead} did not record the canary {tag}: "
+                                       f"blind or dead, so silence would be meaningless")
+        lab_kit.log("lab", f"canary {tag} seen by {list(names)}")
 
     def mac(self, role: str) -> str:
         out = docker("inspect", "-f", f"{{{{(index .NetworkSettings.Networks \"{self.net}\").MacAddress}}}}",

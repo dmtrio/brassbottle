@@ -470,6 +470,135 @@ class LabGateTests(unittest.TestCase):
         self.assertIn("lab_env.require_lab(IMAGE)", source)
 
 
+class HarnessSoundnessTests(unittest.TestCase):
+    """Review findings on the lab: no probe may pass because the harness broke."""
+
+    def _lab(self):
+        return lab_env.Lab("img")
+
+    def _docker(self, rc=0, out="", err=""):
+        return mock.patch.object(lab_env, "docker", return_value=mock.Mock(returncode=rc, stdout=out, stderr=err))
+
+    def test_client_crash_or_missing_json_raises_instead_of_reading_as_refused(self):
+        lab = self._lab()
+        with self._docker(rc=1, err="Traceback ..."), self.assertRaises(lab_kit.HarnessError):
+            lab.client("b1", "tcp", "--host", "x")
+        with self._docker(rc=0, out="no json here"), self.assertRaises(lab_kit.HarnessError):
+            lab.client("b1", "tcp", "--host", "x")
+
+    def test_client_refusal_is_a_result_not_an_error(self):
+        with self._docker(out='{"action": "tcp", "ok": false, "detail": "refused"}'):
+            self.assertFalse(self._lab().client("b1", "tcp", "--host", "x")["ok"])
+
+    def test_unreadable_recorder_file_raises_instead_of_reading_as_silence(self):
+        with self._docker(rc=1, err="No such container"), self.assertRaises(lab_kit.HarnessError):
+            self._lab()._events_text("sink")
+
+    def test_recorder_that_goes_backwards_is_a_harness_error(self):
+        texts = ['{"kind": "packet"}\n{"kind": "packet"}', '{"kind": "packet"}']
+        rec = lab_kit.Recorder("sink", lambda: texts.pop(0))
+        self.assertEqual(len(rec.snapshot()), 2)
+        with self.assertRaises(lab_kit.HarnessError):
+            rec.snapshot()
+
+    def test_silence_ignores_the_canary_but_not_other_traffic(self):
+        events = [{"kind": "packet", "src": "11.0.0.99", "proto": "tcp", "preview": "canary-1"},
+                  {"kind": "packet", "src": "11.0.0.21", "proto": "tcp", "preview": "x"}]
+        rec = lab_kit.Recorder("sink", lambda: "\n".join(json.dumps(e) for e in events))
+        with self.assertRaises(lab_kit.Breach) as ctx:
+            lab_kit.silence("X", [rec], {"sink": 0}, canary="canary-1")
+        self.assertEqual(len(ctx.exception.evidence), 1)
+        only = lab_kit.Recorder("sink", lambda: json.dumps(events[0]))
+        lab_kit.silence("X", [only], {"sink": 0}, canary="canary-1")
+
+    def _prove(self, seen_by):
+        lab = self._lab()
+        lab.recorders = {n: lab_kit.Recorder(n, lambda n=n: json.dumps(
+            {"kind": "packet", "src": "c", "preview": "tag-1"}) if n in seen_by else "")
+            for n in ("sink", "dns")}
+        with mock.patch.object(lab, "client", return_value={"ok": True}) as client, \
+                mock.patch.object(lab_env, "CANARY_TIMEOUT", 0.6), mock.patch.object(lab_env.time, "sleep"):
+            lab.prove_alive(["sink", "dns"], "tag-1")
+        return client
+
+    def test_canary_goes_through_every_recorder_the_probe_relies_on(self):
+        client = self._prove({"sink", "dns"})
+        self.assertEqual(client.call_count, 2)
+        self.assertEqual({c.args[1] for c in client.call_args_list}, {"tcp", "dns"})
+
+    def test_a_recorder_that_misses_the_canary_fails_the_probe_as_a_harness_error(self):
+        with self.assertRaisesRegex(lab_kit.HarnessError, r"\['dns'\]"):
+            self._prove({"sink"})
+
+    def test_not_built_probe_is_reported_as_not_built_and_stays_an_expected_failure(self):
+        self.assertEqual(lab_kit.classify("J", "09", lab_kit.NotBuilt("J", ["a"])).status, "not-built")
+
+        def body():
+            raise lab_kit.NotBuilt("Z", ["no assertion"])
+        results, errors = [], []
+        with mock.patch.dict(lab_kit.UNMET_BY, {"Z": "09"}):
+            class Case(unittest.TestCase):
+                @lab_kit.probe("Z", results=results, harness_errors=errors)
+                def test_it(self):
+                    body()
+            run = lab_kit.run_wrapped(Case)
+        self.assertEqual((len(run.expectedFailures), results[0].status, errors), (1, "not-built", []))
+
+    def test_bottle_hardening_is_read_from_the_shipped_compose(self):
+        hard = lab_env.bottle_hardening()
+        self.assertEqual(hard["cap_add"], ["NET_ADMIN", "NET_RAW"])
+        self.assertEqual(hard["cap_drop"], [])
+        self.assertEqual(self._lab().hardening, hard)
+
+    def test_bottle_hardening_follows_a_cap_drop_and_ignores_other_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.yml"
+            path.write_text("services:\n  other:\n    cap_add:\n      - SYS_ADMIN\n  djinn:\n"
+                            "    cap_drop:\n      - NET_ADMIN  # gone\n      - NET_RAW\n"
+                            "    security_opt:\n      - 'no-new-privileges:true'\n    image: x\n")
+            self.assertEqual(lab_env.bottle_hardening(path),
+                             {"cap_add": [], "cap_drop": ["NET_ADMIN", "NET_RAW"],
+                              "security_opt": ["no-new-privileges:true"]})
+            path.write_text("services:\n  other:\n    image: x\n")
+            with self.assertRaises(RuntimeError):
+                lab_env.bottle_hardening(path)
+
+    def test_run_args_carry_cap_drop_and_security_opt(self):
+        argv = lab_env.run_args("c", "img", "n", "11.1.1.21", "fd::21", ["sleep"], cap_drop=("NET_RAW",),
+                                security_opt=("no-new-privileges:true",))
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "NET_RAW")
+        self.assertEqual(argv[argv.index("--security-opt") + 1], "no-new-privileges:true")
+
+    def test_root_and_non_ascii_queries_are_answered_and_recorded_not_fatal(self):
+        zone = DnsWireTests.ZONE
+        root = struct.pack("!HHHHHH", 7, 0x0100, 1, 0, 0, 0) + b"\0" + struct.pack("!HH", 1, 1)
+        reply = lab_dns.build_response(root, zone)
+        self.assertEqual(struct.unpack("!H", reply[2:4])[0] & 0xF, lab_dns.RCODE_NXDOMAIN)
+        odd = struct.pack("!HHHHHH", 8, 0x0100, 1, 0, 0, 0) + b"\x02\xc3\xa9\0" + struct.pack("!HH", 1, 1)
+        self.assertEqual(struct.unpack("!H", lab_dns.build_response(odd, zone)[:2])[0], 8)
+
+    def test_server_survives_a_query_it_cannot_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            srv = lab_dns.Server(DnsWireTests.ZONE, os.path.join(tmp, "e.jsonl"))
+            with mock.patch.object(lab_dns, "build_response", side_effect=RuntimeError("boom")):
+                srv.failed("udp", ("11.1.2.21", 1), RuntimeError("boom"))
+            lines = [json.loads(ln) for ln in Path(tmp, "e.jsonl").read_text().splitlines()]
+        self.assertEqual((lines[0]["kind"], lines[0]["error"]), ("error", "RuntimeError"))
+        self.assertEqual(lab_kit.traffic(lines), [])   # an error line is never counted as traffic
+
+    def test_baseline_covers_the_decoy_bottle_witnesses_and_a_closing_run(self):
+        source = (Path(__file__).parent / "test_probes.py").read_text()
+        for needle in ("def test_03_baseline_decoy_and_bottle_recorders", "def test_99_closing_baseline",
+                       "self.lab.prove_alive(recorders, canary)"):
+            self.assertIn(needle, source)
+
+    def test_probe_f_attributes_by_arrival_not_by_source(self):
+        source = (Path(__file__).parent / "test_probes.py").read_text()
+        body = source.split("def test_40_F")[1].split("@probe(")[0]
+        self.assertNotIn("filters", body)
+        self.assertNotIn("b1_4", body)
+
+
 class StagedWorkflowTests(unittest.TestCase):
     def test_staged_workflow_runs_the_containment_job_and_keeps_the_existing_jobs(self):
         staged = REPO / "ci-staged" / "ci.yml"
